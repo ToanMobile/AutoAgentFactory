@@ -1,0 +1,17 @@
+FATAL EXCEPTION: main
+Process: com.example.shop, PID: 19377
+java.lang.IllegalArgumentException: Cart 120 has 14 items but total is 0
+	at com.example.shop.cart.CartViewModel$refresh$2.invokeSuspend(CartViewModel.kt:93)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+	at android.os.Handler.handleCallback(Handler.java:942)
+	at com.example.shop.cart.CartFragment$$ExternalSyntheticLambda7.run(D8$$SyntheticClass:0)
+	at android.os.Looper.loopOnce(Looper.java:201)
+	at android.os.Looper.loop(Looper.java:288)
+	at android.app.ActivityThread.main(ActivityThread.java:7918)
+	at java.lang.reflect.Method.invoke(Native Method)
+Caused by: java.lang.NumberFormatException: For input string: "7,99"
+	at java.lang.Integer.parseInt(Integer.java:668)
+	at com.example.shop.cart.PriceParser.parse(PriceParser.kt:25)
+	at com.example.shop.cart.CartRepository$load$1.invoke(CartRepository.kt:61)
+	... 11 more

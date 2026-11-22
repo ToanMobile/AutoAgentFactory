@@ -1,0 +1,17 @@
+Incident Identifier: 6F1A2B3C-4D5E-4F60-8A1B-2C3D4E5F6071
+Hardware Model:      iPhone15,2
+Process:             Shop [18233]
+Path:                /private/var/containers/Bundle/Application/9A8B7C6D-1E2F-4A3B-8C4D-5E6F7A8B9C0D/Shop.app/Shop
+Identifier:          com.example.Shop
+Date/Time:           2026-11-21 09:14:02.551 +0700
+Exception Type:  EXC_BREAKPOINT (SIGTRAP)
+Exception Codes: 0x0000000000000001, 0x00000001a2f4c3d8
+Triggered by Thread:  0
+
+Thread 0 Crashed:
+0   libswiftCore.dylib            	0x00000001a2f4c3d8 _assertionFailure(_:_:file:line:flags:) + 248
+1   Shop                          	0x0000000104b3c2a8 CheckoutViewController.applyCoupon(_:) + 412 (CheckoutViewController.swift:142)
+2   Shop                          	0x0000000104b3a110 closure #1 in CheckoutViewController.viewDidLoad() + 96 (CheckoutViewController.swift:58)
+3   UIKitCore                     	0x00000001a5c0e6f4 -[UIApplication sendAction:to:from:forEvent:] + 100
+4   UIKitCore                     	0x00000001a5c0d2ac UIApplicationMain + 340
+5   Shop                          	0x0000000104b31f40 main + 64 (AppDelegate.swift:12)

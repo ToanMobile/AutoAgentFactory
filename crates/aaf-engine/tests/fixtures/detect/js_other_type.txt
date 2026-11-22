@@ -1,0 +1,12 @@
+/Users/bob/api/src/services/orders.js:47
+    return order.items.map((item) => item.sku);
+                       ^
+
+RangeError: Invalid array length
+    at listSkus (/Users/bob/api/src/services/orders.js:47:24)
+    at /Users/bob/api/src/routes/orders.js:19:22
+    at Layer.handle [as handle_request] (/Users/bob/api/node_modules/express/lib/router/layer.js:95:5)
+    at next (/Users/bob/api/node_modules/express/lib/router/route.js:149:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+
+Node.js v22.12.1

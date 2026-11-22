@@ -1,0 +1,29 @@
+// !$*UTF8*$!
+{
+	objects = {
+		AA0000000000000000000001 /* AppDelegate.swift */ = {isa = PBXFileReference; path = AppDelegate.swift; sourceTree = "<group>"; };
+		AA0000000000000000000002 /* Clock.m */ = {isa = PBXFileReference; path = Clock.m; sourceTree = "<group>"; };
+		AA00000000000000000000Debug /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_FILE = "$(CONFIG_DIR)/Info.plist";
+				INFOPLIST_FILE = ../outside/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		AA00000000000000000000Release /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_FILE = "$(CONFIG_DIR)/Info.plist";
+				INFOPLIST_FILE = ../outside/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+	};
+}

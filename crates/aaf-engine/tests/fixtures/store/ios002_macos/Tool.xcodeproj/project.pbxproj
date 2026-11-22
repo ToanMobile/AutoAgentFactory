@@ -1,0 +1,23 @@
+// !$*UTF8*$!
+{
+	objects = {
+		AA0000000000000000000001 /* AppDelegate.swift */ = {isa = PBXFileReference; path = AppDelegate.swift; sourceTree = "<group>"; };
+		AA0000000000000000000002 /* Clock.m */ = {isa = PBXFileReference; path = Clock.m; sourceTree = "<group>"; };
+		AA00000000000000000000Debug /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		AA00000000000000000000Release /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+	};
+}

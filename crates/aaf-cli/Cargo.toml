@@ -1,0 +1,25 @@
+[package]
+name = "aaf-cli"
+description = "The aaf command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "aaf"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+aaf-domain = { path = "../aaf-domain" }
+aaf-fp = { path = "../aaf-fp" }
+aaf-engine = { path = "../aaf-engine" }
+serde_json = "1.0.154"
+clap = { version = "4.6.9", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,140 @@
+//! The commented `.autofactory/config.toml` that `aaf init` writes.
+
+use std::fmt::Write as _;
+
+use aaf_domain::config::{RepoConfig, StoreMode};
+
+use super::detect::Detected;
+
+/// A TOML string literal with every special character escaped.
+fn quoted(text: &str) -> String {
+    toml::Value::String(text.to_string()).to_string()
+}
+
+/// Text for a `#` comment: control characters would end the comment line and
+/// let the rest be read as configuration.
+fn comment_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Renders tier 2 for a freshly initialised repo: the detected profile and
+/// commands, every other value at its default and written out so the file
+/// documents what can be changed. Parses back to an equal [`RepoConfig`].
+pub fn render_repo_config(detected: &Detected, name: &str) -> String {
+    let defaults = RepoConfig::default();
+    let gate = &defaults.gate;
+    let unblocker = &defaults.unblocker;
+    let run = &defaults.run;
+    let cmds = &detected.commands;
+
+    let evidence = if detected.evidence.is_empty() {
+        "no known marker file found".to_string()
+    } else {
+        comment_safe(&detected.evidence.join(", "))
+    };
+    let store = match gate.store_compliance {
+        StoreMode::Off => "off",
+        StoreMode::Auto => "auto",
+        StoreMode::Always => "always",
+    };
+
+    let mut out = String::new();
+    // Writing to a String cannot fail, so the fmt::Result carries no information.
+    let _ = write!(
+        out,
+        "\
+# AutoAgentFactory repo configuration (tier 2). Commit this file.
+# Personal overrides go in .autofactory/config.local.toml (not committed); they,
+# AAF_* environment variables and command-line flags can only tighten [gate]
+# and cannot set [commands].
+# Stack detection: {evidence}
+
+[project]
+name = {name}
+# auto, android, ios, flutter, react-native, expo, web, backend, rust or unity.
+profile = {profile}
+
+# Shell commands the gate runs with `sh -c` at the repo root. Only commands
+# that are certain for the detected stack are filled in; check them. While the
+# test command of a gate mode is empty, that mode reports Unverified, never Clear.
+[commands]
+build = {build}
+# Fast tests for `aaf gate --scoped`.
+test_scoped = {test_scoped}
+# Whole suite for `aaf gate --full` and `--release`.
+test_full = {test_full}
+lint = {lint}
+# Reproduces a reported failure; a task is filed only when it fails twice in a row.
+repro = {repro}
+
+[gate]
+# auto = origin/HEAD, origin/main, origin/master, main, master (first that exists).
+base_ref = {base_ref}
+# Existing files matching these globs cannot be modified, deleted or renamed
+# without a signed `aaf approve`. Newly added files are exempt.
+head_lock_globs = [
+",
+        name = quoted(name),
+        profile = quoted(&detected.profile),
+        build = quoted(&cmds.build),
+        test_scoped = quoted(&cmds.test_scoped),
+        test_full = quoted(&cmds.test_full),
+        lint = quoted(&cmds.lint),
+        repro = quoted(&cmds.repro),
+        base_ref = quoted(&gate.base_ref),
+    );
+    for glob in &gate.head_lock_globs {
+        let _ = writeln!(out, "    {},", quoted(glob));
+    }
+    let _ = write!(
+        out,
+        "\
+]
+# off, auto (scan when the profile ships to a store) or always.
+store_compliance = {store}
+min_android_target_sdk = {min_sdk}
+# Per gate command; the process group is killed when it expires.
+command_timeout_secs = {command_timeout}
+
+# Limits on automatic unblocking of a stuck task.
+[unblocker]
+max_unblock_cycles = {cycles}
+max_subtask_depth = {depth}
+max_token_budget = {tokens}
+max_wall_clock_secs = {wall_clock}
+global_freeze_consecutive_fails = {freeze}
+
+[run]
+# claude, codex, antigravity, opencode or custom.
+executor = {executor}
+# Command template for non-Claude executors; {{prompt}} is substituted.
+executor_cmd = []
+# false = open a pull request with the gate receipt; true = merge when the gate is Clear.
+auto_merge = {auto_merge}
+max_parallel = {max_parallel}
+run_timeout_secs = {run_timeout}
+# Claude executor only: `claude --model` and `claude --effort`. Empty = the
+# CLI's own default. The local file may override these two.
+model = \"\"
+effort = \"\"
+# The agent gets an allow-list of aaf's environment (PATH, HOME, locale, the
+# toolchain homes), not all of it. Names listed here are passed as well.
+env_pass = []
+",
+        store = quoted(store),
+        min_sdk = gate.min_android_target_sdk,
+        command_timeout = gate.command_timeout_secs,
+        cycles = unblocker.max_unblock_cycles,
+        depth = unblocker.max_subtask_depth,
+        tokens = unblocker.max_token_budget,
+        wall_clock = unblocker.max_wall_clock_secs,
+        freeze = unblocker.global_freeze_consecutive_fails,
+        executor = quoted(&run.executor),
+        auto_merge = run.auto_merge,
+        max_parallel = run.max_parallel,
+        run_timeout = run.run_timeout_secs,
+    );
+    out
+}

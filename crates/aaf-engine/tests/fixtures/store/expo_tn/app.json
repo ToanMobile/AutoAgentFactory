@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "demo",
+    "plugins": [
+      ["expo-build-properties", { "android": { "targetSdkVersion": 36 } }]
+    ],
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scans receipts so you can test your connection to the printer."
+      }
+    }
+  }
+}

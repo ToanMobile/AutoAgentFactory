@@ -1,0 +1,15 @@
+plugins {
+    id 'com.android.application' version '8.9.0' apply false
+}
+
+// The root script only puts the plugin on the classpath; which modules this
+// block reaches is not known statically.
+subprojects {
+    afterEvaluate {
+        android {
+            defaultConfig {
+                targetSdkVersion 30
+            }
+        }
+    }
+}

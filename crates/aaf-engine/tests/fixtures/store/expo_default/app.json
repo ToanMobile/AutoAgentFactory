@@ -1,0 +1,1 @@
+{ "expo": { "name": "demo", "ios": { "infoPlist": { "NSCameraUsageDescription": "$(CAMERA_REASON)" } } } }

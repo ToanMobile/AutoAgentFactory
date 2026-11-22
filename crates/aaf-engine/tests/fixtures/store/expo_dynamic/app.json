@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "demo",
+    "plugins": [
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 34
+          }
+        }
+      ]
+    ],
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "TBD",
+        "UIBackgroundModes": ["audio"]
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/aaf-domain",
+    "crates/aaf-fp",
+    "crates/aaf-hook",
+    "crates/aaf-engine",
+    "crates/aaf-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.89"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

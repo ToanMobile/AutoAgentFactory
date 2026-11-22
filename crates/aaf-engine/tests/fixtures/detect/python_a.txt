@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/Users/alice/work/billing/app/cache.py", line 41, in lookup
+    return self._entries[key]
+           ~~~~~~~~~~~~~^^^^^
+KeyError: 'invoice_4412'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/alice/work/billing/app/worker.py", line 212, in run_job
+    result = handler(job)
+  File "/var/folders/q1/x8k2m5_n3fz9/T/tmpa81k2_zq/billing_plugin.py", line 9, in handler
+    return render_invoice(job.invoice)
+  File "/Users/alice/work/billing/app/invoices.py", line 88, in render_invoice
+    total = sum(line.amount for line in invoice.lines) / invoice.count
+            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~
+ZeroDivisionError: division by zero

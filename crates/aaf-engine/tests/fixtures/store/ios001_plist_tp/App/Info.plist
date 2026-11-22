@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>NSCameraUsageDescription</key>
+	<string></string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TODO</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Test</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>description</string>
+	<key>NSContactsUsageDescription</key>
+	<string>TODO: ask legal for the wording</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Lorem ipsum dolor sit amet</string>
+	<key>NSMotionUsageDescription</key>
+	<string>xxx</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>   </string>
+</dict>
+</plist>

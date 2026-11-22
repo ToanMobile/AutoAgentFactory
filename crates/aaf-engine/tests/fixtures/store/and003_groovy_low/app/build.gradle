@@ -1,0 +1,9 @@
+apply plugin: 'com.android.application'
+
+android {
+    compileSdkVersion 36
+    defaultConfig {
+        minSdkVersion 24
+        targetSdkVersion 33
+    }
+}

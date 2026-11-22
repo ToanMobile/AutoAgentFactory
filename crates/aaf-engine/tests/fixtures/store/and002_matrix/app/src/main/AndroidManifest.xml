@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application android:label="App">
+        <activity android:name=".FilterNoExported">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".FilterExportedTrue" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".FilterExportedFalse" android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.INTERNAL" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".NoFilterNoExported" />
+        <activity android:name=".NoFilterNoExportedOpen">
+            <meta-data android:name="k" android:value="v" />
+        </activity>
+        <activity android:name=".NoFilterExported" android:exported="false" />
+        <activity android:name=".FilterExportedPlaceholder" android:exported="${isExported}">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".RemovedByMerger" tools:node="remove">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+            </intent-filter>
+        </activity>
+        <activity-alias android:name=".AliasNoExported" android:targetActivity=".FilterExportedTrue">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            </intent-filter>
+        </activity-alias>
+        <service android:name=".ServiceNoExported">
+            <intent-filter>
+                <action android:name="com.example.BIND" />
+            </intent-filter>
+        </service>
+        <receiver android:name=".ReceiverNoExported">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".ReceiverExported" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <provider android:name=".Provider" android:authorities="com.example.provider" />
+    </application>
+</manifest>

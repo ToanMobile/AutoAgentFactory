@@ -1,0 +1,17 @@
+thread 'main' (48213) panicked at src/parser/lexer.rs:118:27:
+index out of bounds: the len is 4 but the index is 9
+stack backtrace:
+   0: rust_begin_unwind
+             at /rustc/90b35a6239c3d8bdabc530a6a0816f7ff89a0aaf/library/std/src/panicking.rs:652:5
+   1: core::panicking::panic_fmt
+             at /rustc/90b35a6239c3d8bdabc530a6a0816f7ff89a0aaf/library/core/src/panicking.rs:72:14
+   2: core::panicking::panic_bounds_check
+             at /rustc/90b35a6239c3d8bdabc530a6a0816f7ff89a0aaf/library/core/src/panicking.rs:274:5
+   3: lexer::parser::lexer::Lexer::next_token::h3f9a1c2b4d5e6f70
+             at ./src/parser/lexer.rs:118:27
+   4: lexer::parser::Parser::parse::{{closure}}
+             at ./src/parser/mod.rs:54:19
+   5: core::iter::traits::iterator::Iterator::for_each
+   6: lexer::main
+             at ./src/main.rs:21:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
