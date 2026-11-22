@@ -371,3 +371,25 @@ fn inspect_skills_flags_symlinks_and_phase0_security_invariants_hold() {
     assert!(!spec.args.iter().any(|a| a == "bypassPermissions"));
     assert!(!spec.args.iter().any(|a| a == "acceptEdits"));
 }
+
+#[test]
+fn bundled_skills_pass_static_checks_without_findings() {
+    let added: Vec<aaf_engine::gate::changes::AddedLines> = aaf_engine::skills::all_skills()
+        .iter()
+        .map(|skill| aaf_engine::gate::changes::AddedLines {
+            path: format!(".claude/skills/{}/SKILL.md", skill.name),
+            lines: skill
+                .content
+                .lines()
+                .enumerate()
+                .map(|(idx, line)| ((idx + 1) as u32, line.to_string()))
+                .collect(),
+        })
+        .collect();
+    let report = aaf_engine::gate::static_checks::scan(&added).unwrap();
+    assert!(
+        report.findings.is_empty(),
+        "bundled skill templates must not trip aaf's own static checks: {:?}",
+        report.findings
+    );
+}

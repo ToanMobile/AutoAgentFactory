@@ -7,7 +7,7 @@ description: Pre-PR diff audit, 7 Golden Standards (/100) + MechanicalScore eval
 
 1. **Acceptance Criteria & Diff Completeness**
    - Map every acceptance criterion in the task spec to concrete code paths and executable tests in the diff; flag any unverified requirement explicitly.
-   - Keep the diff surgical: reject drive-by formatting sweeps, unrelated refactors, placeholder stubs (`TODO`, `unimplemented!()`, `// ... existing code ...`), or dead code left behind.
+   - Keep the diff surgical: reject drive-by formatting sweeps, unrelated refactors, placeholder stubs (unfinished `TODO` notes, panic-stub macros, or ellipsis markers omitting code), or dead code left behind.
 
 2. **Edge Cases & Blast Radius**
    - Trace all callers and consumers of changed signatures, config schemas, or persisted formats (SQLite, JSON, TOML) to ensure backward compatibility and safe migrations.
