@@ -78,7 +78,7 @@ pub(crate) fn is_ext(word: &str) -> bool {
 /// A branch name or ref of a protected branch. Ignoring case: on the default
 /// macOS file system `refs/heads/Main` is the file of `main`.
 fn protected(name: &str) -> bool {
-    is_protected(&name.to_ascii_lowercase())
+    is_protected(&name.to_ascii_lowercase()) || crate::git_files::is_aaf_ref_text(name)
 }
 
 fn positional(rest: &[String]) -> impl Iterator<Item = &str> {
@@ -108,6 +108,9 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             "a template directory is set for git init and clone, which copy its hooks".to_string(),
             FIX_TEMPLATE,
         )));
+    }
+    if let Some(denial) = crate::git_files::check_shell_aaf_refs(cmd, ctx) {
+        return Some(denial);
     }
     // As in `git_guard`: a command word built at run time could be git.
     if cmd.name() != "git" && !cmd.dynamic_name {

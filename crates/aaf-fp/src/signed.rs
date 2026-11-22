@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aaf_domain::gate::{Approval, GateMode, GateStatus, Receipt, StoreStatus};
+use aaf_domain::gate::{Approval, GateMode, GateStatus, PostGateAuditRecord, Receipt, StoreStatus};
 use aaf_domain::proof::ProofRecord;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,8 @@ pub const RECEIPT_DOMAIN: &str = "receipt\0";
 pub const APPROVAL_DOMAIN: &str = "approval\0";
 /// Domain tag of a signed device-verification proof artifact.
 pub const PROOF_DOMAIN: &str = "proof\0";
+/// Domain tag of a signed post-gate cross-audit verdict.
+pub const AUDIT_DOMAIN: &str = "audit\0";
 
 fn mac_for(key: &[u8], domain: &str, payload: &str) -> Result<Hmac<Sha256>, FpError> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| FpError::BadKey)?;
@@ -327,4 +329,51 @@ pub fn read_proof(
     let key = load_key(data_dir)?;
     let path = proof_path(data_dir, repo_root, tree_fp);
     read_signed(&path, &key, PROOF_DOMAIN)
+}
+
+/// Storage path for a signed post-gate audit verdict bound to `(repo_root, tree_fp, config_hash)`.
+pub fn audit_verdict_path(
+    data_dir: &Path,
+    repo_root: &Path,
+    tree_fp: &str,
+    config_hash: &str,
+) -> PathBuf {
+    let tag_input = format!("{tree_fp}\0{config_hash}");
+    let mut tag = sha256_hex(tag_input.as_bytes());
+    tag.truncate(24);
+    data_dir
+        .join("audits")
+        .join(repo_id(repo_root))
+        .join(format!("{tag}.audit.json"))
+}
+
+/// Signs and stores `record` under [`AUDIT_DOMAIN`] with mode 0600.
+pub fn write_audit_verdict(
+    data_dir: &Path,
+    key: &[u8],
+    repo_root: &Path,
+    record: &PostGateAuditRecord,
+) -> Result<PathBuf, FpError> {
+    let path = audit_verdict_path(data_dir, repo_root, &record.tree_fp, &record.config_hash);
+    write_signed(data_dir, &path, key, AUDIT_DOMAIN, record)?;
+    Ok(path)
+}
+
+/// `Ok(None)` when no signed post-gate verdict exists; tampered or mismatched binding fails closed.
+pub fn read_audit_verdict(
+    data_dir: &Path,
+    key: &[u8],
+    repo_root: &Path,
+    tree_fp: &str,
+    config_hash: &str,
+) -> Result<Option<PostGateAuditRecord>, FpError> {
+    let path = audit_verdict_path(data_dir, repo_root, tree_fp, config_hash);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let rec: PostGateAuditRecord = read_signed(&path, key, AUDIT_DOMAIN)?;
+    if rec.tree_fp != tree_fp || rec.config_hash != config_hash {
+        return Err(FpError::BadSignature);
+    }
+    Ok(Some(rec))
 }

@@ -213,3 +213,32 @@ pub struct Receipt {
     pub store_compliance: StoreComplianceReport,
     pub created_at: i64,
 }
+
+/// One scored criterion from the 7 Golden Standards (`G1`..`G7`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoldenScore {
+    pub id: String,
+    pub score: u8,
+    #[serde(default)]
+    pub deduction_reason: String,
+}
+
+/// Signed post-gate cross-audit verdict bound to `(repo_root, tree_fp, config_hash)`
+/// under HMAC domain `"audit\0"` so it survives restarts without re-auditing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostGateAuditRecord {
+    pub repo_root: String,
+    pub tree_fp: String,
+    pub config_hash: String,
+    /// `"PASS"` or `"FAIL"`.
+    pub verdict: String,
+    pub reviewer: String,
+    pub same_account: bool,
+    pub mechanical_score: u8,
+    #[serde(default)]
+    pub llm_average: Option<u8>,
+    pub effective_score: u8,
+    #[serde(default)]
+    pub scores: Vec<GoldenScore>,
+    pub created_at: i64,
+}

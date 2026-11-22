@@ -35,10 +35,14 @@ enum Command {
     Gate(cmd::gate::GateArgs),
     /// Clean orphaned worktrees, finished task refs and expired stream/report files.
     Gc(cmd::gc::GcArgs),
+    /// Build a read-only acceptance handover report (Markdown, HTML, or JSON).
+    Handover(cmd::handover::HandoverArgs),
     /// Sign an approval for the current head-lock fingerprint.
     Approve(cmd::approve::ApproveArgs),
     /// Add, list, show, unblock tasks; unfreeze the factory.
     Board(cmd::board::BoardArgs),
+    /// Synchronous interactive TTY cockpit for inspecting and steering tasks.
+    Cockpit(cmd::cockpit::CockpitArgs),
     /// Run ready tasks through agent, gate and merge point.
     Run(cmd::run::RunArgs),
     /// Run a command through the machine-wide queue of heavy commands.
@@ -63,8 +67,10 @@ impl Command {
             Command::Accounts(_) => "accounts",
             Command::Gate(_) => "gate",
             Command::Gc(_) => "gc",
+            Command::Handover(_) => "handover",
             Command::Approve(_) => "approve",
             Command::Board(_) => "board",
+            Command::Cockpit(_) => "cockpit",
             Command::Run(_) => "run",
             Command::Slot(_) => "slot",
             Command::Status(_) => "status",
@@ -109,8 +115,10 @@ fn main() -> ExitCode {
         Command::Accounts(args) => cmd::accounts::run(args, &ctx),
         Command::Gate(args) => cmd::gate::run(args, &ctx),
         Command::Gc(args) => cmd::gc::run(args, &ctx),
+        Command::Handover(args) => cmd::handover::run(args, &ctx),
         Command::Approve(args) => cmd::approve::run(args, &ctx),
         Command::Board(args) => cmd::board::run(args, &ctx),
+        Command::Cockpit(args) => cmd::cockpit::run(args, &ctx),
         Command::Run(args) => cmd::run::run(args, &ctx),
         Command::Slot(args) => cmd::slot::run(args, &ctx),
         Command::Status(args) => cmd::status::run(args, &ctx),

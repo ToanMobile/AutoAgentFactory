@@ -6,6 +6,7 @@ use std::path::Path;
 
 use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::event::EventKind;
+use aaf_domain::gate::Receipt;
 use aaf_domain::ports::{
     AgentOutcome, AgentRequest, InfraFailure, InfraKind, PortError, PortResult,
 };
@@ -15,6 +16,7 @@ use serde_json::json;
 
 use super::audit_backend::{self, AuditBackend};
 use super::ports::{AccountPool, Grant};
+use super::post_audit;
 pub(crate) use super::prompt::PLAN_EXECUTOR;
 use super::prompt::{
     PLAN_APPROVED_PREFIX, PromptContext, build_plan_prompt, build_prompt_with_context,
@@ -49,6 +51,10 @@ pub(crate) enum Job {
         job: GateJob,
         lock_fp: String,
     },
+    PostAudit {
+        job: GateJob,
+        receipt: Box<Receipt>,
+    },
     Unblock {
         job: GateJob,
         signal: Box<FailureSignal>,
@@ -59,7 +65,9 @@ impl Job {
     pub(crate) fn task_id(&self) -> &str {
         match self {
             Job::Agent { task_id } => task_id,
-            Job::Audit { job, .. } | Job::Unblock { job, .. } => &job.task_id,
+            Job::Audit { job, .. } | Job::PostAudit { job, .. } | Job::Unblock { job, .. } => {
+                &job.task_id
+            }
         }
     }
 }
@@ -115,6 +123,9 @@ pub(crate) fn run_job(
         Job::Agent { task_id } => agent(deps, &task_id, grant),
         Job::Audit { job, lock_fp } => {
             audit_backend::execute_audit(deps, audit_backend, job, &lock_fp, grant)
+        }
+        Job::PostAudit { job, receipt } => {
+            return post_audit::run_post_gate_audit(deps, audit_backend, job, *receipt, grant);
         }
         Job::Unblock { job, signal } => {
             unblock::handle(deps, &job.task_id, Some(&job.worktree), *signal, grant)
@@ -367,6 +378,10 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
         deps.settings.hook_required,
         &*deps.accounts,
     )?;
+    if let Err(err) = snapshot_turn(deps, &task.id, &worktree, &run.request.run_id) {
+        let _ = end_run(deps, &task, &run, RunStatus::Failed, None, (0, 0));
+        return Err(err);
+    }
     let profile = crate::config::effective_profile(&deps.settings.repo, &worktree.path);
     let env_ctx = PromptContext {
         repo_root: &worktree.path,
@@ -408,6 +423,16 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
     let mut signal = FailureSignal::empty();
     signal.outcome = Some(outcome);
     unblock::handle(deps, task_id, Some(&worktree), signal, grant)
+}
+
+fn snapshot_turn(deps: &Deps, task_id: &str, wt: &TaskWorktree, run_id: &str) -> PortResult<()> {
+    let now = deps.now();
+    let created = deps.git.create_turn_snapshot(wt, run_id, now);
+    if let Some((r, oid)) = created.map_err(|e| PortError::Io(e.to_string()))? {
+        deps.store
+            .record_turn_snapshot(task_id, run_id, &r, &oid, now)?;
+    }
+    Ok(())
 }
 
 fn invoke_runner(deps: &Deps, task: &Task, run: &OpenRun) -> PortResult<AgentOutcome> {

@@ -26,6 +26,8 @@ const CONFIG: &str = "git's configuration";
 /// hooks and configuration along.
 const GIT_DIR: &str = "the git directory";
 const REF: &str = "a protected branch";
+const AAF_REF: &str = "refs/aaf/* snapshots";
+const AAF_REF_REASON: &str = "refs/aaf/* snapshots are protected";
 
 /// Programs that do not write the files named to them. `find` and the
 /// non-in-place `sed`/`perl` are decided in [`reads_only`].
@@ -134,6 +136,12 @@ fn guarded(path: &Path) -> Option<&'static str> {
         ["etc", "gitconfig"] => return Some(CONFIG),
         _ => {}
     }
+    if parts.windows(2).any(|pair| {
+        paths::fold(pair[0]).eq_ignore_ascii_case("refs")
+            && paths::fold(pair[1]).eq_ignore_ascii_case("aaf")
+    }) {
+        return Some(AAF_REF);
+    }
     let at = parts.iter().position(|part| is(part, ".git"))?;
     let below = parts.get(at + 1..).unwrap_or(&[]);
     if below.iter().any(|part| is(part, "hooks")) {
@@ -146,6 +154,7 @@ fn guarded(path: &Path) -> Option<&'static str> {
         [first] | [first, _] if is(first, "worktrees") || is(first, "modules") => Some(GIT_DIR),
         [name] if is(name, "packed-refs") => Some(REF),
         [refs] if is(refs, "refs") => Some(REF),
+        [refs, aaf, ..] if is(refs, "refs") && is(aaf, "aaf") => Some(AAF_REF),
         [refs, heads, branch @ ..] if is(refs, "refs") && is(heads, "heads") => {
             let branch = branch.join("/").to_ascii_lowercase();
             // The directory of all branches or of `release/*`, a protected
@@ -295,6 +304,95 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             {
                 return Some(deny(name, &path, kind));
             }
+        }
+    }
+    None
+}
+
+/// True when `text` references `refs/aaf` (case- and APFS-folded).
+pub(crate) fn is_aaf_ref_text(text: &str) -> bool {
+    paths::fold(text)
+        .replace('\\', "/")
+        .to_ascii_lowercase()
+        .contains("refs/aaf")
+}
+
+/// True when any argument in `words` references `refs/aaf` (case-insensitively).
+pub(crate) fn touches_aaf_refs(words: &[String]) -> bool {
+    words.iter().any(|word| is_aaf_ref_text(word))
+}
+
+/// Denies ref-writing git subcommands that touch `refs/aaf/*`.
+pub(crate) fn check_git_aaf_refs(sub: &str, rest: &[String]) -> Option<Denial> {
+    const REF_WRITERS: &[&str] = &[
+        "update-ref",
+        "branch",
+        "tag",
+        "push",
+        "fetch",
+        "pull",
+        "symbolic-ref",
+        "pack-refs",
+        "checkout",
+        "switch",
+        "reset",
+        "replace",
+        "notes",
+        "remote",
+        "gc",
+        "prune",
+        "worktree",
+        "receive-pack",
+        "fast-import",
+    ];
+    (REF_WRITERS.contains(&sub) && touches_aaf_refs(rest))
+        .then(|| Denial::new(RULE, AAF_REF_REASON, FIX))
+}
+
+/// Denies shell commands and write redirects that mutate `refs/aaf/*` files directly.
+pub(crate) fn check_shell_aaf_refs(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
+    for redirect in &cmd.redirects {
+        if redirect.op.contains('>')
+            && (is_aaf_ref_text(&redirect.target)
+                || is_aaf_ref_text(&ctx.expand(&redirect.target).to_string_lossy()))
+        {
+            return Some(Denial::new(RULE, AAF_REF_REASON, FIX));
+        }
+    }
+    if cmd.words.is_empty() || (!cmd.dynamic_name && reads_only(cmd)) {
+        return None;
+    }
+    if cmd.name() == "git" && !cmd.dynamic_name {
+        return None;
+    }
+    if is_aaf_ref_text(&ctx.cwd.to_string_lossy()) {
+        return Some(Denial::new(RULE, AAF_REF_REASON, FIX));
+    }
+    let copier = !cmd.dynamic_name && COPIERS.contains(&cmd.name());
+    let words: Vec<&str> = cmd
+        .wrapped
+        .iter()
+        .chain(cmd.args())
+        .map(String::as_str)
+        .collect();
+    let last_plain = words.iter().rposition(|w| !w.starts_with('-'));
+    let mut before = "";
+    for (at, word) in words.iter().copied().enumerate() {
+        let prev = std::mem::replace(&mut before, word);
+        if skips_value(prev) && !prev.contains('=') {
+            continue;
+        }
+        let target = prev == "--target-directory"
+            || (prev.starts_with('-') && !prev.starts_with("--") && prev.ends_with('t'));
+        let source = copier && Some(at) != last_plain && !word.starts_with('-') && !target;
+        if source {
+            continue;
+        }
+        if is_aaf_ref_text(word)
+            || candidates(word)
+                .any(|(text, _)| is_aaf_ref_text(&ctx.expand(text).to_string_lossy()))
+        {
+            return Some(Denial::new(RULE, AAF_REF_REASON, FIX));
         }
     }
     None

@@ -223,53 +223,36 @@ pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String
 
 /// Minimal quote-aware argv splitter (no shell expansion).
 fn split_cmd_words(input: &str) -> Result<Vec<String>, String> {
-    let (mut words, mut cur, mut in_word, mut single, mut double) =
-        (Vec::new(), String::new(), false, false, false);
+    let (mut words, mut cur, mut in_word, mut quote) = (Vec::new(), String::new(), false, '\0');
     let mut chars = input.chars();
     let trail = || "trailing backslash in cross_audit.executor_cmd".to_string();
     while let Some(c) = chars.next() {
-        if single {
-            if c == '\'' {
-                single = false;
-            } else {
-                cur.push(c);
-            }
-            continue;
-        }
-        if double {
-            match c {
-                '"' => double = false,
-                '\\' => cur.push(chars.next().ok_or_else(trail)?),
-                other => cur.push(other),
-            }
-            continue;
-        }
-        match c {
-            '\'' => {
-                single = true;
-                in_word = true;
-            }
-            '"' => {
-                double = true;
-                in_word = true;
-            }
-            '\\' => {
-                cur.push(chars.next().ok_or_else(trail)?);
-                in_word = true;
-            }
-            ch if ch.is_whitespace() => {
-                if in_word {
-                    words.push(std::mem::take(&mut cur));
-                    in_word = false;
+        match quote {
+            '\'' if c == '\'' => quote = '\0',
+            '\'' => cur.push(c),
+            '"' if c == '"' => quote = '\0',
+            '"' if c == '\\' => cur.push(chars.next().ok_or_else(trail)?),
+            '"' => cur.push(c),
+            _ => match c {
+                '\'' | '"' => (quote, in_word) = (c, true),
+                '\\' => {
+                    cur.push(chars.next().ok_or_else(trail)?);
+                    in_word = true;
                 }
-            }
-            other => {
-                cur.push(other);
-                in_word = true;
-            }
+                ch if ch.is_whitespace() => {
+                    if in_word {
+                        words.push(std::mem::take(&mut cur));
+                        in_word = false;
+                    }
+                }
+                other => {
+                    cur.push(other);
+                    in_word = true;
+                }
+            },
         }
     }
-    if single || double {
+    if quote != '\0' {
         return Err("unterminated quote in cross_audit.executor_cmd".to_string());
     }
     if in_word {
@@ -307,21 +290,33 @@ pub(crate) fn route_audit_limit(
     grant: &Grant,
     hit: &LimitHit,
 ) -> PortResult<Next> {
+    let wait = Ok(Next::Wait {
+        until: hit.reset_at,
+    });
     if grant.account_id().is_none() {
-        return Ok(Next::Wait {
-            until: hit.reset_at,
-        });
+        return wait;
     }
     match accounts.after_limit()? {
         Some(QuotaRoute::Switch) => Ok(Next::Switch),
-        Some(QuotaRoute::Wait) => Ok(Next::Wait {
-            until: hit.reset_at,
-        }),
         None if accounts.provider_account_count()? > 1 => Ok(Next::Switch),
-        None => Ok(Next::Wait {
-            until: hit.reset_at,
-        }),
+        Some(QuotaRoute::Wait) | None => wait,
     }
+}
+
+/// Shared failure signal for an audit rejection handed to `Next::Unblock`.
+pub(crate) fn audit_rejection_signal(log_tail: &str) -> FailureSignal {
+    let mut signal = FailureSignal::empty();
+    signal.outcome = Some(AgentOutcome {
+        exit_code: Some(1),
+        timed_out: false,
+        final_text: String::new(),
+        tokens_in: 0,
+        tokens_out: 0,
+        limit_hit: None,
+        infra: None,
+        log_tail: log_tail.to_string(),
+    });
+    signal
 }
 
 fn has_status_code(lower: &str, code: &str) -> bool {
@@ -350,29 +345,26 @@ fn classify_auditor_log_tail(
 ) {
     let lower = tail.to_ascii_lowercase();
     let raw = unblock::one_line(tail, 300);
+    let has_any = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
     let quota_hit = has_status_code(&lower, "429")
-        || [
+        || has_any(&[
             "429 too many",
             "too many requests",
             "rate limit",
             "rate_limit",
             "quota",
-        ]
-        .iter()
-        .any(|n| lower.contains(n));
+        ]);
     let auth_hit = has_status_code(&lower, "401")
         || has_status_code(&lower, "403")
-        || [
+        || has_any(&[
             "401 unauthorized",
             "403 forbidden",
             "unauthorized",
             "invalid api key",
             "invalid_api_key",
             "authentication failed",
-        ]
-        .iter()
-        .any(|n| lower.contains(n));
-    let net_hit = [
+        ]);
+    let net_hit = has_any(&[
         "econnrefused",
         "etimedout",
         "econnreset",
@@ -382,12 +374,9 @@ fn classify_auditor_log_tail(
         "connection timed out",
         "503 service unavailable",
         "529 overloaded",
-    ]
-    .iter()
-    .any(|n| lower.contains(n))
-        || ["502", "503", "504", "529"]
-            .iter()
-            .any(|c| has_status_code(&lower, c));
+    ]) || ["502", "503", "504", "529"]
+        .iter()
+        .any(|c| has_status_code(&lower, c));
     if quota_hit {
         *limit_hit = Some(LimitHit {
             reset_at: None,
@@ -406,7 +395,7 @@ fn classify_auditor_log_tail(
     }
 }
 
-fn verdict_text(verdict: &AuditVerdict) -> String {
+pub(crate) fn verdict_text(verdict: &AuditVerdict) -> String {
     match verdict {
         AuditVerdict::Pass { .. } => "pass".to_string(),
         AuditVerdict::Inconclusive { reason } => format!("inconclusive: {reason}"),
@@ -420,14 +409,47 @@ fn verdict_text(verdict: &AuditVerdict) -> String {
     }
 }
 
+/// Resolves `(audit_provider, reviewer, same_account)` for `task_id` and
+/// enforces `cross_audit.require_different_provider`.
+pub(crate) fn resolve_task_audit_context(
+    deps: &Deps,
+    audit_backend: Option<&AuditBackend>,
+    task_id: &str,
+    grant: &Grant,
+) -> PortResult<Result<(String, String, bool), String>> {
+    let author = deps
+        .store
+        .runs_for_task(task_id)?
+        .into_iter()
+        .rev()
+        .find(|run| run.executor != AUDIT_EXECUTOR && run.executor != PLAN_EXECUTOR)
+        .and_then(|run| run.account_id);
+    let run_provider = &deps.settings.repo.run.executor;
+    let custom_cmd = deps.settings.repo.cross_audit.executor_cmd.trim();
+    let audit_provider = if !custom_cmd.is_empty() && audit_cmd_is_claude(custom_cmd) {
+        "claude"
+    } else {
+        effective_audit_provider(run_provider, audit_backend)
+    };
+    Ok(resolve_audit_policy(
+        run_provider,
+        author.as_deref(),
+        audit_provider,
+        grant.account_id(),
+        deps.settings.repo.cross_audit.require_different_provider,
+    )
+    .map(|(reviewer, same_account)| (audit_provider.to_string(), reviewer, same_account)))
+}
+
 /// One recorded auditor run in `tree`, plus any infra failure or rate limit.
-fn audit_run(
+pub(crate) fn run_auditor_turn(
     deps: &Deps,
     audit_backend: Option<&AuditBackend>,
     task: &Task,
     input: &AuditInput,
     tree: &TaskWorktree,
     grant: &Grant,
+    require_scores: bool,
 ) -> PortResult<(AuditReport, Option<InfraFailure>, Option<LimitHit>)> {
     let custom_cmd = deps.settings.repo.cross_audit.executor_cmd.trim();
     let hook_required = audit_backend.map_or(deps.settings.hook_required, |a| a.hook_required)
@@ -444,7 +466,7 @@ fn audit_run(
         accounts,
     )?;
     let watch = InfraWatch::new(runner);
-    let report = match cross_audit::run_audit(input, &watch, &run.request) {
+    let report = match cross_audit::run_scored_audit(input, &watch, &run.request, require_scores) {
         Ok(report) => report,
         Err(err) => {
             worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0))?;
@@ -481,33 +503,14 @@ pub(crate) fn execute_audit(
     grant: &Grant,
 ) -> PortResult<Next> {
     let task = deps.store.get_task(&job.task_id)?;
-    let author = deps
-        .store
-        .runs_for_task(&task.id)?
-        .into_iter()
-        .rev()
-        .find(|run| run.executor != AUDIT_EXECUTOR && run.executor != PLAN_EXECUTOR)
-        .and_then(|run| run.account_id);
-    let run_provider = &deps.settings.repo.run.executor;
-    let custom_cmd = deps.settings.repo.cross_audit.executor_cmd.trim();
-    let audit_provider = if !custom_cmd.is_empty() && audit_cmd_is_claude(custom_cmd) {
-        "claude"
-    } else {
-        effective_audit_provider(run_provider, audit_backend)
-    };
-    let (reviewer, same_account) = match resolve_audit_policy(
-        run_provider,
-        author.as_deref(),
-        audit_provider,
-        grant.account_id(),
-        deps.settings.repo.cross_audit.require_different_provider,
-    ) {
-        Ok(policy) => policy,
-        Err(why) => {
-            unblock::block_untried(deps, &task.id, &why)?;
-            return Ok(Next::Blocked);
-        }
-    };
+    let (audit_provider, reviewer, same_account) =
+        match resolve_task_audit_context(deps, audit_backend, &task.id, grant)? {
+            Ok(ctx) => ctx,
+            Err(why) => {
+                unblock::block_untried(deps, &task.id, &why)?;
+                return Ok(Next::Blocked);
+            }
+        };
     let input = AuditInput {
         spec: task.spec.clone(),
         diff: deps.git.diff(&job.worktree)?,
@@ -519,7 +522,15 @@ pub(crate) fn execute_audit(
     // the author's `CLAUDE.md` and `.claude/` settings (instructions, hooks,
     // env): the very files it may be auditing.
     let clean = deps.git.integrate(&[])?;
-    let audited = audit_run(deps, audit_backend, &task, &input, &clean.tree, grant);
+    let audited = run_auditor_turn(
+        deps,
+        audit_backend,
+        &task,
+        &input,
+        &clean.tree,
+        grant,
+        false,
+    );
     let _ = deps.git.discard(&clean);
     let (report, infra, limit_hit) = audited?;
     if let Some(hit) = limit_hit {
@@ -570,19 +581,8 @@ pub(crate) fn execute_audit(
     let note = format!("cross-audit rejected the changes to locked files ({text})");
     deps.store
         .append_context_note(&task.id, &unblock::one_line(&note, 400), deps.now())?;
-    let mut signal = FailureSignal::empty();
-    signal.outcome = Some(AgentOutcome {
-        exit_code: Some(1),
-        timed_out: false,
-        final_text: String::new(),
-        tokens_in: 0,
-        tokens_out: 0,
-        limit_hit: None,
-        infra: None,
-        // The verdict kind only: finding texts differ from run to run and
-        // would give every rejection a new failure digest.
-        log_tail: "cross-audit rejected the changes to locked files".to_string(),
-    });
+    // Fixed verdict kind only so finding texts do not create a new failure digest every run.
+    let signal = audit_rejection_signal("cross-audit rejected the changes to locked files");
     Ok(Next::Unblock {
         task_id: task.id,
         worktree: job.worktree,

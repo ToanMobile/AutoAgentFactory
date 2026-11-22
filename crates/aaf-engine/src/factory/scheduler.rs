@@ -177,15 +177,14 @@ impl<'a> Scheduler<'a> {
     }
 
     pub(super) fn default_cooling_down(&mut self) -> bool {
-        if self
+        let cooling = self
             .state
             .default_wait_until
-            .is_some_and(|u| self.deps.now() < u)
-        {
-            return true;
+            .is_some_and(|u| self.deps.now() < u);
+        if !cooling {
+            self.state.default_wait_until = None;
         }
-        self.state.default_wait_until = None;
-        false
+        cooling
     }
 
     pub(super) fn queue_gating_task(&mut self, task_id: String) -> PortResult<()> {
@@ -210,24 +209,21 @@ impl<'a> Scheduler<'a> {
     }
 
     fn open_review_and_scopes(&self) -> PortResult<(usize, Vec<Vec<String>>)> {
-        let tasks = self
-            .deps
-            .store
-            .list_tasks(Some(self.deps.settings.repo_root.as_str()), None)?;
+        let repo = Some(self.deps.settings.repo_root.as_str());
+        let tasks = self.deps.store.list_tasks(repo, None)?;
         Ok(schedule_order::open_review_and_scopes(&tasks))
     }
 
     /// Ready tasks whose dependencies are Done, ordered by priority then critical path.
     fn startable(&mut self) -> PortResult<Vec<Task>> {
         let now = self.deps.now();
-        self.state
-            .task_wait_until
-            .retain(|_, &mut until| until > now);
-        let can_settle = self.summary.halted.is_none() && !is_frozen(&*self.deps.store)?;
+        self.state.task_wait_until.retain(|_, &mut u| u > now);
+        let store = &*self.deps.store;
+        let can_settle = self.summary.halted.is_none() && !is_frozen(store)?;
         let repo = Some(self.deps.settings.repo_root.as_str());
         loop {
-            let all_tasks = self.deps.store.list_tasks(repo, None)?;
-            let all_deps = self.deps.store.all_deps()?;
+            let all_tasks = store.list_tasks(repo, None)?;
+            let all_deps = store.all_deps()?;
             let mut ready: Vec<Task> = all_tasks
                 .iter()
                 .filter(|t| t.state == TaskState::Ready)
@@ -241,27 +237,24 @@ impl<'a> Scheduler<'a> {
             let deps_map = schedule_order::deps_by_task(&all_deps);
             let dep_done = |d: &str| {
                 states.get(d).copied().map_or_else(
-                    || {
-                        self.deps
-                            .store
-                            .get_task(d)
-                            .is_ok_and(|t| t.state == TaskState::Done)
-                    },
+                    || store.get_task(d).is_ok_and(|t| t.state == TaskState::Done),
                     |s| s == TaskState::Done,
                 )
             };
             let (mut out, mut settled_parent) = (Vec::new(), false);
             for task in ready {
+                let waiting = self
+                    .state
+                    .task_wait_until
+                    .get(&task.id)
+                    .is_some_and(|&u| u > now);
+                let blocked_dep = deps_map
+                    .get(task.id.as_str())
+                    .is_some_and(|ds| ds.iter().any(|d| !dep_done(d)));
                 if (self.mode == Mode::Once && self.state.started.contains(&task.id))
                     || self.parked.contains(&task.id)
-                    || self
-                        .state
-                        .task_wait_until
-                        .get(&task.id)
-                        .is_some_and(|&u| u > now)
-                    || deps_map
-                        .get(task.id.as_str())
-                        .is_some_and(|ds| ds.iter().any(|d| !dep_done(d)))
+                    || waiting
+                    || blocked_dep
                 {
                     continue;
                 }
@@ -331,7 +324,7 @@ impl<'a> Scheduler<'a> {
                     None => break,
                 },
             };
-            let is_audit = matches!(job, Job::Audit { .. });
+            let is_audit = matches!(job, Job::Audit { .. } | Job::PostAudit { .. });
             let purpose = if is_audit {
                 Purpose::Audit
             } else {
@@ -507,7 +500,7 @@ impl<'a> Scheduler<'a> {
             .state
             .transient_retries
             .entry(task_id.clone())
-            .or_insert(0);
+            .or_default();
         *tries = (*tries)
             .max(hint_attempt.saturating_sub(1))
             .saturating_add(1);
@@ -540,6 +533,9 @@ impl<'a> Scheduler<'a> {
             Ok(Resolution::NeedsAudit { lock_fp }) => {
                 self.state.jobs.push_back(Job::Audit { job, lock_fp });
             }
+            Ok(Resolution::NeedsPostAudit { receipt }) => {
+                self.state.jobs.push_back(Job::PostAudit { job, receipt });
+            }
             Ok(Resolution::Failed(signal)) => {
                 self.state.jobs.push_back(Job::Unblock { job, signal });
             }
@@ -548,7 +544,7 @@ impl<'a> Scheduler<'a> {
                     .state
                     .gate_retries
                     .entry(job.task_id.clone())
-                    .or_insert(0);
+                    .or_default();
                 *count += 1;
                 if *count > MAX_GATE_RETRIES {
                     self.clear_gating(&job.task_id);

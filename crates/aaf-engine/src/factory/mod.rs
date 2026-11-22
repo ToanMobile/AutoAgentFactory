@@ -19,10 +19,12 @@ mod commit_lock;
 mod finish;
 mod git_real;
 pub mod ports;
+mod post_audit;
 pub mod prompt;
 pub mod schedule_order;
 mod scheduler;
 mod select_pool;
+pub mod snapshots;
 mod sweep;
 mod unblock;
 mod worker;
@@ -50,6 +52,7 @@ pub use audit_backend::{
 };
 pub use git_real::{BaseRef, RealGit, resolve_base};
 pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
+pub use post_audit::is_large_diff;
 pub use scheduler::{
     Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit,
     transient_backoff_secs,
@@ -61,11 +64,30 @@ pub use select_pool::{BindingView, SelectingPool};
 pub trait Store:
     TaskStore + BudgetStore + RunStore + EventSink + KvStore + FingerprintStore
 {
+    fn record_turn_snapshot(
+        &self,
+        _task_id: &str,
+        _run_id: &str,
+        _ref_name: &str,
+        _commit_oid: &str,
+        _now: i64,
+    ) -> PortResult<()> {
+        Ok(())
+    }
 }
 
-impl<T> Store for T where
-    T: TaskStore + BudgetStore + RunStore + EventSink + KvStore + FingerprintStore
-{
+impl Store for crate::db::Db {
+    fn record_turn_snapshot(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        ref_name: &str,
+        commit_oid: &str,
+        now: i64,
+    ) -> PortResult<()> {
+        self.insert_snapshot(task_id, run_id, ref_name, commit_oid, now)
+            .map(|_| ())
+    }
 }
 
 /// What one `aaf run` was asked to do, already merged from config and flags.

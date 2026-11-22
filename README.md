@@ -67,7 +67,7 @@ flowchart TB
 
 *Each task gets its own account lease and git worktree. The agent works inside the sandbox while `aaf-hook` judges every tool call; only a signed `CLEAR` receipt from the gate, which runs outside the sandbox, moves the work on to a pull request or the merge queue. Failures climb the unblock ladder. A login failure stops the whole run at once instead of burning attempts; a network failure does the same, after a few backoff retries when the run uses `--auto`.*
 
-> **About the `v3` tag.** Items marked **`v3`** come from the v3 ecosystem work, which is now merged into `main`. They have unit and integration tests on fixtures but have not yet run live against the GitHub API or a real `mobile-mcp` device (see [Project status](#project-status)). Their names, flags and defaults may still change.
+> **About the `v3` and `v3.2` tags.** Items marked **`v3`** and **`v3.2`** are built into the binary with unit, CLI, real-git, and macOS `/usr/bin/sandbox-exec` tests. Live Android Gradle, Unity EditMode, Xcode builds inside Seatbelt, and remote GitHub API / `mobile-mcp` runs on external app repositories remain operator-side verification when targeting those repos (see [Project status](#project-status)).
 
 ---
 
@@ -123,7 +123,10 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | **Observability** | `aaf status` (tasks, runs, tokens, estimated cost, accounts, throttle), the read-only `aaf watch` dashboard and `aaf board trace`. | **`v3`** |
 | **Planning and scale-out** | `aaf plan` (read-only planning prompt), `aaf board split`, `aaf run --auto-split` and `--max-parallel auto`. | **`v3`** |
 | **Cross-provider cross-audit** | The auditor that reviews head-locked changes can use a different provider or model (`[cross_audit]`). | **`v3`** |
-| **Outage handling and rework** | Transient provider outages no longer use up a task's unblock budget. `aaf board rework` sends a task in review back. | **`v3`** |
+| **Outage handling and rework** | Structured HTTP 5xx/`overloaded` self-healing (`RetryAfter` + jittered backoff) does not burn unblock cycles. `aaf board rework` sends a task in review back. | **`v3` / `v3.2`** |
+| **DAG, scopes and 4-stage pipeline** | `aaf board dep`/`graph` with critical-path tie-breaker and `blocked_upstream`, APFS scope-keyed locks (`--scope`), read-only `plan_stage` + `board approve-plan`, `audit_rework:`, `[run].max_open_review` queue brake, verified squash-merge, `aaf gc`, and DB migration `v3 -> v4` (read-only compatible with v3/v4). | **`v3.2`** |
+| **7 Golden Standards and handover** | 3-tier monotonic `[cross_audit]`, `G1..G7` + `MechanicalScore` with non-deadlocking solo-dev badge, post-gate HMAC `"audit\0"` verdicts, `aaf handover` (read-only Markdown/CSP HTML/JSON, verified PNG `<= 4 MiB`), and sanitized PR body (`< 60 KB`). | **`v3.2`** |
+| **Live streams, snapshots and TTY cockpit** | Sanitized `2 MiB` live stream logs (`streams/<run_id>.jsonl`), protected pre-turn snapshots (`refs/aaf/snapshots/*` + `turn_snapshots`), `board undo`/`steer`, and synchronous interactive TTY `aaf cockpit` (0 ports, 0 new crates, ANSI/OSC sanitized). | **`v3.2`** |
 
 ---
 
@@ -474,10 +477,18 @@ A refused name stops `aaf run` before it takes any task, and the error names the
 
 `AAF_COMMANDS_*` variables are deliberately not supported. If they are set, `aaf` warns that they had no effect.
 
-### `v3` sections
+### `v3` and `v3.2` sections
 
 ```toml
-# .autofactory/config.toml (v3)
+# .autofactory/config.toml (v3 / v3.2)
+
+[run]
+max_open_review = 0            # v3.2: 0 = unlimited; > 0 pauses new dispatches when open review tasks hit the cap
+
+[pipeline]                     # v3.2: 4-stage pipeline (tier 2)
+plan_stage = false             # true = run a strictly read-only planning turn before implementation
+require_plan_approval = false  # true = pause after plan_stage until `aaf board approve-plan <id>`
+max_audit_rework_cycles = 2    # bounded `audit_rework:` loop before human escalation
 
 [cross_audit]                  # also allowed in tier 1 as machine-wide defaults
 executor = ""                  # empty = reuse [run].executor; claude, codex, gemini, opencode or custom
@@ -485,6 +496,10 @@ executor_cmd = ""              # command template when executor is custom
 model = ""
 effort = ""
 require_different_provider = false  # true = refuse to run when the auditor would use the author's provider
+audit_scope = "head_lock_only"      # v3.2: head_lock_only < large_diff < always (monotonic across tiers)
+score_gate = "off"                  # v3.2: off < warn < block (monotonic across tiers)
+min_average_score = 95              # v3.2: 7 Golden Standards (G1..G7) average floor (tighten-only)
+min_criterion_score = 80            # v3.2: per-criterion floor across G1..G7 (tighten-only)
 
 [proof]
 required = false               # true = `aaf gate` blocks without a valid signed proof for the current tree
@@ -516,7 +531,8 @@ How `[cross_audit]` merges:
 
 - Non-empty tier 2 values win over the tier 1 defaults.
 - `require_different_provider` is OR-ed across tiers.
-- Tier 3 can only switch `require_different_provider` from `false` to `true`. Other tier 3 changes to this section are ignored, with a warning.
+- Tier 3 can only tighten `[cross_audit]`: raise `require_different_provider` (`false -> true`), `audit_scope` (`head_lock_only < large_diff < always`), `score_gate` (`off < warn < block`), `min_average_score`, and `min_criterion_score`. Any attempt to loosen them is ignored with a warning.
+- Under single-account solo-dev runs where `require_different_provider = false`, `MechanicalScore` runs alongside the 7 Golden Standards (`G1..G7`) and surfaces the non-deadlocking badge `same_account — chưa có auditor độc lập`; post-gate verdicts are HMAC-signed with the dedicated `"audit\0"` domain tag.
 
 ---
 
@@ -532,7 +548,7 @@ How `[cross_audit]` merges:
 | `aaf approve` | Sign an approval for the current head-lock fingerprint (**human only**) | `--reviewer <name>` (required) |
 | `aaf slot -- <cmd> [args…]` | Run any command through the machine-wide heavy queue | `--label <NAME>`, `--timeout <SECS>` |
 | `aaf accounts list` / `next` / `cooldown <ID>` | Show accounts, show the next account, set or clear a cooldown | `cooldown`: `--until <unix-seconds>`, `--clear` (default cooldown is 5 hours) |
-| `aaf board add` | Add a Ready task for the current repo | `--title`, `--spec`, `--accept` (repeatable, required), `--priority P0..P3` (default P2), `--blocked-by <id>` (repeatable) |
+| `aaf board add` | Add a Ready task for the current repo | `--title`, `--spec`, `--accept` (repeatable, required), `--priority P0..P3` (default P2), `--blocked-by <id>` (repeatable), **`v3.2`** `--scope <prefix>` (repeatable) |
 | `aaf board list` | List tasks, most urgent first | `--state <state>`, `--all` (every repo) |
 | `aaf board show <ID>` | One task with its dependencies, runs and latest events | — |
 | `aaf board unblock <ID>` | Put a Blocked task back to Ready with a fresh budget (**human only**) | — |
@@ -548,6 +564,14 @@ How `[cross_audit]` merges:
 | **`v3`** `aaf plan "<goal>"` | Build a read-only planning prompt (no agent is launched) | `--file <path>` (repeatable), `--dry-run` |
 | **`v3`** `aaf proof record` / `verify` / `show` | Record, verify or print a signed device-screenshot proof | `record`: `--image`, `--device`, `--tool` (default `mobile-mcp:mobile_save_screenshot`), `--task-id`; `verify`/`show`: `--tree-fp` |
 | **`v3`** `aaf skills list` / `sync` | List or sync the bundled skill pack | `list`: `--profile`; `sync`: `--host`, `--dir`, `--profile`, `--all`, `--only` (repeatable), `--force` |
+| **`v3.2`** `aaf board dep add\|rm` | Add (cycle-checked) or remove a DAG dependency edge | `<task> --blocked-by <blocker>` |
+| **`v3.2`** `aaf board graph` | Show topological order, critical path, and cascade-blocked tasks | `--all` |
+| **`v3.2`** `aaf board approve-plan <ID>` | Approve a `plan_stage` plan and move the task back to Ready (**human only**) | — |
+| **`v3.2`** `aaf board undo <ID>` | Roll back a task worktree to its latest verified `refs/aaf/snapshots/*` commit (**human only**) | `--dry-run` |
+| **`v3.2`** `aaf board steer <ID>` | Append a sanitized `steer:` note without editing `ImmutableSpec` (**human only**) | `--note "…"` |
+| **`v3.2`** `aaf gc` | Clean orphaned worktrees, finished task refs/snapshots, and expired streams/reports | `--dry-run` |
+| **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
+| **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
 
 `aaf-hook` is not a command you type. Claude Code runs it: it reads the PreToolUse JSON on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.
 
@@ -736,6 +760,21 @@ aaf init --with-skills              # sync during init without overwriting exist
 - **One stack each:** `unity-game-craft`, `web-frontend-qa`, `backend-service-gate`.
 
 **What sync writes.** Files you edited are reported as `skipped_modified` and are not overwritten unless you pass `--force`. Sync refuses symlinked paths, and it is refused inside an agent run.
+
+### `aaf handover`, `aaf cockpit` and `aaf gc` (`v3.2`)
+
+```sh
+aaf handover t-1a2b3c4d                      # Markdown handover report (strictly read-only)
+aaf handover t-1a2b3c4d --format html --open # CSP HTML + verified PNG (<= 4 MiB), opens on macOS TTY
+aaf cockpit                                  # synchronous interactive TTY cockpit (Enter/r refresh, q quit)
+aaf cockpit --all                            # inspect tasks across every repository
+aaf board undo t-1a2b3c4d                    # roll back worktree to latest verified turn snapshot
+aaf board steer t-1a2b3c4d --note "use X"    # append sanitized steer: note (ImmutableSpec untouched)
+aaf gc --dry-run                             # preview orphan worktrees, finished refs, expired logs
+```
+
+- **`aaf handover`** never creates `receipt.key` or writes to the database. HTML output uses std base64 (zero extra crates) and embeds `Content-Security-Policy: default-src 'none'; img-src data:; style-src 'unsafe-inline';`. PR bodies are secret-scrubbed and bounded under `60 KB`.
+- **`aaf cockpit`** opens zero network ports, adds zero crate dependencies, uses zero `unsafe`, refuses non-TTY stdin and `AAF_RUN_ID` (exit 2), strips all ANSI/OSC/DCS/APC/PM/SOS and C0/C1 controls, and never auto-refreshes in the background while waiting for input. Short read-only commands (`d`, `t`, `h`, `g`, `tail <id>`) run immediately; every mutating command (`approve`, `rework`, `steer`, `undo`, `unblock`, `unfreeze`) previews its target (`locked_changes` or `commit_oid`) and requires explicit `y/N` confirmation (defaulting to NO).
 
 ---
 
@@ -1069,7 +1108,7 @@ Tool directories on `PATH` that sit inside writable caches are write-protected, 
 |---|---|---|
 | `0` | Success; gate `CLEAR`; hook allows | all commands, `aaf-hook` |
 | `1` | Runtime, configuration or I/O error (for example an unknown config key, an unreadable file, a gate that could not run) | all commands |
-| `2` | Blocked, unverified, refused by policy, or a usage error | `aaf gate` (`BLOCKED`/`UNVERIFIED`); `aaf doctor` (a required check failed); `aaf run` (`blocked`, `halted`, `frozen`, `refused`); `aaf approve`, `aaf board unblock`/`unfreeze` refusals; `aaf accounts next` with no usable account; `aaf-hook` (block); **`v3`** `aaf proof verify` `BLOCKED`, `aaf plan`/`aaf board split`/`import-issues`/`sync-github`/`rework`/`skills sync` refusals |
+| `2` | Blocked, unverified, refused by policy, or a usage error | `aaf gate` (`BLOCKED`/`UNVERIFIED`); `aaf doctor` (a required check failed); `aaf run` (`blocked`, `halted`, `frozen`, `refused`); `aaf approve`, `aaf board unblock`/`unfreeze` refusals; `aaf accounts next` with no usable account; `aaf-hook` (block); **`v3`** `aaf proof verify` `BLOCKED`, `aaf plan`/`aaf board split`/`import-issues`/`sync-github`/`rework`/`skills sync` refusals; **`v3.2`** `aaf cockpit` non-TTY/`AAF_RUN_ID` refusal, `aaf handover --out`/`--open` policy refusal, `aaf board approve-plan`/`undo`/`steer` refusals |
 | *command's code* | `aaf slot` passes on the exit code of the command it ran | `aaf slot` |
 | `128 + N` | The command run by `aaf slot` was killed by signal `N` | `aaf slot` |
 | `75` | `--timeout` expired while waiting for a slot; the command never started | `aaf slot` |
@@ -1083,27 +1122,22 @@ Usage errors (a missing `--` for `aaf slot`, an unknown flag) exit `2`. `aaf slo
 
 What has been tested against real tools, and what has not, is tracked in the **Trạng thái** ("Status") section of the Vietnamese guide, [`docs/README.vi.md`](docs/README.vi.md). In summary:
 
-- **Tested with real runs on the owner's machine:**
-  - the hook inside real Claude Code sessions;
-  - `aaf gate` on real app repositories;
-  - a real Gradle unit-test run through the queue;
-  - `aaf accounts` and `aaf doctor`;
-  - one real task taken through `aaf run` to Review.
-- **Covered only by tests with fixtures or stand-ins:**
-  - real Gradle, Unity or Xcode builds *inside* the Seatbelt sandbox;
-  - `SIGSTOP`/`SIGCONT` on real builds;
-  - PR creation against a real GitHub remote;
-  - account switching on a real rate limit;
-  - `aaf run --auto`;
-  - batched gating with real agents;
-  - cross-audit with real agents;
+- **Verified empirically on macOS:**
+  - `/usr/bin/sandbox-exec` Seatbelt profiles with real child processes, including explicit deny verification for `refs/aaf`, `streams/`, `reports/`, `AAF_DATA_DIR`, other tasks' worktrees, and cache control files;
+  - the live Keychain read experiment with `claude -p` OAuth (documenting why `~/Library/Keychains` remains readable and surfaced as `keychain_sandbox_exposure` in `aaf doctor`);
+  - the `aaf-hook` and `aaf` CLI binaries against real local git repositories, linked worktrees, snapshot refs, and SQLite v3/v4 stores;
+  - the hook inside real Claude Code sessions, `aaf gate` on real app repositories, a real Gradle unit-test run through the queue, `aaf accounts`, `aaf doctor`, and one real task taken through `aaf run` to Review.
+- **Covered by unit, integration, and fixture/stand-in tests (operator-side verification required when targeting external repos):**
+  - live Android Gradle, Unity EditMode, or Xcode builds *inside* the Seatbelt sandbox on external app repos;
+  - `SIGSTOP`/`SIGCONT` on real heavy builds;
+  - remote GitHub API / PR creation / Projects v2 sync and live `mobile-mcp` device proofs against external repositories;
+  - account switching on a live provider rate limit, `aaf run --auto`, batched gating, and cross-audit with live multi-provider agents;
   - anything on Linux.
 - **Not available:**
   - hook adapters for agents other than Claude Code;
   - default gate commands for iOS, React Native, Expo, web, Python, and Unity without EditMode tests;
   - anything that runs `commands.repro`;
   - a Linux sandbox.
-- **`v3` features** have unit and integration tests on fixtures. They have not run live against the GitHub API or a real `mobile-mcp` device.
 
 ---
 

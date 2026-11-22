@@ -7,9 +7,10 @@
 
 mod common;
 
-use common::{Fixture, run_corpus};
+use common::{Fixture, run_corpus, run_file_corpus};
 
 const HUMAN: Option<&str> = Some("human_action_guard");
+const GIT: Option<&str> = Some("git_guard");
 const TEXT: Option<&str> = Some("unparsable_command");
 const ALLOW: Option<&str> = None;
 
@@ -43,6 +44,12 @@ fn guards_every_v3_human_subcommand_directly() {
             ("aaf --json board dep T-2 --remove T-1", HUMAN),
             ("aaf board approve-plan T-1", HUMAN),
             ("aaf --json board approve-plan T-1", HUMAN),
+            ("aaf cockpit", HUMAN),
+            ("aaf --json cockpit", HUMAN),
+            ("aaf board undo T-1", HUMAN),
+            ("aaf --json board undo T-1", HUMAN),
+            ("aaf board steer T-1 'keep it small'", HUMAN),
+            ("aaf --json board steer T-1 'keep it small'", HUMAN),
             // Dynamic subcommands under known aaf remain refused.
             ("aaf proof $ACTION", HUMAN),
             ("aaf skills $ACTION", HUMAN),
@@ -54,6 +61,9 @@ fn guards_every_v3_human_subcommand_directly() {
             ("aaf board split T-1 'oops", TEXT),
             ("aaf board dep T-2 --after T-1 'oops", TEXT),
             ("aaf board approve-plan T-1 'oops", TEXT),
+            ("aaf cockpit 'oops", TEXT),
+            ("aaf board undo T-1 'oops", TEXT),
+            ("aaf board steer T-1 'oops", TEXT),
             ("aaf run 'oops", TEXT),
             ("aaf init 'oops", TEXT),
             ("aaf gc 'oops", TEXT),
@@ -84,6 +94,13 @@ fn guards_v3_human_subcommands_via_launchers() {
             ("script -q /dev/null aaf board split T-1", HUMAN),
             ("script -q /dev/null aaf board dep T-2 --after T-1", HUMAN),
             ("script -q /dev/null aaf board approve-plan T-1", HUMAN),
+            ("script -q /dev/null aaf cockpit", HUMAN),
+            ("script -q /dev/null aaf --json cockpit", HUMAN),
+            ("script -q /dev/null aaf board undo T-1", HUMAN),
+            (
+                "script -q /dev/null aaf board steer T-1 'focus on tests'",
+                HUMAN,
+            ),
             (
                 "expect -c 'spawn aaf proof record --image x.png --device emu'",
                 HUMAN,
@@ -95,6 +112,10 @@ fn guards_v3_human_subcommands_via_launchers() {
             ("expect -c 'spawn aaf board split T-1'", HUMAN),
             ("expect -c 'spawn aaf board dep T-2 --after T-1'", HUMAN),
             ("expect -c 'spawn aaf board approve-plan T-1'", HUMAN),
+            ("expect -c 'spawn aaf cockpit'", HUMAN),
+            ("expect -c 'spawn /usr/local/bin/aaf cockpit'", HUMAN),
+            ("expect -c 'spawn aaf board undo T-1'", HUMAN),
+            ("expect -c 'spawn aaf board steer T-1 focus'", HUMAN),
             ("expect -c 'spawn /usr/local/bin/aaf run'", HUMAN),
             ("expect -c 'spawn /usr/local/bin/aaf init'", HUMAN),
             ("expect -c 'spawn /usr/local/bin/aaf gc --apply'", HUMAN),
@@ -126,9 +147,16 @@ fn guards_v3_human_subcommands_via_cargo_run_with_and_without_dashes() {
             ("cargo run -- board split T-1", HUMAN),
             ("cargo run -- board dep T-2 --after T-1", HUMAN),
             ("cargo run -- board approve-plan T-1", HUMAN),
+            ("cargo run -- cockpit", HUMAN),
+            ("cargo run -p aaf-cli -- cockpit", HUMAN),
+            ("cargo run -- board undo T-1", HUMAN),
+            ("cargo run -- board steer T-1 'keep small'", HUMAN),
             ("cargo run -p aaf-cli -- proof record --image x.png", HUMAN),
             // Without `--`
             ("cargo run approve", HUMAN),
+            ("cargo run cockpit", HUMAN),
+            ("cargo run -p aaf-cli cockpit", HUMAN),
+            ("cargo r cockpit", HUMAN),
             ("cargo run run", HUMAN),
             ("cargo run init", HUMAN),
             ("cargo run gc", HUMAN),
@@ -145,6 +173,8 @@ fn guards_v3_human_subcommands_via_cargo_run_with_and_without_dashes() {
             ("cargo run board split T-1", HUMAN),
             ("cargo run board dep T-2 --after T-1", HUMAN),
             ("cargo run board approve-plan T-1", HUMAN),
+            ("cargo run board undo T-1", HUMAN),
+            ("cargo run board steer T-1 'keep small'", HUMAN),
             ("cargo r gc", HUMAN),
             ("cargo r proof record", HUMAN),
         ],
@@ -162,6 +192,10 @@ fn allows_non_human_commands_and_avoids_short_word_false_positives() {
             ("cargo run -p other-app gc", ALLOW),
             ("cargo run -p other-app -- board dep T-2 --after T-1", ALLOW),
             ("cargo run -p other-app board approve-plan T-1", ALLOW),
+            ("cargo run -p other-app -- cockpit", ALLOW),
+            ("cargo run -p other-app cockpit", ALLOW),
+            ("cargo run -p other-app -- board undo T-1", ALLOW),
+            ("cargo run -p other-app board steer T-1 note", ALLOW),
             ("cargo run --bin other-tool run", ALLOW),
             ("cargo run proof verify", ALLOW),
             ("cargo run skills list", ALLOW),
@@ -173,17 +207,20 @@ fn allows_non_human_commands_and_avoids_short_word_false_positives() {
             ("aaf board list", ALLOW),
             ("aaf board show T-1", ALLOW),
             (
-                "aaf board add --title 'rework split gc dep approve-plan' --accept 'sync ok'",
+                "aaf board add --title 'rework split gc dep approve-plan cockpit undo steer' --accept 'sync ok'",
                 ALLOW,
             ),
             ("aaf proof verify", ALLOW),
             ("aaf proof show", ALLOW),
             ("aaf skills list", ALLOW),
             ("aaf skills list --profile rust", ALLOW),
-            ("echo \"split record sync gc dep approve-plan\"", ALLOW),
+            (
+                "echo \"split record sync gc dep approve-plan cockpit undo steer\"",
+                ALLOW,
+            ),
             ("echo \"run init rework\"", ALLOW),
             (
-                "script -q /dev/null echo \"split record sync gc dep approve-plan\"",
+                "script -q /dev/null echo \"split record sync gc dep approve-plan cockpit undo steer\"",
                 ALLOW,
             ),
             ("script -q /dev/null aaf proof verify", ALLOW),
@@ -196,6 +233,41 @@ fn allows_non_human_commands_and_avoids_short_word_false_positives() {
             ("aaf board list 'oops", ALLOW),
             ("aaf proof verify 'oops", ALLOW),
             ("aaf skills list 'oops", ALLOW),
+        ],
+    );
+}
+
+#[test]
+fn guards_aaf_snapshot_refs_against_git_shell_and_file_bypass() {
+    let fixture = Fixture::new();
+    run_corpus(
+        &fixture,
+        &[
+            ("git update-ref -d refs/aaf/snapshots/t1/001", GIT),
+            ("git update-ref refs/aaf/snapshots/t1/001 HEAD", GIT),
+            ("git update-ref -d refs/AAF/snapshots/t1/001", GIT),
+            ("git push . :refs/aaf/snapshots/t1/001", GIT),
+            ("git push origin :refs/aaf/snapshots/t1/001", GIT),
+            ("git fetch . HEAD:refs/aaf/snapshots/t1/001", GIT),
+            ("git symbolic-ref refs/aaf/snapshots/t1/001 HEAD", GIT),
+            ("rm -rf .git/refs/aaf", GIT),
+            ("rm -rf .git/refs/AAF/snapshots/t1/001", GIT),
+            ("cp /tmp/x .git/refs/aaf/snapshots/t1/001", GIT),
+            ("echo deadbeef > .git/refs/aaf/snapshots/t1/001", GIT),
+            // Allowed reads and normal task branch operations.
+            ("git rev-parse refs/aaf/snapshots/t1/001", ALLOW),
+            ("cat .git/refs/aaf/snapshots/t1/001", ALLOW),
+            ("echo refs/aaf/snapshots/t1/001", ALLOW),
+            ("git branch aaf/t1", ALLOW),
+        ],
+    );
+    run_file_corpus(
+        &fixture,
+        &[
+            ("Write", "{root}/.git/refs/aaf/snapshots/t1/001", GIT),
+            ("Edit", "{root}/.git/refs/aaf/snapshots/t1/001", GIT),
+            ("MultiEdit", "{root}/.git/refs/AAF/snapshots/t1/001", GIT),
+            ("Read", "{root}/.git/refs/aaf/snapshots/t1/001", ALLOW),
         ],
     );
 }

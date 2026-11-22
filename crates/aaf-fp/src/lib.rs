@@ -23,10 +23,11 @@ use sha2::{Digest, Sha256};
 pub use hidden::{HiddenFiles, IgnoredFile, hidden_files};
 use proc::Failure;
 pub use signed::{
-    APPROVAL_DOMAIN, PROOF_DOMAIN, RECEIPT_DOMAIN, Signed, approval_path, check_store_receipt,
-    check_store_receipt_in, load_key, load_or_create_key, proof_path, read_approval, read_proof,
-    read_receipt, receipt_path, sign, sign_tagged, verify, verify_tagged, write_approval,
-    write_proof, write_receipt,
+    APPROVAL_DOMAIN, AUDIT_DOMAIN, PROOF_DOMAIN, RECEIPT_DOMAIN, Signed, approval_path,
+    audit_verdict_path, check_store_receipt, check_store_receipt_in, load_key, load_or_create_key,
+    proof_path, read_approval, read_audit_verdict, read_proof, read_receipt, receipt_path, sign,
+    sign_tagged, verify, verify_tagged, write_approval, write_audit_verdict, write_proof,
+    write_receipt,
 };
 pub use tools::{find_program, program, repository_dirs, resolve_programs};
 

@@ -143,7 +143,7 @@ pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
     };
     let repo_path = inputs.repo_root.join(REPO_CONFIG_REL);
     let mut repo: RepoConfig = read_tier(&repo_path, &mut sources)?.unwrap_or_default();
-    merge_cross_audit(&global.cross_audit, &mut repo.cross_audit);
+    merge_cross_audit(&global.cross_audit, &mut repo.cross_audit, &mut warnings);
     merge_max_open_review(global.run.max_open_review, &mut repo.run.max_open_review);
     clamp_pipeline(
         &mut repo.pipeline,

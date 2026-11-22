@@ -8,6 +8,7 @@ mod rework;
 pub(crate) mod split;
 pub(crate) mod store;
 mod trace;
+mod undo_steer;
 
 use std::collections::HashSet;
 
@@ -61,6 +62,10 @@ pub enum BoardCommand {
     Graph(dag::GraphArgs),
     /// Approve a task's generated plan and move it back to Ready.
     ApprovePlan { id: String },
+    /// Roll back a task's worktree to its latest pre-turn snapshot (human action).
+    Undo { id: String },
+    /// Append a human steering note to a task's context without altering its spec.
+    Steer { id: String, note: String },
 }
 
 #[derive(Debug, clap::Args)]
@@ -109,6 +114,8 @@ pub fn run(args: &BoardArgs, ctx: &Ctx) -> CmdResult {
         BoardCommand::Dep(dep_args) => dag::run_dep(dep_args, ctx),
         BoardCommand::Graph(graph_args) => dag::graph(graph_args, ctx),
         BoardCommand::ApprovePlan { id } => approve_plan::run(ctx, id),
+        BoardCommand::Undo { id } => undo_steer::undo(ctx, id),
+        BoardCommand::Steer { id, note } => undo_steer::steer(ctx, id, note),
     }
 }
 

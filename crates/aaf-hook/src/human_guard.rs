@@ -6,14 +6,16 @@ use crate::shell::{Cmd, basename};
 use crate::{Denial, paths};
 
 const RULE: &str = "human_action_guard";
-const FIX: &str = "stop and ask the user to run it: approve, run, init, gc, proof record, skills sync and board mutations are human actions";
+const FIX: &str = "stop and ask the user to run it: approve, cockpit, run, init, gc, proof record, skills sync and board mutations are human actions";
 
 /// Words that name a human action wherever they stand, for text that could
 /// not be split into commands.
 pub const ACTION_WORDS: &[&str] = &["approve", "unblock", "unfreeze"];
 
 /// Top-level `aaf` subcommands that include at least one guarded human action.
-const TOP_LEVEL_ACTIONS: &[&str] = &["approve", "board", "run", "init", "gc", "proof", "skills"];
+const TOP_LEVEL_ACTIONS: &[&str] = &[
+    "approve", "board", "cockpit", "run", "init", "gc", "proof", "skills",
+];
 
 /// aaf sets this for everything a factory run starts, and refuses `approve`,
 /// `run`, `board unblock` and `board unfreeze` while it is set. An agent has
@@ -57,7 +59,7 @@ pub fn names_action(tokens: &[&str]) -> bool {
     }
     non_flags.windows(2).any(|pair| {
         let (first, second) = (pair[0], pair[1]);
-        (basename(first) == "aaf" && matches!(second, "run" | "init" | "gc"))
+        (basename(first) == "aaf" && matches!(second, "run" | "init" | "gc" | "cockpit"))
             || (first == "proof" && second == "record")
             || (first == "skills" && second == "sync")
             || (first == "board"
@@ -71,6 +73,8 @@ pub fn names_action(tokens: &[&str]) -> bool {
                         | "split"
                         | "dep"
                         | "approve-plan"
+                        | "undo"
+                        | "steer"
                 ))
     })
 }
@@ -144,6 +148,7 @@ fn action(args: &[String], certain: bool) -> Option<&'static str> {
         |word: &str| certain && (word.is_empty() || word.contains('$') || paths::has_glob(word));
     match positional.next()? {
         "approve" => Some("approve"),
+        "cockpit" => Some("cockpit"),
         "run" => Some("run"),
         "init" => Some("init"),
         "gc" => Some("gc"),
@@ -166,6 +171,8 @@ fn action(args: &[String], certain: bool) -> Option<&'static str> {
             "split" => Some("board split"),
             "dep" => Some("board dep"),
             "approve-plan" => Some("board approve-plan"),
+            "undo" => Some("board undo"),
+            "steer" => Some("board steer"),
             sub if unknown(sub) => Some("board <action chosen at run time>"),
             _ => None,
         },

@@ -1,7 +1,8 @@
 //! Overrides from tier 3 and above, and the rules for applying them.
 
 use aaf_domain::config::{
-    CrossAuditConfig, MAX_AUDIT_REWORKS_CAP, PipelineConfig, RepoConfig, StoreMode,
+    AuditScope, CrossAuditConfig, GlobalCrossAuditConfig, MAX_AUDIT_REWORKS_CAP, PipelineConfig,
+    RepoConfig, StoreMode,
 };
 use serde::Deserialize;
 
@@ -61,9 +62,10 @@ pub(crate) struct PipelineOverlay {
     pub max_audit_reworks: Option<u32>,
 }
 
-/// Tier 3 partial `[cross_audit]` section: may only tighten
-/// `require_different_provider` (`false -> true`). Every other field is
-/// accepted solely so it can be reported as ignored with a warning.
+/// Tier 3 partial `[cross_audit]` section: tighten-only on
+/// `require_different_provider`, `audit_scope`, `score_gate`,
+/// `min_average_score`, and `min_criterion_score`. Provider fields are
+/// accepted solely so they can be reported as ignored with a warning.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct CrossAuditOverlay {
@@ -72,13 +74,30 @@ pub(crate) struct CrossAuditOverlay {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub require_different_provider: Option<bool>,
+    pub audit_scope: Option<AuditScope>,
+    pub score_gate: Option<bool>,
+    pub min_average_score: Option<u8>,
+    pub min_criterion_score: Option<u8>,
 }
 
-/// Merges tier 1 (`global`) defaults into tier 2 (`repo`): non-empty tier 2
-/// fields win, and `require_different_provider` is OR-ed across tiers.
-/// `executor_cmd`, `model`, and `effort` are only inherited from `global` when
-/// `repo.executor` is unset or names the same executor as `global`.
-pub(crate) fn merge_cross_audit(global: &CrossAuditConfig, repo: &mut CrossAuditConfig) {
+fn clamp_score(value: u8, label: &str, warnings: &mut Vec<String>) -> u8 {
+    if value > 100 {
+        warnings.push(format!("{label} = {value} clamped to 100"));
+        100
+    } else {
+        value
+    }
+}
+
+/// Merges tier 1 (`global`) defaults/floors into tier 2 (`repo`): non-empty
+/// tier 2 provider fields win, while unspecified tier-1 `Option<...>` values
+/// never overwrite explicit tier-2 values. Policy fields tighten monotonically
+/// from tier 1 into tier 2, and score thresholds are clamped to `0..=100`.
+pub(crate) fn merge_cross_audit(
+    global: &GlobalCrossAuditConfig,
+    repo: &mut CrossAuditConfig,
+    warnings: &mut Vec<String>,
+) {
     let repo_exec = repo.executor.trim();
     let global_exec = global.executor.trim();
     let inherit_provider_fields =
@@ -97,13 +116,39 @@ pub(crate) fn merge_cross_audit(global: &CrossAuditConfig, repo: &mut CrossAudit
             repo.effort = global.effort.clone();
         }
     }
-    repo.require_different_provider =
-        global.require_different_provider || repo.require_different_provider;
+    repo.min_average_score = clamp_score(
+        repo.min_average_score,
+        "cross_audit.min_average_score",
+        warnings,
+    );
+    repo.min_criterion_score = clamp_score(
+        repo.min_criterion_score,
+        "cross_audit.min_criterion_score",
+        warnings,
+    );
+    if global.require_different_provider == Some(true) {
+        repo.require_different_provider = true;
+    }
+    if let Some(g) = global.audit_scope {
+        repo.audit_scope = repo.audit_scope.max(g);
+    }
+    if global.score_gate == Some(true) {
+        repo.score_gate = true;
+    }
+    if let Some(g) = global.min_average_score {
+        let g = clamp_score(g, "global cross_audit.min_average_score", warnings);
+        repo.min_average_score = repo.min_average_score.max(g);
+    }
+    if let Some(g) = global.min_criterion_score {
+        let g = clamp_score(g, "global cross_audit.min_criterion_score", warnings);
+        repo.min_criterion_score = repo.min_criterion_score.max(g);
+    }
 }
 
-/// Applies tier 3 `[cross_audit]` overlay: tighten-only on
-/// `require_different_provider`; executor/cmd/model/effort changes are ignored
-/// with a warning.
+/// Applies tier 3 `[cross_audit]` overlay: tighten-only on policy fields
+/// (`require_different_provider`, `audit_scope`, `score_gate`,
+/// `min_average_score`, `min_criterion_score`); executor/cmd/model/effort
+/// changes are ignored with a warning.
 pub(crate) fn apply_cross_audit_overlay(
     current: &mut CrossAuditConfig,
     overlay: CrossAuditOverlay,
@@ -150,6 +195,56 @@ pub(crate) fn apply_cross_audit_overlay(
             ));
         }
         Some(false) | None => {}
+    }
+    if let Some(scope) = overlay.audit_scope {
+        if scope > current.audit_scope {
+            current.audit_scope = scope;
+        } else if scope < current.audit_scope {
+            warnings.push(format!(
+                "{source}: cross_audit.audit_scope = {} ignored: it may only be raised (kept {})",
+                scope.as_str(),
+                current.audit_scope.as_str()
+            ));
+        }
+    }
+    match overlay.score_gate {
+        Some(true) => current.score_gate = true,
+        Some(false) if current.score_gate => {
+            warnings.push(format!(
+                "{source}: cross_audit.score_gate = false ignored: it may only be raised (kept true)"
+            ));
+        }
+        Some(false) | None => {}
+    }
+    if let Some(raw) = overlay.min_average_score {
+        let score = clamp_score(
+            raw,
+            &format!("{source}: cross_audit.min_average_score"),
+            warnings,
+        );
+        if score > current.min_average_score {
+            current.min_average_score = score;
+        } else if score < current.min_average_score {
+            warnings.push(format!(
+                "{source}: cross_audit.min_average_score = {score} ignored: it may only be raised (kept {})",
+                current.min_average_score
+            ));
+        }
+    }
+    if let Some(raw) = overlay.min_criterion_score {
+        let score = clamp_score(
+            raw,
+            &format!("{source}: cross_audit.min_criterion_score"),
+            warnings,
+        );
+        if score > current.min_criterion_score {
+            current.min_criterion_score = score;
+        } else if score < current.min_criterion_score {
+            warnings.push(format!(
+                "{source}: cross_audit.min_criterion_score = {score} ignored: it may only be raised (kept {})",
+                current.min_criterion_score
+            ));
+        }
     }
 }
 

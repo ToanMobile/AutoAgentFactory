@@ -8,15 +8,18 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use aaf_domain::config::AuditScope;
 use aaf_domain::event::EventKind;
-use aaf_domain::gate::{GateStatus, LockStatus, Receipt};
+use aaf_domain::gate::{GateStatus, LockStatus, Receipt, Severity};
 use aaf_domain::ports::{ClosedFingerprint, PortResult};
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
 use super::batch::{Group, Judged, Member, Verdict, gate_batch};
+use super::post_audit;
 use super::worker::GateJob;
 use super::{Deps, unblock};
+use crate::cross_audit::compute_mechanical_score;
 use crate::git::{MergeOutcome, PrOutcome};
 use crate::unblocker::FailureSignal;
 
@@ -41,15 +44,17 @@ pub(super) fn judge_round(
         worktree: job.worktree.clone(),
     };
 
-    let proof_required = deps.settings.repo.proof.required;
+    let solo_required = deps.settings.repo.proof.required
+        || deps.settings.repo.cross_audit.score_gate
+        || deps.settings.repo.cross_audit.audit_scope != AuditScope::HeadLock;
     let mut batch: Vec<GateJob> = Vec::new();
     let mut alone: Vec<GateJob> = Vec::new();
     for job in jobs {
         match deps.gate.head_lock(&job.worktree.path) {
             Ok(lock) if lock.status == LockStatus::Clear => {
-                // Proof artifacts are bound to each task worktree's tree_fp;
-                // synthetic batch trees never carry a task's proof.
-                if proof_required {
+                // Proof artifacts and post-gate audit verdicts are bound to
+                // each task worktree's own tree_fp; never share a batch receipt.
+                if solo_required {
                     alone.push(job);
                 } else {
                     batch.push(job);
@@ -115,6 +120,10 @@ pub(crate) enum Resolution {
     NeedsAudit {
         lock_fp: String,
     },
+    /// Gate passed `Clear`, but `[cross_audit]` policy requires a post-gate audit.
+    NeedsPostAudit {
+        receipt: Box<Receipt>,
+    },
     Failed(Box<FailureSignal>),
     /// Nothing failed; the task goes through the gate again.
     Retry,
@@ -142,14 +151,44 @@ pub(crate) struct Round<'a> {
     pub warnings: &'a Mutex<Vec<String>>,
 }
 
-fn gate_payload(receipt: &Receipt, batch_group: Option<u32>) -> serde_json::Value {
+fn gate_payload(
+    deps: &Deps,
+    worktree: &Path,
+    receipt: &Receipt,
+    batch_group: Option<u32>,
+) -> serde_json::Value {
+    let static_warnings = receipt
+        .static_findings
+        .iter()
+        .filter(|f| f.severity == Severity::Warn)
+        .count();
+    let static_critical = receipt
+        .static_findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .count();
+    let commands_passed = receipt.commands.iter().filter(|c| c.passed()).count();
+    let proof_ok = post_audit::proof_verified(deps, worktree, receipt);
+    let mechanical_score = compute_mechanical_score(receipt, proof_ok, false, false).score;
     json!({
         "status": receipt.status,
         "reasons": receipt.reasons,
         "tree_fp": receipt.tree_fp,
+        "config_hash": receipt.config_hash,
         "gated_tree": receipt.repo_root,
         "batched": batch_group.is_some(),
         "batch_group": batch_group,
+        "static_warnings": static_warnings,
+        "static_critical": static_critical,
+        "store_status": receipt.store_compliance.status,
+        "store_warnings": receipt.store_compliance.warnings,
+        "store_critical": receipt.store_compliance.critical,
+        "store_unresolved": receipt.store_compliance.unresolved.len(),
+        "head_lock_status": receipt.head_lock.status,
+        "suppressions": receipt.suppressions,
+        "commands_passed": commands_passed,
+        "commands_total": receipt.commands.len(),
+        "mechanical_score": mechanical_score,
     })
 }
 
@@ -171,8 +210,13 @@ pub(crate) fn settle(
             deps.emit(
                 EventKind::GateResult,
                 &task.id,
-                gate_payload(&receipt, judged.batch_group),
+                gate_payload(deps, &job.worktree.path, &receipt, judged.batch_group),
             )?;
+            if post_audit::needs_post_gate_audit(deps, job, &receipt) {
+                return Ok(Resolution::NeedsPostAudit {
+                    receipt: Box::new(receipt),
+                });
+            }
             if deps.settings.auto_merge {
                 merge(deps, job, &task, judged.batch_group, round)
             } else {
@@ -184,7 +228,7 @@ pub(crate) fn settle(
             deps.emit(
                 EventKind::GateResult,
                 &task.id,
-                gate_payload(&receipt, judged.batch_group),
+                gate_payload(deps, &job.worktree.path, &receipt, judged.batch_group),
             )?;
             let mut signal = FailureSignal::empty();
             signal.gate = Some(receipt);
@@ -194,7 +238,7 @@ pub(crate) fn settle(
             deps.emit(
                 EventKind::GateResult,
                 &task.id,
-                gate_payload(&receipt, judged.batch_group),
+                gate_payload(deps, &job.worktree.path, &receipt, judged.batch_group),
             )?;
             blocked(format!(
                 "the gate could not verify: {}",
@@ -223,6 +267,59 @@ fn batch_note(group: &Group) -> String {
     note
 }
 
+/// Composes a handover-enriched PR body for `task` from DB state plus verified
+/// receipt, optional signed post-gate audit verdict, and optional signed proof.
+pub(crate) fn compose_task_pr_body(
+    deps: &Deps,
+    job: &GateJob,
+    task: &Task,
+    receipt: &Receipt,
+) -> String {
+    let events = deps
+        .store
+        .events_for_task(&task.id, 100)
+        .unwrap_or_default();
+    let audit = post_audit::load_verified_audit_verdict(deps, &job.worktree.path, receipt);
+    let proof = crate::proof::show_proof(
+        &job.worktree.path,
+        &deps.settings.data_dir,
+        Some(&receipt.tree_fp),
+    )
+    .ok();
+    let ca = &deps.settings.repo.cross_audit;
+    let handover = crate::handover::build_handover_from_parts(
+        task,
+        &events,
+        Some(receipt),
+        audit.as_ref(),
+        proof.as_ref(),
+        deps.settings.repo.proof.required,
+        ca.score_gate,
+        ca.min_average_score,
+        ca.min_criterion_score,
+        ca.require_different_provider,
+    );
+    crate::handover::compose_pr_body(receipt, Some(&handover))
+}
+
+fn handover_note_from_composed(receipt: &Receipt, composed: &str) -> Option<String> {
+    let base = crate::git::pr_body(receipt);
+    let without_receipt = if let Some(rest) = composed.strip_prefix(&base) {
+        rest.trim()
+    } else if let Some(head) = composed.strip_suffix(&base) {
+        head.trim()
+    } else if let Some((head, _)) = composed.split_once("\n## Gate receipt") {
+        head.trim()
+    } else {
+        composed.trim()
+    };
+    let without_proof = without_receipt
+        .split_once("\n## Verification Proof")
+        .map_or(without_receipt, |(head, _)| head)
+        .trim();
+    (!without_proof.is_empty()).then(|| without_proof.to_string())
+}
+
 /// Default merge point: a pull request. Without `gh` or a remote the branch
 /// and the signed receipt stay for a human, and the task still moves to
 /// Review. So does a pull request that cannot be opened (a remote that is
@@ -236,7 +333,16 @@ fn open_pr(
     gated_in: Option<&Group>,
     warnings: &Mutex<Vec<String>>,
 ) -> PortResult<Resolution> {
-    let note = gated_in.map(batch_note);
+    let ca = &deps.settings.repo.cross_audit;
+    let has_handover_policy = ca.score_gate || ca.audit_scope != AuditScope::HeadLock;
+    let note = match gated_in {
+        Some(group) => Some(batch_note(group)),
+        None if has_handover_policy => {
+            let composed = compose_task_pr_body(deps, job, task, receipt);
+            handover_note_from_composed(receipt, &composed)
+        }
+        None => None,
+    };
     let opened = deps
         .git
         .open_pr(&job.worktree, &task.title, receipt, note.as_deref())

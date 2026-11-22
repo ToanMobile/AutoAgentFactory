@@ -417,22 +417,33 @@ fn is_account_leased(leases: &Path, id: &str) -> bool {
     })
 }
 
-/// Strips ANSI CSI/OSC/DCS escape sequences and ASCII/Unicode control
-/// characters from untrusted text before rendering to a terminal.
+/// Strips ANSI CSI/OSC/DCS/APC/PM/SOS escape sequences, standalone ESC
+/// sequences, and C0/C1 control characters from untrusted text before
+/// rendering to a terminal.
 pub fn sanitize_display(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '\x1b' => match chars.next() {
+            '\x1b' => match chars.peek().copied() {
+                // Do not swallow a consecutive ESC or C1 introducer so the
+                // next loop iteration strips the following sequence intact.
+                Some('\x1b' | '\u{0080}'..='\u{009F}') | None => {}
                 Some('[') => {
+                    let _ = chars.next();
                     let _ = chars.by_ref().any(|c| ('@'..='~').contains(&c));
                 }
-                Some(']' | 'P' | 'X' | '^' | '_') => skip_st(&mut chars),
+                Some(']' | 'P' | 'X' | '^' | '_') => {
+                    let _ = chars.next();
+                    skip_st(&mut chars);
+                }
                 Some(c) if (' '..='/').contains(&c) => {
+                    let _ = chars.next();
                     let _ = chars.by_ref().any(|c| ('0'..='~').contains(&c));
                 }
-                Some(_) | None => {}
+                Some(_) => {
+                    let _ = chars.next();
+                }
             },
             '\u{009B}' => {
                 let _ = chars.by_ref().any(|c| ('@'..='~').contains(&c));
@@ -482,20 +493,24 @@ pub fn render_watch_text(snap: &WatchSnapshot) -> String {
             .blocked_reason
             .as_deref()
             .map_or(String::new(), |r| format!(" [{}]", sanitize_display(r)));
-        let (id, tt) = (sanitize_display(&t.id), sanitize_display(&t.title));
+        let (id, prio, tt) = (
+            sanitize_display(&t.id),
+            sanitize_display(&t.priority),
+            sanitize_display(&t.title),
+        );
         let _ = writeln!(
             out,
-            "  {id}  {}  {:<8}  cycles={}  {tt}{blk}",
-            t.priority,
+            "  {id}  {prio}  {:<8}  cycles={}  {tt}{blk}",
             t.state.as_str(),
             t.unblock_cycles
         );
     }
     let drain = if hs.drain_active { "on" } else { "off" };
+    let pressure = sanitize_display(&hs.memory_pressure);
     let _ = writeln!(
         out,
-        "\n[Heavy Slots] pressure={} drain={drain} measured={}",
-        hs.memory_pressure, hs.measured_commands
+        "\n[Heavy Slots] pressure={pressure} drain={drain} measured={}",
+        hs.measured_commands
     );
     if hs.slots.is_empty() {
         let _ = writeln!(out, "  (no slot files)");
@@ -508,14 +523,15 @@ pub fn render_watch_text(snap: &WatchSnapshot) -> String {
         let lbl = s.label.as_deref().map_or(String::new(), |l| {
             format!("  label={}", sanitize_display(l))
         });
-        let _ = writeln!(out, "  slot {}  {:<6}{pg}{ram}{lbl}", s.slot, s.state);
+        let st = sanitize_display(&s.state);
+        let _ = writeln!(out, "  slot {}  {st:<6}{pg}{ram}{lbl}", s.slot);
     }
-    let pin = ac.pinned_account.as_deref().unwrap_or("none");
-    let _ = writeln!(
-        out,
-        "\n[Accounts] selection={} pinned={pin}",
-        ac.selection_mode
-    );
+    let pin = ac
+        .pinned_account
+        .as_deref()
+        .map_or_else(|| "none".to_string(), sanitize_display);
+    let sel = sanitize_display(&ac.selection_mode);
+    let _ = writeln!(out, "\n[Accounts] selection={sel} pinned={pin}");
     if ac.entries.is_empty() {
         let _ = writeln!(out, "  (no accounts)");
     }
@@ -524,17 +540,16 @@ pub fn render_watch_text(snap: &WatchSnapshot) -> String {
             .cooldown_until
             .map_or(String::new(), |ts| format!(" until={ts}"));
         let id = sanitize_display(&a.id);
-        let _ = writeln!(
-            out,
-            "  {id}  {}  {}{cd}  tokens_5h={}",
-            a.provider, a.state, a.tokens_5h
-        );
+        let prov = sanitize_display(&a.provider);
+        let st = sanitize_display(&a.state);
+        let _ = writeln!(out, "  {id}  {prov}  {st}{cd}  tokens_5h={}", a.tokens_5h);
     }
     if let Some(r) = &snap.receipt {
+        let fp = sanitize_display(&r.tree_fp_short);
         let _ = write!(
             out,
-            "\n[Receipt] {:?} ({:?}) tree={} warnings={} created_at={}",
-            r.status, r.mode, r.tree_fp_short, r.warnings, r.created_at
+            "\n[Receipt] {:?} ({:?}) tree={fp} warnings={} created_at={}",
+            r.status, r.mode, r.warnings, r.created_at
         );
     } else {
         let _ = write!(out, "\n[Receipt] none");

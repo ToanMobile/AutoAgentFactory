@@ -10,6 +10,7 @@
 mod history;
 pub mod private;
 mod schema;
+pub mod snapshots;
 mod stores;
 mod tasks;
 
@@ -23,6 +24,7 @@ use aaf_domain::ports::{PortError, PortResult};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 
 pub use schema::SCHEMA_VERSION;
+pub use snapshots::TurnSnapshot;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 /// Together these bound the wait in [`Db::open`] to about `BUSY_TIMEOUT`.

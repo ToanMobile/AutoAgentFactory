@@ -4,7 +4,7 @@
 use std::fs;
 
 use crate::shell::Cmd;
-use crate::{Ctx, Denial, git_alias, paths};
+use crate::{Ctx, Denial, git_alias, git_files, paths};
 
 const RULE: &str = "git_guard";
 
@@ -233,7 +233,9 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             )));
         }
     }
-    if let Some(denial) = git_alias::check(&call, cmd, ctx) {
+    if let Some(denial) = git_alias::check(&call, cmd, ctx)
+        .or_else(|| git_files::check_git_aaf_refs(call.sub, call.rest))
+    {
         return Some(denial);
     }
     let verdict = match call.sub {

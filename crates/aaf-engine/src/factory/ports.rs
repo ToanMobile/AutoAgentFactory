@@ -107,6 +107,16 @@ pub trait GitOps: Send + Sync {
         self.cleanup(task_id)
             .map_err(|e| GitError::Invalid(e.to_string()))
     }
+    /// Creates a pre-turn git snapshot ref (`refs/aaf/snapshots/<task_id>/<ts>-<run_id>`)
+    /// pointing at `worktree`'s current `HEAD`.
+    fn create_turn_snapshot(
+        &self,
+        _worktree: &TaskWorktree,
+        _run_id: &str,
+        _now: i64,
+    ) -> Result<Option<(String, String)>, GitError> {
+        Ok(None)
+    }
 }
 
 /// An account to run on, held until dropped. `account` is `None` when no

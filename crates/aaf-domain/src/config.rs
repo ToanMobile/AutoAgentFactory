@@ -16,7 +16,7 @@ pub struct GlobalConfig {
     pub notifications: NotificationsConfig,
     pub machine: MachineConfig,
     pub run: MachineRunConfig,
-    pub cross_audit: CrossAuditConfig,
+    pub cross_audit: GlobalCrossAuditConfig,
 }
 
 /// The part of `[run]` the operator may also set for the whole machine.
@@ -430,8 +430,53 @@ impl Default for RunConfig {
     }
 }
 
-/// Optional separate provider/model for adversarial cross-audit of head-locked files.
+/// When post-gate adversarial cross-audit runs beyond head-locked files.
+/// Ordering is strictly monotonic: `HeadLock < Large < Always`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditScope {
+    /// Only when head-locked files are touched (pre-gate approval).
+    #[default]
+    HeadLock,
+    /// Head-locked files plus post-gate audit on large diffs (>= 3 files or > 200 prod LOC).
+    Large,
+    /// Head-locked files plus post-gate audit on every task.
+    Always,
+}
+
+impl AuditScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuditScope::HeadLock => "head_lock",
+            AuditScope::Large => "large",
+            AuditScope::Always => "always",
+        }
+    }
+}
+
+/// Tier-1 machine-wide cross-audit defaults/floors. Numeric/boolean/scope fields
+/// are `Option<...>` so unspecified tier-1 defaults never clobber explicit tier-2 values.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GlobalCrossAuditConfig {
+    pub executor: String,
+    pub executor_cmd: String,
+    pub model: String,
+    pub effort: String,
+    pub require_different_provider: Option<bool>,
+    pub audit_scope: Option<AuditScope>,
+    pub score_gate: Option<bool>,
+    pub min_average_score: Option<u8>,
+    pub min_criterion_score: Option<u8>,
+}
+
+/// Default minimum average score (/100) required when `score_gate = true`.
+pub const DEFAULT_MIN_AVERAGE_SCORE: u8 = 95;
+/// Default minimum per-criterion score (/100) across G1..G7 when `score_gate = true`.
+pub const DEFAULT_MIN_CRITERION_SCORE: u8 = 90;
+
+/// Optional separate provider/model and post-gate scoring rules for adversarial cross-audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CrossAuditConfig {
     /// Empty means reuse `[run].executor`. One of: claude, codex, gemini, opencode, custom.
@@ -445,4 +490,28 @@ pub struct CrossAuditConfig {
     /// Fail closed instead of falling back to `same_account = true` when no
     /// auditor from a different provider is configured.
     pub require_different_provider: bool,
+    /// Scope of cross-audit (`head_lock`, `large`, `always`).
+    pub audit_scope: AuditScope,
+    /// Require 7 Golden Standards (`G1..G7`) + `MechanicalScore` thresholds to pass.
+    pub score_gate: bool,
+    /// Minimum required `min(mechanical_score, llm_avg)` in `0..=100` (default 95).
+    pub min_average_score: u8,
+    /// Minimum required score per golden criterion `G1..G7` in `0..=100` (default 90).
+    pub min_criterion_score: u8,
+}
+
+impl Default for CrossAuditConfig {
+    fn default() -> Self {
+        CrossAuditConfig {
+            executor: String::new(),
+            executor_cmd: String::new(),
+            model: String::new(),
+            effort: String::new(),
+            require_different_provider: false,
+            audit_scope: AuditScope::HeadLock,
+            score_gate: false,
+            min_average_score: DEFAULT_MIN_AVERAGE_SCORE,
+            min_criterion_score: DEFAULT_MIN_CRITERION_SCORE,
+        }
+    }
 }

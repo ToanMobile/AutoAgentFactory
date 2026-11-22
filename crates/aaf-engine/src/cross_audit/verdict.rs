@@ -1,8 +1,10 @@
 //! Strict, fail-closed parsing of the auditor's answer.
 
+use aaf_domain::gate::GoldenScore;
 use serde::Deserialize;
 
 use super::checklist::Item;
+use super::scoring::GOLDEN_IDS;
 
 /// A checklist item the auditor answered "yes".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +35,20 @@ impl AuditVerdict {
     }
 }
 
+/// Result of parsing both the binary checklist and optional/required 7 Golden
+/// Standards scores from an auditor response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoredParse {
+    pub verdict: AuditVerdict,
+    pub scores: Vec<GoldenScore>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAnswers {
     answers: Vec<RawAnswer>,
+    #[serde(default)]
+    scores: Option<Vec<RawGoldenScore>>,
 }
 
 #[derive(Deserialize)]
@@ -48,9 +60,25 @@ struct RawAnswer {
     evidence: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGoldenScore {
+    id: String,
+    score: u8,
+    #[serde(default)]
+    deduction_reason: String,
+}
+
 fn inconclusive(reason: impl Into<String>) -> AuditVerdict {
     AuditVerdict::Inconclusive {
         reason: reason.into(),
+    }
+}
+
+fn scored_inconclusive(reason: impl Into<String>) -> ScoredParse {
+    ScoredParse {
+        verdict: inconclusive(reason),
+        scores: Vec::new(),
     }
 }
 
@@ -72,31 +100,79 @@ fn single_object(text: &str) -> Result<RawAnswers, String> {
     Ok(parsed)
 }
 
-/// Turns the auditor's raw text into a verdict. `Pass` requires exactly one
-/// parsable JSON object, every checklist id answered exactly once with "yes"
-/// or "no", no unknown id, and "no" on every blocking item.
-pub fn parse_verdict(text: &str, checklist: &[Item]) -> AuditVerdict {
+fn parse_golden_scores(raw_scores: Vec<RawGoldenScore>) -> Result<Vec<GoldenScore>, String> {
+    let mut ordered: [Option<GoldenScore>; GOLDEN_IDS.len()] = std::array::from_fn(|_| None);
+    for entry in raw_scores {
+        let Some(index) = GOLDEN_IDS.iter().position(|id| entry.id == *id) else {
+            return Err(format!("unknown golden standard id {:?}", entry.id));
+        };
+        if ordered[index].is_some() {
+            return Err(format!("golden standard id {} scored twice", entry.id));
+        }
+        if entry.score > 100 {
+            return Err(format!(
+                "golden standard {} score {} exceeds 100",
+                entry.id, entry.score
+            ));
+        }
+        if entry.score < 100 && entry.deduction_reason.trim().is_empty() {
+            return Err(format!(
+                "golden standard {} score {} (< 100) requires a non-empty deduction_reason",
+                entry.id, entry.score
+            ));
+        }
+        ordered[index] = Some(GoldenScore {
+            id: entry.id,
+            score: entry.score,
+            deduction_reason: entry.deduction_reason,
+        });
+    }
+
+    let mut canonical = Vec::with_capacity(GOLDEN_IDS.len());
+    for (id, slot) in GOLDEN_IDS.iter().zip(ordered) {
+        let Some(score) = slot else {
+            return Err(format!("missing golden standard id {id}"));
+        };
+        canonical.push(score);
+    }
+    Ok(canonical)
+}
+
+/// Turns the auditor's raw text into a verdict and validated 7 Golden Standards
+/// scores (ordered canonically `G1..G7`).
+///
+/// When `require_scores` is `true`, `scores` MUST be present and cover `G1..G7`
+/// exactly once each with `score <= 100` and non-empty `deduction_reason` for
+/// any score `< 100`. When `require_scores` is `false`, an absent `scores`
+/// field yields `Vec::new()`, while a present `scores` field is still validated
+/// strictly (fail closed as `Inconclusive` if malformed).
+pub fn parse_scored_verdict(text: &str, checklist: &[Item], require_scores: bool) -> ScoredParse {
     if !checklist.iter().any(|item| item.blocking) {
-        return inconclusive("checklist has no blocking item");
+        return scored_inconclusive("checklist has no blocking item");
     }
     let raw = match single_object(text) {
         Ok(raw) => raw,
-        Err(reason) => return inconclusive(reason),
+        Err(reason) => return scored_inconclusive(reason),
     };
 
     // The checklist is a dozen items: a linear id lookup is enough.
     let mut answers: Vec<Option<(bool, String)>> = vec![None; checklist.len()];
     for answer in raw.answers {
         let Some(index) = checklist.iter().position(|item| item.id == answer.id) else {
-            return inconclusive(format!("unknown checklist id {:?}", answer.id));
+            return scored_inconclusive(format!("unknown checklist id {:?}", answer.id));
         };
         let yes = match answer.answer.as_str() {
             "yes" => true,
             "no" => false,
-            other => return inconclusive(format!("{}: answer {other:?} is not yes/no", answer.id)),
+            other => {
+                return scored_inconclusive(format!(
+                    "{}: answer {other:?} is not yes/no",
+                    answer.id
+                ));
+            }
         };
         if answers[index].is_some() {
-            return inconclusive(format!("checklist id {} answered twice", answer.id));
+            return scored_inconclusive(format!("checklist id {} answered twice", answer.id));
         }
         answers[index] = Some((yes, answer.evidence));
     }
@@ -105,7 +181,7 @@ pub fn parse_verdict(text: &str, checklist: &[Item]) -> AuditVerdict {
     let mut warnings = Vec::new();
     for (item, answer) in checklist.iter().zip(answers) {
         let Some((yes, evidence)) = answer else {
-            return inconclusive(format!("checklist id {} not answered", item.id));
+            return scored_inconclusive(format!("checklist id {} not answered", item.id));
         };
         if yes {
             let finding = Finding {
@@ -120,9 +196,29 @@ pub fn parse_verdict(text: &str, checklist: &[Item]) -> AuditVerdict {
             }
         }
     }
-    if findings.is_empty() {
+    let verdict = if findings.is_empty() {
         AuditVerdict::Pass { warnings }
     } else {
         AuditVerdict::Fail { findings, warnings }
-    }
+    };
+
+    let scores = match raw.scores {
+        Some(raw_scores) => match parse_golden_scores(raw_scores) {
+            Ok(scores) => scores,
+            Err(reason) => return scored_inconclusive(reason),
+        },
+        None if require_scores => {
+            return scored_inconclusive("missing required golden standards scores (G1..G7)");
+        }
+        None => Vec::new(),
+    };
+
+    ScoredParse { verdict, scores }
+}
+
+/// Turns the auditor's raw text into a verdict. `Pass` requires exactly one
+/// parsable JSON object, every checklist id answered exactly once with "yes"
+/// or "no", no unknown id, and "no" on every blocking item.
+pub fn parse_verdict(text: &str, checklist: &[Item]) -> AuditVerdict {
+    parse_scored_verdict(text, checklist, false).verdict
 }

@@ -1,9 +1,12 @@
 //! Runs any agent CLI from the command template in `run.executor_cmd`.
 
+use std::ffi::OsStr;
+use std::path::Path;
+
 use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
 
 use super::pty::CommandSpec;
-use super::{AccountPaths, ExecEnv, run_confined};
+use super::{AccountPaths, ExecEnv, open_stream_log, run_confined};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
 
@@ -66,7 +69,16 @@ impl AgentRunner for GenericRunner {
                 .collect(),
             write_denied: Vec::new(),
         };
-        let output = run_confined(self.command(request), request, &self.env, account, None)?;
+        let spec = self.command(request);
+        let program = Path::new(&spec.program)
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or(&spec.program)
+            .to_string();
+        let mut log = open_stream_log(&self.env, request);
+        log.write_start(&program, None);
+        let output = run_confined(spec, request, &self.env, account, None)?;
+        log.write_generic_finish(&program, output.exit_code, output.timed_out, &output.tail);
         Ok(AgentOutcome {
             exit_code: output.exit_code,
             timed_out: output.timed_out,

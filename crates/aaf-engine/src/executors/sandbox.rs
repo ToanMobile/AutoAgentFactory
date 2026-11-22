@@ -121,6 +121,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     for git_dir in &git_dirs {
         let hooks = sbpl_string(&git_dir.join("hooks"))?;
         let config = sbpl_string(&git_dir.join("config"))?;
+        let refs_aaf = sbpl_string(&git_dir.join("refs/aaf"))?;
         let linked = sbpl_regex(&format!(
             "^{}/worktrees/[^/]+/(hooks|config|config\\.worktree)(/|$)",
             regex_escape(path_str(git_dir)?)
@@ -128,6 +129,8 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
         profile.push_str(&format!(
             "(deny file-write* (subpath {hooks}) (literal {config}) (regex {linked}))\n"
         ));
+        // Host-owned snapshot refs under `refs/aaf/` stay read-only to agents.
+        profile.push_str(&format!("(deny file-write* (subpath {refs_aaf}))\n"));
         // A linked worktree finds its common dir (and so its hooks and
         // config) through these two pointer files.
         let pointers = sbpl_regex(&format!(
@@ -220,6 +223,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     let mut closed: Vec<PathBuf> = denied.clone();
     closed.extend(worktrees_root.clone());
     closed.extend(git_dirs.iter().map(|git_dir| git_dir.join("config")));
+    closed.extend(git_dirs.iter().map(|git_dir| git_dir.join("refs/aaf")));
     closed.extend(worktree.iter().map(|worktree| worktree.join(".git")));
     let listed = extra.write_denied.iter().chain(&extra.write_denied_prefix);
     closed.extend(listed.map(PathBuf::from));

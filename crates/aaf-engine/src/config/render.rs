@@ -142,6 +142,14 @@ model = {ca_model}
 effort = {ca_effort}
 # true = fail closed instead of falling back to same_account when no different provider is configured.
 require_different_provider = {ca_require_diff}
+# Scope of cross-audit: head_lock (default), large (>= 3 files or > 200 prod LOC), or always.
+audit_scope = {ca_audit_scope}
+# true = require 7 Golden Standards (G1..G7) + mechanical score thresholds to pass.
+score_gate = {ca_score_gate}
+# Minimum required min(mechanical_score, llm_avg) in 0..=100 when score_gate = true.
+min_average_score = {ca_min_avg}
+# Minimum required per-criterion score (G1..G7) in 0..=100 when score_gate = true.
+min_criterion_score = {ca_min_crit}
 
 # HMAC-signed screenshot proof verification (used by `aaf proof` and `aaf gate`).
 [proof]
@@ -170,6 +178,10 @@ allowed_tools = [
         ca_model = quoted(&cross_audit.model),
         ca_effort = quoted(&cross_audit.effort),
         ca_require_diff = cross_audit.require_different_provider,
+        ca_audit_scope = quoted(cross_audit.audit_scope.as_str()),
+        ca_score_gate = cross_audit.score_gate,
+        ca_min_avg = cross_audit.min_average_score,
+        ca_min_crit = cross_audit.min_criterion_score,
         proof_required = proof.required,
         proof_min_bytes = proof.min_bytes,
         proof_min_width = proof.min_width,

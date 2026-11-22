@@ -15,12 +15,13 @@ mod tests;
 use std::path::Path;
 use std::time::Duration;
 
-use aaf_domain::config::{MachineConfig, RepoConfig};
+use aaf_domain::config::{AuditScope, MachineConfig, RepoConfig};
 use aaf_domain::gate::{
     CommandResult, GateMode, GateStatus, HeadLockReport, LockStatus, RECEIPT_SCHEMA_VERSION,
     Receipt, StoreComplianceReport, StoreStatus,
 };
 use aaf_domain::ports::Clock;
+use sha2::{Digest, Sha256};
 
 use crate::db::private;
 use crate::throttle::{Progress, SystemProbe, Throttle};
@@ -52,7 +53,19 @@ pub fn config_hash(cfg: &RepoConfig) -> String {
     // Plain structs of strings and integers always serialise; the fallback
     // only keeps this function infallible.
     let json = serde_json::to_string(&(&cfg.gate, &cfg.commands, &cfg.proof)).unwrap_or_default();
-    aaf_fp::sha256_hex(json.as_bytes())
+    if cfg.cross_audit.audit_scope == AuditScope::HeadLock && !cfg.cross_audit.score_gate {
+        return aaf_fp::sha256_hex(json.as_bytes());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_bytes());
+    hasher.update(b"\0cross_audit\0");
+    hasher.update(cfg.cross_audit.audit_scope.as_str().as_bytes());
+    hasher.update([
+        u8::from(cfg.cross_audit.score_gate),
+        cfg.cross_audit.min_average_score,
+        cfg.cross_audit.min_criterion_score,
+    ]);
+    aaf_fp::hex(&hasher.finalize())
 }
 
 fn mode_name(mode: GateMode) -> &'static str {

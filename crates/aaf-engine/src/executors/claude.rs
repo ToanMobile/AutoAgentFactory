@@ -16,7 +16,7 @@ use aaf_domain::ports::{
 use serde_json::Value;
 
 use super::pty::CommandSpec;
-use super::{AccountPaths, ExecEnv, run_confined};
+use super::{AccountPaths, ExecEnv, open_stream_log, run_confined};
 
 /// Longest provider message kept in [`LimitHit::raw`].
 const RAW_LIMIT_CHARS: usize = 500;
@@ -196,23 +196,29 @@ impl AgentRunner for ClaudeCodeRunner {
             },
             (None, None) => AccountPaths::default(),
         };
-        let parser = Arc::new(Mutex::new(StreamParser::default()));
-        let feed = Arc::clone(&parser);
+        let mut log = open_stream_log(&self.env, request);
+        log.write_start("claude", Some(&self.model));
+        let state = Arc::new(Mutex::new((StreamParser::default(), log)));
+        let feed = Arc::clone(&state);
         let output = run_confined(
             spec,
             request,
             &self.env,
             account,
             Some(Box::new(move |line| {
-                feed.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .feed_line(line);
+                let mut guard = feed.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.0.feed_line(line);
+                guard.1.record_claude_line(line);
             })),
         )?;
-        let summary = parser
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .summary();
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        let summary = guard.0.summary();
+        guard.1.write_claude_finish(
+            output.exit_code,
+            output.timed_out,
+            summary.tokens_in,
+            summary.tokens_out,
+        );
         Ok(AgentOutcome {
             exit_code: output.exit_code,
             timed_out: output.timed_out,

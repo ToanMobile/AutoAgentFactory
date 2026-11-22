@@ -569,4 +569,22 @@ impl GitOps for RealGit {
         let _admin = self.admin();
         worktree::remove_verified_merged(&self.repo_root, worktree, expected_head_oid)
     }
+
+    fn create_turn_snapshot(
+        &self,
+        worktree: &TaskWorktree,
+        run_id: &str,
+        now: i64,
+    ) -> Result<Option<(String, String)>, GitError> {
+        let _admin = self.admin();
+        let task_id = worktree.task_id()?;
+        super::snapshots::create_turn_snapshot_ref(
+            &self.repo_root,
+            &worktree.path,
+            task_id,
+            run_id,
+            now,
+        )
+        .map(Some)
+    }
 }

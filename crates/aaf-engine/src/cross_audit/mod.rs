@@ -4,17 +4,22 @@
 
 pub mod checklist;
 pub mod prompt;
+pub mod scoring;
 pub mod verdict;
 
 use std::path::Path;
 
-use aaf_domain::gate::Approval;
+use aaf_domain::gate::{Approval, GoldenScore};
 use aaf_domain::ports::{AgentRequest, AgentRunner, Clock, PortError};
 use aaf_domain::task::ImmutableSpec;
 
 pub use checklist::{Item, build_checklist};
-pub use prompt::build_prompt;
-pub use verdict::{AuditVerdict, Finding, parse_verdict};
+pub use prompt::{build_prompt, build_scored_prompt};
+pub use scoring::{
+    GOLDEN_IDS, GOLDEN_STANDARDS, MechanicalScoreReport, ScoreGateEvaluation,
+    compute_mechanical_score, evaluate_score_gate,
+};
+pub use verdict::{AuditVerdict, Finding, ScoredParse, parse_scored_verdict, parse_verdict};
 
 /// `runs.executor` of an audit run: it tells the auditor's run from the
 /// author's, both in the audit itself and in the account history.
@@ -34,6 +39,8 @@ pub struct AuditInput {
 pub struct AuditReport {
     pub verdict: AuditVerdict,
     pub checklist: Vec<Item>,
+    /// Validated 7 Golden Standards scores (`G1..G7`) when present/required.
+    pub scores: Vec<GoldenScore>,
     /// True when the auditor saw only the head of the diff.
     pub diff_truncated: bool,
     /// Usage of the auditor run, for the root budget.
@@ -57,11 +64,26 @@ pub fn run_audit(
     runner: &dyn AgentRunner,
     request_template: &AgentRequest,
 ) -> Result<AuditReport, PortError> {
+    run_scored_audit(input, runner, request_template, false)
+}
+
+/// Runs the auditor once and parses both the binary checklist and (when
+/// `require_scores` is `true`) the 7 Golden Standards (`G1..G7`).
+///
+/// A runner that could not complete the run (timeout, limit hit, non-zero
+/// exit) yields `Inconclusive`; `Err` is only the runner's own port error.
+pub fn run_scored_audit(
+    input: &AuditInput,
+    runner: &dyn AgentRunner,
+    request_template: &AgentRequest,
+    require_scores: bool,
+) -> Result<AuditReport, PortError> {
     let checklist = build_checklist(&input.spec, input.mobile);
     let (_, diff_truncated) = prompt::truncate_diff(&input.diff);
     let mut report = AuditReport {
         verdict: inconclusive("empty diff: nothing to audit"),
         checklist,
+        scores: Vec::new(),
         diff_truncated,
         tokens_in: 0,
         tokens_out: 0,
@@ -72,22 +94,28 @@ pub fn run_audit(
     }
 
     let mut request = request_template.clone();
-    request.prompt = build_prompt(input);
+    request.prompt = build_scored_prompt(input, require_scores);
     let outcome = runner.run(&request)?;
     report.tokens_in = outcome.tokens_in;
     report.tokens_out = outcome.tokens_out;
 
-    report.verdict = if !outcome.succeeded() {
-        inconclusive("auditor run did not complete (timeout, limit hit or non-zero exit)")
+    if !outcome.succeeded() {
+        report.verdict =
+            inconclusive("auditor run did not complete (timeout, limit hit or non-zero exit)");
     } else {
-        match parse_verdict(&outcome.final_text, &report.checklist) {
+        let parsed = parse_scored_verdict(&outcome.final_text, &report.checklist, require_scores);
+        match parsed.verdict {
             // The auditor never saw the tail, so its "no" answers do not cover it.
             AuditVerdict::Pass { .. } if diff_truncated => {
-                inconclusive("diff was truncated: the unseen part cannot be approved")
+                report.verdict =
+                    inconclusive("diff was truncated: the unseen part cannot be approved");
             }
-            verdict => verdict,
+            verdict => {
+                report.verdict = verdict;
+                report.scores = parsed.scores;
+            }
         }
-    };
+    }
     Ok(report)
 }
 

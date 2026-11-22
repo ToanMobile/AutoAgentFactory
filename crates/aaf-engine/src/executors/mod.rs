@@ -9,6 +9,7 @@ pub mod pty;
 pub mod reaper;
 pub mod sandbox;
 pub mod sandbox_check;
+pub mod stream_log;
 #[cfg(test)]
 mod tests;
 
@@ -215,6 +216,41 @@ pub(crate) struct AccountPaths {
     pub writable: Vec<String>,
     /// Entries inside `writable` that stay closed.
     pub write_denied: Vec<String>,
+}
+
+/// Collects non-empty runtime values for variables named in `env.env_pass`
+/// (and `env.machine_env_pass`) so [`stream_log::StreamLog`] can scrub them
+/// before writing to disk.
+pub fn env_pass_secrets(env: &ExecEnv) -> Vec<String> {
+    let mut values = Vec::new();
+    for name in env.env_pass.iter().chain(&env.machine_env_pass) {
+        if let Some((_, val)) = env.parent_env.iter().find(|(k, _)| k == name)
+            && !val.is_empty()
+        {
+            values.push(val.clone());
+        }
+        if let Ok(val) = std::env::var(name)
+            && !val.is_empty()
+        {
+            values.push(val);
+        }
+    }
+    values
+}
+
+/// Best-effort opens the run's sanitized stream log when `env.data_dir` is set
+/// and the request passes basic pre-spawn checks.
+pub(crate) fn open_stream_log(env: &ExecEnv, request: &AgentRequest) -> stream_log::StreamLog {
+    if request.timeout_secs == 0 || !Path::new(&request.cwd).is_dir() {
+        return stream_log::StreamLog::noop();
+    }
+    let secrets = env_pass_secrets(env);
+    stream_log::StreamLog::open(
+        env.data_dir.as_deref().map(Path::new),
+        &request.run_id,
+        secrets,
+    )
+    .unwrap_or_else(|_| stream_log::StreamLog::noop())
 }
 
 /// The part of the data dir a confined agent queues its heavy builds in

@@ -53,6 +53,7 @@ fn round(world: &World, count: usize) -> Round {
         let outcome = match resolution {
             Ok(Resolution::Settled(state)) => state.as_str().to_string(),
             Ok(Resolution::NeedsAudit { .. }) => "needs-audit".to_string(),
+            Ok(Resolution::NeedsPostAudit { .. }) => "needs-post-audit".to_string(),
             Ok(Resolution::Failed(signal)) if signal.gate.is_some() => "gate-failed".to_string(),
             Ok(Resolution::Failed(_)) => "failed".to_string(),
             Ok(Resolution::Retry) => "retry".to_string(),
