@@ -112,11 +112,37 @@ pub fn fetch(
     allowlist: &[String],
     runner: &dyn CommandRunner,
 ) -> Result<Vec<IssueCandidate>, IssueError> {
+    fetch_filtered(repo_root, allowlist, None, None, runner)
+}
+
+/// Like [`fetch`], optionally targeting an explicit `owner/repo` slug and/or
+/// requiring a label (passed to `gh issue list --label` and re-checked locally
+/// case-insensitively on returned items).
+pub fn fetch_filtered(
+    repo_root: &Path,
+    allowlist: &[String],
+    repo_slug: Option<&str>,
+    label_filter: Option<&str>,
+    runner: &dyn CommandRunner,
+) -> Result<Vec<IssueCandidate>, IssueError> {
     if !allowlist.iter().any(|entry| !entry.trim().is_empty()) {
         return Ok(Vec::new());
     }
+    let repo_slug = repo_slug.map(str::trim).filter(|s| !s.is_empty());
+    let label_filter = label_filter.map(str::trim).filter(|s| !s.is_empty());
+
+    let mut args: Vec<&str> = GH_ISSUE_LIST_ARGS.to_vec();
+    if let Some(slug) = repo_slug {
+        args.push("--repo");
+        args.push(slug);
+    }
+    if let Some(label) = label_filter {
+        args.push("--label");
+        args.push(label);
+    }
+
     let output = runner
-        .run("gh", &GH_ISSUE_LIST_ARGS, repo_root)
+        .run("gh", &args, repo_root)
         .map_err(|err| IssueError::Runner(err.to_string()))?;
     if output.exit_code != Some(0) {
         return Err(IssueError::GhFailed {
@@ -137,6 +163,14 @@ pub fn fetch(
         if !is_trusted(&author, allowlist) {
             continue;
         }
+        let labels: Vec<String> = issue.labels.into_iter().map(|label| label.name).collect();
+        if label_filter.is_some_and(|required| {
+            !labels
+                .iter()
+                .any(|label| label.trim().eq_ignore_ascii_case(required))
+        }) {
+            continue;
+        }
         let comments = issue
             .comments
             .into_iter()
@@ -153,7 +187,7 @@ pub fn fetch(
             title: issue.title,
             body: issue.body.unwrap_or_default(),
             author,
-            labels: issue.labels.into_iter().map(|label| label.name).collect(),
+            labels,
             comments,
         });
     }

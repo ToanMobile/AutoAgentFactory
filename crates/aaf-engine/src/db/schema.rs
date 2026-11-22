@@ -110,6 +110,20 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';
     ",
+    // v4: task scope_paths for scope-keyed parallelism and turn_snapshots for rollback.
+    "
+    ALTER TABLE tasks ADD COLUMN scope_paths TEXT NOT NULL DEFAULT '[]';
+    CREATE TABLE IF NOT EXISTS turn_snapshots (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id    TEXT NOT NULL REFERENCES tasks(id),
+        run_id     TEXT NOT NULL,
+        ref_name   TEXT NOT NULL,
+        commit_oid TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_turn_snapshots_task
+        ON turn_snapshots(task_id, id);
+    ",
 ];
 
 /// Schema version this build reads and writes.

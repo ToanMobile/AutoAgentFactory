@@ -12,13 +12,15 @@ mod heavy;
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use aaf_domain::config::{AGENT_CONFIG_GLOBS, MachineConfig};
-use aaf_engine::config::EffectiveConfig;
+use aaf_engine::config::{EffectiveConfig, effective_profile};
 use aaf_engine::executors::find_on_path;
+use aaf_engine::github_board::has_trusted_login;
+use aaf_engine::skills::inspect_skills_dir;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::cmd::init::settings;
 use crate::ctx::{Ctx, RepoState};
@@ -298,6 +300,145 @@ fn machine_detail(machine: &MachineConfig) -> String {
     )
 }
 
+fn skills_sync_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check {
+    let Some(root) = repo_root else {
+        return not_applicable("skills_sync");
+    };
+    let present: Vec<&str> = [".claude/skills", ".agents/skills"]
+        .into_iter()
+        .filter(|rel| root.join(rel).is_dir())
+        .collect();
+    if present.is_empty() {
+        return advisory(
+            "skills_sync",
+            Ok("no .claude/skills or .agents/skills directory; run aaf skills sync".to_string()),
+        );
+    }
+    let profile = effective_profile(&cfg.repo, root);
+    let (mut ok_parts, mut warnings) = (Vec::new(), Vec::new());
+    for rel in present {
+        let audit = inspect_skills_dir(&root.join(rel), &profile);
+        let total = audit.synced.len() + audit.missing.len() + audit.modified.len();
+        if audit.missing.is_empty() && audit.modified.is_empty() {
+            ok_parts.push(format!(
+                "{rel} ({profile}): {}/{total} synced",
+                audit.synced.len()
+            ));
+            continue;
+        }
+        let mut detail = format!("{rel} ({profile}):");
+        if !audit.missing.is_empty() {
+            detail.push_str(&format!(" missing=[{}]", audit.missing.join(", ")));
+        }
+        if !audit.modified.is_empty() {
+            detail.push_str(&format!(" modified=[{}]", audit.modified.join(", ")));
+        }
+        warnings.push(detail);
+    }
+    let res = if warnings.is_empty() {
+        Ok(ok_parts.join("; "))
+    } else {
+        Err(format!("{}; run aaf skills sync", warnings.join("; ")))
+    };
+    advisory("skills_sync", res)
+}
+
+fn check_mcp_mobile(root: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(root.join(".mcp.json"))
+        .map_err(|_| "missing .mcp.json with mobile-mcp".to_string())?;
+    let val: Value =
+        serde_json::from_str(&text).map_err(|e| format!(".mcp.json is invalid JSON: {e}"))?;
+    let srv = val
+        .pointer("/mcpServers/mobile-mcp")
+        .ok_or_else(|| ".mcp.json does not configure mobile-mcp".to_string())?;
+    if srv
+        .pointer("/env/MOBILEMCP_DISABLE_TELEMETRY")
+        .and_then(Value::as_str)
+        != Some("1")
+    {
+        return Err(".mcp.json mobile-mcp lacks MOBILEMCP_DISABLE_TELEMETRY=\"1\"".to_string());
+    }
+    Ok(())
+}
+
+fn proof_readiness_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check {
+    let Some(root) = repo_root else {
+        return not_applicable("proof_readiness");
+    };
+    let profile = effective_profile(&cfg.repo, root);
+    let mobile = matches!(
+        profile.as_str(),
+        "android" | "ios" | "flutter" | "react-native" | "expo" | "unity"
+    );
+    if !cfg.repo.proof.required && !mobile {
+        return advisory("proof_readiness", Ok(format!("not required for {profile}")));
+    }
+    let mut issues = Vec::new();
+    let denylist = cfg.repo.proof.denylist_file.trim();
+    let rel = Path::new(denylist);
+    let valid_rel = !denylist.is_empty()
+        && !rel.is_absolute()
+        && rel
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if !valid_rel {
+        issues.push(format!("invalid proof.denylist_file {denylist:?}"));
+    } else if !root.join(rel).is_file() {
+        issues.push(format!("missing {denylist}"));
+    }
+    if cfg.repo.proof.allowed_tools.is_empty() {
+        issues.push("proof.allowed_tools is empty (fail-closed)".to_string());
+    }
+    if let Err(err) = check_mcp_mobile(root) {
+        issues.push(err);
+    }
+    let res = if issues.is_empty() {
+        Ok(format!(
+            "profile={profile}: {denylist} and mobile-mcp ready"
+        ))
+    } else {
+        Err(format!("profile={profile}: {}", issues.join("; ")))
+    };
+    advisory("proof_readiness", res)
+}
+
+fn github_board_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check {
+    if repo_root.is_none() {
+        return not_applicable("github_board");
+    }
+    if !cfg.repo.github.enabled {
+        return advisory("github_board", Ok("disabled".to_string()));
+    }
+    let allow = &cfg.global.safety.owner_github_allowlist;
+    let mut issues = Vec::new();
+    if !has_trusted_login(allow) {
+        issues.push("safety.owner_github_allowlist has no valid owner login".to_string());
+    }
+    if let Err(err) = aaf_fp::program("gh") {
+        issues.push(format!("gh CLI unavailable: {err}"));
+    }
+    let res = if issues.is_empty() {
+        let n = allow.iter().filter(|s| !s.trim().is_empty()).count();
+        Ok(format!("enabled ({n} allowlisted owner(s), gh ready)"))
+    } else {
+        Err(issues.join("; "))
+    };
+    advisory("github_board", res)
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_sandbox_exposure_check() -> Check {
+    advisory(
+        "keychain_sandbox_exposure",
+        Err(
+            "Seatbelt keeps ~/Library/Keychains readable because blocking it breaks `claude -p` \
+             OAuth login (verified empirically on macOS: `Not logged in · Please run /login`); \
+             sandboxed agents can read user Keychain items (SECURITY.md §10 #3)"
+                .to_string(),
+        ),
+    )
+}
+
 pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
     let repo_state = ctx.repo_state();
     let repo_root = match &repo_state {
@@ -349,30 +490,28 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         hook_binary,
         hook_committed,
     ] = repo_checks;
-
-    let (accounts_check, accounts_fields) =
-        accounts::report(ctx, &effective, repo_root.as_deref().ok());
-    let checks = vec![
+    let root_opt = repo_root.as_deref().ok();
+    let (accounts_check, accounts_fields) = accounts::report(ctx, &effective, root_opt);
+    let config_detail = config
+        .as_ref()
+        .map(|cfg| {
+            let mut detail = if cfg.sources.is_empty() {
+                "no config file found; defaults in effect".to_string()
+            } else {
+                format!("loaded {}", cfg.sources.join(", "))
+            };
+            for warning in &cfg.warnings {
+                detail.push_str("; warning: ");
+                detail.push_str(warning);
+            }
+            detail
+        })
+        .map_err(|err| err.message.clone());
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut checks = vec![
         required("git", git_check(ctx)),
         repo_root_check,
-        required(
-            "config",
-            config
-                .as_ref()
-                .map(|cfg| {
-                    let mut detail = if cfg.sources.is_empty() {
-                        "no config file found; defaults in effect".to_string()
-                    } else {
-                        format!("loaded {}", cfg.sources.join(", "))
-                    };
-                    for warning in &cfg.warnings {
-                        detail.push_str("; warning: ");
-                        detail.push_str(warning);
-                    }
-                    detail
-                })
-                .map_err(|err| err.message.clone()),
-        ),
+        required("config", config_detail),
         hook_registered,
         hook_binary,
         hook_committed,
@@ -392,13 +531,15 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         ),
         advisory(
             "gradle_daemon_config",
-            heavy::daemon_config(repo_root.as_deref().ok(), &effective.repo.commands),
+            heavy::daemon_config(root_opt, &effective.repo.commands),
         ),
-        advisory(
-            "git_hooks_heavy",
-            heavy::git_hooks_check(repo_root.as_deref().ok()),
-        ),
+        advisory("git_hooks_heavy", heavy::git_hooks_check(root_opt)),
+        skills_sync_check(root_opt, &effective),
+        proof_readiness_check(root_opt, &effective),
+        github_board_check(root_opt, &effective),
     ];
+    #[cfg(target_os = "macos")]
+    checks.push(keychain_sandbox_exposure_check());
 
     let failed = checks.iter().any(|check| check.required && !check.ok);
     let text = checks

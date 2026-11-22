@@ -136,6 +136,9 @@ fn event_kind() {
         (EventKind::DetectorHit, "detector_hit"),
         (EventKind::CrossAudit, "cross_audit"),
         (EventKind::WebhookSent, "webhook_sent"),
+        (EventKind::ReworkRequested, "rework_requested"),
+        (EventKind::ProofRecorded, "proof_recorded"),
+        (EventKind::PlanGenerated, "plan_generated"),
     ];
     assert_eq!(cases.len(), EventKind::ALL.len());
     for (kind, name) in cases {
@@ -291,6 +294,12 @@ fn blocked_reason_is_tagged_by_kind_and_kind_matches_the_tag() {
             },
             json!({"kind": "needs_human", "why": "w"}),
         ),
+        (
+            BlockedReason::Infra {
+                detail: "d".to_string(),
+            },
+            json!({"kind": "infra", "detail": "d"}),
+        ),
     ];
     for (reason, wire) in &cases {
         assert_eq!(wire["kind"], json!(reason.kind()), "{reason:?}");
@@ -385,6 +394,12 @@ fn unblock_action_is_tagged_by_action() {
                 why: "w".to_string(),
             },
             json!({"action": "freeze_root", "why": "w"}),
+        ),
+        (
+            UnblockAction::RetryInfra {
+                detail: "d".to_string(),
+            },
+            json!({"action": "retry_infra", "detail": "d"}),
         ),
     ]);
 }

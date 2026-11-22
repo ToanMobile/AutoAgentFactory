@@ -212,4 +212,8 @@ impl AccountPool for SelectingPool {
     fn profiles(&self) -> PortResult<Vec<AccountProfile>> {
         self.inner.profiles()
     }
+
+    fn provider_account_count(&self) -> PortResult<usize> {
+        self.inner.provider_account_count()
+    }
 }

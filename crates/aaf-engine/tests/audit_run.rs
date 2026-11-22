@@ -75,6 +75,7 @@ fn template() -> AgentRequest {
         timeout_secs: 600,
         sandbox: SandboxPolicy {
             enabled: true,
+            read_only: false,
             writable_paths: vec![],
             read_denied_paths: vec!["/data".to_string()],
         },

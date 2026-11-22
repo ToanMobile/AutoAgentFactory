@@ -20,7 +20,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use aaf_domain::ports::{PortError, PortResult};
-use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 
 pub use schema::SCHEMA_VERSION;
 
@@ -55,6 +55,7 @@ struct Inner {
     /// `None` only while dropping.
     jobs: Option<mpsc::Sender<Job>>,
     writer: Option<JoinHandle<()>>,
+    schema_version: i64,
 }
 
 impl Drop for Inner {
@@ -138,8 +139,43 @@ impl Db {
             inner: Arc::new(Inner {
                 jobs: Some(jobs),
                 writer: Some(writer),
+                schema_version: SCHEMA_VERSION,
             }),
         })
+    }
+
+    /// Opens an existing database at `path` strictly read-only (`SQLITE_OPEN_READ_ONLY`
+    /// plus `PRAGMA query_only = ON`). Never creates files, chmods, changes journal
+    /// mode, or runs migrations — safe for read-only observers like `aaf watch`.
+    ///
+    /// Enforces `PRAGMA user_version <= SCHEMA_VERSION`. When no `-wal` sidecar
+    /// exists and the parent directory is non-writable (or normal read-only
+    /// open/probe fails with `ReadOnly`/`CannotOpen`), falls back to a
+    /// `file:<path>?mode=ro&immutable=1` URI so zero `-shm`/`-wal` files are created.
+    pub fn open_read_only(path: &Path) -> Result<Db, DbError> {
+        let (mut conn, schema_version) = open_read_only_conn(path)?;
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let writer = std::thread::Builder::new()
+            .name("aaf-db-reader".to_string())
+            .spawn(move || {
+                for job in queue {
+                    job(&mut conn);
+                }
+            })
+            .map_err(|e| DbError::Thread(e.to_string()))?;
+        Ok(Db {
+            inner: Arc::new(Inner {
+                jobs: Some(jobs),
+                writer: Some(writer),
+                schema_version,
+            }),
+        })
+    }
+
+    /// Schema version of the opened database (`SCHEMA_VERSION` for read-write
+    /// handles, or the on-disk `PRAGMA user_version` for read-only handles).
+    pub fn schema_version(&self) -> i64 {
+        self.inner.schema_version
     }
 
     /// Runs `f` on the writer thread and waits for its result.
@@ -189,6 +225,114 @@ impl Db {
     }
 }
 
+fn open_read_only_conn(path: &Path) -> Result<(Connection, i64), DbError> {
+    let can_use_immutable = path.is_file() && !wal_sidecar_exists(path);
+    if can_use_immutable && parent_dir_read_only(path) {
+        return open_immutable_ro(path);
+    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let first = Connection::open_with_flags(path, flags)
+        .map_err(DbError::from)
+        .and_then(|conn| {
+            let version = configure_read_only(&conn)?;
+            Ok((conn, version))
+        });
+    match first {
+        Ok(pair) => Ok(pair),
+        Err(err) if can_use_immutable && is_ro_fallback_error(&err) => open_immutable_ro(path),
+        Err(err) => Err(err),
+    }
+}
+
+fn open_immutable_ro(path: &Path) -> Result<(Connection, i64), DbError> {
+    let uri = immutable_ro_uri(path)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(&uri, flags)?;
+    let version = configure_read_only(&conn)?;
+    Ok((conn, version))
+}
+
+fn configure_read_only(conn: &Connection) -> Result<i64, DbError> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "query_only", "ON")?;
+    let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if !(0..=SCHEMA_VERSION).contains(&found) {
+        return Err(DbError::UnsupportedSchema {
+            found,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    let mut stmt = conn.prepare("SELECT 1 FROM sqlite_master LIMIT 1")?;
+    let _ = stmt.exists([])?;
+    Ok(found)
+}
+
+fn is_ro_fallback_error(err: &DbError) -> bool {
+    matches!(
+        err,
+        DbError::Sqlite(sql_err)
+            if matches!(
+                sql_err.sqlite_error_code(),
+                Some(ErrorCode::ReadOnly | ErrorCode::CannotOpen)
+            )
+    )
+}
+
+fn wal_sidecar_exists(path: &Path) -> bool {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    std::fs::symlink_metadata(&wal).is_ok()
+}
+
+#[cfg(unix)]
+fn parent_dir_read_only(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.parent()
+        .and_then(|parent| std::fs::metadata(parent).ok())
+        .is_some_and(|meta| meta.permissions().mode() & 0o222 == 0)
+}
+
+#[cfg(not(unix))]
+fn parent_dir_read_only(path: &Path) -> bool {
+    path.parent()
+        .and_then(|parent| std::fs::metadata(parent).ok())
+        .is_some_and(|meta| meta.permissions().readonly())
+}
+
+fn immutable_ro_uri(path: &Path) -> Result<String, DbError> {
+    let raw = path.to_str().ok_or_else(|| DbError::File {
+        path: path.display().to_string(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "database path is not valid UTF-8 for SQLite URI",
+        ),
+    })?;
+    let mut uri = String::with_capacity(raw.len() + 32);
+    if raw.starts_with('/') {
+        uri.push_str("file://");
+    } else {
+        uri.push_str("file:");
+    }
+    let normalized = if raw.starts_with("//") {
+        let leading = raw.bytes().take_while(|b| *b == b'/').count();
+        &raw[leading - 1..]
+    } else {
+        raw
+    };
+    for byte in normalized.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
+            uri.push(byte as char);
+        } else {
+            let _ = std::fmt::Write::write_fmt(&mut uri, format_args!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    Ok(uri)
+}
+
 /// Connection pragmas and migrations. Safe to repeat on the same connection.
 ///
 /// Two processes that open a fresh file together both hold a shared lock and
@@ -236,4 +380,32 @@ fn to_u64(value: i64, what: &str) -> PortResult<u64> {
 
 fn corrupt(what: &str, value: &str) -> PortError {
     PortError::Io(format!("corrupt row: {what} = {value:?}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_read_only_rejects_future_schema_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("future.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+        let err = Db::open_read_only(&db_path).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DbError::UnsupportedSchema {
+                    found,
+                    supported: SCHEMA_VERSION,
+                } if found == SCHEMA_VERSION + 1
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
 }

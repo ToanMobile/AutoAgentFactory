@@ -1,10 +1,11 @@
 //! Opens a pull request for a task branch through the `gh` CLI.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aaf_domain::gate::{Receipt, Severity};
-use serde::Serialize;
+use aaf_domain::proof::ProofRecord;
+use serde::{Deserialize, Serialize};
 
 use super::cmd::git;
 use super::worktree::TaskWorktree;
@@ -110,10 +111,80 @@ fn skipped(reason: &str) -> Result<PrOutcome, GitError> {
     })
 }
 
-/// Pushes the task branch and opens a PR against the base.
+fn sanitize_md_code(text: &str) -> String {
+    text.replace('`', "'")
+        .replace(['\r', '\n'], " ")
+        .trim()
+        .to_string()
+}
+
+fn is_non_fast_forward(err: &GitError) -> bool {
+    let GitError::Command { stderr, .. } = err else {
+        return false;
+    };
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("non-fast-forward")
+        || lower.contains("fetch first")
+        || lower.contains("[rejected]")
+        || lower.contains("updates were rejected")
+}
+
+#[derive(Deserialize)]
+struct ExistingPr {
+    url: String,
+}
+
+fn update_existing_pr(
+    runner: &dyn CommandRunner,
+    cwd: &Path,
+    base: &str,
+    branch: &str,
+    body: &str,
+) -> Result<Option<String>, GitError> {
+    let list = runner.run(
+        "gh",
+        &[
+            "pr", "list", "--base", base, "--head", branch, "--state", "open", "--json", "url",
+        ],
+        cwd,
+    )?;
+    if !list.success() {
+        return Ok(None);
+    }
+    let prs: Vec<ExistingPr> = serde_json::from_str(&list.stdout).unwrap_or_default();
+    let Some(url) = prs
+        .into_iter()
+        .map(|p| p.url.trim().to_string())
+        .find(|u| u.starts_with("http"))
+    else {
+        return Ok(None);
+    };
+    let edit = runner.run("gh", &["pr", "edit", &url, "--body", body], cwd)?;
+    if !edit.success() {
+        return Err(GitError::Command {
+            command: "gh pr edit".to_string(),
+            code: edit.exit_code,
+            stderr: edit.stderr.trim().to_string(),
+        });
+    }
+    Ok(Some(url))
+}
+
+/// Pushes the task branch and opens (or updates) a PR against the base.
 /// Without the remote or without `gh` nothing is pushed and the outcome is
 /// `Skipped`.
 pub fn open_pr(req: &PrRequest, runner: &dyn CommandRunner) -> Result<PrOutcome, GitError> {
+    open_pr_with_proof(req, None, runner)
+}
+
+/// Pushes the task branch and opens (or updates) a PR against the base,
+/// optionally embedding a signed device-verification proof summary.
+pub fn open_pr_with_proof(
+    req: &PrRequest,
+    proof: Option<&ProofRecord>,
+    runner: &dyn CommandRunner,
+) -> Result<PrOutcome, GitError> {
+    // Validates the branch is `aaf/<valid_task_id>` before any push.
     req.worktree.task_id()?;
     check_branch_name(&req.repo_root, &req.base)?;
     if !has_remote(&req.repo_root, &req.remote)? {
@@ -130,10 +201,19 @@ pub fn open_pr(req: &PrRequest, runner: &dyn CommandRunner) -> Result<PrOutcome,
 
     let branch = req.worktree.branch.as_str();
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    git(&req.repo_root, &["push", &req.remote, &refspec])?;
+    if let Err(push_err) = git(&req.repo_root, &["push", &req.remote, &refspec]) {
+        if is_non_fast_forward(&push_err) {
+            git(
+                &req.repo_root,
+                &["push", "--force-with-lease", &req.remote, &refspec],
+            )?;
+        } else {
+            return Err(push_err);
+        }
+    }
 
     // Title and body are untrusted text: each travels as one argv entry.
-    let body = pr_body(&req.receipt);
+    let body = pr_body_with_proof(req, proof);
     let args = [
         "pr", "create", "--title", &req.title, "--body", &body, "--base", &req.base, "--head",
         branch,
@@ -145,6 +225,11 @@ pub fn open_pr(req: &PrRequest, runner: &dyn CommandRunner) -> Result<PrOutcome,
         stderr: stderr.trim().to_string(),
     };
     if !out.success() {
+        if out.stderr.to_ascii_lowercase().contains("already exists")
+            && let Some(url) = update_existing_pr(runner, cwd, &req.base, branch, &body)?
+        {
+            return Ok(PrOutcome::Opened { url });
+        }
         return Err(failed(&out.stderr));
     }
     // gh prints the PR URL as its last line.
@@ -154,4 +239,33 @@ pub fn open_pr(req: &PrRequest, runner: &dyn CommandRunner) -> Result<PrOutcome,
         }),
         None => Err(failed("gh printed no pull request URL")),
     }
+}
+
+/// Pull request body wrapping [`pr_body`] plus an optional signed mobile/device proof summary.
+pub fn pr_body_with_proof(req: &PrRequest, proof: Option<&ProofRecord>) -> String {
+    let mut body = pr_body(&req.receipt);
+    if let Some(record) = proof {
+        body.push_str("\n## Verification Proof\n\n");
+        body.push_str(&format!(
+            "- Tool: `{}`\n",
+            sanitize_md_code(&record.source_tool)
+        ));
+        body.push_str(&format!(
+            "- Device: `{}`\n",
+            sanitize_md_code(&record.device_serial)
+        ));
+        body.push_str(&format!(
+            "- Resolution: {}x{} ({} bytes)\n",
+            record.width, record.height, record.byte_len
+        ));
+        body.push_str(&format!(
+            "- Image SHA-256: `{}`\n",
+            sanitize_md_code(&record.image_sha256)
+        ));
+        body.push_str(&format!(
+            "- Tree: `{}`\n",
+            sanitize_md_code(&record.tree_fp)
+        ));
+    }
+    body
 }

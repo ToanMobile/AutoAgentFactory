@@ -316,6 +316,7 @@ fn evidence<'a>(
         critical_findings: 0,
         head_lock,
         store,
+        proof_block: None,
         commands,
         test_command_missing: false,
         tree_changed: false,

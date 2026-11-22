@@ -21,6 +21,19 @@ pub(crate) fn open_db(ctx: &Ctx) -> Result<Db, CmdError> {
     Db::open(&ctx.data_dir.join(DB_FILE)).map_err(|e| err("database", e))
 }
 
+/// Opens `aaf.db` strictly read-only when present, returning `Ok(None)` when
+/// the file does not exist so read-only commands never create `AAF_DATA_DIR`
+/// or `aaf.db`.
+pub fn open_db_read_only(ctx: &Ctx) -> Result<Option<Db>, CmdError> {
+    let path = ctx.data_dir.join(DB_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Db::open_read_only(&path)
+        .map(Some)
+        .map_err(|e| err("database", e))
+}
+
 /// Root of the git work tree the command was started in, resolved, as it is
 /// stored in `tasks.repo_root`.
 pub(crate) fn repo_root(ctx: &Ctx) -> Result<PathBuf, CmdError> {

@@ -186,13 +186,6 @@ fn agent_proposer_fails_closed() {
                 ..answer(&array(1))
             },
         ),
-        (
-            "limit hit",
-            AgentOutcome {
-                final_text: array(1),
-                ..limit_outcome(None)
-            },
-        ),
     ];
     for (name, canned) in cases {
         let world = World::new(UnblockerConfig::default());
@@ -205,6 +198,25 @@ fn agent_proposer_fails_closed() {
         let plans = proposer.propose(&world.task(ROOT), &stuck(), "d").unwrap();
         assert!(plans.is_empty(), "case: {name}");
     }
+
+    // Quota limits propagate as transient errors so the unblocker retries instead of burning a cycle.
+    let world = World::new(UnblockerConfig::default());
+    let runner = FakeRunner::new(Ok(AgentOutcome {
+        final_text: array(1),
+        ..limit_outcome(None)
+    }));
+    let proposer = AgentSubtaskProposer {
+        runner: &runner,
+        budgets: &world.budgets,
+        base: request(),
+    };
+    let err = proposer
+        .propose(&world.task(ROOT), &stuck(), "d")
+        .unwrap_err();
+    assert!(
+        matches!(err, PortError::Io(ref msg) if msg.starts_with("limit_hit:")),
+        "{err:?}"
+    );
 }
 
 #[test]

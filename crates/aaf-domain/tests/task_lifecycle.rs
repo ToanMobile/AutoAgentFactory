@@ -14,7 +14,7 @@ const ALLOWED: [(TaskState, &[TaskState]); 8] = [
     (Ready, &[Running, Blocked, Cancelled]),
     (Running, &[Gating, Blocked, Ready, Cancelled]),
     (Gating, &[Review, Done, Blocked, Ready, Cancelled]),
-    (Review, &[Done, Blocked, Ready, Cancelled]),
+    (Review, &[Gating, Done, Blocked, Ready, Cancelled]),
     (Blocked, &[Ready, Cancelled]),
     (Done, &[]),
     (Cancelled, &[]),
@@ -38,7 +38,7 @@ fn every_pair_matches_the_documented_table() {
             allowed_count += usize::from(want);
         }
     }
-    assert_eq!(allowed_count, 20);
+    assert_eq!(allowed_count, 21);
 }
 
 #[test]

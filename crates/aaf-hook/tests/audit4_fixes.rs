@@ -24,7 +24,8 @@ fn env_clearing_wrapper_around_nested_shell_still_blocks_aaf() {
             ("env -i /bin/sh -c 'aaf gate'", HUMAN),
             ("env -i eval 'aaf run'", HUMAN),
             ("git -c alias.f='!env -i sh -c \"aaf run\"' f", GIT),
-            ("aaf run", ALLOW),
+            ("aaf run", HUMAN),
+            ("aaf gate", ALLOW),
             ("env -i sh -c 'true'", ALLOW),
         ],
     );

@@ -51,7 +51,7 @@ pub enum GateError {
 pub fn config_hash(cfg: &RepoConfig) -> String {
     // Plain structs of strings and integers always serialise; the fallback
     // only keeps this function infallible.
-    let json = serde_json::to_string(&(&cfg.gate, &cfg.commands)).unwrap_or_default();
+    let json = serde_json::to_string(&(&cfg.gate, &cfg.commands, &cfg.proof)).unwrap_or_default();
     aaf_fp::sha256_hex(json.as_bytes())
 }
 
@@ -71,6 +71,7 @@ pub(crate) struct Evidence<'a> {
     pub critical_findings: usize,
     pub head_lock: &'a HeadLockReport,
     pub store: &'a StoreComplianceReport,
+    pub proof_block: Option<&'a str>,
     /// `None` when the commands were skipped because an earlier stage blocked.
     pub commands: Option<&'a [CommandResult]>,
     pub test_command_missing: bool,
@@ -100,6 +101,9 @@ fn early_blocks(evidence: &Evidence<'_>) -> Vec<String> {
             "store compliance: {} critical finding(s)",
             evidence.store.critical
         ));
+    }
+    if let Some(reason) = evidence.proof_block {
+        reasons.push(format!("proof required: {reason}"));
     }
     reasons
 }
@@ -266,6 +270,13 @@ pub fn run_gate_policy(
     // Resolved before the reuse check: a receipt is only as good as the
     // base it was compared against.
     let base = base::resolve(repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
+    let mut proof_block = if cfg.proof.required {
+        crate::proof::verify_proof(repo_root, data_dir, &cfg.proof, Some(&fp_before))
+            .err()
+            .map(|e| e.to_string())
+    } else {
+        None
+    };
     let asked = Asked {
         repo_root,
         tree_fp: &fp_before,
@@ -277,6 +288,7 @@ pub fn run_gate_policy(
     // earlier `Clear` receipt for this tree proves nothing about it. Files
     // the policy lets pass are the operator's own environment.
     if hidden.is_empty()
+        && proof_block.is_none()
         && let Some(receipt) = reusable_receipt(data_dir, &key, &asked)
     {
         return Ok(GateRun {
@@ -299,12 +311,16 @@ pub fn run_gate_policy(
     let head_lock = head_lock::evaluate_changes(data_dir, repo_root, cfg, &set.changes)?;
     let store = crate::store_compliance::scan(repo_root, cfg, release);
 
-    let verdict = |hidden: &[String], commands: Option<&[CommandResult]>, tree_changed| {
+    let verdict = |hidden: &[String],
+                   proof_block: Option<&str>,
+                   commands: Option<&[CommandResult]>,
+                   tree_changed| {
         decide(&Evidence {
             hidden,
             critical_findings: statics.critical(),
             head_lock: &head_lock,
             store: &store,
+            proof_block,
             commands,
             test_command_missing: runner::test_command(&cfg.commands, mode).1.is_empty(),
             tree_changed,
@@ -313,7 +329,8 @@ pub fn run_gate_policy(
     };
     let mut notes = Vec::new();
     // With no command result yet, `Blocked` means an earlier stage blocks.
-    let unblocked = verdict(&hidden, Some(&[]), false).0 != GateStatus::Blocked;
+    let unblocked =
+        verdict(&hidden, proof_block.as_deref(), Some(&[]), false).0 != GateStatus::Blocked;
     let commands = if unblocked {
         let timeout = Duration::from_secs(cfg.gate.command_timeout_secs);
         let stats_repo_id = stats_repo_id(repo_root);
@@ -338,7 +355,17 @@ pub fn run_gate_policy(
         hidden_notes.extend(after.notes);
     }
     let tree_fp = aaf_fp::tree_fp(repo_root, GIT_TIMEOUT)?;
-    let (status, mut reasons) = verdict(&hidden, commands.as_deref(), tree_fp != fp_before);
+    if cfg.proof.required && proof_block.is_none() {
+        proof_block = crate::proof::verify_proof(repo_root, data_dir, &cfg.proof, Some(&fp_before))
+            .err()
+            .map(|e| e.to_string());
+    }
+    let (status, mut reasons) = verdict(
+        &hidden,
+        proof_block.as_deref(),
+        commands.as_deref(),
+        tree_fp != fp_before,
+    );
     // Waiting for the machine is not a failure: it is recorded, and the
     // status stays what the evidence decided. The same goes for what the
     // hidden-file policy let pass or removed.

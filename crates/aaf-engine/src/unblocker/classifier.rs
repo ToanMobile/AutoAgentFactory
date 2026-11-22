@@ -13,6 +13,45 @@ const DIGEST_TAIL_LINES: usize = 20;
 const DIGEST_HEX_CHARS: usize = 16;
 const MAX_LISTED_FILES: usize = 10;
 
+/// Transient upstream provider outage needles in agent stderr/log output.
+const TRANSIENT_INFRA_PATTERNS: &[&str] = &[
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "http 529",
+    "status 500",
+    "status 502",
+    "status 503",
+    "status 504",
+    "status 529",
+    "503 service unavailable",
+    "529 overloaded",
+    "\"type\":\"overloaded_error\"",
+    "\"type\": \"overloaded_error\"",
+    "\"type\":\"api_error\"",
+    "\"type\": \"api_error\"",
+];
+
+fn transient_infra_detail(outcome: &AgentOutcome) -> Option<String> {
+    if outcome.succeeded() {
+        return None;
+    }
+    let hay_tail = outcome.log_tail.to_ascii_lowercase();
+    let matched = TRANSIENT_INFRA_PATTERNS
+        .iter()
+        .any(|needle| hay_tail.contains(needle));
+    if !matched {
+        return None;
+    }
+    let flat = one_line(&outcome.log_tail);
+    if flat.is_empty() {
+        Some("transient upstream infrastructure failure".to_string())
+    } else {
+        Some(truncate_chars(&flat, SUMMARY_MAX_CHARS))
+    }
+}
+
 /// Result of rerunning the failed tests without any code change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RerunResult {
@@ -78,6 +117,15 @@ pub fn classify(signal: &FailureSignal) -> BlockedReason {
             reset_at: hit.reset_at,
         };
     }
+    if let Some(infra) = signal.outcome.as_ref().and_then(|o| o.infra.as_ref()) {
+        let flat = one_line(&infra.raw);
+        let detail = if flat.is_empty() {
+            "executor infrastructure failure".to_string()
+        } else {
+            truncate_chars(&flat, SUMMARY_MAX_CHARS)
+        };
+        return BlockedReason::Infra { detail };
+    }
     if !signal.merge_conflict_files.is_empty() {
         return BlockedReason::MergeConflict {
             detail: conflict_detail(&signal.merge_conflict_files),
@@ -104,6 +152,11 @@ pub fn classify(signal: &FailureSignal) -> BlockedReason {
         return BlockedReason::Stuck {
             detail: "agent run timed out".to_string(),
         };
+    }
+    if let Some(outcome) = signal.outcome.as_ref()
+        && let Some(detail) = transient_infra_detail(outcome)
+    {
+        return BlockedReason::Infra { detail };
     }
     let digest = failure_digest(signal);
     if signal.same_failure_count >= STUCK_REPEAT_THRESHOLD {
@@ -132,6 +185,9 @@ pub fn failure_digest(signal: &FailureSignal) -> String {
 /// describes the failure that was classified. The gate is preferred over
 /// agent logs because agent prose differs on every run.
 fn digest_material(signal: &FailureSignal) -> String {
+    if let Some(dep) = &signal.open_dependency {
+        return format!("dependency:{dep}");
+    }
     if signal
         .outcome
         .as_ref()
@@ -139,8 +195,8 @@ fn digest_material(signal: &FailureSignal) -> String {
     {
         return "quota".to_string();
     }
-    if let Some(dep) = &signal.open_dependency {
-        return format!("dependency:{dep}");
+    if signal.outcome.as_ref().is_some_and(|o| o.infra.is_some()) {
+        return "infra".to_string();
     }
     if !signal.merge_conflict_files.is_empty() {
         let mut files = signal.merge_conflict_files.clone();
@@ -152,6 +208,7 @@ fn digest_material(signal: &FailureSignal) -> String {
     }
     match &signal.outcome {
         Some(outcome) if outcome.timed_out => "agent:timeout".to_string(),
+        Some(outcome) if transient_infra_detail(outcome).is_some() => "infra".to_string(),
         Some(outcome) => format!(
             "agent:exit={:?}\n{}",
             outcome.exit_code,

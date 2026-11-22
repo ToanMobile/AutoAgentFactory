@@ -389,7 +389,7 @@ fn a_rejected_cross_audit_signs_nothing_and_returns_the_task_with_the_finding() 
         "nothing unapproved reaches the gate"
     );
     let notes = world.task("t1").context_notes;
-    assert!(notes[0].contains("cross-audit rejected"), "{notes:?}");
+    assert!(notes[0].starts_with("audit_rework:"), "{notes:?}");
     assert!(notes[0].contains("ASSERT"), "{notes:?}");
 }
 

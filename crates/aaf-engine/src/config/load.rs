@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 
 use super::detect::PROFILES;
 use super::merge::{
-    ConfigOverlay, GateOverlay, OverlayOrigin, ProjectOverlay, RunOverlay, apply_overlay,
+    ConfigOverlay, CrossAuditOverlay, GateOverlay, OverlayOrigin, PipelineOverlay, ProjectOverlay,
+    RunOverlay, apply_cross_audit_overlay, apply_overlay, apply_pipeline_overlay, clamp_pipeline,
+    merge_cross_audit, merge_max_open_review,
 };
 
 /// Tier 2, relative to the repo root.
@@ -86,11 +88,15 @@ struct LocalFile {
     project: ProjectOverlay,
     gate: GateOverlay,
     run: RunOverlay,
+    cross_audit: CrossAuditOverlay,
+    pub pipeline: Option<PipelineOverlay>,
     commands: Option<toml::Value>,
     unblocker: Option<toml::Value>,
     safety: Option<toml::Value>,
     accounts: Option<toml::Value>,
     notifications: Option<toml::Value>,
+    proof: Option<toml::Value>,
+    github: Option<toml::Value>,
 }
 
 /// `AAF_CONFIG_DIR/config.toml`, else `$HOME/.config/autofactory/config.toml`.
@@ -135,8 +141,15 @@ pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
         Some(path) => read_tier(path, &mut sources)?.unwrap_or_default(),
         None => GlobalConfig::default(),
     };
-    let mut repo: RepoConfig =
-        read_tier(&inputs.repo_root.join(REPO_CONFIG_REL), &mut sources)?.unwrap_or_default();
+    let repo_path = inputs.repo_root.join(REPO_CONFIG_REL);
+    let mut repo: RepoConfig = read_tier(&repo_path, &mut sources)?.unwrap_or_default();
+    merge_cross_audit(&global.cross_audit, &mut repo.cross_audit);
+    merge_max_open_review(global.run.max_open_review, &mut repo.run.max_open_review);
+    clamp_pipeline(
+        &mut repo.pipeline,
+        &repo_path.display().to_string(),
+        &mut warnings,
+    );
 
     let local_path = inputs.repo_root.join(LOCAL_CONFIG_REL);
     if let Some(local) = read_tier::<LocalFile>(&local_path, &mut sources)? {
@@ -147,6 +160,8 @@ pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
             ("safety", &local.safety, "the global config"),
             ("accounts", &local.accounts, "the global config"),
             ("notifications", &local.notifications, "the global config"),
+            ("proof", &local.proof, REPO_CONFIG_REL),
+            ("github", &local.github, REPO_CONFIG_REL),
         ];
         for (section, value, owner) in tier_two_only {
             if value.is_some() {
@@ -167,6 +182,15 @@ pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
             OverlayOrigin::Ambient,
             &mut warnings,
         );
+        apply_cross_audit_overlay(
+            &mut repo.cross_audit,
+            local.cross_audit,
+            &source,
+            &mut warnings,
+        );
+        if let Some(pipeline) = local.pipeline {
+            apply_pipeline_overlay(&mut repo.pipeline, pipeline, &source, &mut warnings);
+        }
     }
 
     let env_overlay = env_overlay(inputs.env, &mut warnings)?;

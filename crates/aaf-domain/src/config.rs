@@ -16,6 +16,7 @@ pub struct GlobalConfig {
     pub notifications: NotificationsConfig,
     pub machine: MachineConfig,
     pub run: MachineRunConfig,
+    pub cross_audit: CrossAuditConfig,
 }
 
 /// The part of `[run]` the operator may also set for the whole machine.
@@ -29,6 +30,10 @@ pub struct MachineRunConfig {
     /// repository's own `run.env_pass`. This file is outside every worktree,
     /// so no task can add a name to it.
     pub env_pass: Vec<String>,
+    /// Optional machine-wide cap on open Review + Running + Gating tasks when
+    /// `auto_merge = false`. Positive tier-1 caps cannot be loosened by repo
+    /// or local config.
+    pub max_open_review: Option<u32>,
 }
 
 /// Machine-wide limits on heavy gate commands (Gradle, Unity, Xcode builds),
@@ -139,6 +144,98 @@ pub struct RepoConfig {
     pub gate: GateConfig,
     pub unblocker: UnblockerConfig,
     pub run: RunConfig,
+    pub cross_audit: CrossAuditConfig,
+    pub proof: ProofConfig,
+    pub github: GithubBoardConfig,
+    pub pipeline: PipelineConfig,
+}
+
+/// Hard upper bound on automatic audit-rework rounds before escalating.
+pub const MAX_AUDIT_REWORKS_CAP: u32 = 5;
+
+/// Optional multi-stage pipeline settings (plan stage & automatic audit rework).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PipelineConfig {
+    /// Generate a read-only plan before the first implementation turn.
+    pub plan_stage: bool,
+    /// Pause for explicit human approval (`aaf board approve-plan`) after plan generation.
+    pub require_plan_approval: bool,
+    /// Maximum automatic rework rounds after an explicit `AuditVerdict::Fail` (capped at 5).
+    pub max_audit_reworks: u32,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        PipelineConfig {
+            plan_stage: false,
+            require_plan_approval: false,
+            max_audit_reworks: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubBoardConfig {
+    pub enabled: bool,
+    pub repo: String,
+    pub project_owner: String,
+    pub project_number: Option<u32>,
+    pub label_filter: String,
+    pub columns: GithubColumnMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubColumnMap {
+    pub backlog: String,
+    pub ready: String,
+    pub running: String,
+    pub gating: String,
+    pub review: String,
+    pub blocked: String,
+    pub done: String,
+    pub cancelled: String,
+}
+
+impl Default for GithubColumnMap {
+    fn default() -> Self {
+        Self {
+            backlog: "Backlog".to_string(),
+            ready: "Ready".to_string(),
+            running: "Building".to_string(),
+            gating: "QA".to_string(),
+            review: "Review".to_string(),
+            blocked: "Blocked".to_string(),
+            done: "Done".to_string(),
+            cancelled: "Done".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProofConfig {
+    pub required: bool,
+    pub min_bytes: u64,
+    pub min_width: u32,
+    pub min_height: u32,
+    pub denylist_file: String,
+    pub allowed_tools: Vec<String>,
+}
+
+impl Default for ProofConfig {
+    fn default() -> Self {
+        Self {
+            required: false,
+            min_bytes: 8192,
+            min_width: 100,
+            min_height: 100,
+            denylist_file: ".adb-denylist".to_string(),
+            allowed_tools: vec!["mobile-mcp:mobile_save_screenshot".to_string()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,12 +306,18 @@ pub struct GateConfig {
     pub command_timeout_secs: u64,
 }
 
-/// What Claude Code loads from a repository as instructions, hooks, agents
+/// What coding agents load from a repository as instructions, hooks, skills
 /// and MCP servers. A task that could change them unaudited would change
 /// its own guard (`.claude/settings.json` registers `aaf-hook`) and, once
 /// merged, what runs in the owner's own sessions outside any sandbox.
 /// Part of the default `head_lock_globs`.
-pub const AGENT_CONFIG_GLOBS: [&str; 3] = ["**/.claude/**", "**/CLAUDE.md", "**/.mcp.json"];
+pub const AGENT_CONFIG_GLOBS: [&str; 5] = [
+    "**/.claude/**",
+    "**/CLAUDE.md",
+    "**/.mcp.json",
+    "**/.agents/**",
+    "**/AGENTS.md",
+];
 
 /// Google Play requirement for new apps and updates since 2026-08-31.
 pub const DEFAULT_MIN_ANDROID_TARGET_SDK: u32 = 36;
@@ -245,6 +348,8 @@ impl Default for GateConfig {
             "**/build.rs",
             "**/build.gradle",
             "**/build.gradle.kts",
+            "**/.adb-denylist",
+            "**/.adb-allowlist",
         ];
         GateConfig {
             base_ref: "auto".to_string(),
@@ -304,6 +409,9 @@ pub struct RunConfig {
     /// signed approval first). The operator's own list is
     /// [`MachineRunConfig::env_pass`] in tier 1.
     pub env_pass: Vec<String>,
+    /// Queue brake when `auto_merge = false`: `0` disables the cap, positive
+    /// values bound `Review + Running + Gating` tasks before starting more work.
+    pub max_open_review: u32,
 }
 
 impl Default for RunConfig {
@@ -317,6 +425,24 @@ impl Default for RunConfig {
             model: String::new(),
             effort: String::new(),
             env_pass: Vec::new(),
+            max_open_review: 0,
         }
     }
+}
+
+/// Optional separate provider/model for adversarial cross-audit of head-locked files.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CrossAuditConfig {
+    /// Empty means reuse `[run].executor`. One of: claude, codex, gemini, opencode, custom.
+    pub executor: String,
+    /// Command template when `executor` is `custom` (or override binary path).
+    pub executor_cmd: String,
+    /// Optional model override for the cross-audit run.
+    pub model: String,
+    /// Optional reasoning effort override for the cross-audit run.
+    pub effort: String,
+    /// Fail closed instead of falling back to `same_account = true` when no
+    /// auditor from a different provider is configured.
+    pub require_different_provider: bool,
 }

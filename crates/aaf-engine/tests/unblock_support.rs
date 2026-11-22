@@ -84,7 +84,13 @@ impl TaskStore for MemTasks {
     fn add_dep(&self, _task_id: &str, _blocked_by: &str) -> PortResult<()> {
         Ok(())
     }
+    fn remove_dep(&self, _task_id: &str, _blocked_by: &str) -> PortResult<bool> {
+        Ok(false)
+    }
     fn deps_of(&self, _task_id: &str) -> PortResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+    fn all_deps(&self) -> PortResult<Vec<(String, String)>> {
         Ok(Vec::new())
     }
     fn children_of(&self, parent_id: &str) -> PortResult<Vec<Task>> {

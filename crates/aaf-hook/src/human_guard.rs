@@ -6,12 +6,14 @@ use crate::shell::{Cmd, basename};
 use crate::{Denial, paths};
 
 const RULE: &str = "human_action_guard";
-const FIX: &str =
-    "stop and ask the user to run it: approve, board unblock and board unfreeze are human actions";
+const FIX: &str = "stop and ask the user to run it: approve, run, init, gc, proof record, skills sync and board mutations are human actions";
 
 /// Words that name a human action wherever they stand, for text that could
 /// not be split into commands.
 pub const ACTION_WORDS: &[&str] = &["approve", "unblock", "unfreeze"];
+
+/// Top-level `aaf` subcommands that include at least one guarded human action.
+const TOP_LEVEL_ACTIONS: &[&str] = &["approve", "board", "run", "init", "gc", "proof", "skills"];
 
 /// aaf sets this for everything a factory run starts, and refuses `approve`,
 /// `run`, `board unblock` and `board unfreeze` while it is set. An agent has
@@ -39,10 +41,38 @@ const LAUNCHERS: &[&str] = &[
     "osascript",
 ];
 
-/// aaf is named next to a human action word, in text that is not an argv.
+/// aaf is named next to a human action word or subcommand pair, in text that
+/// is not an argv.
 pub fn names_action(tokens: &[&str]) -> bool {
-    tokens.iter().any(|token| basename(token) == "aaf")
-        && tokens.iter().any(|token| ACTION_WORDS.contains(token))
+    let non_flags: Vec<&str> = tokens
+        .iter()
+        .copied()
+        .filter(|t| !t.is_empty() && !t.starts_with('-'))
+        .collect();
+    if !non_flags.iter().any(|token| basename(token) == "aaf") {
+        return false;
+    }
+    if non_flags.iter().any(|token| ACTION_WORDS.contains(token)) {
+        return true;
+    }
+    non_flags.windows(2).any(|pair| {
+        let (first, second) = (pair[0], pair[1]);
+        (basename(first) == "aaf" && matches!(second, "run" | "init" | "gc"))
+            || (first == "proof" && second == "record")
+            || (first == "skills" && second == "sync")
+            || (first == "board"
+                && matches!(
+                    second,
+                    "unblock"
+                        | "unfreeze"
+                        | "rework"
+                        | "import-issues"
+                        | "sync-github"
+                        | "split"
+                        | "dep"
+                        | "approve-plan"
+                ))
+    })
 }
 
 pub fn check(cmd: &Cmd) -> Option<Denial> {
@@ -83,6 +113,7 @@ fn launched_action(cmd: &Cmd) -> Option<&'static str> {
     let text = argv().map(String::as_str).collect::<Vec<_>>().join(" ");
     let tokens: Vec<&str> = text
         .split(|c: char| c.is_whitespace() || ";|&()<>\"'`{}\\:,=".contains(c))
+        .filter(|t| !t.is_empty())
         .collect();
     names_action(&tokens).then_some("<a human action> on a terminal of its own")
 }
@@ -113,15 +144,60 @@ fn action(args: &[String], certain: bool) -> Option<&'static str> {
         |word: &str| certain && (word.is_empty() || word.contains('$') || paths::has_glob(word));
     match positional.next()? {
         "approve" => Some("approve"),
+        "run" => Some("run"),
+        "init" => Some("init"),
+        "gc" => Some("gc"),
+        "proof" => match positional.next()? {
+            "record" => Some("proof record"),
+            sub if unknown(sub) => Some("proof <action chosen at run time>"),
+            _ => None,
+        },
+        "skills" => match positional.next()? {
+            "sync" => Some("skills sync"),
+            sub if unknown(sub) => Some("skills <action chosen at run time>"),
+            _ => None,
+        },
         "board" => match positional.next()? {
             "unblock" => Some("board unblock"),
             "unfreeze" => Some("board unfreeze"),
+            "rework" => Some("board rework"),
+            "import-issues" => Some("board import-issues"),
+            "sync-github" => Some("board sync-github"),
+            "split" => Some("board split"),
+            "dep" => Some("board dep"),
+            "approve-plan" => Some("board approve-plan"),
             sub if unknown(sub) => Some("board <action chosen at run time>"),
             _ => None,
         },
         sub if unknown(sub) => Some("<subcommand chosen at run time>"),
         _ => None,
     }
+}
+
+fn find_subcommand_pos(rest: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(arg) = rest.get(i) {
+        if matches!(
+            arg.as_str(),
+            "-p" | "--package"
+                | "--bin"
+                | "--example"
+                | "--manifest-path"
+                | "--target"
+                | "--target-dir"
+                | "--profile"
+                | "-F"
+                | "--features"
+        ) {
+            i += 2;
+            continue;
+        }
+        if TOP_LEVEL_ACTIONS.contains(&arg.as_str()) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// `cargo run [-p aaf-cli] -- <aaf args>`: the same CLI, built on the spot.
@@ -137,9 +213,7 @@ fn cargo_run_args(args: &[String]) -> Option<(&[String], bool)> {
         // `--` as well; option values make the first of them uncertain, so
         // the search starts at the word that would name a human action.
         None => {
-            let at = rest
-                .iter()
-                .position(|arg| arg == "approve" || arg == "board")?;
+            let at = find_subcommand_pos(rest)?;
             (at, at)
         }
     };

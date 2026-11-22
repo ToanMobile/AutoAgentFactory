@@ -135,13 +135,8 @@ fn task_failures_limits_and_served_runs_are_not_infra() {
             said("The test failed: Unable to connect to API (ENOTFOUND)"),
             result(true, "The test failed: Unable to connect to API", None),
         ]),
-        // Ordinary failed runs, and server errors the CLI reports.
+        // Ordinary failed runs stay non-infra.
         result(true, "compile error in main.rs", None),
-        result(true, "server error", Some(500)),
-        stream(&[
-            api_error("overloaded", "API Error: Overloaded"),
-            result(true, "API Error: Overloaded", Some(529)),
-        ]),
         // An error on the way, then a successful result.
         stream(&[
             api_error("authentication_failed", "Not logged in"),
@@ -150,6 +145,22 @@ fn task_failures_limits_and_served_runs_are_not_infra() {
     ];
     for text in cases {
         assert_eq!(parse_stream(&text).infra, None, "{text}");
+    }
+
+    // Structured HTTP 5xx / overloaded errors classify as transient Network infra (v3.2).
+    for transient in [
+        result(true, "server error", Some(500)),
+        stream(&[
+            api_error("overloaded", "API Error: Overloaded"),
+            result(true, "API Error: Overloaded", Some(529)),
+        ]),
+    ] {
+        let infra = parse_stream(&transient).infra;
+        assert_eq!(
+            infra.as_ref().map(|i| i.kind),
+            Some(InfraKind::Network),
+            "{transient}"
+        );
     }
 }
 

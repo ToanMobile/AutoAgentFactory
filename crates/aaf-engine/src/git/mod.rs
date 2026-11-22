@@ -16,7 +16,7 @@ pub mod worktree;
 mod tests;
 
 pub use merge_queue::{MergeOutcome, MergeRequest, merge};
-pub use pr::{PrOutcome, PrRequest, open_pr, pr_body};
+pub use pr::{PrOutcome, PrRequest, open_pr, open_pr_with_proof, pr_body, pr_body_with_proof};
 pub use worktree::{TaskWorktree, WorktreeEntry};
 
 #[derive(Debug, thiserror::Error)]

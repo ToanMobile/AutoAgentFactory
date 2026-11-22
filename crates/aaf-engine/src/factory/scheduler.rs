@@ -4,25 +4,32 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::Scope;
 
-use aaf_domain::gate::LockStatus;
 use aaf_domain::ports::{PortError, PortResult};
-use aaf_domain::run::{RunFinish, RunStatus};
-use aaf_domain::task::TaskState;
+use aaf_domain::task::{Task, TaskState};
 
-use super::batch::{Member, gate_batch};
-use super::finish::{self, Resolution, Round};
-use super::ports::Purpose;
+use super::audit_backend::AuditBackend;
+use super::finish::Resolution;
+pub(super) use super::finish::{GateStats, judge_round};
+use super::ports::{AccountPool, Purpose};
+use super::schedule_order;
+pub use super::schedule_order::{
+    MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, transient_backoff_secs,
+};
+use super::sweep;
+pub use super::sweep::recover;
 use super::worker::{self, GateJob, Job, Next, Outcome};
-use super::{Deps, Mode, RunSummary, is_frozen};
+use super::{Deps, Mode, RunSummary, is_frozen, unblock};
+
+const MAX_GATE_RETRIES: u32 = 3;
+const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: i64 = 300;
 
 /// What the caller supplies besides the ports.
 pub struct Hooks<'a> {
-    /// Called in [`Mode::Auto`] when nothing can run right now. Waits, then
-    /// returns true to look again or false to stop the loop.
+    /// Called in [`Mode::Auto`] when nothing can run right now; returns `false` to stop.
     pub idle: &'a (dyn Fn() -> bool + Sync),
     /// Kills what is left of an interrupted run (`executors::reaper::reap`).
     pub reap: &'a (dyn Fn(&str) -> PortResult<()> + Sync),
@@ -36,82 +43,46 @@ enum Msg {
     },
 }
 
-/// Written by the gate thread before it reports a task, read by the
-/// scheduler when the loop ends.
-#[derive(Default)]
-pub(super) struct GateStats {
-    pub(super) runs: AtomicU32,
-    pub(super) warnings: Mutex<Vec<String>>,
-}
-
-/// Puts back what an interrupted `aaf run` left behind: a task still
-/// `Running` has no live run any more (its processes are reaped and it
-/// returns to Ready); a task still `Gating` only needs the gate again.
-pub fn recover(deps: &Deps, reap: &dyn Fn(&str) -> PortResult<()>) -> PortResult<Vec<String>> {
-    let repo = Some(deps.settings.repo_root.as_str());
-    for task in deps.store.list_tasks(repo, Some(TaskState::Running))? {
-        for run in deps.store.runs_for_task(&task.id)? {
-            if run.status != RunStatus::Running {
-                continue;
-            }
-            reap(&run.id)?;
-            deps.store.finish_run(
-                &run.id,
-                &RunFinish {
-                    status: RunStatus::Killed,
-                    exit_code: None,
-                    tokens_in: run.tokens_in,
-                    tokens_out: run.tokens_out,
-                    ended_at: deps.now(),
-                },
-            )?;
-        }
-        deps.move_to(
-            &task.id,
-            TaskState::Ready,
-            None,
-            "left running by an interrupted run",
-        )?;
-    }
-    let gating = deps.store.list_tasks(repo, Some(TaskState::Gating))?;
-    Ok(gating.into_iter().map(|task| task.id).collect())
-}
-
-/// Runs the factory for the repository of `deps.settings` until nothing is
-/// left to do ([`Mode::Once`]), `hooks.idle` says stop, or the factory
-/// freezes.
+/// Runs the factory for `deps.settings` until idle ([`Mode::Once`]), stopped, or frozen.
 pub fn run(deps: &Deps, mode: Mode, hooks: &Hooks<'_>) -> PortResult<RunSummary> {
+    run_with_audit(deps, None, mode, hooks)
+}
+
+/// [`run`] with an optional separate [`AuditBackend`] for cross-provider audits.
+pub fn run_with_audit(
+    deps: &Deps,
+    audit: Option<&AuditBackend>,
+    mode: Mode,
+    hooks: &Hooks<'_>,
+) -> PortResult<RunSummary> {
     let mut summary = RunSummary::default();
     if is_frozen(&*deps.store)? {
         summary.frozen = true;
         return Ok(summary);
     }
     let resumed = recover(deps, hooks.reap)?;
+    summary.errors.extend(sweep::startup_sweep(deps));
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
     let (gate_tx, gate_rx) = mpsc::channel::<GateJob>();
     let stats = GateStats::default();
     let result = std::thread::scope(|scope| {
-        let gate_msgs = msg_tx.clone();
-        let stats = &stats;
+        let (gate_msgs, stats) = (msg_tx.clone(), &stats);
         scope.spawn(move || gate_loop(deps, &gate_rx, &gate_msgs, stats));
         let mut scheduler = Scheduler {
             deps,
+            audit,
             mode,
             msg_tx,
             msg_rx,
             gate_tx,
-            jobs: VecDeque::new(),
-            active: 0,
-            in_gate: 0,
-            started: HashSet::new(),
-            restarts: HashMap::new(),
             parked: HashSet::new(),
+            gating_in_flight: HashSet::new(),
+            state: LoopState::default(),
             summary,
         };
-        let result = scheduler.drive(scope, hooks, resumed);
-        // Dropping the scheduler closes the gate queue, which ends the gate
-        // thread; the scope then waits for every thread.
-        result.map(|()| scheduler.summary)
+        scheduler
+            .drive(scope, hooks, resumed)
+            .map(|()| scheduler.summary)
     });
     let mut summary = result?;
     summary.gate_runs = stats.runs.load(Ordering::Relaxed);
@@ -121,25 +92,30 @@ pub fn run(deps: &Deps, mode: Mode, hooks: &Hooks<'_>) -> PortResult<RunSummary>
     Ok(summary)
 }
 
-struct Scheduler<'a> {
-    deps: &'a Deps,
+#[derive(Default)]
+struct LoopState {
+    jobs: VecDeque<Job>,
+    active: usize,
+    in_gate: usize,
+    started: HashSet<String>,
+    restarts: HashMap<String, usize>,
+    gate_retries: HashMap<String, u32>,
+    transient_retries: HashMap<String, u32>,
+    default_wait_until: Option<i64>,
+    task_wait_until: HashMap<String, i64>,
+}
+
+pub(super) struct Scheduler<'a> {
+    pub(super) deps: &'a Deps,
+    audit: Option<&'a AuditBackend>,
     mode: Mode,
     msg_tx: Sender<Msg>,
     msg_rx: Receiver<Msg>,
     gate_tx: Sender<GateJob>,
-    /// Audits and unblock steps waiting for an account; served before new
-    /// tasks so work in flight finishes first.
-    jobs: VecDeque<Job>,
-    active: usize,
-    in_gate: usize,
-    /// Tasks whose agent ran in this invocation.
-    started: HashSet<String>,
-    /// Times a task was started again in this invocation after its account
-    /// ran into a usage limit.
-    restarts: HashMap<String, usize>,
-    /// Tasks left Ready to wait for an account's cooldown.
-    parked: HashSet<String>,
-    summary: RunSummary,
+    pub(super) parked: HashSet<String>,
+    pub(super) gating_in_flight: HashSet<String>,
+    state: LoopState,
+    pub(super) summary: RunSummary,
 }
 
 impl<'a> Scheduler<'a> {
@@ -152,125 +128,241 @@ impl<'a> Scheduler<'a> {
     where
         'a: 'scope,
     {
-        for task_id in resumed {
-            let worktree = self.deps.git.task_worktree(&task_id)?;
-            self.queue_gate(GateJob {
-                task_id,
-                worktree,
-                audited: false,
-            })?;
-        }
-        // New task branches are cut from the base as it is now, not as it
-        // was at the last fetch.
         let fresh = self.fetch_base();
         self.sweep_review(fresh)?;
+        for task_id in resumed {
+            self.queue_gating_task(task_id)?;
+        }
         loop {
             let frozen = is_frozen(&*self.deps.store)?;
-            // After an infra failure no agent starts: work already running
-            // and gates already queued finish, nothing new begins.
             let halted = self.summary.halted.is_some();
             if !frozen && !halted {
+                if self.mode == Mode::Auto {
+                    self.poll_gating()?;
+                }
                 self.start_jobs(scope)?;
             }
-            if self.active > 0 || self.in_gate > 0 {
-                // The scheduler holds a sender itself, so this only fails if
-                // the channel is broken beyond repair.
+            if self.state.active > 0 || self.state.in_gate > 0 {
                 let msg = self
                     .msg_rx
                     .recv()
                     .map_err(|_| PortError::Io("factory message channel closed".to_string()))?;
-                self.handle(msg)?;
+                match msg {
+                    Msg::Worker(outcome) => self.handle_worker(outcome)?,
+                    Msg::Gate { job, resolution } => self.handle_gate(job, resolution)?,
+                }
                 continue;
             }
             self.summary.frozen = frozen;
-            // A parked task counts once: `startable` skips it in
-            // `Mode::Once` (it was started) and lists it in `Mode::Auto`.
             let startable = self.startable()?;
-            let parked = self.parked.iter().filter(|id| !startable.contains(id));
-            let waiting = self.jobs.len() + startable.len() + parked.count();
+            let capped = !startable.is_empty()
+                && self
+                    .review_cap()
+                    .is_some_and(|cap| self.open_review_and_scopes().is_ok_and(|(o, _)| o >= cap));
+            let parked = self
+                .parked
+                .iter()
+                .filter(|id| !startable.iter().any(|t| t.id == **id))
+                .count();
+            let waiting = self.state.jobs.len() + parked + if capped { 0 } else { startable.len() };
             if !halted {
-                // A halted run's tasks wait for the login or the network,
-                // which `halted` says; no account would start them.
                 self.summary.waiting_for_account = u32::try_from(waiting).unwrap_or(u32::MAX);
             }
             if frozen || halted || self.mode == Mode::Once || !(hooks.idle)() {
                 return Ok(());
             }
+            self.parked.clear();
             self.sweep_review(false)?;
         }
     }
 
-    /// Ready tasks of this repository whose dependencies are all done, in
-    /// board order (priority, then age).
-    fn startable(&self) -> PortResult<Vec<String>> {
-        let store = &self.deps.store;
-        let repo = Some(self.deps.settings.repo_root.as_str());
-        let mut ids = Vec::new();
-        for task in store.list_tasks(repo, Some(TaskState::Ready))? {
-            if self.mode == Mode::Once && self.started.contains(&task.id) {
-                continue;
-            }
-            let mut open = false;
-            for dep in store.deps_of(&task.id)? {
-                // A dependency that no longer exists can never be done.
-                open |= !store
-                    .get_task(&dep)
-                    .is_ok_and(|t| t.state == TaskState::Done);
-            }
-            if !open {
-                ids.push(task.id);
+    pub(super) fn default_cooling_down(&mut self) -> bool {
+        if self
+            .state
+            .default_wait_until
+            .is_some_and(|u| self.deps.now() < u)
+        {
+            return true;
+        }
+        self.state.default_wait_until = None;
+        false
+    }
+
+    pub(super) fn queue_gating_task(&mut self, task_id: String) -> PortResult<()> {
+        match self.deps.git.task_worktree(&task_id) {
+            Ok(worktree) => self.queue_gate(GateJob {
+                task_id,
+                worktree,
+                audited: false,
+            }),
+            Err(err) => {
+                let outcome = worker::block_infra(self.deps, &task_id, &err.to_string());
+                self.summary.errors.extend(outcome.error);
+                self.summary.blocked.push(task_id);
+                Ok(())
             }
         }
-        Ok(ids)
+    }
+
+    fn review_cap(&self) -> Option<usize> {
+        (!self.deps.settings.auto_merge && self.deps.settings.repo.run.max_open_review > 0)
+            .then_some(self.deps.settings.repo.run.max_open_review as usize)
+    }
+
+    fn open_review_and_scopes(&self) -> PortResult<(usize, Vec<Vec<String>>)> {
+        let tasks = self
+            .deps
+            .store
+            .list_tasks(Some(self.deps.settings.repo_root.as_str()), None)?;
+        Ok(schedule_order::open_review_and_scopes(&tasks))
+    }
+
+    /// Ready tasks whose dependencies are Done, ordered by priority then critical path.
+    fn startable(&mut self) -> PortResult<Vec<Task>> {
+        let now = self.deps.now();
+        self.state
+            .task_wait_until
+            .retain(|_, &mut until| until > now);
+        let can_settle = self.summary.halted.is_none() && !is_frozen(&*self.deps.store)?;
+        let repo = Some(self.deps.settings.repo_root.as_str());
+        loop {
+            let all_tasks = self.deps.store.list_tasks(repo, None)?;
+            let all_deps = self.deps.store.all_deps()?;
+            let mut ready: Vec<Task> = all_tasks
+                .iter()
+                .filter(|t| t.state == TaskState::Ready)
+                .cloned()
+                .collect();
+            schedule_order::sort_ready_by_priority_and_critical_path(&mut ready, &all_deps);
+            self.summary.blocked_upstream =
+                schedule_order::blocked_upstream_tasks(&ready, &all_tasks, &all_deps);
+            let states: HashMap<&str, TaskState> =
+                all_tasks.iter().map(|t| (t.id.as_str(), t.state)).collect();
+            let deps_map = schedule_order::deps_by_task(&all_deps);
+            let dep_done = |d: &str| {
+                states.get(d).copied().map_or_else(
+                    || {
+                        self.deps
+                            .store
+                            .get_task(d)
+                            .is_ok_and(|t| t.state == TaskState::Done)
+                    },
+                    |s| s == TaskState::Done,
+                )
+            };
+            let (mut out, mut settled_parent) = (Vec::new(), false);
+            for task in ready {
+                if (self.mode == Mode::Once && self.state.started.contains(&task.id))
+                    || self.parked.contains(&task.id)
+                    || self
+                        .state
+                        .task_wait_until
+                        .get(&task.id)
+                        .is_some_and(|&u| u > now)
+                    || deps_map
+                        .get(task.id.as_str())
+                        .is_some_and(|ds| ds.iter().any(|d| !dep_done(d)))
+                {
+                    continue;
+                }
+                if can_settle && self.try_auto_complete_split_parent(&task)? {
+                    settled_parent = true;
+                    continue;
+                }
+                out.push(task);
+            }
+            if !settled_parent {
+                return Ok(out);
+            }
+        }
+    }
+
+    fn pool_for(&self, for_audit: bool) -> &dyn AccountPool {
+        match (for_audit, self.audit) {
+            (true, Some(backend)) => &*backend.accounts,
+            _ => &*self.deps.accounts,
+        }
+    }
+
+    fn pick_next_agent(&mut self, swept_for_cap: &mut bool) -> PortResult<Option<String>> {
+        let candidates = self.startable()?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let (mut open, mut scopes) = self.open_review_and_scopes()?;
+        if let Some(cap) = self.review_cap()
+            && open >= cap
+        {
+            if !*swept_for_cap {
+                *swept_for_cap = true;
+                self.sweep_review(false)?;
+                (open, scopes) = self.open_review_and_scopes()?;
+            }
+            if open >= cap {
+                self.summary.waiting_for_review_cap =
+                    self.summary.waiting_for_review_cap.saturating_add(1);
+                return Ok(None);
+            }
+        }
+        Ok(candidates
+            .into_iter()
+            .find(|t| {
+                !scopes
+                    .iter()
+                    .any(|s| schedule_order::scopes_overlap(&t.scope_paths, s))
+            })
+            .map(|t| t.id))
     }
 
     fn start_jobs<'scope>(&mut self, scope: &'scope Scope<'scope, '_>) -> PortResult<()>
     where
         'a: 'scope,
     {
+        if self.default_cooling_down() {
+            return Ok(());
+        }
         let limit = self.deps.settings.max_parallel.max(1) as usize;
-        while self.active < limit {
-            let job = match self.jobs.pop_front() {
+        let mut swept_for_cap = false;
+        while self.state.active < limit {
+            let job = match self.state.jobs.pop_front() {
                 Some(job) => job,
-                None => match self.startable()?.into_iter().next() {
+                None => match self.pick_next_agent(&mut swept_for_cap)? {
                     Some(task_id) => Job::Agent { task_id },
                     None => break,
                 },
             };
-            let purpose = match job {
-                Job::Audit { .. } => Purpose::Audit,
-                _ => Purpose::Work,
+            let is_audit = matches!(job, Job::Audit { .. });
+            let purpose = if is_audit {
+                Purpose::Audit
+            } else {
+                Purpose::Work
             };
-            let Some(grant) = self.deps.accounts.acquire_for(job.task_id(), purpose)? else {
-                // No account this job may run on is free (all busy or
-                // cooling down, or the one it is bound to): wait, never
-                // fail. A new task is simply found again on the next pass.
+            let Some(grant) = self
+                .pool_for(is_audit)
+                .acquire_for(job.task_id(), purpose)?
+            else {
                 if !matches!(job, Job::Agent { .. }) {
-                    self.jobs.push_front(job);
+                    self.state.jobs.push_front(job);
                 }
                 break;
             };
             if let Job::Agent { task_id } = &job {
                 self.deps
                     .move_to(task_id, TaskState::Running, None, "picked by aaf run")?;
-                self.started.insert(task_id.clone());
+                self.state.started.insert(task_id.clone());
                 self.parked.remove(task_id);
-                // Running again after a usage limit: no longer just requeued.
                 self.summary.requeued.retain(|id| id != task_id);
                 self.summary.agent_runs += 1;
             }
-            self.active += 1;
-            let deps = self.deps;
-            let tx = self.msg_tx.clone();
+            self.state.active += 1;
+            let (deps, audit, tx) = (self.deps, self.audit, self.msg_tx.clone());
             scope.spawn(move || {
                 let task_id = job.task_id().to_string();
-                let outcome = catch_unwind(AssertUnwindSafe(|| worker::run_job(deps, job, &grant)))
-                    .unwrap_or_else(|_| worker::block_infra(deps, &task_id, "the worker panicked"));
-                // Released before the scheduler hears about it, so the
-                // account is free for the job it starts next.
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    worker::run_job(deps, audit, job, &grant)
+                }))
+                .unwrap_or_else(|_| worker::block_infra(deps, &task_id, "the worker panicked"));
                 drop(grant);
-                // The receiver is gone only when the scheduler already
-                // returned an error; nothing is left to tell.
                 let _ = tx.send(Msg::Worker(outcome));
             });
         }
@@ -278,232 +370,228 @@ impl<'a> Scheduler<'a> {
     }
 
     fn queue_gate(&mut self, job: GateJob) -> PortResult<()> {
-        self.in_gate += 1;
-        self.gate_tx
-            .send(job)
-            .map_err(|_| PortError::Io("the gate thread is gone".to_string()))
+        let id = job.task_id.clone();
+        self.gating_in_flight.insert(id.clone());
+        self.state.in_gate += 1;
+        if self.gate_tx.send(job).is_err() {
+            self.gating_in_flight.remove(&id);
+            self.state.in_gate -= 1;
+            return Err(PortError::Io("the gate thread is gone".to_string()));
+        }
+        Ok(())
     }
 
-    fn handle(&mut self, msg: Msg) -> PortResult<()> {
-        match msg {
-            Msg::Worker(outcome) => {
-                self.active -= 1;
-                self.summary.errors.extend(outcome.error);
-                match outcome.next {
-                    // The worker is already gone: the task waits for the
-                    // gate without holding a slot or an account.
-                    Next::Gate(job) => self.queue_gate(job)?,
-                    Next::Ready => self.summary.requeued.push(outcome.task_id),
-                    Next::Switch => {
-                        // The limit was the account's, and that account is
-                        // cooling down now: in `Mode::Once` the task may
-                        // start again on another one instead of waiting for
-                        // the next `aaf run`. One restart per known account
-                        // at most, so an account that never cools down (a
-                        // reset time in the past) cannot keep the run going.
-                        let limit = self.deps.accounts.profiles()?.len();
-                        let restarts = self.restarts.entry(outcome.task_id.clone()).or_insert(0);
-                        if *restarts < limit {
-                            *restarts += 1;
-                            self.started.remove(&outcome.task_id);
-                        }
-                        self.summary.requeued.push(outcome.task_id);
-                    }
-                    Next::Wait => {
-                        // It stays in `started`: this invocation does not
-                        // run it again, on this account or on another.
-                        self.parked.insert(outcome.task_id.clone());
-                        self.summary.requeued.push(outcome.task_id);
-                    }
-                    Next::Halt(why) => {
-                        // An agent run's task is back in Ready; an audit's
-                        // stays in Gating for the next run's gate.
-                        let state = self.deps.store.get_task(&outcome.task_id)?.state;
-                        if state == TaskState::Ready {
-                            self.summary.requeued.push(outcome.task_id);
-                        }
-                        // The first one says it; a second worker failing the
-                        // same way in parallel adds nothing new.
-                        self.summary.halted.get_or_insert(why);
-                    }
-                    Next::Blocked => self.summary.blocked.push(outcome.task_id),
-                }
+    fn requeue_if_ready(&mut self, task_id: String, state: TaskState) {
+        if state == TaskState::Ready && !self.summary.requeued.contains(&task_id) {
+            self.summary.requeued.push(task_id);
+        }
+    }
+
+    fn clear_gating(&mut self, task_id: &str) {
+        self.gating_in_flight.remove(task_id);
+        self.state.gate_retries.remove(task_id);
+    }
+
+    fn handle_worker(&mut self, outcome: Outcome) -> PortResult<()> {
+        self.state.active -= 1;
+        self.summary.errors.extend(outcome.error);
+        if !matches!(outcome.next, Next::Gate(_) | Next::Unblock { .. }) {
+            self.gating_in_flight.remove(&outcome.task_id);
+        }
+        match outcome.next {
+            Next::Gate(job) => {
+                self.state.transient_retries.remove(&outcome.task_id);
+                self.queue_gate(job)?;
             }
-            Msg::Gate { job, resolution } => {
-                self.in_gate -= 1;
-                match resolution {
-                    Ok(Resolution::Settled(state)) => match state {
-                        TaskState::Done => self.summary.done.push(job.task_id),
-                        TaskState::Review => self.summary.review.push(job.task_id),
-                        _ => self.summary.blocked.push(job.task_id),
-                    },
-                    Ok(Resolution::NeedsAudit { lock_fp }) => {
-                        self.jobs.push_back(Job::Audit { job, lock_fp });
-                    }
-                    Ok(Resolution::Failed(signal)) => {
-                        self.jobs.push_back(Job::Unblock { job, signal });
-                    }
-                    Ok(Resolution::Retry) => self.queue_gate(job)?,
-                    Err(error) => {
-                        let outcome = worker::block_infra(self.deps, &job.task_id, &error);
-                        self.summary.errors.extend(outcome.error);
-                        self.summary.blocked.push(job.task_id);
-                    }
-                }
+            Next::Unblock {
+                task_id,
+                worktree,
+                signal,
+            } => self.state.jobs.push_back(Job::Unblock {
+                job: GateJob {
+                    task_id,
+                    worktree,
+                    audited: false,
+                },
+                signal,
+            }),
+            Next::Ready => {
+                self.state.transient_retries.remove(&outcome.task_id);
+                self.summary.requeued.push(outcome.task_id);
+            }
+            Next::Switch => self.handle_switch(outcome.task_id)?,
+            Next::Wait { until } => self.handle_wait(outcome.task_id, until)?,
+            Next::RetryAfter {
+                until,
+                attempt,
+                detail,
+            } => self.handle_retry_after(outcome.task_id, until, attempt, detail)?,
+            Next::Halt(why) => {
+                let state = self.deps.store.get_task(&outcome.task_id)?.state;
+                self.requeue_if_ready(outcome.task_id, state);
+                self.summary.halted.get_or_insert(why);
+            }
+            Next::Blocked => {
+                self.state.transient_retries.remove(&outcome.task_id);
+                self.summary.blocked.push(outcome.task_id);
             }
         }
         Ok(())
     }
 
-    /// A task in Review whose branch has reached the base is done: this is
-    /// how a merged pull request releases the tasks that depend on it.
-    fn sweep_review(&mut self, base_is_fresh: bool) -> PortResult<()> {
-        let deps = self.deps;
-        let repo = Some(deps.settings.repo_root.as_str());
-        let review = deps.store.list_tasks(repo, Some(TaskState::Review))?;
-        // Offline: the tasks stay in Review and are looked at again on the
-        // next sweep.
-        if review.is_empty() || !(base_is_fresh || self.fetch_base()) {
+    fn handle_switch(&mut self, task_id: String) -> PortResult<()> {
+        let state = self.deps.store.get_task(&task_id)?.state;
+        let count = self
+            .pool_for(state == TaskState::Gating)
+            .provider_account_count()?;
+        if count == 0 {
+            self.state.default_wait_until =
+                Some(self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
+            self.parked.insert(task_id.clone());
+            self.requeue_if_ready(task_id, state);
             return Ok(());
         }
-        for task in review {
-            if deps.git.is_merged(&task.id)? {
-                deps.move_to(
-                    &task.id,
-                    TaskState::Done,
-                    None,
-                    "branch is merged into the base",
-                )?;
-                finish::close(deps, &task)?;
-                if let Err(err) = deps.git.cleanup(&task.id) {
-                    // The task is done either way; the leftover worktree
-                    // only costs disk.
-                    self.summary.errors.push(format!("{}: {err}", task.id));
-                }
-                self.summary.done.push(task.id);
+        let restarts = self.state.restarts.entry(task_id.clone()).or_insert(0);
+        let can_retry = *restarts < count.max(1);
+        if can_retry {
+            *restarts += 1;
+        }
+        if state == TaskState::Gating {
+            if can_retry {
+                self.queue_gating_task(task_id)?;
+            } else {
+                self.parked.insert(task_id);
             }
+        } else {
+            if can_retry {
+                self.state.started.remove(&task_id);
+            }
+            self.summary.requeued.push(task_id);
         }
         Ok(())
     }
 
-    /// False when the remote could not be reached; the run goes on with the
-    /// base it has.
-    fn fetch_base(&mut self) -> bool {
-        match self.deps.git.fetch_base() {
-            Ok(()) => true,
-            Err(err) => {
-                self.summary.errors.push(format!("fetch: {err}"));
-                false
+    fn handle_wait(&mut self, task_id: String, until: Option<i64>) -> PortResult<()> {
+        let state = self.deps.store.get_task(&task_id)?.state;
+        let now = self.deps.now();
+        let count = self
+            .pool_for(state == TaskState::Gating)
+            .provider_account_count()?;
+        if count == 0 {
+            let deadline = until
+                .filter(|&u| u > now)
+                .unwrap_or(now + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
+            self.state.default_wait_until = Some(deadline);
+        } else if let Some(deadline) = until.filter(|&u| u > now) {
+            self.state.task_wait_until.insert(task_id.clone(), deadline);
+        }
+        self.parked.insert(task_id.clone());
+        self.requeue_if_ready(task_id, state);
+        Ok(())
+    }
+
+    fn handle_retry_after(
+        &mut self,
+        task_id: String,
+        hint_until: i64,
+        hint_attempt: u32,
+        detail: String,
+    ) -> PortResult<()> {
+        let state = self.deps.store.get_task(&task_id)?.state;
+        self.requeue_if_ready(task_id.clone(), state);
+        if self.mode == Mode::Once {
+            self.summary.halted.get_or_insert(detail);
+            return Ok(());
+        }
+        let tries = self
+            .state
+            .transient_retries
+            .entry(task_id.clone())
+            .or_insert(0);
+        *tries = (*tries)
+            .max(hint_attempt.saturating_sub(1))
+            .saturating_add(1);
+        if *tries <= MAX_TRANSIENT_RETRIES {
+            let wait = i64::try_from(transient_backoff_secs(*tries)).unwrap_or(60);
+            let deadline = hint_until.max(self.deps.now() + wait);
+            self.state.task_wait_until.insert(task_id, deadline);
+        } else {
+            self.summary.halted.get_or_insert(detail);
+        }
+        Ok(())
+    }
+
+    fn handle_gate(
+        &mut self,
+        job: GateJob,
+        resolution: Result<Resolution, String>,
+    ) -> PortResult<()> {
+        self.state.in_gate -= 1;
+        match resolution {
+            Ok(Resolution::Settled(state)) => {
+                self.clear_gating(&job.task_id);
+                self.state.transient_retries.remove(&job.task_id);
+                match state {
+                    TaskState::Done => self.summary.done.push(job.task_id),
+                    TaskState::Review => self.summary.review.push(job.task_id),
+                    _ => self.summary.blocked.push(job.task_id),
+                }
+            }
+            Ok(Resolution::NeedsAudit { lock_fp }) => {
+                self.state.jobs.push_back(Job::Audit { job, lock_fp });
+            }
+            Ok(Resolution::Failed(signal)) => {
+                self.state.jobs.push_back(Job::Unblock { job, signal });
+            }
+            Ok(Resolution::Retry) => {
+                let count = self
+                    .state
+                    .gate_retries
+                    .entry(job.task_id.clone())
+                    .or_insert(0);
+                *count += 1;
+                if *count > MAX_GATE_RETRIES {
+                    self.clear_gating(&job.task_id);
+                    let why =
+                        format!("gate/merge retried {MAX_GATE_RETRIES} times without landing");
+                    unblock::block_untried(self.deps, &job.task_id, &why)?;
+                    self.summary.blocked.push(job.task_id);
+                } else {
+                    self.queue_gate(job)?;
+                }
+            }
+            Err(error) => {
+                self.clear_gating(&job.task_id);
+                let outcome = worker::block_infra(self.deps, &job.task_id, &error);
+                self.summary.errors.extend(outcome.error);
+                self.summary.blocked.push(job.task_id);
             }
         }
+        Ok(())
     }
 }
 
 fn gate_loop(deps: &Deps, queue: &Receiver<GateJob>, tx: &Sender<Msg>, stats: &GateStats) {
     while let Ok(first) = queue.recv() {
-        // Everything that queued up while the previous round ran becomes
-        // one batch: the longer the queue, the larger the batch.
         let mut jobs = vec![first];
         jobs.extend(queue.try_iter());
         let pending = Mutex::new(jobs.clone());
         let round = catch_unwind(AssertUnwindSafe(|| {
-            gate_round(deps, jobs, tx, stats, &pending);
+            judge_round(deps, jobs, stats, &|job, resolution| {
+                if let Ok(mut pending) = pending.lock() {
+                    pending.retain(|p| p.task_id != job.task_id);
+                }
+                let _ = tx.send(Msg::Gate { job, resolution });
+            });
         }));
         if round.is_err() {
-            // Every task of the round still has to be answered, or the
-            // scheduler would wait for it forever.
             let left = pending.lock().map(|mut p| std::mem::take(&mut *p));
             for job in left.unwrap_or_default() {
-                report(tx, job, Err("the gate thread panicked".to_string()));
+                let _ = tx.send(Msg::Gate {
+                    job,
+                    resolution: Err("the gate thread panicked".to_string()),
+                });
             }
         }
-    }
-}
-
-fn report(tx: &Sender<Msg>, job: GateJob, resolution: Result<Resolution, String>) {
-    // The receiver is gone only when the scheduler already returned an
-    // error; nothing is left to tell.
-    let _ = tx.send(Msg::Gate { job, resolution });
-}
-
-fn gate_round(
-    deps: &Deps,
-    jobs: Vec<GateJob>,
-    tx: &Sender<Msg>,
-    stats: &GateStats,
-    pending: &Mutex<Vec<GateJob>>,
-) {
-    judge_round(deps, jobs, stats, &|job, resolution| {
-        if let Ok(mut pending) = pending.lock() {
-            pending.retain(|p| p.task_id != job.task_id);
-        }
-        report(tx, job, resolution);
-    });
-}
-
-/// One gate round: judges `jobs` with as few gate runs as possible and hands
-/// every job's resolution to `answer`, in board order.
-pub(super) fn judge_round(
-    deps: &Deps,
-    jobs: Vec<GateJob>,
-    stats: &GateStats,
-    answer: &dyn Fn(GateJob, Result<Resolution, String>),
-) {
-    let member = |job: &GateJob| Member {
-        task_id: job.task_id.clone(),
-        worktree: job.worktree.clone(),
-    };
-
-    let mut batch: Vec<GateJob> = Vec::new();
-    let mut alone: Vec<GateJob> = Vec::new();
-    for job in jobs {
-        match deps.gate.head_lock(&job.worktree.path) {
-            Ok(lock) if lock.status == LockStatus::Clear => batch.push(job),
-            Ok(lock)
-                if lock.status == LockStatus::Blocked
-                    && !job.audited
-                    && !lock.lock_fp.is_empty() =>
-            {
-                let lock_fp = lock.lock_fp;
-                answer(job, Ok(Resolution::NeedsAudit { lock_fp }));
-            }
-            // Approved, still blocked after its audit, or unreadable: the
-            // approval lives with the task's own worktree, so that is where
-            // the gate has to run, and its receipt says what is wrong.
-            _ => alone.push(job),
-        }
-    }
-
-    let members: Vec<Member> = batch.iter().map(member).collect();
-    let mut outcome = gate_batch(&*deps.git, &*deps.gate, &members);
-    for job in &alone {
-        let single = gate_batch(&*deps.git, &*deps.gate, &[member(job)]);
-        outcome.verdicts.extend(single.verdicts);
-        outcome.gate_runs += single.gate_runs;
-    }
-    stats.runs.fetch_add(outcome.gate_runs, Ordering::Relaxed);
-    if let Ok(mut warnings) = stats.warnings.lock() {
-        warnings.append(&mut outcome.warnings);
-    }
-
-    // Only the batch has groups: a task gated alone has no integration tree.
-    let mut round = Round {
-        groups: std::mem::take(&mut outcome.groups),
-        gate_runs: &stats.runs,
-        warnings: &stats.warnings,
-    };
-    // Board order, so the merges of a clear batch land by priority.
-    for job in batch.into_iter().chain(alone) {
-        let Some(at) = outcome
-            .verdicts
-            .iter()
-            .position(|j| j.task_id == job.task_id)
-        else {
-            answer(job, Err("the gate returned no verdict".to_string()));
-            continue;
-        };
-        let judged = outcome.verdicts.swap_remove(at);
-        let resolution = finish::settle(deps, &job, judged, &mut round).map_err(|e| e.to_string());
-        answer(job, resolution);
     }
 }

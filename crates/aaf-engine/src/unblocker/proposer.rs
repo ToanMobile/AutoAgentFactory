@@ -7,7 +7,7 @@
 use serde::Deserialize;
 
 use aaf_domain::blocked::{BlockedReason, SubtaskPlan};
-use aaf_domain::ports::{AgentRequest, AgentRunner, BudgetStore, PortResult};
+use aaf_domain::ports::{AgentRequest, AgentRunner, BudgetStore, PortError, PortResult};
 use aaf_domain::task::Task;
 
 pub const MAX_PLANS: usize = 4;
@@ -113,6 +113,12 @@ impl SubtaskProposer for AgentSubtaskProposer<'_> {
             0,
             0,
         )?;
+        if let Some(infra) = &outcome.infra {
+            return Err(PortError::Io(format!("infra: {}", infra.raw)));
+        }
+        if let Some(hit) = &outcome.limit_hit {
+            return Err(PortError::Io(format!("limit_hit: {}", hit.raw)));
+        }
         if !outcome.succeeded() {
             return Ok(Vec::new());
         }

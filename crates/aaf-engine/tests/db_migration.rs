@@ -270,7 +270,8 @@ fn opening_twice_changes_neither_schema_nor_data() {
             "root_budgets",
             "runs",
             "task_deps",
-            "tasks"
+            "tasks",
+            "turn_snapshots"
         ]
     );
 

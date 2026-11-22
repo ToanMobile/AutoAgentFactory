@@ -13,6 +13,7 @@ fn listed_writable_paths_under_a_worktrees_dir_are_dropped() {
     let own = root.join("autofactory/worktrees/repo/my-task");
     let policy = SandboxPolicy {
         enabled: true,
+        read_only: false,
         writable_paths: vec![sibling.to_string_lossy().into_owned()],
         read_denied_paths: Vec::new(),
     };
@@ -54,6 +55,7 @@ fn custom_worktrees_root_closes_siblings_and_reopens_only_the_own_worktree() {
     let own = wt_root.join("repo/my-task");
     let policy = SandboxPolicy {
         enabled: true,
+        read_only: false,
         writable_paths: vec![
             sibling.to_string_lossy().into_owned(),
             root.to_string_lossy().into_owned(),

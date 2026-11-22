@@ -27,6 +27,11 @@ pub fn render_repo_config(detected: &Detected, name: &str) -> String {
     let gate = &defaults.gate;
     let unblocker = &defaults.unblocker;
     let run = &defaults.run;
+    let cross_audit = &defaults.cross_audit;
+    let proof = &defaults.proof;
+    let github = &defaults.github;
+    let pipeline = &defaults.pipeline;
+    let columns = &github.columns;
     let cmds = &detected.commands;
 
     let evidence = if detected.evidence.is_empty() {
@@ -122,6 +127,30 @@ effort = \"\"
 # The agent gets an allow-list of aaf's environment (PATH, HOME, locale, the
 # toolchain homes), not all of it. Names listed here are passed as well.
 env_pass = []
+# Queue brake when auto_merge = false: 0 disables the cap, positive values
+# bound Review + Running + Gating tasks before starting more work.
+max_open_review = {max_open_review}
+
+# Optional separate provider/model for adversarial cross-audit of head-locked files.
+[cross_audit]
+# Empty = reuse [run].executor. One of: claude, codex, gemini, opencode, custom.
+executor = {ca_executor}
+# Command template when executor is custom (or override binary/args).
+executor_cmd = {ca_executor_cmd}
+# Optional model and reasoning effort overrides for the auditor run.
+model = {ca_model}
+effort = {ca_effort}
+# true = fail closed instead of falling back to same_account when no different provider is configured.
+require_different_provider = {ca_require_diff}
+
+# HMAC-signed screenshot proof verification (used by `aaf proof` and `aaf gate`).
+[proof]
+required = {proof_required}
+min_bytes = {proof_min_bytes}
+min_width = {proof_min_width}
+min_height = {proof_min_height}
+denylist_file = {proof_denylist}
+allowed_tools = [
 ",
         store = quoted(store),
         min_sdk = gate.min_android_target_sdk,
@@ -135,6 +164,66 @@ env_pass = []
         auto_merge = run.auto_merge,
         max_parallel = run.max_parallel,
         run_timeout = run.run_timeout_secs,
+        max_open_review = run.max_open_review,
+        ca_executor = quoted(&cross_audit.executor),
+        ca_executor_cmd = quoted(&cross_audit.executor_cmd),
+        ca_model = quoted(&cross_audit.model),
+        ca_effort = quoted(&cross_audit.effort),
+        ca_require_diff = cross_audit.require_different_provider,
+        proof_required = proof.required,
+        proof_min_bytes = proof.min_bytes,
+        proof_min_width = proof.min_width,
+        proof_min_height = proof.min_height,
+        proof_denylist = quoted(&proof.denylist_file),
+    );
+    for tool in &proof.allowed_tools {
+        let _ = writeln!(out, "    {},", quoted(tool));
+    }
+    let _ = write!(
+        out,
+        "\
+]
+
+# GitHub issues import and Projects v2 / status-label board sync.
+[github]
+enabled = {gh_enabled}
+repo = {gh_repo}
+project_owner = {gh_owner}
+# Set project_number to sync a GitHub Projects v2 Status field instead of issue labels.
+# project_number = 1
+label_filter = {gh_label_filter}
+
+[github.columns]
+backlog = {col_backlog}
+ready = {col_ready}
+running = {col_running}
+gating = {col_gating}
+review = {col_review}
+blocked = {col_blocked}
+done = {col_done}
+cancelled = {col_cancelled}
+
+# Optional multi-stage pipeline (read-only plan stage and automatic audit rework).
+[pipeline]
+plan_stage = {pipe_plan_stage}
+require_plan_approval = {pipe_require_approval}
+max_audit_reworks = {pipe_max_audit_reworks}
+",
+        gh_enabled = github.enabled,
+        gh_repo = quoted(&github.repo),
+        gh_owner = quoted(&github.project_owner),
+        gh_label_filter = quoted(&github.label_filter),
+        col_backlog = quoted(&columns.backlog),
+        col_ready = quoted(&columns.ready),
+        col_running = quoted(&columns.running),
+        col_gating = quoted(&columns.gating),
+        col_review = quoted(&columns.review),
+        col_blocked = quoted(&columns.blocked),
+        col_done = quoted(&columns.done),
+        col_cancelled = quoted(&columns.cancelled),
+        pipe_plan_stage = pipeline.plan_stage,
+        pipe_require_approval = pipeline.require_plan_approval,
+        pipe_max_audit_reworks = pipeline.max_audit_reworks,
     );
     out
 }

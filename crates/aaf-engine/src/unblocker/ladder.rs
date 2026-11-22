@@ -64,6 +64,12 @@ struct FreezePayload<'a> {
     threshold: u32,
 }
 
+enum WalkOutcome {
+    Decision(UnblockTier, BlockedReason, UnblockAction),
+    /// Proposer aborted due to infra/quota; never charge a cycle or emit T5Escalate.
+    ProposerTransient(UnblockTier, BlockedReason, UnblockAction),
+}
+
 fn to_json<T: Serialize>(value: &T) -> PortResult<String> {
     serde_json::to_string(value).map_err(|e| PortError::Invalid(format!("event payload: {e}")))
 }
@@ -74,7 +80,16 @@ fn marker(tier: UnblockTier, digest: &str) -> String {
 
 fn tried(task: &Task, tier: UnblockTier, digest: &str) -> bool {
     let marker = marker(tier, digest);
-    task.context_notes.iter().any(|n| n.starts_with(&marker))
+    // Human rework resets the unblock tier ladder: scan only notes appended
+    // after the most recent `rework:` note.
+    let start = task
+        .context_notes
+        .iter()
+        .rposition(|n| n.starts_with("rework:"))
+        .map_or(0, |idx| idx + 1);
+    task.context_notes[start..]
+        .iter()
+        .any(|n| n.starts_with(&marker))
 }
 
 fn reason_text(reason: &BlockedReason) -> &str {
@@ -85,6 +100,7 @@ fn reason_text(reason: &BlockedReason) -> &str {
         | BlockedReason::BudgetExceeded { detail } => detail,
         BlockedReason::GateFailed { summary } => summary,
         BlockedReason::NeedsHuman { why } => why,
+        BlockedReason::Infra { detail } => detail,
         BlockedReason::Dependency { task_id } => task_id,
         BlockedReason::Quota { .. } => "",
     }
@@ -140,19 +156,52 @@ impl<'a> Ladder<'a> {
         });
         let now = self.clock.now();
         let task = self.tasks.get_task(task_id)?;
-        let cycle = self.tasks.increment_unblock_cycles(task_id, now)?;
-        let budget = self.charge_cycle(&task.root_id)?;
         let digest = failure_digest(signal);
+        let classified = classify(signal);
 
-        // The store is authoritative; the signal's view may be older.
-        let check = match budget.check() {
-            BudgetCheck::Ok => signal.budget,
-            other => other,
-        };
-        let (tier, reason, action) = if let Some(detail) = budget_detail(check) {
-            self.freeze_root(&task, &budget, detail, now)?
+        let (cycle, tier, reason, action) = if matches!(
+            classified,
+            BlockedReason::Infra { .. } | BlockedReason::Quota { .. }
+        ) {
+            // Upstream infrastructure and quota/rate-limit events must not
+            // burn task unblock cycles or trigger FreezeRoot.
+            let (tier, reason, action) =
+                match self.walk(&task, classified, &digest, quota, proposer, now)? {
+                    WalkOutcome::Decision(t, r, a) | WalkOutcome::ProposerTransient(t, r, a) => {
+                        (t, r, a)
+                    }
+                };
+            (task.unblock_cycles, tier, reason, action)
         } else {
-            self.walk(&task, classify(signal), &digest, quota, proposer, now)?
+            let current = self.ensure_budget(&task.root_id)?;
+            let mut projected = current.clone();
+            projected.add_usage(0, 0, 1);
+            // The store is authoritative; the signal's view may be older.
+            let check = match projected.check() {
+                BudgetCheck::Ok => signal.budget,
+                other => other,
+            };
+            if let Some(detail) = budget_detail(check) {
+                let cycle = self.tasks.increment_unblock_cycles(task_id, now)?;
+                let budget = self.charge_cycle(&task.root_id)?;
+                let (tier, reason, action) = self.freeze_root(&task, &budget, detail, now)?;
+                (cycle, tier, reason, action)
+            } else {
+                match self.walk(&task, classified, &digest, quota, proposer, now)? {
+                    WalkOutcome::ProposerTransient(tier, reason, action) => {
+                        return Ok(UnblockDecision {
+                            tier,
+                            reason,
+                            action,
+                        });
+                    }
+                    WalkOutcome::Decision(tier, reason, action) => {
+                        let cycle = self.tasks.increment_unblock_cycles(task_id, now)?;
+                        self.charge_cycle(&task.root_id)?;
+                        (cycle, tier, reason, action)
+                    }
+                }
+            }
         };
 
         let payload = to_json(&StepPayload {
@@ -169,6 +218,18 @@ impl<'a> Ladder<'a> {
             reason,
             action,
         })
+    }
+
+    fn ensure_budget(&self, root_id: &str) -> PortResult<RootBudget> {
+        match self.budgets.get_budget(root_id) {
+            Ok(budget) => Ok(budget),
+            Err(PortError::NotFound(_)) => {
+                let budget = RootBudget::new(root_id, self.cfg);
+                self.budgets.put_budget(&budget)?;
+                Ok(budget)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn charge_cycle(&self, root_id: &str) -> PortResult<RootBudget> {
@@ -223,7 +284,7 @@ impl<'a> Ladder<'a> {
         quota: QuotaRoute,
         proposer: Option<&dyn SubtaskProposer>,
         now: i64,
-    ) -> PortResult<(UnblockTier, BlockedReason, UnblockAction)> {
+    ) -> PortResult<WalkOutcome> {
         let t2 = UnblockTier::T2Mechanical;
         let mechanical = match &reason {
             // Waiting is the only fix for these two, so they never climb;
@@ -244,17 +305,26 @@ impl<'a> Ladder<'a> {
                 self.note(task, t2, digest, "rerun tests", now)?;
                 Some(UnblockAction::RerunTests)
             }
+            BlockedReason::Infra { .. } if !tried(task, t2, digest) => {
+                self.note(task, t2, digest, "retry after infrastructure failure", now)?;
+                Some(UnblockAction::RetryInfra {
+                    detail: reason_text(&reason).to_string(),
+                })
+            }
             _ => None,
         };
         if let Some(action) = mechanical {
-            return Ok((t2, reason, action));
+            return Ok(WalkOutcome::Decision(t2, reason, action));
         }
         if matches!(
             reason,
-            BlockedReason::NeedsHuman { .. } | BlockedReason::BudgetExceeded { .. }
+            BlockedReason::NeedsHuman { .. }
+                | BlockedReason::BudgetExceeded { .. }
+                | BlockedReason::Infra { .. }
         ) {
             let why = reason_text(&reason).to_string();
-            return Ok(self.escalate(reason, why));
+            let (t, r, a) = self.escalate(reason, why);
+            return Ok(WalkOutcome::Decision(t, r, a));
         }
 
         let t3 = UnblockTier::T3FreshContext;
@@ -268,30 +338,68 @@ impl<'a> Ladder<'a> {
             let action = UnblockAction::RetryFreshContext {
                 digest: digest.to_string(),
             };
-            return Ok((t3, reason, action));
+            return Ok(WalkOutcome::Decision(t3, reason, action));
         }
 
         let t4 = UnblockTier::T4Decompose;
         if tried(task, t4, digest) {
-            return Ok(self.escalate(reason, "decomposition did not fix this failure".into()));
+            let (t, r, a) = self.escalate(reason, "decomposition did not fix this failure".into());
+            return Ok(WalkOutcome::Decision(t, r, a));
         }
         if !can_spawn_subtask(task.depth, self.cfg.max_subtask_depth) {
-            return Ok(self.escalate(reason, "subtask depth limit reached".into()));
+            let (t, r, a) = self.escalate(reason, "subtask depth limit reached".into());
+            return Ok(WalkOutcome::Decision(t, r, a));
         }
         let Some(proposer) = proposer else {
-            return Ok(self.escalate(reason, "no subtask proposer available".into()));
+            let (t, r, a) = self.escalate(reason, "no subtask proposer available".into());
+            return Ok(WalkOutcome::Decision(t, r, a));
         };
         let plans = match proposer.propose(task, &reason, digest) {
             // Proposers are untrusted too: re-validate whatever they return.
             Ok(plans) => validate_plans(plans),
-            Err(e) => return Ok(self.escalate(reason, format!("subtask proposer failed: {e}"))),
+            Err(PortError::Io(msg)) if msg.starts_with("infra:") => {
+                let raw = msg.trim_start_matches("infra:").trim();
+                let detail = if raw.is_empty() {
+                    "subtask proposer infrastructure failure".to_string()
+                } else {
+                    truncate_chars(&one_line(raw), 200)
+                };
+                let infra = BlockedReason::Infra {
+                    detail: detail.clone(),
+                };
+                return Ok(WalkOutcome::ProposerTransient(
+                    t2,
+                    infra,
+                    UnblockAction::RetryInfra { detail },
+                ));
+            }
+            Err(PortError::Io(msg)) if msg.starts_with("limit_hit:") => {
+                let action = match quota {
+                    QuotaRoute::Switch => UnblockAction::SwitchAccount,
+                    QuotaRoute::Wait => UnblockAction::WaitForAccount { until: None },
+                };
+                return Ok(WalkOutcome::ProposerTransient(
+                    t2,
+                    BlockedReason::Quota { reset_at: None },
+                    action,
+                ));
+            }
+            Err(e) => {
+                let (t, r, a) = self.escalate(reason, format!("subtask proposer failed: {e}"));
+                return Ok(WalkOutcome::Decision(t, r, a));
+            }
         };
         if plans.is_empty() {
-            return Ok(self.escalate(reason, "no valid subtask plan was proposed".into()));
+            let (t, r, a) = self.escalate(reason, "no valid subtask plan was proposed".into());
+            return Ok(WalkOutcome::Decision(t, r, a));
         }
         let text = format!("split into {} subtasks", plans.len());
         self.note(task, t4, digest, &text, now)?;
-        Ok((t4, reason, UnblockAction::SpawnSubtasks { plans }))
+        Ok(WalkOutcome::Decision(
+            t4,
+            reason,
+            UnblockAction::SpawnSubtasks { plans },
+        ))
     }
 
     fn escalate(

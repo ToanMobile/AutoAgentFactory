@@ -1,13 +1,22 @@
-//! `aaf board add|list|show|unblock|unfreeze` (docs/PLAN.md C.10): the task
-//! board in the SQLite store, used through the port traits.
+//! `aaf board add|list|show|unblock|unfreeze|rework|split|dep|graph|approve-plan`
+//! (docs/PLAN.md C.10): the task board in the SQLite store, used through the port traits.
 
+mod approve_plan;
+mod dag;
+mod github;
+mod rework;
+pub(crate) mod split;
 pub(crate) mod store;
+mod trace;
+
+use std::collections::HashSet;
 
 use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{BudgetStore, Clock, EventSink, PortError, RunStore, TaskStore};
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 use aaf_engine::factory::adapters::SystemClock;
+use aaf_engine::factory::schedule_order::normalize_scope;
 use aaf_engine::factory::{is_frozen, unfreeze};
 use serde_json::{Value, json};
 
@@ -36,6 +45,22 @@ pub enum BoardCommand {
     Unblock { id: String },
     /// Clear the factory freeze and the consecutive-failure counter.
     Unfreeze,
+    /// Send a task in `review` back for rework (to `gating`, or `ready` with --rerun).
+    Rework(rework::ReworkArgs),
+    /// Show chronological runs, events, tokens, wall-clock and estimated cost for a task.
+    Trace(trace::TraceArgs),
+    /// Import open GitHub issues from allowlisted logins with 72h dedup.
+    ImportIssues(github::ImportIssuesArgs),
+    /// Map board tasks to GitHub Projects v2 status columns (with issue label fallback).
+    SyncGithub(github::SyncGithubArgs),
+    /// Proactively decompose a Ready or Backlog root task into disjoint parallel subtasks.
+    Split(split::SplitArgs),
+    /// Add or remove task dependency edges (`add` / `rm`).
+    Dep(dag::DepArgs),
+    /// Show the task dependency DAG, critical path and cascade-blocked tasks.
+    Graph(dag::GraphArgs),
+    /// Approve a task's generated plan and move it back to Ready.
+    ApprovePlan { id: String },
 }
 
 #[derive(Debug, clap::Args)]
@@ -54,6 +79,9 @@ pub struct AddArgs {
     /// Id of a task that must be Done first; repeat the flag for more.
     #[arg(long = "blocked-by")]
     pub blocked_by: Vec<String>,
+    /// Relative path prefix owned by this task; repeat the flag for more.
+    #[arg(long = "scope")]
+    pub scope: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -73,6 +101,14 @@ pub fn run(args: &BoardArgs, ctx: &Ctx) -> CmdResult {
         BoardCommand::Show { id } => show(id, ctx),
         BoardCommand::Unblock { id } => unblock(id, ctx),
         BoardCommand::Unfreeze => unfreeze_factory(ctx),
+        BoardCommand::Rework(rework_args) => rework::run(rework_args, ctx),
+        BoardCommand::Trace(trace_args) => trace::run(trace_args, ctx),
+        BoardCommand::ImportIssues(import_args) => github::run_import_issues(import_args, ctx),
+        BoardCommand::SyncGithub(sync_args) => github::run_sync_github(sync_args, ctx),
+        BoardCommand::Split(split_args) => split::run_split(split_args, ctx),
+        BoardCommand::Dep(dep_args) => dag::run_dep(dep_args, ctx),
+        BoardCommand::Graph(graph_args) => dag::graph(graph_args, ctx),
+        BoardCommand::ApprovePlan { id } => approve_plan::run(ctx, id),
     }
 }
 
@@ -138,6 +174,15 @@ fn add(args: &AddArgs, ctx: &Ctx) -> CmdResult {
     };
     let priority = Priority::parse(&args.priority)
         .ok_or_else(|| CmdError::new(format!("--priority {}: use P0..P3", args.priority)))?;
+    let mut scope_paths = Vec::with_capacity(args.scope.len());
+    let mut seen_scopes: HashSet<String> = HashSet::with_capacity(args.scope.len());
+    for raw in &args.scope {
+        let norm =
+            normalize_scope(raw).map_err(|msg| CmdError::new(format!("--scope {raw}: {msg}")))?;
+        if seen_scopes.insert(norm.to_ascii_lowercase()) {
+            scope_paths.push(norm);
+        }
+    }
     let repo = repo_root(ctx)?.to_string_lossy().into_owned();
     let db = open_db(ctx)?;
     // Checked before anything is written, so a bad id leaves no task behind.
@@ -156,17 +201,23 @@ fn add(args: &AddArgs, ctx: &Ctx) -> CmdResult {
     let mut task = Task::new_root(id, repo, title, spec, priority, now);
     // `board add` is the human saying "do this": no separate triage step.
     task.state = TaskState::Ready;
+    task.scope_paths = scope_paths;
     db.insert_task(&task).map_err(port)?;
     for blocker in &args.blocked_by {
         db.add_dep(&task.id, blocker).map_err(port)?;
     }
-    let payload = json!({ "title": task.title, "blocked_by": args.blocked_by });
+    let payload = json!({
+        "title": task.title,
+        "blocked_by": args.blocked_by,
+        "scope_paths": task.scope_paths,
+    });
     let event = FactoryEvent::new(EventKind::TaskCreated, payload.to_string(), now);
     db.emit(&event.for_task(&task.id)).map_err(port)?;
 
     Ok(CmdOutput::ok("ok", format!("added {}", task_line(&task)))
         .field("task", task_json(&task)?)
-        .field("blocked_by", json!(args.blocked_by)))
+        .field("blocked_by", json!(args.blocked_by))
+        .field("scope_paths", json!(task.scope_paths)))
 }
 
 fn list(args: &ListArgs, ctx: &Ctx) -> CmdResult {
@@ -237,6 +288,9 @@ fn show(id: &str, ctx: &Ctx) -> CmdResult {
             .iter()
             .map(|a| format!("  accept: {a}")),
     );
+    if !task.scope_paths.is_empty() {
+        text.push(format!("  scope: {}", task.scope_paths.join(", ")));
+    }
     if let Some(reason) = &task.blocked_reason {
         text.push(format!("  blocked: {}", json!(reason)));
     }
@@ -304,6 +358,7 @@ fn unblock(id: &str, ctx: &Ctx) -> CmdResult {
         Ok(_) | Err(PortError::NotFound(_)) => false,
         Err(other) => return Err(port(other)),
     };
+    let plan_approved = approve_plan::maybe_approve_on_unblock(&db, &task, now)?;
     db.set_state(id, TaskState::Ready, None, now)
         .map_err(port)?;
     let payload = json!({
@@ -312,13 +367,15 @@ fn unblock(id: &str, ctx: &Ctx) -> CmdResult {
         "by": "human",
         "was": task.blocked_reason,
         "budget_reset": budget_reset,
+        "plan_approved": plan_approved,
     });
     let event = FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now);
     db.emit(&event.for_task(id)).map_err(port)?;
     Ok(CmdOutput::ok("ok", format!("{id} is ready"))
         .field("task_id", json!(id))
         .field("state", json!(TaskState::Ready))
-        .field("budget_reset", json!(budget_reset)))
+        .field("budget_reset", json!(budget_reset))
+        .field("plan_approved", json!(plan_approved)))
 }
 
 fn unfreeze_factory(ctx: &Ctx) -> CmdResult {

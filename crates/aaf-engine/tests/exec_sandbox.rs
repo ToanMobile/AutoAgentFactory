@@ -9,6 +9,7 @@ use aaf_engine::executors::sandbox::{SandboxPaths, canonical, seatbelt_profile, 
 fn policy(writable: &[&str], denied: &[&str]) -> SandboxPolicy {
     SandboxPolicy {
         enabled: true,
+        read_only: false,
         writable_paths: writable.iter().map(|s| (*s).to_string()).collect(),
         read_denied_paths: denied.iter().map(|s| (*s).to_string()).collect(),
     }
@@ -202,6 +203,7 @@ mod real {
     fn sandboxed(dirs: &Dirs, script: &str) -> PtyOutput {
         let policy = SandboxPolicy {
             enabled: true,
+            read_only: false,
             writable_paths: vec![dirs.allowed.to_string_lossy().into_owned()],
             read_denied_paths: vec![dirs.denied.to_string_lossy().into_owned()],
         };
@@ -280,6 +282,7 @@ mod real {
         std::fs::create_dir(&inner).unwrap();
         let policy = SandboxPolicy {
             enabled: true,
+            read_only: false,
             writable_paths: vec![dirs.allowed.to_string_lossy().into_owned()],
             read_denied_paths: vec![inner.to_string_lossy().into_owned()],
         };
@@ -327,6 +330,7 @@ mod real {
                 timeout_secs: 60,
                 sandbox: SandboxPolicy {
                     enabled: true,
+                    read_only: false,
                     writable_paths: Vec::new(),
                     read_denied_paths: vec![dirs.denied.to_string_lossy().into_owned()],
                 },

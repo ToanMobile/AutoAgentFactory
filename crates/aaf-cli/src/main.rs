@@ -33,6 +33,8 @@ enum Command {
     Accounts(cmd::accounts::AccountsArgs),
     /// Run the gate and write a signed receipt.
     Gate(cmd::gate::GateArgs),
+    /// Clean orphaned worktrees, finished task refs and expired stream/report files.
+    Gc(cmd::gc::GcArgs),
     /// Sign an approval for the current head-lock fingerprint.
     Approve(cmd::approve::ApproveArgs),
     /// Add, list, show, unblock tasks; unfreeze the factory.
@@ -41,6 +43,16 @@ enum Command {
     Run(cmd::run::RunArgs),
     /// Run a command through the machine-wide queue of heavy commands.
     Slot(cmd::slot::SlotArgs),
+    /// Show read-only cost, token, task/run, account and throttle overview.
+    Status(cmd::status::StatusArgs),
+    /// Build a strictly read-only planning prompt.
+    Plan(cmd::plan::PlanArgs),
+    /// Record, verify, or inspect signed device-verification proofs.
+    Proof(cmd::proof::ProofArgs),
+    /// List or sync bundled domain skills into `.claude/skills`.
+    Skills(cmd::skills::SkillsArgs),
+    /// Live read-only terminal dashboard for tasks, heavy slots, accounts and receipt.
+    Watch(cmd::watch::WatchArgs),
 }
 
 impl Command {
@@ -50,10 +62,16 @@ impl Command {
             Command::Doctor(_) => "doctor",
             Command::Accounts(_) => "accounts",
             Command::Gate(_) => "gate",
+            Command::Gc(_) => "gc",
             Command::Approve(_) => "approve",
             Command::Board(_) => "board",
             Command::Run(_) => "run",
             Command::Slot(_) => "slot",
+            Command::Status(_) => "status",
+            Command::Plan(_) => "plan",
+            Command::Proof(_) => "proof",
+            Command::Skills(_) => "skills",
+            Command::Watch(_) => "watch",
         }
     }
 }
@@ -90,10 +108,16 @@ fn main() -> ExitCode {
         Command::Doctor(args) => cmd::doctor::run(args, &ctx),
         Command::Accounts(args) => cmd::accounts::run(args, &ctx),
         Command::Gate(args) => cmd::gate::run(args, &ctx),
+        Command::Gc(args) => cmd::gc::run(args, &ctx),
         Command::Approve(args) => cmd::approve::run(args, &ctx),
         Command::Board(args) => cmd::board::run(args, &ctx),
         Command::Run(args) => cmd::run::run(args, &ctx),
         Command::Slot(args) => cmd::slot::run(args, &ctx),
+        Command::Status(args) => cmd::status::run(args, &ctx),
+        Command::Plan(args) => cmd::plan::run(args, &ctx),
+        Command::Proof(args) => cmd::proof::run(args, &ctx),
+        Command::Skills(args) => cmd::skills::run(args, &ctx),
+        Command::Watch(args) => cmd::watch::run(args, &ctx, cli.json),
     });
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     ExitCode::from(output::emit(cli.json, name, &result, millis))

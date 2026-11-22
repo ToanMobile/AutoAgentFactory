@@ -13,6 +13,7 @@ pub enum BlockedReason {
     GateFailed { summary: String },
     BudgetExceeded { detail: String },
     NeedsHuman { why: String },
+    Infra { detail: String },
 }
 
 impl BlockedReason {
@@ -26,6 +27,7 @@ impl BlockedReason {
             BlockedReason::GateFailed { .. } => "gate_failed",
             BlockedReason::BudgetExceeded { .. } => "budget_exceeded",
             BlockedReason::NeedsHuman { .. } => "needs_human",
+            BlockedReason::Infra { .. } => "infra",
         }
     }
 }
@@ -86,4 +88,5 @@ pub enum UnblockAction {
     SpawnSubtasks { plans: Vec<SubtaskPlan> },
     EscalateHuman { why: String },
     FreezeRoot { why: String },
+    RetryInfra { detail: String },
 }

@@ -3,26 +3,34 @@
 //! runs on its own thread and ends by saying where the task goes next.
 
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
 
 use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::event::EventKind;
 use aaf_domain::ports::{
-    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, InfraKind, PortError, PortResult,
+    AgentOutcome, AgentRequest, InfraFailure, InfraKind, PortError, PortResult,
 };
 use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
-use super::ports::Grant;
-use super::prompt::{build_prompt, sandbox_policy};
+use super::audit_backend::{self, AuditBackend};
+use super::ports::{AccountPool, Grant};
+pub(crate) use super::prompt::PLAN_EXECUTOR;
+use super::prompt::{
+    PLAN_APPROVED_PREFIX, PromptContext, build_plan_prompt, build_prompt_with_context,
+    plan_sandbox_policy, sandbox_policy,
+};
+use super::unblock::report_account_limit;
 use super::{Deps, unblock};
-use crate::cross_audit::{self, AUDIT_EXECUTOR, AuditInput, AuditReport, AuditVerdict};
+use crate::cross_audit::AUDIT_EXECUTOR;
 use crate::git::TaskWorktree;
 use crate::hook_settings;
 use crate::unblocker::FailureSignal;
 
 const NO_CHANGE: &str = "the agent run ended without changing anything on the branch";
+const EMPTY_PLAN: &str = "the plan run ended without producing a plan";
+const MAX_PLAN_CHARS: usize = 4000;
+const PLAN_EVENTS_LIMIT: u32 = 100;
 
 /// A task waiting for the gate.
 #[derive(Debug, Clone)]
@@ -66,11 +74,27 @@ pub(crate) enum Next {
     /// Ready again after a usage limit that no other account may take over
     /// (a pinned repository, or every account limited): the task waits for
     /// a cooldown and is not started again in this invocation.
-    Wait,
+    Wait {
+        until: Option<i64>,
+    },
+    /// Ready again, untried: transient network failure. The scheduler applies
+    /// jittered backoff in `Mode::Auto` or halts after retries / in `Mode::Once`.
+    RetryAfter {
+        until: i64,
+        attempt: u32,
+        detail: String,
+    },
     /// Ready again, untried: the agent CLI failed for its account or the
     /// network. Every task started after it would fail the same way, so
     /// the run stops; the text says why and what to fix.
     Halt(String),
+    /// Cross-audit rejected the changes; hand back to the scheduler so the
+    /// unblocker runs on a real `Purpose::Work` grant from `deps.accounts`.
+    Unblock {
+        task_id: String,
+        worktree: TaskWorktree,
+        signal: Box<FailureSignal>,
+    },
     Blocked,
 }
 
@@ -80,11 +104,18 @@ pub(crate) struct Outcome {
     pub error: Option<String>,
 }
 
-pub(crate) fn run_job(deps: &Deps, job: Job, grant: &Grant) -> Outcome {
+pub(crate) fn run_job(
+    deps: &Deps,
+    audit_backend: Option<&AuditBackend>,
+    job: Job,
+    grant: &Grant,
+) -> Outcome {
     let task_id = job.task_id().to_string();
     let result = match job {
         Job::Agent { task_id } => agent(deps, &task_id, grant),
-        Job::Audit { job, lock_fp } => audit(deps, job, &lock_fp, grant),
+        Job::Audit { job, lock_fp } => {
+            audit_backend::execute_audit(deps, audit_backend, job, &lock_fp, grant)
+        }
         Job::Unblock { job, signal } => {
             unblock::handle(deps, &job.task_id, Some(&job.worktree), *signal, grant)
         }
@@ -100,11 +131,12 @@ pub(crate) fn run_job(deps: &Deps, job: Job, grant: &Grant) -> Outcome {
 }
 
 /// An error of the factory's own machinery (git, store, executor) is not
-/// something an agent retry fixes: the task waits for a human.
+/// something an agent retry fixes: the task waits for a human, without
+/// freezing unrelated tasks across the factory.
 pub(crate) fn block_infra(deps: &Deps, task_id: &str, error: &str) -> Outcome {
     let why = format!("factory error: {error}");
     let mut message = format!("{task_id}: {error}");
-    if let Err(second) = unblock::block_task(deps, task_id, &why) {
+    if let Err(second) = unblock::block_untried(deps, task_id, &why) {
         // The store itself is failing; the summary is the only place left.
         message.push_str(&format!(" (and the task could not be blocked: {second})"));
     }
@@ -129,11 +161,27 @@ pub(crate) fn ensure_budget(deps: &Deps, root_id: &str) -> PortResult<RootBudget
 /// The request of a run on `grant`'s account in `cwd`; the prompt is filled
 /// in by the caller.
 pub(crate) fn request(deps: &Deps, cwd: &str, grant: &Grant) -> PortResult<AgentRequest> {
+    request_with(
+        deps,
+        cwd,
+        grant,
+        deps.settings.hook_required,
+        &*deps.accounts,
+    )
+}
+
+fn request_with(
+    deps: &Deps,
+    cwd: &str,
+    grant: &Grant,
+    hook_required: bool,
+    accounts: &dyn AccountPool,
+) -> PortResult<AgentRequest> {
     let settings = &deps.settings;
     // Every agent the factory starts (task run, cross-audit, subtask
     // proposal) gets its request here: none starts where the hook is not
-    // registered.
-    if let Some(problem) = hook_problem(deps, Path::new(cwd)) {
+    // registered (for executors that require `aaf-hook`).
+    if let Some(problem) = hook_problem_if(deps, Path::new(cwd), hook_required) {
         return Err(PortError::Invalid(problem));
     }
     Ok(AgentRequest {
@@ -147,7 +195,7 @@ pub(crate) fn request(deps: &Deps, cwd: &str, grant: &Grant) -> PortResult<Agent
             &settings.data_dir,
             &settings.home,
             grant.account.as_ref(),
-            &deps.accounts.profiles()?,
+            &accounts.profiles()?,
         ),
     })
 }
@@ -155,8 +203,12 @@ pub(crate) fn request(deps: &Deps, cwd: &str, grant: &Grant) -> PortResult<Agent
 /// Why an agent started in `cwd` would run without `aaf-hook`; `None` when
 /// it is registered there or the executor has no such hook.
 pub(crate) fn hook_problem(deps: &Deps, cwd: &Path) -> Option<String> {
+    hook_problem_if(deps, cwd, deps.settings.hook_required)
+}
+
+fn hook_problem_if(deps: &Deps, cwd: &Path, required: bool) -> Option<String> {
     let settings = &deps.settings;
-    if !settings.hook_required {
+    if !required {
         return None;
     }
     // The main checkout is the owner's and no agent writes there; every
@@ -173,19 +225,27 @@ pub(crate) fn hook_problem(deps: &Deps, cwd: &Path) -> Option<String> {
     hook_settings::check_worktree(cwd, &settings.agent_path, base.as_deref()).err()
 }
 
-struct OpenRun {
-    request: AgentRequest,
+pub(super) struct OpenRun {
+    pub(super) request: AgentRequest,
     started: i64,
 }
 
-fn begin_run(
+pub(super) fn begin_run_with(
     deps: &Deps,
     task: &Task,
     worktree: &TaskWorktree,
     executor: &str,
     grant: &Grant,
+    hook_required: bool,
+    accounts: &dyn AccountPool,
 ) -> PortResult<OpenRun> {
-    let request = request(deps, &worktree.path.to_string_lossy(), grant)?;
+    let request = request_with(
+        deps,
+        &worktree.path.to_string_lossy(),
+        grant,
+        hook_required,
+        accounts,
+    )?;
     let started = deps.now();
     deps.store.insert_run(&RunRecord {
         id: request.run_id.clone(),
@@ -211,7 +271,7 @@ fn begin_run(
 
 /// Closes the run and charges the root budget: tokens are input + output +
 /// cache creation (`tokens_in` already includes cache creation).
-fn end_run(
+pub(super) fn end_run(
     deps: &Deps,
     task: &Task,
     run: &OpenRun,
@@ -267,8 +327,16 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
         signal.budget = budget;
         return unblock::handle(deps, task_id, None, signal, grant);
     }
+    if needs_plan(deps, &task)? {
+        return run_plan_stage(deps, &task, grant);
+    }
     let worktree = deps.git.task_worktree(task_id)?;
-    if !deps.store.runs_for_task(task_id)?.is_empty() {
+    let has_impl_runs = deps
+        .store
+        .runs_for_task(task_id)?
+        .iter()
+        .any(|run| run.executor != PLAN_EXECUTOR && run.executor != AUDIT_EXECUTOR);
+    if has_impl_runs {
         // A failed or interrupted run leaves its edits uncommitted, and git
         // refuses to rebase a dirty tree: keep them as a commit, the next
         // attempt builds on them.
@@ -290,43 +358,25 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
         return Ok(Next::Blocked);
     }
 
-    let mut run = begin_run(
+    let mut run = begin_run_with(
         deps,
         &task,
         &worktree,
         &deps.settings.repo.run.executor,
         grant,
+        deps.settings.hook_required,
+        &*deps.accounts,
     )?;
-    run.request.prompt = build_prompt(&task, &worktree.branch);
-    let mut outcome = match deps.runner.run(&run.request) {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            end_run(deps, &task, &run, RunStatus::Failed, None, (0, 0))?;
-            return Err(err);
-        }
+    let profile = crate::config::effective_profile(&deps.settings.repo, &worktree.path);
+    let env_ctx = PromptContext {
+        repo_root: &worktree.path,
+        profile: &profile,
+        proof_required: deps.settings.repo.proof.required,
     };
-    let tokens = (outcome.tokens_in, outcome.tokens_out);
-    end_run(
-        deps,
-        &task,
-        &run,
-        status_of(&outcome),
-        outcome.exit_code,
-        tokens,
-    )?;
-    if let (Some(hit), Some(account)) = (&outcome.limit_hit, grant.account_id()) {
-        deps.accounts.report_limit(account, hit)?;
-        deps.emit(
-            EventKind::AccountCooldown,
-            task_id,
-            // The provider's own words: the only record of why an account
-            // was benched once the run's output is gone.
-            json!({
-                "account": account,
-                "reset_at": hit.reset_at,
-                "raw": unblock::one_line(&hit.raw, 300),
-            }),
-        )?;
+    run.request.prompt = build_prompt_with_context(&task, &worktree.branch, &env_ctx);
+    let mut outcome = invoke_runner(deps, &task, &run)?;
+    if let Some(hit) = &outcome.limit_hit {
+        report_account_limit(deps, task_id, grant, hit)?;
     }
     if let Some(infra) = &outcome.infra {
         return halt_on_infra(deps, task_id, grant, infra);
@@ -360,10 +410,109 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
     unblock::handle(deps, task_id, Some(&worktree), signal, grant)
 }
 
+fn invoke_runner(deps: &Deps, task: &Task, run: &OpenRun) -> PortResult<AgentOutcome> {
+    let outcome = match deps.runner.run(&run.request) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            end_run(deps, task, run, RunStatus::Failed, None, (0, 0))?;
+            return Err(err);
+        }
+    };
+    let tokens = (outcome.tokens_in, outcome.tokens_out);
+    let status = status_of(&outcome);
+    end_run(deps, task, run, status, outcome.exit_code, tokens)?;
+    Ok(outcome)
+}
+
+fn needs_plan(deps: &Deps, task: &Task) -> PortResult<bool> {
+    if !deps.settings.repo.pipeline.plan_stage
+        || task
+            .context_notes
+            .iter()
+            .any(|n| n.starts_with(PLAN_APPROVED_PREFIX))
+    {
+        return Ok(false);
+    }
+    let events = deps.store.events_for_task(&task.id, PLAN_EVENTS_LIMIT)?;
+    Ok(!events.iter().any(|e| e.kind == EventKind::PlanGenerated))
+}
+
+fn run_plan_stage(deps: &Deps, task: &Task, grant: &Grant) -> PortResult<Next> {
+    let clean = deps.git.integrate(&[])?;
+    let ran = run_plan_in_tree(deps, task, &clean.tree, grant);
+    let _ = deps.git.discard(&clean);
+    let Some((run_id, mut outcome)) = ran? else {
+        return Ok(Next::Blocked);
+    };
+    if let Some(hit) = &outcome.limit_hit {
+        report_account_limit(deps, &task.id, grant, hit)?;
+        deps.move_to(&task.id, TaskState::Ready, None, "plan run hit usage limit")?;
+        return unblock::route_limit_hit(deps, grant, hit);
+    }
+    if let Some(infra) = &outcome.infra {
+        return halt_on_infra(deps, &task.id, grant, infra);
+    }
+    let plan = outcome.final_text.trim();
+    if outcome.succeeded() && !plan.is_empty() {
+        let truncated: String = plan.chars().take(MAX_PLAN_CHARS).collect();
+        let payload = json!({ "plan": truncated, "run_id": run_id });
+        deps.emit(EventKind::PlanGenerated, &task.id, payload)?;
+        if deps.settings.repo.pipeline.require_plan_approval {
+            let summary = unblock::one_line(&truncated, 200);
+            let why = format!("plan approval required: {summary}");
+            unblock::block_untried(deps, &task.id, &why)?;
+            return Ok(Next::Blocked);
+        }
+        let note = format!("{PLAN_APPROVED_PREFIX} {truncated}");
+        deps.store
+            .append_context_note(&task.id, &note, deps.now())?;
+        deps.move_to(&task.id, TaskState::Ready, None, "plan generated")?;
+        return Ok(Next::Ready);
+    }
+    if outcome.succeeded() {
+        outcome.log_tail = EMPTY_PLAN.to_string();
+    }
+    let mut signal = FailureSignal::empty();
+    signal.outcome = Some(outcome);
+    unblock::handle(deps, &task.id, None, signal, grant)
+}
+
+fn run_plan_in_tree(
+    deps: &Deps,
+    task: &Task,
+    tree: &TaskWorktree,
+    grant: &Grant,
+) -> PortResult<Option<(String, AgentOutcome)>> {
+    if let Some(problem) = hook_problem(deps, &tree.path) {
+        unblock::block_untried(deps, &task.id, &problem)?;
+        return Ok(None);
+    }
+    let mut run = begin_run_with(
+        deps,
+        task,
+        tree,
+        PLAN_EXECUTOR,
+        grant,
+        deps.settings.hook_required,
+        &*deps.accounts,
+    )?;
+    let profiles = deps.accounts.profiles()?;
+    run.request.sandbox = plan_sandbox_policy(&deps.settings, grant.account.as_ref(), &profiles);
+    let profile = crate::config::effective_profile(&deps.settings.repo, &tree.path);
+    let env_ctx = PromptContext {
+        repo_root: &tree.path,
+        profile: &profile,
+        proof_required: deps.settings.repo.proof.required,
+    };
+    run.request.prompt = build_plan_prompt(task, &env_ctx);
+    let outcome = invoke_runner(deps, task, &run)?;
+    Ok(Some((run.request.run_id, outcome)))
+}
+
 /// The agent CLI could not work for its account or network: the task goes
-/// back to Ready without a ladder step (no note, no cycle, no failed root),
-/// and the run is told to stop.
-fn halt_on_infra(
+/// back to Ready without a ladder step (no note, no cycle, no failed root).
+/// Network failures return [`Next::RetryAfter`]; auth failures halt immediately.
+pub(super) fn halt_on_infra(
     deps: &Deps,
     task_id: &str,
     grant: &Grant,
@@ -377,11 +526,19 @@ fn halt_on_infra(
         None,
         &format!("agent CLI failed: {what} ({raw}); not counted as an attempt"),
     )?;
-    Ok(Next::Halt(halt_message(task_id, what, infra, &fix)))
+    let detail = halt_message(task_id, what, infra, &fix);
+    if infra.kind == InfraKind::Network {
+        return Ok(Next::RetryAfter {
+            until: deps.now(),
+            attempt: 1,
+            detail,
+        });
+    }
+    Ok(Next::Halt(detail))
 }
 
 /// What went wrong, and what a person does about it.
-fn infra_words(grant: &Grant, infra: &InfraFailure) -> (&'static str, String) {
+pub(super) fn infra_words(grant: &Grant, infra: &InfraFailure) -> (&'static str, String) {
     match infra.kind {
         InfraKind::Auth => (
             "its login or credentials were refused",
@@ -397,160 +554,10 @@ fn infra_words(grant: &Grant, infra: &InfraFailure) -> (&'static str, String) {
     }
 }
 
-fn halt_message(task_id: &str, what: &str, infra: &InfraFailure, fix: &str) -> String {
+pub(super) fn halt_message(task_id: &str, what: &str, infra: &InfraFailure, fix: &str) -> String {
     format!(
         "{task_id}: the agent CLI failed: {what}: {}. The run stopped so no \
          other task fails for the same reason; {fix}, then run aaf run again",
         unblock::one_line(&infra.raw, 300)
     )
-}
-
-fn verdict_text(verdict: &AuditVerdict) -> String {
-    match verdict {
-        AuditVerdict::Pass { .. } => "pass".to_string(),
-        AuditVerdict::Inconclusive { reason } => format!("inconclusive: {reason}"),
-        AuditVerdict::Fail { findings, .. } => {
-            let items: Vec<String> = findings
-                .iter()
-                .map(|f| format!("{} ({})", f.id, f.evidence))
-                .collect();
-            format!("fail: {}", items.join("; "))
-        }
-    }
-}
-
-/// Passes a run on to the real runner and keeps what an infra failure said:
-/// the audit's report only knows that its run did not complete.
-struct InfraWatch<'a> {
-    runner: &'a dyn AgentRunner,
-    seen: Mutex<Option<InfraFailure>>,
-}
-
-impl AgentRunner for InfraWatch<'_> {
-    fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome> {
-        let outcome = self.runner.run(request)?;
-        if let Some(infra) = &outcome.infra {
-            *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(infra.clone());
-        }
-        Ok(outcome)
-    }
-}
-
-/// One recorded auditor run in `tree`, and the infra failure that ended it,
-/// if one did.
-fn audit_run(
-    deps: &Deps,
-    task: &Task,
-    input: &AuditInput,
-    tree: &TaskWorktree,
-    grant: &Grant,
-) -> PortResult<(AuditReport, Option<InfraFailure>)> {
-    let run = begin_run(deps, task, tree, AUDIT_EXECUTOR, grant)?;
-    let watch = InfraWatch {
-        runner: &*deps.runner,
-        seen: Mutex::new(None),
-    };
-    let report = match cross_audit::run_audit(input, &watch, &run.request) {
-        Ok(report) => report,
-        Err(err) => {
-            end_run(deps, task, &run, RunStatus::Failed, None, (0, 0))?;
-            return Err(err);
-        }
-    };
-    let status = if report.verdict.is_pass() {
-        RunStatus::Succeeded
-    } else {
-        RunStatus::Failed
-    };
-    let tokens = (report.tokens_in, report.tokens_out);
-    end_run(deps, task, &run, status, None, tokens)?;
-    let infra = watch
-        .seen
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner);
-    Ok((report, infra))
-}
-
-/// Cross-audit of a task whose locked files changed. A pass signs the
-/// approval for the task's own worktree (approvals are per worktree, and
-/// that is where its gate runs) and sends it back to the gate.
-fn audit(deps: &Deps, job: GateJob, lock_fp: &str, grant: &Grant) -> PortResult<Next> {
-    let task = deps.store.get_task(&job.task_id)?;
-    let input = AuditInput {
-        spec: task.spec.clone(),
-        diff: deps.git.diff(&job.worktree)?,
-        mobile: deps.settings.mobile,
-    };
-    let author = deps
-        .store
-        .runs_for_task(&task.id)?
-        .into_iter()
-        .rev()
-        .find(|run| run.executor != AUDIT_EXECUTOR)
-        .and_then(|run| run.account_id);
-    // Unknown on either side counts as the same account: never overclaim
-    // independence.
-    let same_account = match (author.as_deref(), grant.account_id()) {
-        (Some(author), Some(auditor)) => author == auditor,
-        _ => true,
-    };
-
-    // The auditor gets the changes as text in its prompt and works in a
-    // clean tree of the base. Started in the author's worktree it would load
-    // the author's `CLAUDE.md` and `.claude/` settings (instructions, hooks,
-    // env): the very files it may be auditing. The hook check of `request`
-    // applies to that tree like to any other.
-    let clean = deps.git.integrate(&[])?;
-    let audited = audit_run(deps, &task, &input, &clean.tree, grant);
-    // The verdict stands whether or not the tree could be removed: what is
-    // left is an empty checkout of the base under its own unique name, which
-    // costs disk and nothing else.
-    let _ = deps.git.discard(&clean);
-    let (report, infra) = audited?;
-    if let Some(infra) = infra {
-        // No verdict was reached, so none is recorded against the task. It
-        // stays in Gating: the next run's gate asks for the audit again.
-        let (what, fix) = infra_words(grant, &infra);
-        return Ok(Next::Halt(halt_message(&task.id, what, &infra, &fix)));
-    }
-
-    let reviewer = format!("cross-audit:{}", grant.account_id().unwrap_or("default"));
-    let approval = cross_audit::approve_if_pass(
-        &report,
-        &deps.settings.data_dir,
-        &job.worktree.path,
-        lock_fp,
-        &reviewer,
-        same_account,
-        &*deps.clock,
-    )?;
-    let text = verdict_text(&report.verdict);
-    deps.emit(
-        EventKind::CrossAudit,
-        &task.id,
-        json!({ "verdict": text, "same_account": same_account, "lock_fp": lock_fp }),
-    )?;
-    if approval.is_some() {
-        return Ok(Next::Gate(GateJob {
-            audited: true,
-            ..job
-        }));
-    }
-    let note = format!("cross-audit rejected the changes to locked files ({text})");
-    deps.store
-        .append_context_note(&task.id, &unblock::one_line(&note, 400), deps.now())?;
-    let mut signal = FailureSignal::empty();
-    signal.outcome = Some(AgentOutcome {
-        exit_code: Some(1),
-        timed_out: false,
-        final_text: String::new(),
-        tokens_in: 0,
-        tokens_out: 0,
-        limit_hit: None,
-        infra: None,
-        // The verdict kind only: finding texts differ from run to run and
-        // would give every rejection a new failure digest.
-        log_tail: "cross-audit rejected the changes to locked files".to_string(),
-    });
-    unblock::handle(deps, &task.id, Some(&job.worktree), signal, grant)
 }

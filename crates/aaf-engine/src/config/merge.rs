@@ -1,6 +1,8 @@
 //! Overrides from tier 3 and above, and the rules for applying them.
 
-use aaf_domain::config::{RepoConfig, StoreMode};
+use aaf_domain::config::{
+    CrossAuditConfig, MAX_AUDIT_REWORKS_CAP, PipelineConfig, RepoConfig, StoreMode,
+};
 use serde::Deserialize;
 
 /// A partial configuration from the local file, the environment or the
@@ -45,6 +47,169 @@ pub struct RunOverlay {
     pub effort: Option<String>,
     /// Accepted so that it can be reported; never applied.
     pub env_pass: Option<Vec<String>>,
+    /// Queue brake override: may only tighten downward to a positive lower cap.
+    pub max_open_review: Option<u32>,
+}
+
+/// Tier 3 partial `[pipeline]` section: booleans are tighten-only
+/// (`false -> true`); `max_audit_reworks` is always ignored with a warning.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PipelineOverlay {
+    pub plan_stage: Option<bool>,
+    pub require_plan_approval: Option<bool>,
+    pub max_audit_reworks: Option<u32>,
+}
+
+/// Tier 3 partial `[cross_audit]` section: may only tighten
+/// `require_different_provider` (`false -> true`). Every other field is
+/// accepted solely so it can be reported as ignored with a warning.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct CrossAuditOverlay {
+    pub executor: Option<String>,
+    pub executor_cmd: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub require_different_provider: Option<bool>,
+}
+
+/// Merges tier 1 (`global`) defaults into tier 2 (`repo`): non-empty tier 2
+/// fields win, and `require_different_provider` is OR-ed across tiers.
+/// `executor_cmd`, `model`, and `effort` are only inherited from `global` when
+/// `repo.executor` is unset or names the same executor as `global`.
+pub(crate) fn merge_cross_audit(global: &CrossAuditConfig, repo: &mut CrossAuditConfig) {
+    let repo_exec = repo.executor.trim();
+    let global_exec = global.executor.trim();
+    let inherit_provider_fields =
+        repo_exec.is_empty() || repo_exec.eq_ignore_ascii_case(global_exec);
+    if repo_exec.is_empty() {
+        repo.executor = global.executor.clone();
+    }
+    if inherit_provider_fields {
+        if repo.executor_cmd.trim().is_empty() {
+            repo.executor_cmd = global.executor_cmd.clone();
+        }
+        if repo.model.trim().is_empty() {
+            repo.model = global.model.clone();
+        }
+        if repo.effort.trim().is_empty() {
+            repo.effort = global.effort.clone();
+        }
+    }
+    repo.require_different_provider =
+        global.require_different_provider || repo.require_different_provider;
+}
+
+/// Applies tier 3 `[cross_audit]` overlay: tighten-only on
+/// `require_different_provider`; executor/cmd/model/effort changes are ignored
+/// with a warning.
+pub(crate) fn apply_cross_audit_overlay(
+    current: &mut CrossAuditConfig,
+    overlay: CrossAuditOverlay,
+    source: &str,
+    warnings: &mut Vec<String>,
+) {
+    const TRUSTED_ONLY: &str = "only the global config or .autofactory/config.toml may set it";
+    if let Some(executor) = overlay.executor
+        && executor != current.executor
+    {
+        warnings.push(format!(
+            "{source}: cross_audit.executor = {executor:?} ignored: {TRUSTED_ONLY} (kept {:?})",
+            current.executor
+        ));
+    }
+    if let Some(executor_cmd) = overlay.executor_cmd
+        && executor_cmd != current.executor_cmd
+    {
+        warnings.push(format!(
+            "{source}: cross_audit.executor_cmd ignored: {TRUSTED_ONLY}"
+        ));
+    }
+    if let Some(model) = overlay.model
+        && model != current.model
+    {
+        warnings.push(format!(
+            "{source}: cross_audit.model = {model:?} ignored: {TRUSTED_ONLY} (kept {:?})",
+            current.model
+        ));
+    }
+    if let Some(effort) = overlay.effort
+        && effort != current.effort
+    {
+        warnings.push(format!(
+            "{source}: cross_audit.effort = {effort:?} ignored: {TRUSTED_ONLY} (kept {:?})",
+            current.effort
+        ));
+    }
+    match overlay.require_different_provider {
+        Some(true) => current.require_different_provider = true,
+        Some(false) if current.require_different_provider => {
+            warnings.push(format!(
+                "{source}: cross_audit.require_different_provider = false ignored: it may only be raised (kept true)"
+            ));
+        }
+        Some(false) | None => {}
+    }
+}
+
+/// Merges tier 1 `[run].max_open_review` into tier 2. A positive tier-1 cap
+/// cannot be loosened or disabled (`0`) by tier 2.
+pub(crate) fn merge_max_open_review(global: Option<u32>, repo: &mut u32) {
+    if let Some(cap) = global
+        && cap > 0
+    {
+        *repo = if *repo > 0 { cap.min(*repo) } else { cap };
+    }
+}
+
+/// Enforces the hard ceiling [`MAX_AUDIT_REWORKS_CAP`] on tier-2 `[pipeline]`.
+pub(crate) fn clamp_pipeline(
+    pipeline: &mut PipelineConfig,
+    source: &str,
+    warnings: &mut Vec<String>,
+) {
+    if pipeline.max_audit_reworks > MAX_AUDIT_REWORKS_CAP {
+        warnings.push(format!(
+            "{source}: pipeline.max_audit_reworks = {} clamped to {MAX_AUDIT_REWORKS_CAP}",
+            pipeline.max_audit_reworks
+        ));
+        pipeline.max_audit_reworks = MAX_AUDIT_REWORKS_CAP;
+    }
+}
+
+/// Applies tier 3 `[pipeline]` overlay: booleans may only be tightened
+/// (`false -> true`), and `max_audit_reworks` is always ignored with a warning.
+pub(crate) fn apply_pipeline_overlay(
+    current: &mut PipelineConfig,
+    overlay: PipelineOverlay,
+    source: &str,
+    warnings: &mut Vec<String>,
+) {
+    match overlay.plan_stage {
+        Some(true) => current.plan_stage = true,
+        Some(false) if current.plan_stage => {
+            warnings.push(format!(
+                "{source}: pipeline.plan_stage = false ignored: it may only be raised (kept true)"
+            ));
+        }
+        Some(false) | None => {}
+    }
+    match overlay.require_plan_approval {
+        Some(true) => current.require_plan_approval = true,
+        Some(false) if current.require_plan_approval => {
+            warnings.push(format!(
+                "{source}: pipeline.require_plan_approval = false ignored: it may only be raised (kept true)"
+            ));
+        }
+        Some(false) | None => {}
+    }
+    if let Some(reworks) = overlay.max_audit_reworks {
+        warnings.push(format!(
+            "{source}: pipeline.max_audit_reworks = {reworks} ignored: only .autofactory/config.toml may set it (kept {})",
+            current.max_audit_reworks
+        ));
+    }
 }
 
 fn mode_name(mode: StoreMode) -> &'static str {
@@ -138,6 +303,22 @@ pub(crate) fn apply_overlay(
         && env_pass != repo.run.env_pass
     {
         warnings.push(format!("{source}: run.env_pass ignored: {TIER_TWO_ONLY}"));
+    }
+    if let Some(local) = run.max_open_review {
+        let cur = repo.run.max_open_review;
+        if local == 0 {
+            if cur > 0 {
+                warnings.push(format!(
+                    "{source}: run.max_open_review = 0 ignored: cannot disable cap (kept {cur})"
+                ));
+            }
+        } else if cur == 0 || local < cur {
+            repo.run.max_open_review = local;
+        } else if local > cur {
+            warnings.push(format!(
+                "{source}: run.max_open_review = {local} ignored: it may only be lowered (kept {cur})"
+            ));
+        }
     }
 
     let current = &mut repo.gate;

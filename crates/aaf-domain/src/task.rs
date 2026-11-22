@@ -61,7 +61,7 @@ impl TaskState {
                 | (Ready, Running | Blocked | Cancelled)
                 | (Running, Gating | Blocked | Ready | Cancelled)
                 | (Gating, Review | Done | Blocked | Ready | Cancelled)
-                | (Review, Done | Blocked | Ready | Cancelled)
+                | (Review, Gating | Done | Blocked | Ready | Cancelled)
                 | (Blocked, Ready | Cancelled)
         )
     }
@@ -132,6 +132,9 @@ pub struct Task {
     pub fingerprint: Option<String>,
     pub blocked_reason: Option<BlockedReason>,
     pub unblock_cycles: u32,
+    /// Optional owned path prefixes for scope-keyed parallelism; empty means unscoped.
+    #[serde(default)]
+    pub scope_paths: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -160,6 +163,7 @@ impl Task {
             fingerprint: None,
             blocked_reason: None,
             unblock_cycles: 0,
+            scope_paths: Vec::new(),
             created_at: now,
             updated_at: now,
         }
@@ -194,6 +198,7 @@ impl Task {
             fingerprint: None,
             blocked_reason: None,
             unblock_cycles: 0,
+            scope_paths: Vec::new(),
             created_at: now,
             updated_at: now,
         })

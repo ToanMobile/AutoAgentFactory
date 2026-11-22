@@ -20,10 +20,13 @@ pub enum EventKind {
     DetectorHit,
     CrossAudit,
     WebhookSent,
+    ReworkRequested,
+    ProofRecorded,
+    PlanGenerated,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 15] = [
+    pub const ALL: [EventKind; 18] = [
         EventKind::TaskCreated,
         EventKind::TaskStateChanged,
         EventKind::RunStarted,
@@ -39,6 +42,9 @@ impl EventKind {
         EventKind::DetectorHit,
         EventKind::CrossAudit,
         EventKind::WebhookSent,
+        EventKind::ReworkRequested,
+        EventKind::ProofRecorded,
+        EventKind::PlanGenerated,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -58,6 +64,9 @@ impl EventKind {
             EventKind::DetectorHit => "detector_hit",
             EventKind::CrossAudit => "cross_audit",
             EventKind::WebhookSent => "webhook_sent",
+            EventKind::ReworkRequested => "rework_requested",
+            EventKind::ProofRecorded => "proof_recorded",
+            EventKind::PlanGenerated => "plan_generated",
         }
     }
 

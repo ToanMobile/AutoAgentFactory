@@ -44,9 +44,10 @@ fn an_earlier_clearing_wrapper_reaches_a_later_split_string() {
             ("env - nice env -S 'aaf run'", HUMAN),
             // Neighbours.
             ("env -i sh -c 'true'", ALLOW),
-            ("env -u PATHi sh -c 'aaf run'", ALLOW),
-            ("env FOO=bar sh -c 'aaf run'", ALLOW),
-            ("env FOO=bar env -S 'aaf run'", ALLOW),
+            ("env -u PATHi sh -c 'aaf gate'", ALLOW),
+            ("env FOO=bar sh -c 'aaf gate'", ALLOW),
+            ("env FOO=bar env -S 'aaf gate'", ALLOW),
+            ("env -u PATHi sh -c 'aaf run'", HUMAN),
         ],
     );
 }

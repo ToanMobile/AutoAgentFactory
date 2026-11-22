@@ -458,3 +458,54 @@ impl KvStore for Db {
         })
     }
 }
+
+impl Db {
+    /// Aggregates `(status, run_count, tokens_in, tokens_out)` grouped by `runs.status`,
+    /// optionally scoped to tasks under `repo_root`.
+    pub fn run_totals_by_repo(
+        &self,
+        repo_root: Option<&str>,
+    ) -> PortResult<Vec<(RunStatus, usize, u64, u64)>> {
+        let repo_root = repo_root.map(str::to_string);
+        self.read(move |conn| {
+            let map_row = |row: &Row<'_>| -> PortResult<(RunStatus, usize, u64, u64)> {
+                let status_str: String = row.get(0).map_err(sql_err)?;
+                let status = RunStatus::parse(&status_str)
+                    .ok_or_else(|| corrupt("runs.status", &status_str))?;
+                let count_i64: i64 = row.get(1).map_err(sql_err)?;
+                let count = usize::try_from(count_i64)
+                    .map_err(|_| corrupt("runs.count", &count_i64.to_string()))?;
+                let tokens_in = to_u64(row.get(2).map_err(sql_err)?, "runs.tokens_in")?;
+                let tokens_out = to_u64(row.get(3).map_err(sql_err)?, "runs.tokens_out")?;
+                Ok((status, count, tokens_in, tokens_out))
+            };
+            let mut totals = Vec::new();
+            if let Some(root) = repo_root {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT r.status, COUNT(*), COALESCE(SUM(r.tokens_in), 0), \
+                         COALESCE(SUM(r.tokens_out), 0) \
+                         FROM runs r INNER JOIN tasks t ON t.id = r.task_id \
+                         WHERE t.repo_root = ?1 GROUP BY r.status",
+                    )
+                    .map_err(sql_err)?;
+                let mut rows = stmt.query(params![root]).map_err(sql_err)?;
+                while let Some(row) = rows.next().map_err(sql_err)? {
+                    totals.push(map_row(row)?);
+                }
+            } else {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT status, COUNT(*), COALESCE(SUM(tokens_in), 0), \
+                         COALESCE(SUM(tokens_out), 0) FROM runs GROUP BY status",
+                    )
+                    .map_err(sql_err)?;
+                let mut rows = stmt.query([]).map_err(sql_err)?;
+                while let Some(row) = rows.next().map_err(sql_err)? {
+                    totals.push(map_row(row)?);
+                }
+            }
+            Ok(totals)
+        })
+    }
+}

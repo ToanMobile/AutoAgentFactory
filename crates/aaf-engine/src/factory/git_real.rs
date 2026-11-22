@@ -1,13 +1,15 @@
 //! [`GitOps`] on the real `crate::git` layer.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aaf_domain::gate::Receipt;
 use aaf_domain::ports::{PortError, PortResult};
+use aaf_domain::proof::ProofRecord;
 
 use super::commit_lock::{self, CommitLock};
 use super::ports::{GitOps, Integration};
@@ -22,6 +24,8 @@ const DEFAULT_REMOTE: &str = "origin";
 /// A merge waits this long for another `aaf` process merging the same repo.
 const MERGE_LOCK_TIMEOUT: Duration = Duration::from_secs(600);
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
+const GH_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+const SQUASH_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// A commit waits this long for another `aaf` process committing in the same
 /// repository; each holder is bounded by the timeout of its own git call.
 const COMMIT_LOCK_TIMEOUT: Duration = Duration::from_secs(600);
@@ -135,6 +139,7 @@ pub struct RealGit {
     /// workers from creating their worktrees.
     commit: Mutex<()>,
     commit_lock_timeout: Duration,
+    last_squash_poll: Mutex<Option<Instant>>,
 }
 
 impl RealGit {
@@ -153,6 +158,7 @@ impl RealGit {
             admin: Mutex::new(()),
             commit: Mutex::new(()),
             commit_lock_timeout: COMMIT_LOCK_TIMEOUT,
+            last_squash_poll: Mutex::new(None),
         }
     }
 
@@ -164,6 +170,26 @@ impl RealGit {
 
     pub fn base(&self) -> &BaseRef {
         &self.base
+    }
+
+    /// Runs squash-merge PR verification using `runner` (injectable in tests).
+    pub fn verify_squash_merges_with(
+        &self,
+        candidates: &[(String, String)],
+        runner: &dyn CommandRunner,
+    ) -> Result<HashMap<String, String>, GitError> {
+        let fetch = || {
+            self.fetch_base()
+                .map_err(|e| GitError::Invalid(e.to_string()))
+        };
+        crate::gc::verify_squash_merges(
+            &self.repo_root,
+            &self.base.branch,
+            &self.start(),
+            candidates,
+            &fetch,
+            runner,
+        )
     }
 
     fn admin(&self) -> MutexGuard<'_, ()> {
@@ -223,41 +249,64 @@ struct NotedRunner<'a> {
 
 impl CommandRunner for NotedRunner<'_> {
     fn run(&self, program: &str, args: &[&str], cwd: &Path) -> io::Result<CommandOutput> {
-        if program != "gh" || !args.starts_with(&["pr", "create"]) {
+        if program != "gh" {
             return self.inner.run(program, args, cwd);
         }
-        // By position, never by searching: the title is untrusted text and
-        // may itself read `--body`.
-        let ["pr", "create", "--title", _, "--body", body, ..] = args else {
-            // A pull request without the note would present a batch receipt
-            // as the branch's own; none is opened instead.
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "gh pr create: no body to put the batch note in",
-            ));
-        };
-        let noted = format!("{}\n\n{body}", self.note);
-        let mut args = args.to_vec();
-        args[5] = &noted;
-        self.inner.run(program, &args, cwd)
+        if args.starts_with(&["pr", "create"]) {
+            // By position, never by searching: the title is untrusted text and
+            // may itself read `--body`.
+            let ["pr", "create", "--title", _, "--body", body, ..] = args else {
+                // A pull request without the note would present a batch receipt
+                // as the branch's own; none is opened instead.
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "gh pr create: no body to put the batch note in",
+                ));
+            };
+            let noted = format!("{}\n\n{body}", self.note);
+            let mut args = args.to_vec();
+            args[5] = &noted;
+            return self.inner.run(program, &args, cwd);
+        }
+        if args.starts_with(&["pr", "edit"]) {
+            let ["pr", "edit", _, "--body", body, ..] = args else {
+                return self.inner.run(program, args, cwd);
+            };
+            let noted = format!("{}\n\n{body}", self.note);
+            let mut args = args.to_vec();
+            args[4] = &noted;
+            return self.inner.run(program, &args, cwd);
+        }
+        self.inner.run(program, args, cwd)
     }
 }
 
 /// [`crate::git::open_pr`] with `note` above the receipt summary of the body.
+#[cfg(test)]
 pub(super) fn open_pr_noted(
     request: &PrRequest,
     runner: &dyn CommandRunner,
     note: Option<&str>,
 ) -> Result<PrOutcome, GitError> {
+    open_pr_noted_with_proof(request, None, runner, note)
+}
+
+fn open_pr_noted_with_proof(
+    request: &PrRequest,
+    proof: Option<&ProofRecord>,
+    runner: &dyn CommandRunner,
+    note: Option<&str>,
+) -> Result<PrOutcome, GitError> {
     match note {
-        Some(note) => crate::git::open_pr(
+        Some(note) => crate::git::open_pr_with_proof(
             request,
+            proof,
             &NotedRunner {
                 inner: runner,
                 note,
             },
         ),
-        None => crate::git::open_pr(request, runner),
+        None => crate::git::open_pr_with_proof(request, proof, runner),
     }
 }
 
@@ -433,12 +482,15 @@ impl GitOps for RealGit {
             title: title.to_string(),
             receipt: receipt.clone(),
         };
-        // `open_pr` pushes the task branch without any force flag, so a
-        // force push can never reach a branch that is not `aaf/*`.
+        // `open_pr_with_proof` pushes the validated `aaf/*` task branch, falling
+        // back to `--force-with-lease` only after a non-fast-forward rework.
         let runner = SystemRunner {
             timeout: GH_TIMEOUT,
         };
-        open_pr_noted(&request, &runner, note).map_err(err)
+        let proof = self.locks_dir.parent().and_then(|data_dir| {
+            crate::proof::show_proof(&worktree.path, data_dir, Some(&receipt.tree_fp)).ok()
+        });
+        open_pr_noted_with_proof(&request, proof.as_ref(), &runner, note).map_err(err)
     }
 
     fn fetch_base(&self) -> PortResult<()> {
@@ -458,5 +510,63 @@ impl GitOps for RealGit {
         // Exit 1 is "not an ancestor"; a missing branch (128) is not merged
         // as far as this repository can tell.
         Ok(git_raw(&self.repo_root, &args).map_err(err)?.code == Some(0))
+    }
+
+    fn existing_worktree_head(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<(TaskWorktree, String)>, GitError> {
+        let _admin = self.admin();
+        worktree::existing_head(&self.repo_root, &self.worktrees_dir, task_id)
+    }
+
+    fn sweep_orphan_batches(&self, active_task_ids: &HashSet<String>) -> Result<usize, GitError> {
+        let _admin = self.admin();
+        let repo_id = aaf_fp::repo_id(&self.repo_root);
+        worktree::remove_orphan_batch_worktrees(
+            &self.repo_root,
+            &self.worktrees_dir,
+            &repo_id,
+            active_task_ids,
+            false,
+        )
+        .map(|removed| removed.len())
+    }
+
+    fn prune_worktrees(&self) -> Result<(), GitError> {
+        let _admin = self.admin();
+        worktree::prune(&self.repo_root)
+    }
+
+    fn verified_squash_merges(
+        &self,
+        candidates: &[(String, String)],
+    ) -> Result<HashMap<String, String>, GitError> {
+        if candidates.is_empty() {
+            return Ok(HashMap::new());
+        }
+        {
+            let mut last = self
+                .last_squash_poll
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if last.is_some_and(|t| t.elapsed() < SQUASH_POLL_INTERVAL) {
+                return Ok(HashMap::new());
+            }
+            *last = Some(Instant::now());
+        }
+        let runner = SystemRunner {
+            timeout: GH_LIST_TIMEOUT,
+        };
+        self.verify_squash_merges_with(candidates, &runner)
+    }
+
+    fn remove_verified_merged(
+        &self,
+        worktree: &TaskWorktree,
+        expected_head_oid: &str,
+    ) -> Result<(), GitError> {
+        let _admin = self.admin();
+        worktree::remove_verified_merged(&self.repo_root, worktree, expected_head_oid)
     }
 }

@@ -9,16 +9,100 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aaf_domain::event::EventKind;
-use aaf_domain::gate::{GateStatus, Receipt};
+use aaf_domain::gate::{GateStatus, LockStatus, Receipt};
 use aaf_domain::ports::{ClosedFingerprint, PortResult};
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
-use super::batch::{Group, Judged, Verdict};
+use super::batch::{Group, Judged, Member, Verdict, gate_batch};
 use super::worker::GateJob;
 use super::{Deps, unblock};
 use crate::git::{MergeOutcome, PrOutcome};
 use crate::unblocker::FailureSignal;
+
+/// Written by the gate thread before it reports a task, read by the
+/// scheduler when the loop ends.
+#[derive(Default)]
+pub(super) struct GateStats {
+    pub(super) runs: AtomicU32,
+    pub(super) warnings: Mutex<Vec<String>>,
+}
+
+/// One gate round: judges `jobs` with as few gate runs as possible and hands
+/// every job's resolution to `answer`, in board order.
+pub(super) fn judge_round(
+    deps: &Deps,
+    jobs: Vec<GateJob>,
+    stats: &GateStats,
+    answer: &dyn Fn(GateJob, Result<Resolution, String>),
+) {
+    let member = |job: &GateJob| Member {
+        task_id: job.task_id.clone(),
+        worktree: job.worktree.clone(),
+    };
+
+    let proof_required = deps.settings.repo.proof.required;
+    let mut batch: Vec<GateJob> = Vec::new();
+    let mut alone: Vec<GateJob> = Vec::new();
+    for job in jobs {
+        match deps.gate.head_lock(&job.worktree.path) {
+            Ok(lock) if lock.status == LockStatus::Clear => {
+                // Proof artifacts are bound to each task worktree's tree_fp;
+                // synthetic batch trees never carry a task's proof.
+                if proof_required {
+                    alone.push(job);
+                } else {
+                    batch.push(job);
+                }
+            }
+            Ok(lock)
+                if lock.status == LockStatus::Blocked
+                    && !job.audited
+                    && !lock.lock_fp.is_empty() =>
+            {
+                let lock_fp = lock.lock_fp;
+                answer(job, Ok(Resolution::NeedsAudit { lock_fp }));
+            }
+            // Approved, still blocked after its audit, or unreadable: the
+            // approval lives with the task's own worktree, so that is where
+            // the gate has to run, and its receipt says what is wrong.
+            _ => alone.push(job),
+        }
+    }
+
+    let members: Vec<Member> = batch.iter().map(member).collect();
+    let mut outcome = gate_batch(&*deps.git, &*deps.gate, &members);
+    for job in &alone {
+        let single = gate_batch(&*deps.git, &*deps.gate, &[member(job)]);
+        outcome.verdicts.extend(single.verdicts);
+        outcome.gate_runs += single.gate_runs;
+    }
+    stats.runs.fetch_add(outcome.gate_runs, Ordering::Relaxed);
+    if let Ok(mut warnings) = stats.warnings.lock() {
+        warnings.append(&mut outcome.warnings);
+    }
+
+    // Only the batch has groups: a task gated alone has no integration tree.
+    let mut round = Round {
+        groups: std::mem::take(&mut outcome.groups),
+        gate_runs: &stats.runs,
+        warnings: &stats.warnings,
+    };
+    // Board order, so the merges of a clear batch land by priority.
+    for job in batch.into_iter().chain(alone) {
+        let Some(at) = outcome
+            .verdicts
+            .iter()
+            .position(|j| j.task_id == job.task_id)
+        else {
+            answer(job, Err("the gate returned no verdict".to_string()));
+            continue;
+        };
+        let judged = outcome.verdicts.swap_remove(at);
+        let resolution = settle(deps, &job, judged, &mut round).map_err(|e| e.to_string());
+        answer(job, resolution);
+    }
+}
 
 /// The base can move between the rebase and the fast-forward when another
 /// process merges; each retry rebases again.
@@ -77,7 +161,9 @@ pub(crate) fn settle(
 ) -> PortResult<Resolution> {
     let task = deps.store.get_task(&job.task_id)?;
     let blocked = |why: String| -> PortResult<Resolution> {
-        unblock::block_task(deps, &task.id, &why)?;
+        // Broken gate commands or unverified repo config must not count toward
+        // the global consecutive-failure freeze across unrelated repos.
+        unblock::block_untried(deps, &task.id, &why)?;
         Ok(Resolution::Settled(TaskState::Blocked))
     };
     match judged.verdict {
@@ -211,16 +297,30 @@ fn merge(
     for _ in 0..MERGE_ATTEMPTS {
         match deps.git.merge(&job.worktree, &regate)? {
             MergeOutcome::Merged { new_base_sha } => {
-                // After a merge through the remote the local view of the
-                // base is stale until fetched.
-                deps.git.fetch_base()?;
+                // Move to Done before fetching or deleting the worktree/branch so
+                // a transient post-merge fetch failure or crash cannot block a
+                // task that already landed on the remote.
+                deps.move_to(&task.id, TaskState::Done, None, "merged into the base")?;
+                // After a merge through the remote the local view of the base is
+                // stale until fetched; a failed fetch does not undo the merge.
+                let fetch_error = deps.git.fetch_base().err().map(|e| e.to_string());
+                if let Some(ref err) = fetch_error
+                    && let Ok(mut warnings) = round.warnings.lock()
+                {
+                    warnings.push(format!("{}: post-merge fetch: {err}", task.id));
+                }
                 // Done tasks must not pile up worktrees on disk. A failed
                 // cleanup does not undo the merge; it is recorded with it.
                 let leftover = deps.git.cleanup(&task.id).err().map(|e| e.to_string());
                 deps.emit(
                     EventKind::MergeResult,
                     &task.id,
-                    json!({ "merged": true, "base_sha": new_base_sha, "leftover": leftover }),
+                    json!({
+                        "merged": true,
+                        "base_sha": new_base_sha,
+                        "leftover": leftover,
+                        "fetch_error": fetch_error,
+                    }),
                 )?;
                 // The batch verdict stays valid only along the chain of its
                 // own group's merges. A merge that needed its own gate run
@@ -231,7 +331,6 @@ fn merge(
                 {
                     group.base = Some(new_base_sha);
                 }
-                deps.move_to(&task.id, TaskState::Done, None, "merged into the base")?;
                 close(deps, task)?;
                 unblock::root_succeeded(deps, task)?;
                 return Ok(Resolution::Settled(TaskState::Done));

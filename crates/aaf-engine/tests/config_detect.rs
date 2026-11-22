@@ -99,39 +99,63 @@ fn android_commands_only_with_gradlew() {
 }
 
 #[test]
-fn ios_by_xcodeproj_directory() {
+fn ios_by_xcodeproj_xcworkspace_or_package_swift() {
     let d = detect(&[("Demo.xcodeproj/project.pbxproj", "")]);
     assert_eq!(d.profile, "ios");
     assert_eq!(d.evidence, vec!["Demo.xcodeproj"]);
     assert_eq!(d.commands, CommandsConfig::default());
+
+    let ws = detect(&[("Demo.xcworkspace/contents.xcworkspacedata", "")]);
+    assert_eq!(ws.profile, "ios");
+    assert_eq!(ws.evidence, vec!["Demo.xcworkspace"]);
+
+    let spm = detect(&[("Package.swift", "// swift-tools-version: 5.9\n")]);
+    assert_eq!(spm.profile, "ios");
+    assert_eq!(spm.evidence, vec!["Package.swift"]);
 }
 
 #[test]
 fn flutter_by_pubspec() {
-    let d = detect(&[
-        (
-            "pubspec.yaml",
-            "name: demo\ndependencies:\n  flutter:\n    sdk: flutter\n",
-        ),
+    let pubspec = "name: demo\ndependencies:\n  flutter:\n    sdk: flutter\n";
+    let with_tests = detect(&[
+        ("pubspec.yaml", pubspec),
+        ("test/widget_test.dart", "void main() {}\n"),
         // A Flutter app carries native shells; they must not win.
         ("android/build.gradle", ""),
         ("android/app/src/main/AndroidManifest.xml", "<manifest/>"),
         ("ios/Runner.xcodeproj/project.pbxproj", ""),
     ]);
-    assert_eq!(d.profile, "flutter");
-    assert_eq!(d.commands.test_scoped, "flutter test");
-    assert_eq!(d.commands.test_full, "flutter test");
-    assert_eq!(d.commands.lint, "flutter analyze");
-    assert_eq!(d.commands.build, "");
+    assert_eq!(with_tests.profile, "flutter");
+    assert_eq!(with_tests.commands.test_scoped, "flutter test");
+    assert_eq!(with_tests.commands.test_full, "flutter test");
+    assert_eq!(with_tests.commands.lint, "flutter analyze");
+    assert_eq!(with_tests.commands.build, "");
+    assert_eq!(with_tests.evidence, vec!["pubspec.yaml", "test/"]);
 
-    // A pubspec without the Flutter SDK: profile by marker, but no certain command.
+    // Without a `test/` directory, `flutter test` would fail; leave test commands empty.
+    let without_tests = detect(&[
+        ("pubspec.yaml", pubspec),
+        ("android/build.gradle", ""),
+        ("android/app/src/main/AndroidManifest.xml", "<manifest/>"),
+    ]);
+    assert_eq!(without_tests.profile, "flutter");
+    assert_eq!(without_tests.commands.test_scoped, "");
+    assert_eq!(without_tests.commands.test_full, "");
+    assert_eq!(without_tests.commands.lint, "flutter analyze");
+    assert_eq!(without_tests.commands.build, "");
+    assert_eq!(
+        without_tests.evidence,
+        vec!["pubspec.yaml (no test/ directory)"]
+    );
+
+    // A plain Dart package without `sdk: flutter` falls through to `auto`.
     let plain = detect(&[("pubspec.yaml", "name: demo\n")]);
-    assert_eq!(plain.profile, "flutter");
+    assert_eq!(plain.profile, "auto");
     assert_eq!(plain.commands, CommandsConfig::default());
 }
 
 #[test]
-fn expo_by_app_json_key_and_it_wins_over_react_native() {
+fn expo_by_app_json_config_file_or_dependency_wins_over_react_native() {
     let d = detect(&[
         ("app.json", r#"{"expo": {"name": "demo"}}"#),
         ("package.json", RN_PACKAGE),
@@ -139,6 +163,30 @@ fn expo_by_app_json_key_and_it_wins_over_react_native() {
     assert_eq!(d.profile, "expo");
     assert_eq!(d.evidence, vec!["app.json (\"expo\")"]);
     assert_eq!(d.commands, CommandsConfig::default());
+
+    for cfg in [
+        "app.config.ts",
+        "app.config.js",
+        "app.config.mjs",
+        "app.config.cjs",
+    ] {
+        let by_cfg = detect(&[
+            (cfg, "import 'expo/config';\nexport default {};\n"),
+            ("package.json", RN_PACKAGE),
+        ]);
+        assert_eq!(by_cfg.profile, "expo", "{cfg}");
+        assert_eq!(by_cfg.evidence, vec![cfg]);
+
+        let non_expo = detect(&[(cfg, "export default {};\n"), ("package.json", RN_PACKAGE)]);
+        assert_eq!(non_expo.profile, "react-native", "{cfg}");
+    }
+
+    let by_dep = detect(&[(
+        "package.json",
+        r#"{"dependencies": {"expo": "^52.0.0", "react-native": "0.76.0"}}"#,
+    )]);
+    assert_eq!(by_dep.profile, "expo");
+    assert_eq!(by_dep.evidence, vec!["package.json (expo)"]);
 }
 
 #[test]
@@ -174,11 +222,26 @@ fn react_native_by_package_dependency_and_it_wins_over_native_shells() {
 
 #[test]
 fn web_by_plain_package_json() {
+    // Conservative rule: web repos keep [commands] empty instead of guessing npm/pnpm/yarn/bun.
     let d = detect(&[("package.json", WEB_PACKAGE)]);
     assert_eq!(d.profile, "web");
     assert_eq!(d.evidence, vec!["package.json"]);
-    // The package manager is unknown, so no command is certain.
     assert_eq!(d.commands, CommandsConfig::default());
+
+    let full_pkg =
+        r#"{"scripts": {"build": "vite build", "test": "vitest run", "lint": "eslint ."}}"#;
+    for lock in [
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "package-lock.json",
+    ] {
+        let w = detect(&[("package.json", full_pkg), (lock, "")]);
+        assert_eq!(w.profile, "web", "{lock}");
+        assert_eq!(w.commands, CommandsConfig::default(), "{lock}");
+        assert_eq!(w.evidence, vec!["package.json"], "{lock}");
+    }
 
     // "react-native" only in a script or a name is not a dependency.
     let name_only = detect(&[(
@@ -186,6 +249,7 @@ fn web_by_plain_package_json() {
         r#"{"name": "react-native-docs", "scripts": {"x": "react-native"}}"#,
     )]);
     assert_eq!(name_only.profile, "web");
+    assert_eq!(name_only.commands, CommandsConfig::default());
 }
 
 #[test]
@@ -298,7 +362,17 @@ fn rendered_config_is_commented_and_names_the_evidence() {
     assert!(text.contains("Cargo.toml"));
     assert!(text.contains("Unverified"));
     assert!(text.lines().any(|l| l == "repro = \"\""), "{text}");
-    for section in ["[project]", "[commands]", "[gate]", "[unblocker]", "[run]"] {
+    for section in [
+        "[project]",
+        "[commands]",
+        "[gate]",
+        "[unblocker]",
+        "[run]",
+        "[cross_audit]",
+        "[proof]",
+        "[github]",
+        "[github.columns]",
+    ] {
         assert!(text.lines().any(|l| l == section), "missing {section}");
     }
     assert!(text.lines().filter(|l| l.starts_with('#')).count() >= 8);

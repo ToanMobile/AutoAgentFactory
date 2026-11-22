@@ -169,8 +169,8 @@ fn a_limit_hit_on_the_only_account_waits_for_the_cooldown_instead_of_failing() {
     assert_eq!(summary.review, vec!["t1"]);
     assert_eq!(
         world.task("t1").unblock_cycles,
-        1,
-        "one cycle for the limit, none for waiting"
+        0,
+        "quota rate limits do not burn unblock cycles"
     );
 }
 
@@ -255,9 +255,12 @@ fn a_budget_exactly_at_its_limit_still_runs() {
 fn consecutive_failed_roots_freeze_the_factory_until_it_is_unfrozen() {
     let mut world = World::new();
     world.repo.unblocker.global_freeze_consecutive_fails = 2;
-    world.gate.state.lock().unwrap().unverified = true;
+    world.repo.unblocker.max_token_budget = 14;
     for id in ["t1", "t2", "t3"] {
         world.add(id);
+        world
+            .runner
+            .script(id, vec![failed_outcome("compile error")]);
     }
 
     let summary = world.once();
@@ -265,10 +268,14 @@ fn consecutive_failed_roots_freeze_the_factory_until_it_is_unfrozen() {
     assert!(summary.frozen);
     assert!(is_frozen(&world.db).unwrap());
     assert!(summary.blocked.len() >= 2, "{summary:?}");
-    let BlockedReason::NeedsHuman { why } = world.task("t1").blocked_reason.unwrap() else {
-        panic!("not needs_human");
-    };
-    assert!(why.contains("the gate could not verify"), "{why}");
+    assert!(
+        matches!(
+            world.task("t1").blocked_reason,
+            Some(BlockedReason::BudgetExceeded { .. })
+        ),
+        "{:?}",
+        world.task("t1").blocked_reason
+    );
 
     // Frozen: a new run starts nothing at all.
     world.add("t9");
@@ -282,7 +289,7 @@ fn consecutive_failed_roots_freeze_the_factory_until_it_is_unfrozen() {
     // `aaf board unfreeze` clears the flag and the counter.
     crate::factory::unfreeze(&world.db, &*world.clock).unwrap();
     assert!(!is_frozen(&world.db).unwrap());
-    world.gate.state.lock().unwrap().unverified = false;
+    world.repo.unblocker.max_token_budget = 10_000;
     let summary = world.once();
     assert!(!summary.frozen);
     assert!(summary.review.contains(&"t9".to_string()));
@@ -292,8 +299,11 @@ fn consecutive_failed_roots_freeze_the_factory_until_it_is_unfrozen() {
 fn a_success_resets_the_consecutive_failure_counter() {
     let mut world = World::new();
     world.repo.unblocker.global_freeze_consecutive_fails = 2;
+    world.repo.unblocker.max_token_budget = 14;
     world.add("t1");
-    world.gate.state.lock().unwrap().unverified = true;
+    world
+        .runner
+        .script("t1", vec![failed_outcome("compile error")]);
     world.once();
     assert_eq!(
         world
@@ -304,7 +314,7 @@ fn a_success_resets_the_consecutive_failure_counter() {
         Some("1")
     );
 
-    world.gate.state.lock().unwrap().unverified = false;
+    world.repo.unblocker.max_token_budget = 10_000;
     world.add("t2");
     world.once();
 
@@ -317,6 +327,23 @@ fn a_success_resets_the_consecutive_failure_counter() {
         Some("0")
     );
     assert!(!is_frozen(&world.db).unwrap());
+}
+
+#[test]
+fn unverified_gate_blocks_only_that_task_without_freezing_factory() {
+    let mut world = World::new();
+    world.repo.unblocker.global_freeze_consecutive_fails = 2;
+    world.gate.state.lock().unwrap().unverified = true;
+    for id in ["t1", "t2"] {
+        world.add(id);
+    }
+
+    let summary = world.once();
+
+    assert!(!summary.frozen);
+    assert!(!is_frozen(&world.db).unwrap());
+    assert_eq!(world.state("t1"), TaskState::Blocked);
+    assert_eq!(world.state("t2"), TaskState::Blocked);
 }
 
 #[test]

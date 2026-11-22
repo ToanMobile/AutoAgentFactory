@@ -7,6 +7,7 @@ mod batch;
 mod commit_lock;
 mod failure;
 mod fakes;
+mod fakes_git;
 mod flow;
 mod git_real;
 mod infra;

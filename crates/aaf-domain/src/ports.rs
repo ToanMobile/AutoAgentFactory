@@ -55,8 +55,12 @@ pub trait TaskStore: Send + Sync {
     fn increment_unblock_cycles(&self, id: &str, now: i64) -> PortResult<u32>;
     /// Rejects an edge that would create a cycle with `PortError::Conflict`.
     fn add_dep(&self, task_id: &str, blocked_by: &str) -> PortResult<()>;
+    /// Removes a dependency edge; returns `true` if the edge existed.
+    fn remove_dep(&self, task_id: &str, blocked_by: &str) -> PortResult<bool>;
     /// Ids of the tasks that block `task_id`.
     fn deps_of(&self, task_id: &str) -> PortResult<Vec<String>>;
+    /// All `(task_id, blocked_by)` dependency edges across the store.
+    fn all_deps(&self) -> PortResult<Vec<(String, String)>>;
     fn children_of(&self, parent_id: &str) -> PortResult<Vec<Task>>;
 }
 
@@ -135,6 +139,10 @@ pub const META_CONSECUTIVE_ROOT_FAILS: &str = "consecutive_root_fails";
 pub struct SandboxPolicy {
     /// False runs the agent unconfined (explicit opt-in only).
     pub enabled: bool,
+    /// True denies all writes to the worktree, `.git`, and build caches
+    /// (only temp dirs and account session state remain writable).
+    #[serde(default)]
+    pub read_only: bool,
     pub writable_paths: Vec<String>,
     pub read_denied_paths: Vec<String>,
 }

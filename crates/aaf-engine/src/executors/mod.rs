@@ -308,23 +308,30 @@ pub(crate) fn run_confined(
             marks = Some(run_marks);
         }
         let (queue, queue_guest) = open_queue(env)?;
+        let read_only = request.sandbox.read_only;
         // A linked worktree keeps its index, refs and objects in the main
         // repository's git dir. Not being in a repository is fine: then there
-        // is no such directory to open up.
-        let git_dirs = match aaf_fp::git(
-            Path::new(&request.cwd),
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            &[],
-            aaf_fp::GIT_TIMEOUT,
-        ) {
-            Ok(git_dir) if !git_dir.is_empty() => vec![git_dir],
-            _ => Vec::new(),
+        // is no such directory to open up. Read-only runs never write to git.
+        let git_dirs = if read_only {
+            Vec::new()
+        } else {
+            match aaf_fp::git(
+                Path::new(&request.cwd),
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                &[],
+                aaf_fp::GIT_TIMEOUT,
+            ) {
+                Ok(git_dir) if !git_dir.is_empty() => vec![git_dir],
+                _ => Vec::new(),
+            }
         };
         let mut writable = env.temp_dirs.clone();
-        if let Some(home) = &env.home {
-            writable.extend(BUILD_CACHE_DIRS.iter().map(|dir| format!("{home}/{dir}")));
+        if !read_only {
+            if let Some(home) = &env.home {
+                writable.extend(BUILD_CACHE_DIRS.iter().map(|dir| format!("{home}/{dir}")));
+            }
+            writable.extend(env.sdk_dirs.iter().cloned());
         }
-        writable.extend(env.sdk_dirs.iter().cloned());
         writable.extend(account.writable);
         let mut write_denied = account.write_denied;
         let mut write_denied_prefix = Vec::new();
@@ -370,7 +377,7 @@ pub(crate) fn run_confined(
             read_denied: env.data_dir.iter().cloned().collect(),
             read_reopened: queue,
             write_reopened: queue_guest,
-            worktree: Some(request.cwd.clone()),
+            worktree: (!read_only).then(|| request.cwd.clone()),
             git_dirs,
             worktrees_root,
             path_dirs,

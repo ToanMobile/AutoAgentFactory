@@ -143,22 +143,52 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
         );
     }
 
-    if let Some(pubspec) = read_marker(&repo_root.join("pubspec.yaml")) {
-        // Plain Dart packages share the marker but not the `flutter` tool.
-        let cmds = if pubspec.contains("sdk: flutter") {
-            commands("", "flutter test", "flutter test", "flutter analyze")
-        } else {
-            none()
-        };
-        return found("flutter", cmds, vec!["pubspec.yaml".to_string()]);
+    if let Some(pubspec) = read_marker(&repo_root.join("pubspec.yaml"))
+        && pubspec.contains("sdk: flutter")
+    {
+        if repo_root.join("test").is_dir() {
+            return found(
+                "flutter",
+                commands("", "flutter test", "flutter test", "flutter analyze"),
+                vec!["pubspec.yaml".to_string(), "test/".to_string()],
+            );
+        }
+        return found(
+            "flutter",
+            commands("", "", "", "flutter analyze"),
+            vec!["pubspec.yaml (no test/ directory)".to_string()],
+        );
     }
 
     let app_json = read_json(&repo_root.join("app.json"));
     if app_json.is_some_and(|app| app.get("expo").is_some()) {
         return found("expo", none(), vec!["app.json (\"expo\")".to_string()]);
     }
-
     let package = read_json(&repo_root.join("package.json"));
+    let pkg_has_expo = package.as_ref().is_some_and(|p| depends_on(p, "expo"));
+    if let Some(cfg) = [
+        "app.config.ts",
+        "app.config.js",
+        "app.config.mjs",
+        "app.config.cjs",
+    ]
+    .into_iter()
+    .find(|rel| {
+        is_file(rel)
+            && (pkg_has_expo
+                || read_marker(&repo_root.join(rel)).is_some_and(|text| {
+                    text.contains("\"expo\"")
+                        || text.contains("'expo'")
+                        || text.contains("\"expo/")
+                        || text.contains("'expo/")
+                }))
+    }) {
+        return found("expo", none(), vec![cfg.to_string()]);
+    }
+
+    if pkg_has_expo {
+        return found("expo", none(), vec!["package.json (expo)".to_string()]);
+    }
     if package
         .as_ref()
         .is_some_and(|p| depends_on(p, "react-native"))
@@ -204,10 +234,18 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
 
     if let Some(project) = children
         .iter()
-        .find(|name| name.ends_with(".xcodeproj") && repo_root.join(name).is_dir())
+        .find(|name| name.ends_with(".xcworkspace") && repo_root.join(name).is_dir())
+        .or_else(|| {
+            children
+                .iter()
+                .find(|name| name.ends_with(".xcodeproj") && repo_root.join(name).is_dir())
+        })
     {
         // Scheme and destination are project-specific, so no xcodebuild line is certain.
         return found("ios", none(), vec![project.clone()]);
+    }
+    if is_file("Package.swift") {
+        return found("ios", none(), vec!["Package.swift".to_string()]);
     }
 
     if is_file("Cargo.toml") {
@@ -241,7 +279,6 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
     }
 
     if package.is_some() {
-        // npm, pnpm, yarn or bun: the script runner is not knowable from package.json alone.
         return found("web", none(), vec!["package.json".to_string()]);
     }
 

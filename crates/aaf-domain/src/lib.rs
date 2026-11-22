@@ -11,6 +11,7 @@ pub mod dag;
 pub mod event;
 pub mod gate;
 pub mod ports;
+pub mod proof;
 pub mod run;
 pub mod task;
 

@@ -1,5 +1,12 @@
 //! Confirms a bug before it becomes a task: the repro command must fail on
 //! every run. One failure out of two is a flaky test, not a confirmed bug.
+//!
+//! Security boundary:
+//! - `commands.repro` is **not** executed automatically by `aaf run` or `aaf gate`.
+//! - Untrusted CLI arguments, GitHub issue text, logs, or agent output must **never**
+//!   be passed to [`ReproCommand::committed_shell`] (which invokes `/bin/sh -c`).
+//! - Only [`ReproCommand::argv`] (direct argv execution without a shell) is intended
+//!   for manual confirmation.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,7 +50,9 @@ impl ReproCommand {
 
     /// Runs `script` through `/bin/sh -c`. Only for a command string read
     /// from the repo's committed config (`.autofactory/config.toml`); never
-    /// for text taken from an issue, a log or agent output.
+    /// for untrusted CLI strings, text taken from an issue, a log, or agent
+    /// output. `commands.repro` is not executed automatically by `aaf run` or
+    /// `aaf gate` — use [`ReproCommand::argv`] for manual confirmation.
     pub fn committed_shell(
         script: impl Into<String>,
         cwd: impl Into<PathBuf>,

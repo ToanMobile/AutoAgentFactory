@@ -71,6 +71,9 @@ impl ClaudeCodeRunner {
         // Nobody can answer a permission prompt in an unattended run, so the
         // choice is between granting up front and denying automatically
         // (`claude --help`, 2.1.330):
+        // - Read-only (`sandbox.read_only`): `--permission-mode plan` keeps
+        //   Claude Code strictly in read-only planning mode, paired with a
+        //   read-only Seatbelt profile when sandboxed.
         // - Sandboxed: `--permission-mode bypassPermissions`. The agent must
         //   edit files and run the project's build and test commands, which no
         //   static allow-list can enumerate; the Seatbelt profile and the
@@ -80,7 +83,9 @@ impl ClaudeCodeRunner {
         //   prompt (shell commands outside the user's own allow rules) into
         //   an automatic denial instead of a hang. Bypassing all checks with
         //   no OS confinement behind it is never chosen here.
-        if request.sandbox.enabled {
+        if request.sandbox.read_only {
+            args.extend(["--permission-mode", "plan"].map(String::from));
+        } else if request.sandbox.enabled {
             args.extend(["--permission-mode", "bypassPermissions"].map(String::from));
         } else {
             args.extend(
@@ -265,6 +270,7 @@ struct ResultEvent {
     text: String,
     is_error: bool,
     api_error_status: Option<i64>,
+    infra: Option<InfraFailure>,
     tokens: (u64, u64),
 }
 
@@ -281,13 +287,13 @@ impl StreamParser {
                 if error == Some("rate_limit") {
                     self.rate_limit_error = Some(text.clone());
                 }
-                let flagged = event.get("is_api_error_message").and_then(Value::as_bool);
-                if error.is_some() || flagged == Some(true) {
-                    self.api_error =
-                        infra_kind(error, flagged == Some(true), &text).map(|kind| InfraFailure {
-                            kind,
-                            raw: text.chars().take(RAW_LIMIT_CHARS).collect(),
-                        });
+                let flagged =
+                    event.get("is_api_error_message").and_then(Value::as_bool) == Some(true);
+                let structured = structured_infra(&event, &text);
+                if structured.is_some() {
+                    self.api_error = structured;
+                } else if event.get("error").is_some() || flagged {
+                    self.api_error = network_wording_infra(flagged, &text);
                 }
                 if let Some(usage) = message.and_then(|m| m.get("usage")) {
                     let id = message
@@ -301,18 +307,33 @@ impl StreamParser {
                     self.last_assistant_text = text;
                 }
             }
+            Some("error") => {
+                let msg = event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(failure) = structured_infra(&event, msg) {
+                    self.api_error = Some(failure);
+                }
+            }
             Some("result") => {
+                let text = event
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let infra = structured_infra(&event, &text);
                 self.result = Some(ResultEvent {
-                    text: event
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
+                    text,
                     is_error: event
                         .get("is_error")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                    api_error_status: event.get("api_error_status").and_then(Value::as_i64),
+                    api_error_status: event
+                        .get("api_error_status")
+                        .or_else(|| event.get("status_code"))
+                        .and_then(Value::as_i64),
+                    infra,
                     tokens: event.get("usage").map(usage_tokens).unwrap_or_default(),
                 });
             }
@@ -389,9 +410,10 @@ impl StreamParser {
         })
     }
 
-    /// A failed run whose last API error was about the account or the
-    /// network, or whose result carries HTTP 401/403. A run that was served
-    /// in the end, or that hit a limit (handled as a limit), is none.
+    /// A failed run whose last API error was about the account, the network,
+    /// or a structured transient server error (HTTP 5xx / `overloaded` /
+    /// `server_error`), or whose result carries HTTP 401/403/5xx. A run that
+    /// was served in the end, or that hit a limit (handled as a limit), is none.
     fn infra(&self) -> Option<InfraFailure> {
         if self.result.as_ref().is_some_and(|r| !r.is_error) || self.limit_hit().is_some() {
             return None;
@@ -399,29 +421,25 @@ impl StreamParser {
         if let Some(failure) = &self.api_error {
             return Some(failure.clone());
         }
-        let result = self.result.as_ref()?;
-        matches!(result.api_error_status, Some(401 | 403)).then(|| InfraFailure {
-            kind: InfraKind::Auth,
-            raw: result.text.chars().take(RAW_LIMIT_CHARS).collect(),
-        })
+        self.result.as_ref()?.infra.clone()
     }
 }
 
-/// Values of the `error` field of an API error message that mean the
-/// provider refused the account itself. From the error enum of the Claude
-/// Code 2.1.330 binary; `authentication_failed` is also in a real run
-/// (`tests/fixtures/exec/claude_not_logged_in.stream.jsonl`). The other
-/// values of that enum (`rate_limit`, `overloaded`, `server_error`,
-/// `invalid_request`, `model_not_found`, `max_output_tokens`, `unknown`)
-/// are not taken as trouble with the account.
-const ACCOUNT_ERRORS: [&str; 6] = [
+/// Values of structured error fields that mean the provider refused the
+/// account itself (permanent until fixed; never retried).
+const ACCOUNT_ERRORS: [&str; 7] = [
     "authentication_failed",
+    "authentication_error",
     "oauth_org_not_allowed",
     "account_on_hold",
     "verification_required",
     "billing_error",
     "cloud_credential_error",
 ];
+
+/// Structured error codes for transient provider/server failures (mapped to
+/// [`InfraKind::Network`] so `Mode::Auto` can back off and retry).
+const TRANSIENT_SERVER_ERRORS: [&str; 3] = ["server_error", "overloaded", "overloaded_error"];
 
 /// How Claude Code 2.1.330 words a request that never reached the API
 /// (read from the binary's connection-error messages; never observed
@@ -436,13 +454,60 @@ const NETWORK_WORDING: [&str; 6] = [
     "connection dropped",
 ];
 
-fn infra_kind(error: Option<&str>, flagged: bool, text: &str) -> Option<InfraKind> {
-    if error.is_some_and(|error| ACCOUNT_ERRORS.contains(&error)) {
-        return Some(InfraKind::Auth);
+fn structured_infra(
+    event: &serde_json::Map<String, Value>,
+    fallback_text: &str,
+) -> Option<InfraFailure> {
+    let error_val = event.get("error");
+    let error_obj = error_val.and_then(Value::as_object);
+    fn str_field<'a>(o: Option<&'a serde_json::Map<String, Value>>, k: &str) -> Option<&'a str> {
+        o.and_then(|m| m.get(k)).and_then(Value::as_str)
     }
+    let error_status = error_obj
+        .and_then(|o| o.get("status").or_else(|| o.get("status_code")))
+        .and_then(Value::as_i64);
+    let status = event
+        .get("api_error_status")
+        .or_else(|| event.get("status_code"))
+        .and_then(Value::as_i64)
+        .or(error_status);
+    let codes = [
+        error_val.and_then(Value::as_str),
+        str_field(error_obj, "type"),
+        event.get("subtype").and_then(Value::as_str),
+    ];
+    let has_code = |list: &[&str]| {
+        codes
+            .iter()
+            .flatten()
+            .any(|c| list.iter().any(|known| known.eq_ignore_ascii_case(c)))
+    };
+    let kind = if has_code(&ACCOUNT_ERRORS) || matches!(status, Some(401 | 403)) {
+        InfraKind::Auth
+    } else if has_code(&TRANSIENT_SERVER_ERRORS) || matches!(status, Some(500..=599)) {
+        InfraKind::Network
+    } else {
+        return None;
+    };
+    let detail = [fallback_text, str_field(error_obj, "message").unwrap_or("")]
+        .into_iter()
+        .chain(codes.into_iter().flatten())
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| status.map(|s| format!("HTTP {s}")))
+        .unwrap_or_default();
+    Some(InfraFailure {
+        kind,
+        raw: detail.chars().take(RAW_LIMIT_CHARS).collect(),
+    })
+}
+
+fn network_wording_infra(flagged: bool, text: &str) -> Option<InfraFailure> {
     let lower = text.to_lowercase();
-    (flagged && NETWORK_WORDING.iter().any(|words| lower.contains(words)))
-        .then_some(InfraKind::Network)
+    (flagged && NETWORK_WORDING.iter().any(|words| lower.contains(words))).then(|| InfraFailure {
+        kind: InfraKind::Network,
+        raw: text.chars().take(RAW_LIMIT_CHARS).collect(),
+    })
 }
 
 /// Parses a whole transcript.

@@ -13,10 +13,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use aaf_engine::config::{LOCAL_CONFIG_REL, REPO_CONFIG_REL, detect_stack, render_repo_config};
+use aaf_engine::config::{
+    LOCAL_CONFIG_REL, REPO_CONFIG_REL, detect_stack, effective_profile, render_repo_config,
+};
 use aaf_engine::executors::find_on_path;
 use serde_json::json;
 
+use crate::cmd::skills::{SkillHost, merge_outcomes};
 use crate::ctx::{self, Ctx};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -27,9 +30,79 @@ pub struct InitArgs {
     /// Overwrite an existing `.autofactory/config.toml`.
     #[arg(long)]
     pub force: bool,
+    /// Also sync bundled domain skills into the host skills directory without overwriting existing ones.
+    #[arg(long)]
+    pub with_skills: bool,
+    /// Target host directory layout for `--with-skills` (`claude`, `agents`, or `all`).
+    #[arg(long, value_enum, default_value_t = SkillHost::Claude)]
+    pub host: SkillHost,
 }
 
 pub fn run(args: &InitArgs, ctx: &Ctx) -> CmdResult {
+    if let Some(refused) = super::board::store::refuse_inside_agent_run(ctx, "aaf init") {
+        return Ok(refused);
+    }
+    let mut out = run_init(args, ctx)?;
+    if args.with_skills && out.exit == crate::output::Exit::Ok {
+        let root = super::board::store::repo_root(ctx).unwrap_or_else(|_| ctx.cwd.clone());
+        let profile = if root.join(REPO_CONFIG_REL).exists() {
+            let cfg = ctx.load_config(&root)?;
+            effective_profile(&cfg.repo, &root)
+        } else {
+            detect_stack(&root).profile
+        };
+        let dests = args.host.resolve_dirs(&root);
+        let mut raw_outcomes = Vec::with_capacity(dests.len());
+        let mut targets = Vec::with_capacity(dests.len());
+        for dest in &dests {
+            let synced =
+                aaf_engine::skills::sync_skills_for_profile(dest, Some(&profile), None, false)
+                    .map_err(|e| CmdError::new(e.to_string()))?;
+            targets.push(json!({
+                "dir": dest.to_string_lossy().into_owned(),
+                "written": synced.written,
+                "skipped_existing": synced.skipped_existing,
+                "unchanged": synced.unchanged,
+                "skipped_modified": synced.skipped_modified,
+            }));
+            raw_outcomes.push(synced);
+        }
+        let merged = merge_outcomes(&raw_outcomes);
+        let dirs: Vec<String> = dests
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        out.text.push_str(&format!(
+            "\nskills: profile={profile} host={} written={} unchanged={} skipped_modified={} ({})",
+            args.host.as_str(),
+            merged.written.len(),
+            merged.unchanged.len(),
+            merged.skipped_modified.len(),
+            dirs.join(", "),
+        ));
+        if profile == "auto" {
+            out.text.push_str(
+                "\nnote: profile is auto (core skills only); run `aaf skills sync --profile <stack>` for stack-specific skills",
+            );
+        }
+        out = out.field(
+            "skills",
+            json!({
+                "profile": profile,
+                "host": args.host.as_str(),
+                "dirs": dirs,
+                "written": merged.written,
+                "skipped_existing": merged.skipped_existing,
+                "unchanged": merged.unchanged,
+                "skipped_modified": merged.skipped_modified,
+                "targets": targets,
+            }),
+        );
+    }
+    Ok(out)
+}
+
+fn run_init(args: &InitArgs, ctx: &Ctx) -> CmdResult {
     init(args, ctx, ctx::current_exe().as_deref())
 }
 

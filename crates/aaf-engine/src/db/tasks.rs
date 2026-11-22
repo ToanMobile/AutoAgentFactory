@@ -8,12 +8,23 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
 use super::{Db, corrupt, sql_err};
 
-const TASK_COLS: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
+const TASK_COLS_V3: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
      state, priority, fingerprint, blocked_reason, unblock_cycles, created_at, updated_at";
+const TASK_COLS_V4: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
+     state, priority, fingerprint, blocked_reason, unblock_cycles, created_at, updated_at, \
+     scope_paths";
 
 /// Priority first (`P0` sorts lowest), then oldest first; `rowid` keeps
 /// insertion order for tasks created in the same second.
 const TASK_ORDER: &str = " ORDER BY priority, created_at, rowid";
+
+fn task_cols(has_scope_paths: bool) -> &'static str {
+    if has_scope_paths {
+        TASK_COLS_V4
+    } else {
+        TASK_COLS_V3
+    }
+}
 
 fn to_json<T: serde::Serialize>(value: &T, what: &str) -> PortResult<String> {
     serde_json::to_string(value).map_err(|e| PortError::Invalid(format!("{what}: {e}")))
@@ -23,12 +34,18 @@ fn from_json<T: serde::de::DeserializeOwned>(text: &str, what: &str) -> PortResu
     serde_json::from_str(text).map_err(|_| corrupt(what, text))
 }
 
-fn task_from_row(row: &Row<'_>) -> PortResult<Task> {
+fn task_from_row(row: &Row<'_>, has_scope_paths: bool) -> PortResult<Task> {
     let spec: String = row.get(6).map_err(sql_err)?;
     let notes: String = row.get(7).map_err(sql_err)?;
     let state: String = row.get(8).map_err(sql_err)?;
     let priority: String = row.get(9).map_err(sql_err)?;
     let blocked: Option<String> = row.get(11).map_err(sql_err)?;
+    let scope_paths = if has_scope_paths {
+        let text: String = row.get(15).map_err(sql_err)?;
+        from_json(&text, "tasks.scope_paths")?
+    } else {
+        Vec::new()
+    };
     Ok(Task {
         id: row.get(0).map_err(sql_err)?,
         repo_root: row.get(1).map_err(sql_err)?,
@@ -46,17 +63,23 @@ fn task_from_row(row: &Row<'_>) -> PortResult<Task> {
             None => None,
         },
         unblock_cycles: row.get(12).map_err(sql_err)?,
+        scope_paths,
         created_at: row.get(13).map_err(sql_err)?,
         updated_at: row.get(14).map_err(sql_err)?,
     })
 }
 
-fn query_tasks(conn: &Connection, sql: &str, params: impl Params) -> PortResult<Vec<Task>> {
+fn query_tasks(
+    conn: &Connection,
+    sql: &str,
+    params: impl Params,
+    has_scope_paths: bool,
+) -> PortResult<Vec<Task>> {
     let mut stmt = conn.prepare_cached(sql).map_err(sql_err)?;
     let mut rows = stmt.query(params).map_err(sql_err)?;
     let mut tasks = Vec::new();
     while let Some(row) = rows.next().map_err(sql_err)? {
-        tasks.push(task_from_row(row)?);
+        tasks.push(task_from_row(row, has_scope_paths)?);
     }
     Ok(tasks)
 }
@@ -95,12 +118,13 @@ impl TaskStore for Db {
             Some(reason) => Some(to_json(reason, "blocked_reason")?),
             None => None,
         };
+        let scope_paths = to_json(&task.scope_paths, "scope_paths")?;
         self.write(move |tx| {
             tx.prepare_cached(
                 "INSERT INTO tasks (id, repo_root, parent_id, root_id, depth, title, spec, \
                  context_notes, state, priority, fingerprint, blocked_reason, unblock_cycles, \
-                 created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 created_at, updated_at, scope_paths) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )
             .and_then(|mut stmt| {
                 stmt.execute(params![
@@ -119,6 +143,7 @@ impl TaskStore for Db {
                     task.unblock_cycles,
                     task.created_at,
                     task.updated_at,
+                    scope_paths,
                 ])
             })
             .map_err(sql_err)?;
@@ -128,9 +153,11 @@ impl TaskStore for Db {
 
     fn get_task(&self, id: &str) -> PortResult<Task> {
         let id = id.to_string();
+        let has_scope_paths = self.schema_version() >= 4;
+        let cols = task_cols(has_scope_paths);
         self.read(move |conn| {
-            let sql = format!("SELECT {TASK_COLS} FROM tasks WHERE id = ?1");
-            query_tasks(conn, &sql, params![id])?
+            let sql = format!("SELECT {cols} FROM tasks WHERE id = ?1");
+            query_tasks(conn, &sql, params![id], has_scope_paths)?
                 .pop()
                 .ok_or_else(|| task_not_found(&id))
         })
@@ -152,13 +179,22 @@ impl TaskStore for Db {
             clauses.push("state = ?");
             args.push(state.as_str().to_string());
         }
-        let mut sql = format!("SELECT {TASK_COLS} FROM tasks");
+        let has_scope_paths = self.schema_version() >= 4;
+        let cols = task_cols(has_scope_paths);
+        let mut sql = format!("SELECT {cols} FROM tasks");
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
         sql.push_str(TASK_ORDER);
-        self.read(move |conn| query_tasks(conn, &sql, rusqlite::params_from_iter(args)))
+        self.read(move |conn| {
+            query_tasks(
+                conn,
+                &sql,
+                rusqlite::params_from_iter(args),
+                has_scope_paths,
+            )
+        })
     }
 
     fn set_state(
@@ -263,6 +299,18 @@ impl TaskStore for Db {
         })
     }
 
+    fn remove_dep(&self, task_id: &str, blocked_by: &str) -> PortResult<bool> {
+        let task_id = task_id.to_string();
+        let blocked_by = blocked_by.to_string();
+        self.write(move |tx| {
+            let changed = tx
+                .prepare_cached("DELETE FROM task_deps WHERE task_id = ?1 AND blocked_by = ?2")
+                .and_then(|mut stmt| stmt.execute(params![task_id, blocked_by]))
+                .map_err(sql_err)?;
+            Ok(changed > 0)
+        })
+    }
+
     fn deps_of(&self, task_id: &str) -> PortResult<Vec<String>> {
         let task_id = task_id.to_string();
         self.read(move |conn| {
@@ -277,11 +325,26 @@ impl TaskStore for Db {
         })
     }
 
+    fn all_deps(&self) -> PortResult<Vec<(String, String)>> {
+        self.read(|conn| {
+            conn.prepare_cached(
+                "SELECT task_id, blocked_by FROM task_deps ORDER BY task_id, blocked_by",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
+            })
+            .map_err(sql_err)
+        })
+    }
+
     fn children_of(&self, parent_id: &str) -> PortResult<Vec<Task>> {
         let parent_id = parent_id.to_string();
+        let has_scope_paths = self.schema_version() >= 4;
+        let cols = task_cols(has_scope_paths);
         self.read(move |conn| {
-            let sql = format!("SELECT {TASK_COLS} FROM tasks WHERE parent_id = ?1{TASK_ORDER}");
-            query_tasks(conn, &sql, params![parent_id])
+            let sql = format!("SELECT {cols} FROM tasks WHERE parent_id = ?1{TASK_ORDER}");
+            query_tasks(conn, &sql, params![parent_id], has_scope_paths)
         })
     }
 }

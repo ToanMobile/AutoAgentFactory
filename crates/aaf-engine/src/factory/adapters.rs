@@ -108,13 +108,14 @@ impl GateRunner for RealGate {
     }
 }
 
-/// The provider whose accounts `run.executor` can use; `None` for a custom
-/// command, which runs without an account.
+/// The provider whose accounts an executor (`[run].executor` or
+/// `[cross_audit].executor`) can use; `None` for `custom` commands, which run
+/// without a discovered account profile.
 pub fn provider_for(executor: &str) -> Option<ProviderKind> {
-    match executor {
+    match executor.trim().to_ascii_lowercase().as_str() {
         "claude" => Some(ProviderKind::ClaudeCode),
         "codex" => Some(ProviderKind::Codex),
-        "antigravity" => Some(ProviderKind::Antigravity),
+        "antigravity" | "gemini" => Some(ProviderKind::Antigravity),
         "opencode" => Some(ProviderKind::OpenCode),
         _ => None,
     }
@@ -220,6 +221,13 @@ impl AccountPool for RouterPool {
             .into_iter()
             .map(|state| state.profile)
             .collect())
+    }
+
+    fn provider_account_count(&self) -> PortResult<usize> {
+        if self.provider.is_none() {
+            return Ok(0);
+        }
+        Ok(self.provider_accounts()?.len())
     }
 }
 

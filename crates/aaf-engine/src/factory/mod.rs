@@ -13,14 +13,17 @@
 //! ponytail: thread per run, upgrade to a pool when > 64 runs are parallel.
 
 pub mod adapters;
+pub mod audit_backend;
 pub mod batch;
 mod commit_lock;
 mod finish;
 mod git_real;
 pub mod ports;
 pub mod prompt;
+pub mod schedule_order;
 mod scheduler;
 mod select_pool;
+mod sweep;
 mod unblock;
 mod worker;
 
@@ -41,9 +44,16 @@ use aaf_domain::ports::{
 use aaf_domain::task::TaskState;
 use serde::Serialize;
 
+pub use audit_backend::{
+    AuditBackend, audit_cmd_is_claude, build_audit_command, configured_audit_provider,
+    effective_audit_provider, resolve_audit_policy, same_audit_provider,
+};
 pub use git_real::{BaseRef, RealGit, resolve_base};
 pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
-pub use scheduler::{Hooks, run};
+pub use scheduler::{
+    Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit,
+    transient_backoff_secs,
+};
 pub use select_pool::{BindingView, SelectingPool};
 
 /// Every store the loop needs, as one object so a single `Db` handle serves
@@ -115,6 +125,11 @@ pub struct RunSummary {
     pub requeued: Vec<String>,
     /// Jobs that could not start because no account was free.
     pub waiting_for_account: u32,
+    /// Ready tasks held back by the `run.max_open_review` queue brake.
+    pub waiting_for_review_cap: u32,
+    /// Ready tasks waiting on a `Blocked` upstream dependency (`(task_id, blocker_id)`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked_upstream: Vec<(String, String)>,
     pub frozen: bool,
     /// Why the run stopped taking tasks: the agent CLI failed for its
     /// account or the network (`AgentOutcome::infra`). Every further task

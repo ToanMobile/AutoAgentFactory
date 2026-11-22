@@ -3,13 +3,14 @@
 //! in-memory fakes.
 
 use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use aaf_domain::account::AccountProfile;
 use aaf_domain::gate::{HeadLockReport, Receipt};
 use aaf_domain::ports::{LimitHit, PortResult};
 
-use crate::git::{MergeOutcome, PrOutcome, TaskWorktree};
+use crate::git::{GitError, MergeOutcome, PrOutcome, TaskWorktree};
 use crate::unblocker::QuotaRoute;
 use crate::webhook::WebhookEvent;
 
@@ -73,6 +74,39 @@ pub trait GitOps: Send + Sync {
     /// Removes the worktree and branch of a task that is done. Never
     /// discards work: a dirty worktree or an unmerged branch is an error.
     fn cleanup(&self, task_id: &str) -> PortResult<()>;
+    /// Existing worktree and its `HEAD` oid (without creating a worktree).
+    fn existing_worktree_head(
+        &self,
+        _task_id: &str,
+    ) -> Result<Option<(TaskWorktree, String)>, GitError> {
+        Ok(None)
+    }
+    /// Removes orphaned `aaf/batch-*` worktrees/branches not in `active_task_ids`.
+    fn sweep_orphan_batches(&self, _active_task_ids: &HashSet<String>) -> Result<usize, GitError> {
+        Ok(0)
+    }
+    /// Drops stale git worktree registrations whose directories are gone.
+    fn prune_worktrees(&self) -> Result<(), GitError> {
+        Ok(())
+    }
+    /// Checks `(task_id, local_head_oid)` candidates against merged GitHub PRs
+    /// and local git ancestry. Returns verified `task_id -> expected_head_oid`.
+    fn verified_squash_merges(
+        &self,
+        _candidates: &[(String, String)],
+    ) -> Result<HashMap<String, String>, GitError> {
+        Ok(HashMap::new())
+    }
+    /// Removes a worktree/branch/snapshot refs after squash-merge verification.
+    fn remove_verified_merged(
+        &self,
+        worktree: &TaskWorktree,
+        _expected_head_oid: &str,
+    ) -> Result<(), GitError> {
+        let task_id = worktree.task_id()?;
+        self.cleanup(task_id)
+            .map_err(|e| GitError::Invalid(e.to_string()))
+    }
 }
 
 /// An account to run on, held until dropped. `account` is `None` when no
@@ -124,6 +158,10 @@ pub trait AccountPool: Send + Sync {
     fn report_limit(&self, account_id: &str, hit: &LimitHit) -> PortResult<()>;
     /// Every known account, for the sandbox's read-deny list.
     fn profiles(&self) -> PortResult<Vec<AccountProfile>>;
+    /// Number of configured accounts matching this pool's provider.
+    fn provider_account_count(&self) -> PortResult<usize> {
+        Ok(self.profiles()?.len())
+    }
 }
 
 pub trait Notifier: Send + Sync {
