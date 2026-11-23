@@ -21,8 +21,10 @@ pub const NICE_INCREMENT: &str = "10";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PriorityTools {
     pub nice: Option<PathBuf>,
-    /// macOS only: `taskpolicy -b` also lowers I/O priority and keeps the
-    /// work off the performance cores.
+    /// macOS only: `taskpolicy -c utility` clamps the process tree to Utility
+    /// QoS so it yields to interactive desktop apps while still allowing idle
+    /// Performance cores and avoiding `PRIO_DARWIN_BG` (`-b`) E-core + disk
+    /// I/O starvation that turns minute-long builds into multi-hour stalls.
     pub taskpolicy: Option<PathBuf>,
 }
 
@@ -72,7 +74,8 @@ pub fn priority_argv(
     if low_priority {
         if let Some(taskpolicy) = &tools.taskpolicy {
             argv.push(taskpolicy.into());
-            argv.push("-b".into());
+            argv.push("-c".into());
+            argv.push("utility".into());
         }
         if let Some(nice) = &tools.nice {
             argv.push(nice.into());

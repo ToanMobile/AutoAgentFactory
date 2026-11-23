@@ -72,6 +72,9 @@ pub enum Busy {
     /// Every slot the command may use is taken, or a running command of
     /// unknown size leaves no room to share.
     SlotsTaken,
+    /// Another unmeasured or exclusive command holds `drain.lock` and is
+    /// draining the queue until every active slot empties.
+    Draining,
     /// A command that runs alone waits until no other heavy command runs.
     RunsAlone,
     /// Free memory, less what the running commands are still expected to
@@ -435,6 +438,19 @@ pub struct MachineView<'a> {
     pub group_state: &'a dyn Fn(u32) -> Option<GroupState>,
 }
 
+/// Counts how many of the `0..ceiling` heavy slots are currently unlocked
+/// (ignoring legacy files; used as a non-blocking hint for FIFO yielding).
+pub fn free_slot_count(data_dir: &Path, ceiling: usize) -> usize {
+    let ceiling = ceiling.max(1);
+    let mut free = 0usize;
+    for index in 0..ceiling {
+        if !is_locked(&slot_path(data_dir, index)) {
+            free += 1;
+        }
+    }
+    free
+}
+
 /// [`try_acquire_in`] for a caller that cannot read the memory of other
 /// commands: every reservation then counts in full.
 pub fn try_acquire(
@@ -516,7 +532,7 @@ fn acquire_shared(
     view: &MachineView<'_>,
 ) -> io::Result<Result<SlotGuard, Busy>> {
     if draining(data_dir) {
-        return Ok(Err(Busy::SlotsTaken));
+        return Ok(Err(Busy::Draining));
     }
     let mut mine = None;
     let mut busy = Vec::new();

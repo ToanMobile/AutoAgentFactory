@@ -32,6 +32,9 @@ struct Spec {
     id: &'static str,
     severity: Severity,
     skip_tests: bool,
+    /// Skip comment-only lines and documentation files (true for code-syntax
+    /// rules like `ERR-001` and `LOG-001`; false for secrets and TODO stubs).
+    skip_comments_and_docs: bool,
     message: &'static str,
     fix: &'static str,
     patterns: &'static [&'static [&'static str]],
@@ -42,6 +45,7 @@ const SPECS: &[Spec] = &[
         id: "SEC-001",
         severity: Severity::Critical,
         skip_tests: false,
+        skip_comments_and_docs: false,
         message: "a credential or private key is added in plain text",
         fix: "remove it, rotate the credential and load it from the environment or a secret manager",
         patterns: &[
@@ -58,6 +62,7 @@ const SPECS: &[Spec] = &[
         id: "SEC-002",
         severity: Severity::Warn,
         skip_tests: false,
+        skip_comments_and_docs: false,
         message: "a password or token is assigned a string literal",
         fix: "read the value from the environment or a secret manager",
         patterns: &[&[
@@ -69,6 +74,7 @@ const SPECS: &[Spec] = &[
         id: "LAZY-001",
         severity: Severity::Critical,
         skip_tests: false,
+        skip_comments_and_docs: false,
         message: "placeholder left where real code is expected",
         fix: "write the implementation or remove the stub",
         patterns: &[
@@ -83,6 +89,7 @@ const SPECS: &[Spec] = &[
         id: "ERR-001",
         severity: Severity::Critical,
         skip_tests: false,
+        skip_comments_and_docs: true,
         message: "an error is caught and silently discarded",
         fix: "log it with context, handle it or rethrow",
         patterns: &[
@@ -94,6 +101,7 @@ const SPECS: &[Spec] = &[
         id: "LOG-001",
         severity: Severity::Warn,
         skip_tests: true,
+        skip_comments_and_docs: true,
         message: "raw debug output in production code",
         fix: "use the project's structured logger or remove the statement",
         patterns: &[
@@ -190,6 +198,29 @@ pub fn is_test_path(path: &str) -> bool {
             .any(|end| stem.ends_with(end))
 }
 
+fn is_comment_line(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed == "*"
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("*\t")
+        || trimmed.starts_with("*/")
+        || (trimmed.starts_with('#') && !trimmed.starts_with("#[") && !trimmed.starts_with("#!["))
+        || trimmed.starts_with("-- ")
+        || trimmed == "--"
+}
+
+fn is_doc_path(path: &str) -> bool {
+    let name = file_name(path);
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "md" | "mdx" | "rst" | "txt" | "adoc"
+        )
+    })
+}
+
 fn allowed(rules: &Rules, text: &str, id: &str) -> bool {
     rules
         .allow
@@ -204,18 +235,26 @@ pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
     let mut report = StaticReport::default();
     for file in files.iter().filter(|file| !skip_path(&file.path)) {
         let is_test = is_test_path(&file.path);
+        let is_doc = is_doc_path(&file.path);
         let mut previous: Option<(u32, &str)> = None;
         for (number, text) in &file.lines {
+            let is_comment = is_comment_line(text);
             let mut hits: Vec<(usize, u32, bool)> = Vec::new();
             for (index, patterns) in rules.rules.iter().enumerate() {
                 if SPECS[index].skip_tests && is_test {
+                    continue;
+                }
+                if SPECS[index].skip_comments_and_docs && (is_comment || is_doc) {
                     continue;
                 }
                 if patterns.iter().any(|pattern| pattern.is_match(text)) {
                     hits.push((index, *number, allowed(rules, text, SPECS[index].id)));
                 }
             }
-            if let Some((prev_number, prev_text)) = previous
+            if !is_doc
+                && !is_comment
+                && let Some((prev_number, prev_text)) = previous
+                && !is_comment_line(prev_text)
                 && prev_number.checked_add(1) == Some(*number)
                 && rules
                     .two_line

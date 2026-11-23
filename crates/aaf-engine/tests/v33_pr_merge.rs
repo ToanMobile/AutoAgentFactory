@@ -363,3 +363,116 @@ fn approval_unlocks_merge_when_pr_tightens_head_lock_globs_and_edits_newly_locke
     }
     assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 1);
 }
+
+struct LaggingHeadGh {
+    stale_head: String,
+    fresh_head: String,
+    branch: String,
+    pr_number: u64,
+    views: AtomicUsize,
+    merged_calls: AtomicUsize,
+}
+
+impl GhClient for LaggingHeadGh {
+    fn view_pr(&self, _repo_root: &Path, _pr_number: u64) -> Result<PrInfo, GitError> {
+        let n = self.views.fetch_add(1, Ordering::SeqCst);
+        let head = if n == 0 {
+            &self.stale_head
+        } else {
+            &self.fresh_head
+        };
+        Ok(pr_info(self.pr_number, &self.branch, head))
+    }
+
+    fn pr_checks(&self, _repo_root: &Path, _pr_number: u64) -> Result<Vec<PrCheck>, GitError> {
+        Ok(vec![])
+    }
+
+    fn merge_pr(
+        &self,
+        _repo_root: &Path,
+        _pr_number: u64,
+        _expect_head: &str,
+        _strategy: MergeStrategy,
+        _subject: Option<&str>,
+        _body_file: Option<&Path>,
+    ) -> Result<(), GitError> {
+        self.merged_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn merge_waits_for_github_head_propagation_when_ci_wait_is_enabled() {
+    let fx = Fixture::new("true");
+    let head = fx.make_pr_branch("feat/lagging-head", |root| {
+        fs::write(root.join("src/lib.rs"), "pub fn v() -> i32 { 42 }\n").unwrap();
+    });
+    let gh = LaggingHeadGh {
+        stale_head: "1".repeat(40),
+        fresh_head: head.clone(),
+        branch: "feat/lagging-head".to_string(),
+        pr_number: 568,
+        views: AtomicUsize::new(0),
+        merged_calls: AtomicUsize::new(0),
+    };
+    let mut req = fx.req(568, &head, false);
+    req.ci_wait_secs = 5;
+    let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
+    let out = merge_pr(&req, &gh, &FixedClock(30), &noop).unwrap();
+    match out {
+        PrMergeOutcome::Merged { pr_number, .. } => assert_eq!(pr_number, 568),
+        other => panic!("expected Merged after GitHub head caught up, got {other:?}"),
+    }
+    assert!(gh.views.load(Ordering::SeqCst) >= 2);
+    assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn approval_signed_with_untracked_agent_files_still_unlocks_clean_merge() {
+    let fx = Fixture::new("true");
+    let head = fx.make_pr_branch("feat/untracked-agent-files", |root| {
+        fs::write(
+            root.join("tests/basic_test.rs"),
+            "#[test] fn t() { assert_eq!(3, 3); }\n",
+        )
+        .unwrap();
+    });
+
+    // Simulate a worktree that also has untracked local `.claude/` / `.agents/` files.
+    git(fx.work.path(), &["checkout", "feat/untracked-agent-files"]);
+    fs::create_dir_all(fx.work.path().join(".claude/hooks")).unwrap();
+    fs::write(
+        fx.work.path().join(".claude/hooks/local.sh"),
+        "#!/bin/sh\necho local\n",
+    )
+    .unwrap();
+    let mut cfg = RepoConfig::default();
+    cfg.gate.base_ref = "origin/main".to_string();
+    head_lock::approve(
+        fx.data.path(),
+        fx.work.path(),
+        &cfg,
+        "independent-reviewer",
+        false,
+        &FixedClock(40),
+    )
+    .unwrap();
+    fs::remove_dir_all(fx.work.path().join(".claude")).unwrap();
+    git(fx.work.path(), &["checkout", "main"]);
+
+    let gh = FakeGh {
+        pr: pr_info(567, "feat/untracked-agent-files", &head),
+        checks: vec![],
+        merged_calls: AtomicUsize::new(0),
+    };
+    let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
+    let out = merge_pr(&fx.req(567, &head, false), &gh, &FixedClock(41), &noop).unwrap();
+    match out {
+        PrMergeOutcome::Merged { pr_number, .. } => assert_eq!(pr_number, 567),
+        other => {
+            panic!("expected Merged despite untracked agent files during approve, got {other:?}")
+        }
+    }
+    assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 1);
+}

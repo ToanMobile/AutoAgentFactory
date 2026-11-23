@@ -19,6 +19,7 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use aaf_engine::throttle::{
     Progress, SLOT_ENV, SlotJob, SystemProbe, Throttle, daemons, inherited_slot,
@@ -31,6 +32,8 @@ use crate::output::{CmdError, CmdOutput, CmdResult, notice};
 
 /// `EX_TEMPFAIL`: no slot within `--timeout`; trying again later can work.
 pub const EXIT_NO_SLOT: i32 = 75;
+/// Standard `timeout(1)` exit code when `--exec-timeout` expires while running.
+pub const EXIT_EXEC_TIMEOUT: i32 = 124;
 const EXIT_CANNOT_RUN: i32 = 126;
 const EXIT_NOT_FOUND: i32 = 127;
 
@@ -42,6 +45,9 @@ pub struct SlotArgs {
     /// Give up with exit 75 when no slot was granted after this long.
     #[arg(long, value_name = "SECS")]
     timeout: Option<u64>,
+    /// Kill the command's process group with exit 124 if it runs longer than this.
+    #[arg(long, value_name = "SECS")]
+    exec_timeout: Option<u64>,
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     command: Vec<OsString>,
@@ -133,6 +139,7 @@ fn run_command(args: &SlotArgs, ctx: &Ctx) -> Result<i32, CmdError> {
         argv: &args.command,
         cwd: &ctx.cwd,
         wait_limit_secs: args.timeout,
+        exec_timeout: args.exec_timeout.map(Duration::from_secs),
         inherit_stdin: !ctx.stdin_is_tty,
     };
     match throttle.run_slot(&ctx.data_dir, &SystemClock, &job) {
@@ -146,6 +153,16 @@ fn run_command(args: &SlotArgs, ctx: &Ctx) -> Result<i32, CmdError> {
                         daemon.kind, daemon.pid
                     ),
                 );
+            }
+            if run.timed_out {
+                notice(
+                    "slot",
+                    &format!(
+                        "{label}: command timed out after {}s and was terminated",
+                        args.exec_timeout.unwrap_or(0)
+                    ),
+                );
+                return Ok(EXIT_EXEC_TIMEOUT);
             }
             Ok(exit_code(run.status))
         }

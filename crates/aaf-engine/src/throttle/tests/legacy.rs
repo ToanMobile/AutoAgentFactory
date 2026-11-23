@@ -105,7 +105,7 @@ fn an_old_drain_lock_closes_the_slots_to_measured_commands() {
     old.lock().unwrap();
 
     let refused = try_acquire(data.path(), 2, SMALL, &plenty).unwrap();
-    assert_eq!(refused.unwrap_err(), Busy::SlotsTaken);
+    assert_eq!(refused.unwrap_err(), Busy::Draining);
 
     old.unlock().unwrap();
     let admitted = try_acquire(data.path(), 2, SMALL, &plenty).unwrap();

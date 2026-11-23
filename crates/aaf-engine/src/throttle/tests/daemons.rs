@@ -172,6 +172,7 @@ fn running_gradle_command_blocks_every_other_command() {
         repo_id: REPO,
         label: "test_full",
         tool: heavy_tool("./gradlew test"),
+        cmd_family: Some("gradle"),
         exclusive: heavy_tool("./gradlew test").is_some(),
         wait_limit_secs: None,
     };

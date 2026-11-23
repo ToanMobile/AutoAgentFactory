@@ -6,6 +6,7 @@ use std::path::Path;
 use aaf_domain::ports::Clock;
 
 use super::heavy::HeavyTool;
+use super::queue::{self, WaitTicket};
 use super::slots::{self, Admission, Busy, DrainGuard, MachineView};
 use super::{Admitted, Backoff, Pressure, Progress, Throttle, stats};
 
@@ -28,6 +29,8 @@ pub struct Ask<'a> {
     pub label: &'a str,
     /// Build tool class (used as a fallback measurement key across labels).
     pub tool: Option<HeavyTool>,
+    /// Command family for stats fallback (`@cmd:<family>`) when `tool` is `None`.
+    pub cmd_family: Option<&'a str>,
     /// Runs alone whatever was measured of it.
     pub exclusive: bool,
     /// Longest admission wait; `None` waits as long as it takes.
@@ -78,6 +81,7 @@ impl Throttle<'_> {
             repo_id,
             label,
             tool: None,
+            cmd_family: None,
             exclusive: false,
             wait_limit_secs: None,
         };
@@ -170,10 +174,17 @@ impl Throttle<'_> {
             // Phase B: acquire a heavy slot.
             let mut slot_backoff = Backoff::new(self.jitter_seed);
             let mut drain: Option<DrainGuard> = None;
+            let mut ticket: Option<WaitTicket> = None;
             let slot = loop {
                 // Read again on every attempt: a sibling task of the same repo
                 // may record the first measurement while this one waits.
-                let peak = stats::recorded_peak_with_tool(data_dir, ask.repo_id, label, ask.tool);
+                let peak = stats::recorded_peak_for(
+                    data_dir,
+                    ask.repo_id,
+                    label,
+                    ask.tool,
+                    ask.cmd_family,
+                );
                 let admission = match peak {
                     Some(peak_rss_bytes) if !ask.exclusive => {
                         Admission::Measured { peak_rss_bytes }
@@ -184,18 +195,47 @@ impl Throttle<'_> {
                     // Measured in the meantime: it no longer needs the machine
                     // to itself, and would shut itself out.
                     drain = None;
+                } else {
+                    // Unmeasured / exclusive commands use `drain.lock` instead of
+                    // the measured FIFO ticket queue.
+                    ticket = None;
                 }
-                let view = MachineView {
-                    free_memory: &|| self.probe.free_memory_bytes(),
-                    group_rss: &|pgid| {
-                        self.control
-                            .tree(pgid, &[])
-                            .map(|sample| sample.rss_bytes)
-                            .or_else(|| self.control.rss_bytes(pgid))
-                    },
-                    group_state: &|pgid| self.control.group_state(pgid),
+                let ceiling = self.ceiling();
+                // FIFO fairness for measured commands: if older live waiters are
+                // queued ahead and there are not enough free slots for them plus
+                // us, take our own ticket and yield so newcomers polling at 250 ms
+                // never starve long-waiting processes.
+                let attempt = if admission != Admission::Unmeasured {
+                    let ahead = queue::older_waiters(data_dir, ticket.as_ref());
+                    if ahead > 0 && slots::free_slot_count(data_dir, ceiling) <= ahead {
+                        Ok(Err(Busy::SlotsTaken))
+                    } else {
+                        let view = MachineView {
+                            free_memory: &|| self.probe.free_memory_bytes(),
+                            group_rss: &|pgid| {
+                                self.control
+                                    .tree(pgid, &[])
+                                    .map(|sample| sample.rss_bytes)
+                                    .or_else(|| self.control.rss_bytes(pgid))
+                            },
+                            group_state: &|pgid| self.control.group_state(pgid),
+                        };
+                        slots::try_acquire_in(data_dir, ceiling, admission, &view)
+                    }
+                } else {
+                    let view = MachineView {
+                        free_memory: &|| self.probe.free_memory_bytes(),
+                        group_rss: &|pgid| {
+                            self.control
+                                .tree(pgid, &[])
+                                .map(|sample| sample.rss_bytes)
+                                .or_else(|| self.control.rss_bytes(pgid))
+                        },
+                        group_state: &|pgid| self.control.group_state(pgid),
+                    };
+                    slots::try_acquire_in(data_dir, ceiling, admission, &view)
                 };
-                match slots::try_acquire_in(data_dir, self.ceiling(), admission, &view)? {
+                match attempt? {
                     Ok(slot) => break slot,
                     Err(reason) => {
                         if matches!(reason, Busy::NotEnoughMemory { free: None, .. })
@@ -209,6 +249,21 @@ impl Throttle<'_> {
                         let now = clock.now();
                         if expired(now) {
                             return Ok(None);
+                        }
+                        if admission != Admission::Unmeasured {
+                            match reason {
+                                Busy::SlotsTaken | Busy::Draining => {
+                                    if ticket.is_none() {
+                                        ticket = WaitTicket::join(data_dir, started);
+                                    }
+                                }
+                                // Release ticket while waiting on RAM so a large
+                                // job never head-of-line blocks smaller jobs.
+                                Busy::NotEnoughMemory { .. } => {
+                                    ticket = None;
+                                }
+                                _ => {}
+                            }
                         }
                         if admission == Admission::Unmeasured
                             && drain.is_none()
@@ -229,6 +284,7 @@ impl Throttle<'_> {
                 }
             };
             // It holds the slot(s) now; the queue behind it moves again.
+            drop(ticket);
             drop(drain);
 
             // Phase C: re-check memory pressure right after acquiring the slot.

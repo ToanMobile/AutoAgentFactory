@@ -27,6 +27,10 @@ use crate::gate::{self, HiddenPolicy};
 use crate::throttle::{Progress, SystemProbe, Throttle};
 
 const MAX_OPTIMISTIC_RETRIES: usize = 2;
+/// Maximum seconds to wait for GitHub's PR view API to reflect a just-pushed
+/// head commit when `--ci-wait > 0` before returning `head_mismatch`.
+const HEAD_SETTLE_MAX_SECS: u64 = 15;
+const HEAD_SETTLE_POLL: Duration = Duration::from_millis(500);
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -235,12 +239,26 @@ fn fetch_base_and_pr(
 
     let tmp_ref = format!("refs/aaf-merge/pr-{}", pr.number);
     let pr_refspec = format!("+refs/pull/{}/head:{tmp_ref}", pr.number);
-    if !git_raw(repo_root, &["fetch", "--quiet", remote, &pr_refspec])?.success() {
+    let mut fetched_head =
+        if git_raw(repo_root, &["fetch", "--quiet", remote, &pr_refspec])?.success() {
+            git(repo_root, &["rev-parse", &tmp_ref]).ok()
+        } else {
+            None
+        };
+    // GitHub can update `refs/pull/<n>/head` asynchronously right after a push;
+    // fall back to the branch ref (updated atomically by `git push`) if the PR
+    // ref failed or still points at an older commit.
+    if !fetched_head
+        .as_deref()
+        .is_some_and(|sha| sha.eq_ignore_ascii_case(expect_head))
+    {
         check_branch_name(repo_root, &pr.head_ref_name)?;
         let branch_refspec = format!("+refs/heads/{}:{tmp_ref}", pr.head_ref_name);
         git(repo_root, &["fetch", "--quiet", remote, &branch_refspec])?;
+        fetched_head = Some(git(repo_root, &["rev-parse", &tmp_ref])?);
     }
-    let fetched_head = git(repo_root, &["rev-parse", &tmp_ref])?;
+    let fetched_head = fetched_head
+        .ok_or_else(|| GitError::Invalid(format!("failed to fetch PR #{} head", pr.number)))?;
     let _ = git_raw(repo_root, &["update-ref", "-d", &tmp_ref]);
     if !fetched_head.eq_ignore_ascii_case(expect_head) {
         return Err(GitError::Invalid(format!(
@@ -378,7 +396,29 @@ pub fn merge_pr(
             req.expect_head
         )));
     }
-    let pr = gh.view_pr(&req.repo_root, req.pr_number)?;
+    let mut pr = gh.view_pr(&req.repo_root, req.pr_number)?;
+    // Right after `git push`, GitHub's PR API can briefly report the previous
+    // head SHA. When the caller opted into waiting (`ci_wait_secs > 0`), poll
+    // for a short bounded settle window before failing closed with `head_mismatch`.
+    if pr.state.eq_ignore_ascii_case("OPEN")
+        && !pr.is_draft
+        && !pr.head_ref_oid.eq_ignore_ascii_case(&req.expect_head)
+        && req.ci_wait_secs > 0
+    {
+        let settle = Duration::from_secs(req.ci_wait_secs.min(HEAD_SETTLE_MAX_SECS));
+        let deadline = Instant::now() + settle;
+        while Instant::now() < deadline {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            thread::sleep(rem.min(HEAD_SETTLE_POLL));
+            pr = gh.view_pr(&req.repo_root, req.pr_number)?;
+            if !pr.state.eq_ignore_ascii_case("OPEN")
+                || pr.is_draft
+                || pr.head_ref_oid.eq_ignore_ascii_case(&req.expect_head)
+            {
+                break;
+            }
+        }
+    }
     if pr.state.eq_ignore_ascii_case("MERGED") {
         return Ok(PrMergeOutcome::AlreadyMerged {
             pr_number: pr.number,

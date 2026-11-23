@@ -46,6 +46,8 @@ pub struct SlotJob<'a> {
     pub cwd: &'a Path,
     /// Longest wait for admission; `None` waits as long as it takes.
     pub wait_limit_secs: Option<u64>,
+    /// Longest runtime once admitted (`None` = unlimited).
+    pub exec_timeout: Option<Duration>,
     /// False gives the command an empty stdin: in a process group of its
     /// own it would be stopped for reading the terminal.
     pub inherit_stdin: bool,
@@ -54,6 +56,7 @@ pub struct SlotJob<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotRun {
     pub status: ExitStatus,
+    pub timed_out: bool,
     /// Slot the command ended in.
     pub slot: usize,
     pub waited_secs: u64,
@@ -249,6 +252,9 @@ impl Throttle<'_> {
             if let Some(t) = tool {
                 let tool_key = stats::tool_label(t);
                 let _ = stats::record(data_dir, ask.repo_id, &tool_key, sample, self.sleeper);
+            } else if let Some(family) = ask.cmd_family {
+                let cmd_key = stats::cmd_label(family);
+                let _ = stats::record(data_dir, ask.repo_id, &cmd_key, sample, self.sleeper);
             }
         }
         Ok(Some(Supervised {
@@ -316,10 +322,12 @@ impl Throttle<'_> {
         extra_env: &[(&str, &str)],
     ) -> io::Result<HeavyRun> {
         let tool = heavy::heavy_tool(job.command);
+        let cmd_family = heavy::stats_command_family(job.command);
         let ask = Ask {
             repo_id: job.repo_id,
             label: job.label,
             tool,
+            cmd_family,
             exclusive: self.machine.exclusive_build_tools && tool.is_some(),
             wait_limit_secs: None,
         };
@@ -395,10 +403,12 @@ impl Throttle<'_> {
             ));
         }
         let tool = heavy::heavy_tool_argv(job.argv);
+        let cmd_family = heavy::stats_command_family_argv(job.argv);
         let ask = Ask {
             repo_id: job.repo_id,
             label: job.label,
             tool,
+            cmd_family,
             exclusive: self.machine.exclusive_build_tools && tool.is_some(),
             wait_limit_secs: job.wait_limit_secs,
         };
@@ -408,18 +418,19 @@ impl Throttle<'_> {
         if !job.inherit_stdin {
             command.stdin(Stdio::null());
         }
-        // The command's own time is the caller's business: a hook or a CI
-        // step that wraps it sets the limit it wants.
+        // Bound execution time when the caller set `--exec-timeout`; otherwise
+        // leave the runtime up to the caller.
         let launch = Launch {
             ask,
             tool,
             command,
-            timeout: Duration::MAX,
+            timeout: job.exec_timeout.unwrap_or(Duration::MAX),
             output: Output::Passed,
         };
         let run = self.supervise(data_dir, clock, launch, inherited)?;
         Ok(run.map(|run| SlotRun {
             status: run.status,
+            timed_out: run.timed_out,
             slot: run.slot,
             waited_secs: run.waited_secs,
             degraded: run.degraded,

@@ -369,3 +369,20 @@ fn command_below_a_slot_holder_runs_at_once_instead_of_waiting_for_its_own_ances
     assert!(!String::from_utf8_lossy(&stale.stderr).contains("already inside"));
     assert!(marker.exists());
 }
+
+#[test]
+fn exec_timeout_kills_hung_command_with_exit_124_and_frees_slot() {
+    let Some(sb) = calm_sandbox("exec_timeout_kills_hung_command") else {
+        return;
+    };
+    let out = sb.aaf(&["slot", "--exec-timeout", "1", "--", "sleep", "30"]);
+    assert_eq!(out.status.code(), Some(124), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("timed out after 1s"),
+        "expected timeout notice, got: {stderr}"
+    );
+    // Slot must be released immediately after timeout.
+    let follow = sb.aaf(&["slot", "--timeout", "0", "--", "true"]);
+    assert_eq!(follow.status.code(), Some(0), "{follow:?}");
+}

@@ -240,20 +240,51 @@ pub fn approve(
     let base = base::resolve(repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
     let set = changes::collect(repo_root, &base.diff_target, GIT_TIMEOUT)?;
     let (locked_changes, lock_fp) = locked(repo_root, cfg, &set.changes)?;
-    // `aaf merge` evaluates head-lock against the trusted config on `base`,
-    // which can differ from the PR branch's `.autofactory/config.toml` when
-    // the PR itself updates `head_lock_globs`. Sign that exact base-evaluated
-    // content fingerprint as well so the human approval covers both views.
-    let base_lock_fp = base.sha.as_deref().and_then(|sha| {
+    // `aaf merge` evaluates head-lock against the trusted config on `base` inside
+    // a clean detached scratch worktree (no untracked local worktree files such
+    // as `.agents/` or `.claude/`). Sign the exact content-bound fingerprints for
+    // those views as well so a human approval signed in a worktree unlocks
+    // `aaf merge` without weakening content binding on any tracked file.
+    let base_cfg = base.sha.as_deref().and_then(|sha| {
         let spec = format!("{sha}:.autofactory/config.toml");
         let raw = aaf_fp::git(repo_root, &["show", &spec], &[], GIT_TIMEOUT).ok()?;
-        let base_cfg: RepoConfig = toml::from_str(&raw).ok()?;
-        let (base_locked, fp) = locked(repo_root, &base_cfg, &set.changes).ok()?;
+        toml::from_str::<RepoConfig>(&raw).ok()
+    });
+    let base_lock_fp = base_cfg.as_ref().and_then(|bcfg| {
+        let (base_locked, fp) = locked(repo_root, bcfg, &set.changes).ok()?;
         (!base_locked.is_empty()).then_some(fp)
     });
+    let tracked_changes: Vec<Change> = if set.untracked.is_empty() {
+        Vec::new()
+    } else {
+        let untracked_set: std::collections::HashSet<&str> =
+            set.untracked.iter().map(String::as_str).collect();
+        set.changes
+            .iter()
+            .filter(|c| !(c.kind == ChangeKind::Added && untracked_set.contains(c.path.as_str())))
+            .cloned()
+            .collect()
+    };
+    let mut extra_fps: Vec<String> = Vec::new();
+    if let Some(fp) = base_lock_fp.clone() {
+        extra_fps.push(fp);
+    }
+    if !tracked_changes.is_empty() {
+        if let Ok((tl, fp)) = locked(repo_root, cfg, &tracked_changes)
+            && !tl.is_empty()
+        {
+            extra_fps.push(fp);
+        }
+        if let Some(bcfg) = base_cfg.as_ref()
+            && let Ok((tl, fp)) = locked(repo_root, bcfg, &tracked_changes)
+            && !tl.is_empty()
+        {
+            extra_fps.push(fp);
+        }
+    }
     let primary_fp = if !locked_changes.is_empty() {
         lock_fp
-    } else if let Some(fp) = base_lock_fp.clone() {
+    } else if let Some(fp) = base_lock_fp {
         fp
     } else {
         return Err(GateError::NothingLocked);
@@ -268,17 +299,19 @@ pub fn approve(
     };
     let key = aaf_fp::load_or_create_key(data_dir)?;
     write_approval_everywhere(data_dir, &key, repo_root, &approval)?;
-    if let Some(base_fp) = base_lock_fp
-        && base_fp != approval.lock_fp
-    {
-        let base_approval = Approval {
-            lock_fp: base_fp,
-            reviewer: reviewer.to_string(),
-            verdict: "PASS".to_string(),
-            same_account,
-            created_at,
-        };
-        write_approval_everywhere(data_dir, &key, repo_root, &base_approval)?;
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(approval.lock_fp.clone());
+    for extra_fp in extra_fps {
+        if seen.insert(extra_fp.clone()) {
+            let extra_approval = Approval {
+                lock_fp: extra_fp,
+                reviewer: reviewer.to_string(),
+                verdict: "PASS".to_string(),
+                same_account,
+                created_at,
+            };
+            write_approval_everywhere(data_dir, &key, repo_root, &extra_approval)?;
+        }
     }
     Ok(approval)
 }

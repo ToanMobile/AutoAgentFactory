@@ -51,6 +51,7 @@ fn job<'a>(cwd: &'a Path, argv: &'a [OsString], wait_limit_secs: Option<u64>) ->
         argv,
         cwd,
         wait_limit_secs,
+        exec_timeout: None,
         inherit_stdin: false,
     }
 }
@@ -287,6 +288,7 @@ fn measured_build_tool_shares_slots_when_exclusive_build_tools_is_false() {
         argv: &command,
         cwd: work.path(),
         wait_limit_secs: Some(1),
+        exec_timeout: None,
         inherit_stdin: false,
     };
     assert!(run(&rig, data.path(), &unmeasured_job).is_none());

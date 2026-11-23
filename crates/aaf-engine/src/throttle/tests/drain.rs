@@ -28,7 +28,7 @@ fn draining_refuses_measured_commands_in_every_slot_and_not_the_loner() {
 
     // Even slot 0 of an idle machine is closed to a measured command.
     let refused = try_acquire(data.path(), 3, SMALL, &plenty).unwrap();
-    assert_eq!(refused.unwrap_err(), Busy::SlotsTaken);
+    assert_eq!(refused.unwrap_err(), Busy::Draining);
     let alone = try_acquire(data.path(), 3, Admission::Unmeasured, &plenty)
         .unwrap()
         .unwrap();

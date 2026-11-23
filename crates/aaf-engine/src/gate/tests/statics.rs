@@ -127,6 +127,35 @@ fn swallowed_errors_are_critical_on_one_or_two_lines() {
 }
 
 #[test]
+fn comments_and_docs_do_not_trip_code_only_rules_while_secrets_still_fire() {
+    let kdoc = j(&[" * previously fell into `catch (Exception) {", "}`"]);
+    let line_comment = j(&["    // catch (e) {", "}"]);
+    let block_comment = j(&["/* catch (e) {", "} */"]);
+    let py_comment = j(&["# except Exception:", " pass"]);
+    let doc_log = j(&["console.", "log(example)"]);
+    for line in [&kdoc, &line_comment, &block_comment, &py_comment] {
+        assert!(rules_hit("src/FooTest.kt", line).is_empty(), "{line}");
+    }
+    assert!(rules_hit("docs/notes.md", &j(&["catch (e) {", "}"])).is_empty());
+    assert!(rules_hit("docs/notes.md", &doc_log).is_empty());
+    // Two-line form inside KDoc is ignored.
+    let kdoc_two = scan_text("src/FooTest.kt", &[&j(&[" * catch (e) {", ""]), " * }"]);
+    assert!(kdoc_two.findings.is_empty());
+    // Real code with a trailing comment STILL triggers ERR-001.
+    assert_eq!(
+        rules_hit("src/x.kt", &j(&["} catch (e) {", "} // ignored"])),
+        vec!["ERR-001"]
+    );
+    // Secrets and placeholders inside comments/docs STILL trigger.
+    let secret_comment = format!("// key = \"{}\"", fake_secret());
+    assert_eq!(rules_hit("src/a.kt", &secret_comment), vec!["SEC-001"]);
+    assert_eq!(
+        rules_hit("docs/plan.md", &j(&["# TODO: impl", "ement later"])),
+        vec!["LAZY-001"]
+    );
+}
+
+#[test]
 fn two_line_form_needs_adjacent_added_lines() {
     let file = AddedLines {
         path: "src/a.py".to_string(),

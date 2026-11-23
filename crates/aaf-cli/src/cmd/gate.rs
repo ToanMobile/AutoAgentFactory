@@ -67,6 +67,9 @@ pub(crate) fn progress_line(event: &Progress<'_>) -> String {
         } => {
             let why = match reason {
                 Busy::SlotsTaken => "every heavy slot is taken".to_string(),
+                Busy::Draining => {
+                    "queue is draining for an unmeasured or exclusive command".to_string()
+                }
                 Busy::RunsAlone => {
                     "it runs alone: never measured, or a build tool that works through daemons"
                         .to_string()

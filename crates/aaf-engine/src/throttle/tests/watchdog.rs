@@ -269,7 +269,8 @@ fn heavy_argv_table() {
         heavy_argv(cmd, true, &mac),
         argv(&[
             "/usr/sbin/taskpolicy",
-            "-b",
+            "-c",
+            "utility",
             "/usr/bin/nice",
             "-n",
             "10",

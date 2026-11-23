@@ -2,8 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use aaf_domain::gate::LockStatus;
 use aaf_domain::ports::Clock;
 use aaf_engine::factory::adapters::SystemClock;
+use aaf_engine::gate::{GIT_TIMEOUT, base, head_lock};
 use aaf_engine::telemetry::{
     CostRates, RunCounts, StatusQuery, TaskCounts, TelemetrySummary, collect_status_from_db,
     inspect_throttle,
@@ -19,9 +21,86 @@ pub struct StatusArgs {
     /// Summarize across every repository instead of scoping to the current repo.
     #[arg(long)]
     pub all: bool,
+    /// Inspect read-only head-lock approval state for the current repo/worktree.
+    #[arg(long)]
+    pub approval: bool,
+}
+
+fn run_approval_status(ctx: &Ctx) -> CmdResult {
+    let root = ctx.repo_root()?;
+    let cfg = ctx.load_config(&root)?;
+    let resolved = base::resolve(&root, &cfg.repo.gate.base_ref, GIT_TIMEOUT)
+        .map_err(|e| CmdError::new(format!("status --approval: {e}")))?;
+    let report = head_lock::evaluate(&ctx.data_dir, &root, &cfg.repo, &resolved.diff_target);
+    let mut merge_cfg = cfg.repo.clone();
+    merge_cfg.cross_audit.require_different_provider = true;
+    let merge_report = head_lock::evaluate(&ctx.data_dir, &root, &merge_cfg, &resolved.diff_target);
+
+    let status_word = match report.status {
+        LockStatus::Clear => "clear",
+        LockStatus::Approved => "approved",
+        LockStatus::Blocked => "missing",
+    };
+    let approved = report.status == LockStatus::Approved;
+    let independent_approved = merge_report.status == LockStatus::Approved;
+    let approval_rec = merge_report.approval.as_ref().or(report.approval.as_ref());
+    let reviewer = approval_rec.map(|a| a.reviewer.as_str());
+    let same_account = approval_rec.map(|a| a.same_account);
+    let locked_files: Vec<String> = report
+        .locked_changes
+        .iter()
+        .map(|c| c.path.clone())
+        .collect();
+
+    let mut lines = vec![
+        format!("scope: {}", root.display()),
+        format!("base: {}", resolved.diff_target),
+    ];
+    match report.status {
+        LockStatus::Clear => {
+            lines.push("approval: clear (no locked files changed)".to_string());
+        }
+        LockStatus::Approved => {
+            lines.push(format!(
+                "approval: approved (independent={}, reviewer={}, lock_fp={}, locked_files={})",
+                independent_approved,
+                reviewer.unwrap_or("unknown"),
+                report.lock_fp,
+                locked_files.len()
+            ));
+        }
+        LockStatus::Blocked => {
+            lines.push(format!(
+                "approval: missing (lock_fp={}, locked_files={})",
+                report.lock_fp,
+                locked_files.len()
+            ));
+        }
+    }
+    for file in &locked_files {
+        lines.push(format!("  locked: {file}"));
+    }
+
+    let approval_json = json!({
+        "status": status_word,
+        "base": resolved.diff_target,
+        "lock_fp": report.lock_fp,
+        "locked_files": locked_files,
+        "approved": approved,
+        "independent_approved": independent_approved,
+        "reviewer": reviewer,
+        "same_account": same_account,
+    });
+
+    Ok(CmdOutput::ok("ok", lines.join("\n"))
+        .field("scope", json!(root.to_string_lossy().into_owned()))
+        .field("approval", approval_json))
 }
 
 pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
+    if args.approval {
+        return run_approval_status(ctx);
+    }
     let db = open_db_read_only(ctx)?;
     let repo = if args.all {
         None

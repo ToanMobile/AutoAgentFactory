@@ -262,3 +262,72 @@ fn unreadable_load_and_pressure_count_as_normal_with_a_warning() {
         ]
     );
 }
+
+#[test]
+fn custom_labeled_command_reuses_cmd_family_peak_instead_of_running_alone() {
+    let data = TempDir::new().unwrap();
+    let rig = Rig::calm();
+    let sample = HeavySample {
+        peak_rss_bytes: 2 * GIB,
+        duration_ms: 1_000,
+    };
+    assert!(
+        record(
+            data.path(),
+            REPO,
+            &super::super::stats::cmd_label("cargo"),
+            sample,
+            &rig.sleeper,
+        )
+        .unwrap()
+    );
+    let _first = occupy(&data);
+    let ask = super::super::Ask {
+        repo_id: REPO,
+        label: "fix-g6",
+        tool: None,
+        cmd_family: Some("cargo"),
+        exclusive: false,
+        wait_limit_secs: None,
+    };
+    let admitted = rig
+        .throttle()
+        .admit_ask(data.path(), &*rig.clock, &ask)
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.slot.index(), 1);
+    assert_eq!(rig.sleeper.count(), 0);
+}
+
+#[test]
+fn newer_measured_waiter_yields_to_older_fifo_ticket_when_slots_are_scarce() {
+    let data = TempDir::new().unwrap();
+    let rig = Rig::calm();
+    measure(&rig, &data);
+    // 1 of 2 slots occupied, leaving 1 free slot, with 1 older waiter queued.
+    let _busy = occupy(&data);
+    let older = super::super::queue::WaitTicket::join(data.path(), 500).unwrap();
+
+    let ask = super::super::Ask {
+        repo_id: REPO,
+        label: LABEL,
+        tool: None,
+        cmd_family: None,
+        exclusive: false,
+        wait_limit_secs: Some(0),
+    };
+    // Newcomer (clock = 1000 > 500) must yield instead of jumping ahead.
+    let jumped = rig
+        .throttle()
+        .admit_ask(data.path(), &*rig.clock, &ask)
+        .unwrap();
+    assert!(jumped.is_none(), "newcomer must yield to older waiter");
+
+    // Once the older waiter drops its ticket, the newcomer is admitted.
+    drop(older);
+    let admitted = rig
+        .throttle()
+        .admit_ask(data.path(), &*rig.clock, &ask)
+        .unwrap();
+    assert!(admitted.is_some());
+}

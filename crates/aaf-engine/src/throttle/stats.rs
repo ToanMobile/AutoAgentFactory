@@ -100,6 +100,13 @@ pub fn tool_label(tool: HeavyTool) -> String {
     format!("@tool:{}", tool.name())
 }
 
+/// Shared command-family stats label (e.g. `@cmd:cargo`, `@cmd:maven`) so
+/// custom `--label` invocations of non-daemon build tools reuse the repo's
+/// measured peak RSS instead of triggering exclusive draining.
+pub fn cmd_label(family: &str) -> String {
+    format!("@cmd:{family}")
+}
+
 /// Like [`recorded_peak`], falling back to `<repo_id>/@tool:<tool>` when
 /// the exact `(repo_id, label)` key has no prior measurement.
 pub fn recorded_peak_with_tool(
@@ -108,8 +115,21 @@ pub fn recorded_peak_with_tool(
     label: &str,
     tool: Option<HeavyTool>,
 ) -> Option<u64> {
+    recorded_peak_for(data_dir, repo_id, label, tool, None)
+}
+
+/// Like [`recorded_peak_with_tool`], also falling back to `<repo_id>/@cmd:<family>`
+/// when a command belongs to a known build/test command family (e.g. `cargo`).
+pub fn recorded_peak_for(
+    data_dir: &Path,
+    repo_id: &str,
+    label: &str,
+    tool: Option<HeavyTool>,
+    cmd_family: Option<&str>,
+) -> Option<u64> {
     recorded_peak(data_dir, repo_id, label)
         .or_else(|| tool.and_then(|t| recorded_peak(data_dir, repo_id, &tool_label(t))))
+        .or_else(|| cmd_family.and_then(|f| recorded_peak(data_dir, repo_id, &cmd_label(f))))
 }
 
 fn lock_file(data_dir: &Path, guest: bool, sleeper: &dyn Sleeper) -> io::Result<Option<File>> {

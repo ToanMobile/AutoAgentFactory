@@ -189,3 +189,29 @@ fn value_of_a_wrapper_option_is_not_taken_for_the_command() {
         }
     }
 }
+
+#[test]
+fn stats_command_family_detects_non_daemon_tools_through_shell_wrappers() {
+    use super::super::heavy::{stats_command_family, stats_command_family_argv};
+
+    assert_eq!(
+        stats_command_family("cargo test -p aaf-engine"),
+        Some("cargo")
+    );
+    assert_eq!(
+        stats_command_family_argv(&[
+            "sh",
+            "-c",
+            "set -e\necho '=== 1 ==='\ncargo clippy -p aaf-engine"
+        ]),
+        Some("cargo")
+    );
+    assert_eq!(
+        stats_command_family_argv(&["./gradlew", ":feature:reader:testDebugUnitTest"]),
+        Some("gradle")
+    );
+    assert_eq!(stats_command_family("pytest tests/unit"), Some("python"));
+    assert_eq!(stats_command_family("echo cargo test"), None);
+    // Daemon-heavy classification stays unchanged for cargo.
+    assert_eq!(heavy_tool("cargo test -p aaf-engine"), None);
+}

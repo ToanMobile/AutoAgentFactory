@@ -13,6 +13,7 @@ pub mod orphans;
 pub mod paths;
 pub mod pools;
 pub mod probe;
+pub mod queue;
 mod relay;
 mod reservation;
 mod run;
@@ -31,7 +32,10 @@ use aaf_domain::config::MachineConfig;
 
 pub use admit::{Ask, DRAIN_AFTER_SECS};
 pub use daemons::BuildDaemon;
-pub use heavy::{HeavyTool, heavy_tool, heavy_tool_argv, unqueued_heavy_tool};
+pub use heavy::{
+    HeavyTool, heavy_tool, heavy_tool_argv, stats_command_family, stats_command_family_argv,
+    unqueued_heavy_tool,
+};
 pub use probe::{GroupState, LoadProbe, Pressure, SystemProbe};
 pub use run::{SLOT_ENV, SlotJob, SlotRun};
 pub use slots::{Admission, Busy, SlotGuard};

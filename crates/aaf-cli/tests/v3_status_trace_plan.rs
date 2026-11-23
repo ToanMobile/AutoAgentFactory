@@ -164,3 +164,74 @@ fn status_and_trace_and_plan_commands_succeed_with_expected_json() {
             .contains("architecture context")
     );
 }
+
+#[test]
+fn status_approval_reports_clear_missing_and_signed_state() {
+    let fx = Fixture::new();
+    // Initial clean tree -> clear.
+    let clear = fx.aaf(&["status", "--approval"]);
+    assert_eq!(clear.code, 0, "{}", clear.stderr);
+    assert_eq!(clear.json["approval"]["status"], json!("clear"));
+    assert_eq!(clear.json["approval"]["approved"], json!(false));
+
+    // Add and commit a locked test file on main, then modify it -> missing.
+    fs::create_dir_all(fx.repo.join("tests")).unwrap();
+    fs::write(fx.repo.join("tests/sample_test.rs"), "// v1\n").unwrap();
+    for args in [
+        &["add", "tests/sample_test.rs"][..],
+        &["commit", "-m", "add test"][..],
+        &["checkout", "-b", "feat/edit-locked"][..],
+    ] {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(&fx.repo)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+    fs::write(fx.repo.join("tests/sample_test.rs"), "// v2\n").unwrap();
+
+    let missing = fx.aaf(&["status", "--approval"]);
+    assert_eq!(missing.code, 0, "{}", missing.stderr);
+    assert_eq!(missing.json["approval"]["status"], json!("missing"));
+    assert_eq!(missing.json["approval"]["approved"], json!(false));
+    assert_eq!(
+        missing.json["approval"]["independent_approved"],
+        json!(false)
+    );
+    assert!(
+        !missing.json["approval"]["lock_fp"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Sign an independent approval -> approved & independent_approved = true.
+    let mut cfg = aaf_domain::config::RepoConfig::default();
+    cfg.gate.base_ref = "main".to_string();
+    struct FixedClock(i64);
+    impl aaf_domain::ports::Clock for FixedClock {
+        fn now(&self) -> i64 {
+            self.0
+        }
+    }
+    aaf_engine::gate::head_lock::approve(
+        &fx.data,
+        &fx.repo,
+        &cfg,
+        "antigravity-audit",
+        false,
+        &FixedClock(100),
+    )
+    .unwrap();
+
+    let signed = fx.aaf(&["status", "--approval"]);
+    assert_eq!(signed.code, 0, "{}", signed.stderr);
+    assert_eq!(signed.json["approval"]["status"], json!("approved"));
+    assert_eq!(signed.json["approval"]["approved"], json!(true));
+    assert_eq!(signed.json["approval"]["independent_approved"], json!(true));
+    assert_eq!(
+        signed.json["approval"]["reviewer"],
+        json!("antigravity-audit")
+    );
+}
