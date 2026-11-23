@@ -95,6 +95,7 @@ struct LocalFile {
     safety: Option<toml::Value>,
     accounts: Option<toml::Value>,
     notifications: Option<toml::Value>,
+    telegram: Option<toml::Value>,
     proof: Option<toml::Value>,
     github: Option<toml::Value>,
 }
@@ -160,6 +161,7 @@ pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
             ("safety", &local.safety, "the global config"),
             ("accounts", &local.accounts, "the global config"),
             ("notifications", &local.notifications, "the global config"),
+            ("telegram", &local.telegram, "the global config"),
             ("proof", &local.proof, REPO_CONFIG_REL),
             ("github", &local.github, REPO_CONFIG_REL),
         ];

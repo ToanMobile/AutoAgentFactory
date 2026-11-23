@@ -36,6 +36,9 @@ pub struct InitArgs {
     /// Target host directory layout for `--with-skills` (`claude`, `agents`, or `all`).
     #[arg(long, value_enum, default_value_t = SkillHost::Claude)]
     pub host: SkillHost,
+    /// Agent hook hosts to register (`claude`, `codex`, `gemini`, or `all`).
+    #[arg(long, default_value = "claude")]
+    pub hook_host: String,
 }
 
 pub fn run(args: &InitArgs, ctx: &Ctx) -> CmdResult {
@@ -207,12 +210,26 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
     let repo_root = ctx.repo_root()?;
 
     // Everything that can refuse is decided before the first write.
+    let hook_targets = aaf_engine::hook_settings::multi_host::parse_host_arg(&args.hook_host)
+        .map_err(CmdError::new)?;
     let (hook_path, hook_source) = resolve_hook(current_exe, &ctx.path_var).ok_or_else(|| {
         CmdError::new(format!(
             "{HOOK_BINARY} was not found next to the aaf binary or on PATH; \
              install it beside aaf and run aaf init again"
         ))
     })?;
+    let raw_hook_cmd = match hook_source {
+        HookSource::Path => HOOK_BINARY.to_string(),
+        HookSource::Sibling => hook_path
+            .to_str()
+            .ok_or_else(|| {
+                CmdError::new(format!(
+                    "{} is not valid UTF-8 and cannot be written to settings",
+                    hook_path.display()
+                ))
+            })?
+            .to_string(),
+    };
     let settings_path = repo_root.join(SETTINGS_REL);
     let command = hook_command(&hook_path, hook_source)?;
     let (new_settings, hook_change) =
@@ -248,6 +265,29 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
     }
     if let Some(text) = &new_gitignore {
         write_file(&gitignore_path, text)?;
+    }
+
+    let mut extra_hooks = Vec::new();
+    for target in &hook_targets {
+        match target {
+            aaf_engine::hook_settings::multi_host::HookHostTarget::Claude => {}
+            aaf_engine::hook_settings::multi_host::HookHostTarget::Codex => {
+                let change = aaf_engine::hook_settings::multi_host::register_codex(
+                    &repo_root,
+                    &raw_hook_cmd,
+                )
+                .map_err(CmdError::new)?;
+                extra_hooks.push((target.as_str(), target.settings_rel(), change.as_str()));
+            }
+            aaf_engine::hook_settings::multi_host::HookHostTarget::Gemini => {
+                let change = aaf_engine::hook_settings::multi_host::register_gemini(
+                    &repo_root,
+                    &raw_hook_cmd,
+                )
+                .map_err(CmdError::new)?;
+                extra_hooks.push((target.as_str(), target.settings_rel(), change.as_str()));
+            }
+        }
     }
 
     // After the writes: what git has of the file as it is now.
@@ -286,6 +326,9 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
         gitignore_action,
         LOCAL_CONFIG_REL,
     );
+    for (host_name, rel_path, action) in &extra_hooks {
+        text.push_str(&format!("\nhook ({host_name}): {action} in {rel_path}"));
+    }
     if config_action == "kept" {
         text.push_str("\nnote: the existing config was kept; --force regenerates it");
     }

@@ -5,10 +5,12 @@
 pub mod claude;
 pub mod env;
 pub mod generic;
+pub mod linux_sandbox;
 pub mod pty;
 pub mod reaper;
 pub mod sandbox;
 pub mod sandbox_check;
+pub mod secret_mask;
 pub mod stream_log;
 #[cfg(test)]
 mod tests;
@@ -398,6 +400,13 @@ pub(crate) fn run_confined(
                 .chain(&write_denied_prefix)
                 .chain(&path_dirs),
         )?;
+        if !read_only
+            && cfg!(target_os = "macos")
+            && let Some(vol_tmp) =
+                secondary_volume_temp_dir(Path::new(&request.cwd), env.home.as_deref())
+        {
+            writable.push(vol_tmp.to_string_lossy().into_owned());
+        }
         let worktrees_root = env.worktrees_root.clone().or_else(|| {
             env.home
                 .as_ref()
@@ -419,8 +428,25 @@ pub(crate) fn run_confined(
             path_dirs,
             run_mark: marks.as_ref().map(|marks| marks.mark.clone()),
         };
-        let profile = sandbox::seatbelt_profile(&request.sandbox, &extra)?;
-        spec = sandbox::wrap(&spec, &profile)?;
+        if cfg!(target_os = "macos") {
+            let profile = sandbox::seatbelt_profile(&request.sandbox, &extra)?;
+            spec = sandbox::wrap(&spec, &profile)?;
+        } else if cfg!(target_os = "linux") {
+            match linux_sandbox::detect_host_linux_isolation() {
+                linux_sandbox::LinuxIsolation::Bubblewrap { bwrap_bin } => {
+                    spec = linux_sandbox::wrap(&bwrap_bin, &extra, &spec)?;
+                }
+                linux_sandbox::LinuxIsolation::HardenedContainer { .. } => {}
+                linux_sandbox::LinuxIsolation::None => {
+                    return Err(PortError::Unsupported(
+                        "no Linux sandbox found (install bubblewrap `bwrap`, run inside a hardened container, or pass --unsandboxed)".to_string(),
+                    ));
+                }
+            }
+        } else {
+            let profile = sandbox::seatbelt_profile(&request.sandbox, &extra)?;
+            spec = sandbox::wrap(&spec, &profile)?;
+        }
     }
 
     let mut output = pty::run_pty(
@@ -471,4 +497,54 @@ pub(crate) fn capture(
         // Killed at the deadline, or its output did not end with it.
         None => Err(PortError::Io(format!("{program}: timed out"))),
     }
+}
+
+/// On macOS secondary volumes (`/Volumes/<Vol>/...`), Foundation/Carbon checks
+/// volume writability via `/Volumes/<Vol>/.TemporaryItems/folders.<uid>`.
+/// Without allowing that narrow per-UID directory, Unity batch mode aborts
+/// immediately with "Project folder or disk is read only" under Seatbelt.
+pub(crate) fn secondary_volume_temp_dir(worktree: &Path, home: Option<&str>) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let uid = owner_uid(worktree).or_else(|| home.and_then(|h| owner_uid(Path::new(h))));
+    secondary_volume_temp_dir_in(&canonical, uid, Path::exists)
+}
+
+#[cfg(unix)]
+fn owner_uid(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|meta| meta.uid())
+}
+
+#[cfg(not(unix))]
+fn owner_uid(_path: &Path) -> Option<u32> {
+    None
+}
+
+pub(crate) fn secondary_volume_temp_dir_in(
+    canonical: &Path,
+    uid: Option<u32>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut comps = canonical.components();
+    if comps.next() != Some(Component::RootDir) {
+        return None;
+    }
+    if comps.next() != Some(Component::Normal(OsStr::new("Volumes"))) {
+        return None;
+    }
+    let Component::Normal(vol) = comps.next()? else {
+        return None;
+    };
+    if vol.is_empty() {
+        return None;
+    }
+    let base = PathBuf::from("/Volumes").join(vol).join(".TemporaryItems");
+    if let Some(uid) = uid {
+        let per_uid = base.join(format!("folders.{uid}"));
+        if exists(&per_uid) {
+            return Some(per_uid);
+        }
+    }
+    exists(&base).then_some(base)
 }

@@ -9,6 +9,7 @@
 
 mod accounts;
 mod heavy;
+mod hosts;
 
 use std::fs;
 use std::io;
@@ -268,6 +269,9 @@ fn receipt_key_check(data_dir: &Path) -> Result<String, String> {
 }
 
 fn sandbox_check() -> Result<String, String> {
+    if cfg!(target_os = "linux") {
+        return hosts::linux_sandbox_check();
+    }
     if !cfg!(target_os = "macos") {
         return Err("no sandbox on this OS; aaf run needs --unsandboxed".to_string());
     }
@@ -537,6 +541,14 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         skills_sync_check(root_opt, &effective),
         proof_readiness_check(root_opt, &effective),
         github_board_check(root_opt, &effective),
+        root_opt.map_or_else(
+            || not_applicable("multi_host_hooks"),
+            |root| advisory("multi_host_hooks", hosts::multi_host_hooks(root)),
+        ),
+        advisory(
+            "telegram",
+            hosts::telegram_status(&effective.global.telegram),
+        ),
     ];
     #[cfg(target_os = "macos")]
     checks.push(keychain_sandbox_exposure_check());

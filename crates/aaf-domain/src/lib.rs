@@ -14,6 +14,7 @@ pub mod ports;
 pub mod proof;
 pub mod run;
 pub mod task;
+pub mod telegram;
 
 /// Errors raised by pure domain rules.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

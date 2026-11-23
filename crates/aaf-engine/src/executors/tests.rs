@@ -49,3 +49,32 @@ fn a_helper_that_does_not_end_is_reported_at_its_timeout() {
     assert!(done.is_err(), "{done:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
 }
+
+#[test]
+fn secondary_volume_temp_dir_selects_per_uid_folder_on_macos_volumes() {
+    use super::secondary_volume_temp_dir_in;
+    use std::path::Path;
+
+    let worktree = Path::new("/Volumes/Data/projects/sample-game");
+    let exact = secondary_volume_temp_dir_in(worktree, Some(501), |p| {
+        p == Path::new("/Volumes/Data/.TemporaryItems/folders.501")
+    });
+    assert_eq!(
+        exact.as_deref(),
+        Some(Path::new("/Volumes/Data/.TemporaryItems/folders.501"))
+    );
+
+    let fallback = secondary_volume_temp_dir_in(worktree, Some(501), |p| {
+        p == Path::new("/Volumes/Data/.TemporaryItems")
+    });
+    assert_eq!(
+        fallback.as_deref(),
+        Some(Path::new("/Volumes/Data/.TemporaryItems"))
+    );
+
+    let boot = secondary_volume_temp_dir_in(Path::new("/Users/alice/repo"), Some(501), |_| true);
+    assert_eq!(boot, None);
+
+    let none = secondary_volume_temp_dir_in(worktree, Some(501), |_| false);
+    assert_eq!(none, None);
+}

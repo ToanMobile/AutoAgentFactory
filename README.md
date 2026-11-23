@@ -127,6 +127,9 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | **DAG, scopes and 4-stage pipeline** | `aaf board dep`/`graph` with critical-path tie-breaker and `blocked_upstream`, APFS scope-keyed locks (`--scope`), read-only `plan_stage` + `board approve-plan`, `audit_rework:`, `[run].max_open_review` queue brake, verified squash-merge, `aaf gc`, and DB migration `v3 -> v4` (read-only compatible with v3/v4). | **`v3.2`** |
 | **7 Golden Standards and handover** | 3-tier monotonic `[cross_audit]`, `G1..G7` + `MechanicalScore` with non-deadlocking solo-dev badge, post-gate HMAC `"audit\0"` verdicts, `aaf handover` (read-only Markdown/CSP HTML/JSON, verified PNG `<= 4 MiB`), and sanitized PR body (`< 60 KB`). | **`v3.2`** |
 | **Live streams, snapshots and TTY cockpit** | Sanitized `2 MiB` live stream logs (`streams/<run_id>.jsonl`), protected pre-turn snapshots (`refs/aaf/snapshots/*` + `turn_snapshots`), `board undo`/`steer`, and synchronous interactive TTY `aaf cockpit` (0 ports, 0 new crates, ANSI/OSC sanitized). | **`v3.2`** |
+| **Remote Telegram companion (`aaf telegram`)** | Zero-port outbound Telegram Bot API long-polling (Tier-1 config only, fail-closed `allowed_chat_ids`, env-only token) for read-only `/status`, `/board`, `/show`, `/handover` and opt-in two-step `/confirm <code>` approvals/mutations. | **`v3.4`** |
+| **Multi-host hook adapters** | `aaf-hook --host <auto\|claude\|codex\|gemini>` and `aaf init --hook-host <claude\|codex\|gemini\|all>` extend the full guard suite to Codex CLI (including `apply_patch` path checks) and Gemini CLI (`BeforeTool`). | **`v3.4`** |
+| **Packaging, `[secret NAME]` masking & Linux `bwrap`** | Streaming chunk-boundary `[secret NAME]` masking, GitHub Release workflow + SHA-256 verified `scripts/install.sh` + Homebrew formula + hardened Docker runner, and Linux bubblewrap (`bwrap`) / container isolation dispatch. | **`v3.4`** |
 
 ---
 
@@ -134,8 +137,8 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 
 | Requirement | Notes |
 |---|---|
-| **macOS** | The agent sandbox uses Seatbelt (`/usr/bin/sandbox-exec`), which exists only on macOS. |
-| **Linux** | **Unverified.** There is no sandbox: `aaf run` refuses (exit 2) until you pass `--unsandboxed`. The `/proc`-based load measurement has never run on a real Linux machine. |
+| **macOS** | The agent sandbox uses Seatbelt (`/usr/bin/sandbox-exec`), including narrow per-UID `/Volumes/<Vol>/.TemporaryItems/folders.<uid>` allowance for Unity on secondary volumes. |
+| **Linux** | Uses bubblewrap (`bwrap`) or a hardened container (`packaging/docker/`) when available; otherwise `aaf run` refuses (exit 2) until you pass `--unsandboxed`. Real Linux `/proc` load behavior remains operator-verified on Linux hosts. |
 | **Rust toolchain** | The workspace declares `rust-version = "1.89"`. The repository pins its toolchain in `rust-toolchain.toml` (channel `1.100.0`, with `clippy` and `rustfmt`), and rustup uses that pinned toolchain inside the checkout. |
 | **git ≥ 2.34** | Required. `aaf doctor` fails its `git` check below 2.34, because the tree fingerprint uses `git add --sparse`. |
 | **Claude Code CLI (`claude`)** | Must be on `PATH` and logged in. This is the default executor of `aaf run`. `aaf doctor` warns when `claude` is missing. |
@@ -572,6 +575,7 @@ How `[cross_audit]` merges:
 | **`v3.2`** `aaf gc` | Clean orphaned worktrees, finished task refs/snapshots, and expired streams/reports | `--dry-run` |
 | **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
 | **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
+| **`v3.4`** `aaf telegram` | Zero-port outbound Telegram companion for status, handover, and opt-in two-step `/confirm` approvals (**human only**) | `--once`, `--all`, `--repo <path>`, `--send-test` |
 
 `aaf-hook` is not a command you type. Claude Code runs it: it reads the PreToolUse JSON on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.
 
@@ -1122,22 +1126,21 @@ Usage errors (a missing `--` for `aaf slot`, an unknown flag) exit `2`. `aaf slo
 
 What has been tested against real tools, and what has not, is tracked in the **Trạng thái** ("Status") section of the Vietnamese guide, [`docs/README.vi.md`](docs/README.vi.md). In summary:
 
-- **Verified empirically on macOS:**
+- **Verified empirically on macOS (see [`docs/VERIFICATION_LIVE.md`](docs/VERIFICATION_LIVE.md) and `scripts/live_verify.sh`):**
   - `/usr/bin/sandbox-exec` Seatbelt profiles with real child processes, including explicit deny verification for `refs/aaf`, `streams/`, `reports/`, `AAF_DATA_DIR`, other tasks' worktrees, and cache control files;
+  - real Android Gradle unit tests (`OfficeReader` `:core:common:testDebugUnitTest`, Gradle 9.8.0 / Kotlin 2.4.10, 119 tasks) *inside* Seatbelt + `aaf slot` (`rc=0`);
+  - real Unity `6000.6.0f1` EditMode tests (`Idle-Plaza-3D`, 13/13 tests `rc=0`) *inside* Seatbelt on a secondary macOS volume (`/Volumes/Data`) after adding the narrow per-UID `.TemporaryItems/folders.<uid>` writable allowance;
+  - live read-only `gh` CLI + `aaf board import-issues --dry-run` (both empty-allowlist fail-closed and allowlisted fetch) and `aaf board sync-github --dry-run` against `ToanMobile/AutoAgentFactory`;
   - the live Keychain read experiment with `claude -p` OAuth (documenting why `~/Library/Keychains` remains readable and surfaced as `keychain_sandbox_exposure` in `aaf doctor`);
   - the `aaf-hook` and `aaf` CLI binaries against real local git repositories, linked worktrees, snapshot refs, and SQLite v3/v4 stores;
   - the hook inside real Claude Code sessions, `aaf gate` on real app repositories, a real Gradle unit-test run through the queue, `aaf accounts`, `aaf doctor`, and one real task taken through `aaf run` to Review.
 - **Covered by unit, integration, and fixture/stand-in tests (operator-side verification required when targeting external repos):**
-  - live Android Gradle, Unity EditMode, or Xcode builds *inside* the Seatbelt sandbox on external app repos;
-  - `SIGSTOP`/`SIGCONT` on real heavy builds;
-  - remote GitHub API / PR creation / Projects v2 sync and live `mobile-mcp` device proofs against external repositories;
+  - live Xcode builds *inside* Seatbelt, `SIGSTOP`/`SIGCONT` under real critical memory pressure, and mutating remote GitHub PR creation / Projects v2 writes / live `mobile-mcp` device proofs;
   - account switching on a live provider rate limit, `aaf run --auto`, batched gating, and cross-audit with live multi-provider agents;
-  - anything on Linux.
+  - Linux `bwrap` / Docker execution on a real Linux host.
 - **Not available:**
-  - hook adapters for agents other than Claude Code;
   - default gate commands for iOS, React Native, Expo, web, Python, and Unity without EditMode tests;
-  - anything that runs `commands.repro`;
-  - a Linux sandbox.
+  - anything that runs `commands.repro`.
 
 ---
 

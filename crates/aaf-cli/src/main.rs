@@ -57,6 +57,8 @@ enum Command {
     Proof(cmd::proof::ProofArgs),
     /// List or sync bundled domain skills into `.claude/skills`.
     Skills(cmd::skills::SkillsArgs),
+    /// Run the outbound Telegram remote companion (status, handover, two-step approvals).
+    Telegram(cmd::telegram::TelegramArgs),
     /// Live read-only terminal dashboard for tasks, heavy slots, accounts and receipt.
     Watch(cmd::watch::WatchArgs),
 }
@@ -80,6 +82,7 @@ impl Command {
             Command::Plan(_) => "plan",
             Command::Proof(_) => "proof",
             Command::Skills(_) => "skills",
+            Command::Telegram(_) => "telegram",
             Command::Watch(_) => "watch",
         }
     }
@@ -129,6 +132,7 @@ fn main() -> ExitCode {
         Command::Plan(args) => cmd::plan::run(args, &ctx),
         Command::Proof(args) => cmd::proof::run(args, &ctx),
         Command::Skills(args) => cmd::skills::run(args, &ctx),
+        Command::Telegram(args) => cmd::telegram::run(args, &ctx),
         Command::Watch(args) => cmd::watch::run(args, &ctx, cli.json),
     });
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);

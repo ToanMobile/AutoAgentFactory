@@ -19,6 +19,7 @@ pub mod git_files;
 pub mod git_guard;
 pub mod git_persist;
 pub mod heavy_guard;
+pub mod host;
 pub mod human_guard;
 pub mod interp_guard;
 pub mod paths;

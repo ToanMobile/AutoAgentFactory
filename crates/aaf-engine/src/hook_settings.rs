@@ -8,6 +8,7 @@
 //! verdict away), the program must really start, and a task worktree must
 //! still have the file its base branch has.
 
+pub mod multi_host;
 mod validate;
 
 use std::ffi::OsStr;

@@ -18,4 +18,5 @@ pub mod run;
 pub mod skills;
 pub mod slot;
 pub mod status;
+pub mod telegram;
 pub mod watch;

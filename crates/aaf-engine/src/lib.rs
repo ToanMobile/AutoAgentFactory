@@ -21,6 +21,7 @@ pub mod proof;
 pub mod skills;
 pub mod split;
 pub mod store_compliance;
+pub mod telegram;
 pub mod telemetry;
 pub mod throttle;
 pub mod unblocker;

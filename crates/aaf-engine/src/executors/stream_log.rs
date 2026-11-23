@@ -349,14 +349,11 @@ pub fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 }
 
 /// Scrubs PEM private keys, Bearer headers, URL credentials, common API key
-/// prefixes, and exact runtime values of passed environment secrets.
+/// prefixes, named process environment secrets (`[secret NAME]`), and exact
+/// runtime values of passed environment secrets.
 pub fn scrub_secrets(input: &str, extra_secrets: &[String]) -> String {
-    let mut out = input.to_string();
-    for secret in extra_secrets {
-        if secret.chars().count() >= MIN_ENV_SECRET_CHARS && out.contains(secret.as_str()) {
-            out = out.replace(secret.as_str(), REDACTED);
-        }
-    }
+    let named = super::secret_mask::collect_env_secrets();
+    let mut out = super::secret_mask::mask_named_and_patterns(input, &named, extra_secrets);
     let Some(patterns) = scrub_patterns() else {
         return out;
     };

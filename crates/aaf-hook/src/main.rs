@@ -17,6 +17,20 @@ fn dir_var(name: &str) -> Option<PathBuf> {
 }
 
 fn judge() -> Outcome {
+    let cli_args: Vec<String> = env::args().skip(1).collect();
+    let host = match aaf_hook::host::parse_cli_host(&cli_args) {
+        Ok(host) => host,
+        Err(msg) => {
+            return aaf_hook::host::render_for_host(
+                &aaf_hook::Decision::Deny(aaf_hook::Denial::new(
+                    "hook_input",
+                    msg,
+                    "invoke `aaf-hook` with optional `--host <auto|claude|codex|gemini>`",
+                )),
+                aaf_hook::host::HookHost::Claude,
+            );
+        }
+    };
     let mut input = Vec::new();
     let read = io::stdin()
         .lock()
@@ -39,7 +53,7 @@ fn judge() -> Outcome {
         home,
         cwd: env::current_dir().ok(),
     };
-    aaf_hook::run(&input, &hook_env)
+    aaf_hook::host::run_for_host(&input, &hook_env, host)
 }
 
 fn main() {

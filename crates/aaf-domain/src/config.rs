@@ -17,6 +17,7 @@ pub struct GlobalConfig {
     pub machine: MachineConfig,
     pub run: MachineRunConfig,
     pub cross_audit: GlobalCrossAuditConfig,
+    pub telegram: crate::telegram::TelegramConfig,
 }
 
 /// The part of `[run]` the operator may also set for the whole machine.
