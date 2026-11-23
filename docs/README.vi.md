@@ -2,13 +2,13 @@
 
 # AutoAgentFactory (`aaf`)
 
-`aaf` là một CLI Rust cho người chạy nhiều coding agent trên một máy: một gate ký biên nhận (`aaf gate`), một hook PreToolUse cho Claude Code (`aaf-hook`), một hàng chờ toàn máy cho lệnh build nặng (`aaf slot`), và một vòng chạy task qua agent → gate → PR (`aaf board`, `aaf run`). Nó thay cho bộ script gate + hook viết tay theo từng repo: cùng một binary, cùng một cấu hình ba tầng cho mọi repo, và biên nhận nằm ngoài repo, có chữ ký, agent không tự ghi được.
+`aaf` là một CLI Rust cho người chạy nhiều coding agent trên một máy: một gate ký biên nhận (`aaf gate`), một hook bảo vệ đa host cho Claude Code, Codex CLI và Gemini CLI (`aaf-hook`), một hàng chờ toàn máy cho lệnh build nặng (`aaf slot`), và một vòng chạy task qua agent → gate → PR (`aaf board`, `aaf run`). Nó thay cho bộ script gate + hook viết tay theo từng repo: cùng một binary, cùng một cấu hình ba tầng cho mọi repo, và biên nhận nằm ngoài repo, có chữ ký, agent không tự ghi được.
 
 Hợp đồng kỹ thuật: [`docs/PLAN.md`](PLAN.md). Mô hình đe doạ và các lỗ hổng đã biết: [`SECURITY.md`](../SECURITY.md). Giấy phép: Apache-2.0.
 
 ## Build và cài
 
-Cần Rust theo `rust-toolchain.toml` (1.100.0) và `git`. Chạy được trên macOS; Linux xem mục Trạng thái.
+Cần Rust theo `rust-toolchain.toml` (1.100.0) và `git` ≥ 2.34. Chạy được trên macOS (Seatbelt) và Linux (bubblewrap `bwrap` hoặc container cứng hoá trong `packaging/docker/`, xem mục Trạng thái). Ngoài build từ mã nguồn bên dưới, v3.4 cung cấp thêm script cài đặt `scripts/install.sh` (tải tarball release có kiểm SHA-256 hoặc `--from-source`), công thức Homebrew (`packaging/homebrew/aaf.rb`) và Docker image (`packaging/docker/`).
 
 ```sh
 cargo build --release -p aaf-cli -p aaf-hook
@@ -46,7 +46,7 @@ Cờ chung `--json`: stdout đúng một JSON object `{ok, command, status, …,
 
 | Lệnh | Việc | Cờ chính | Exit đáng nhớ |
 |---|---|---|---|
-| `aaf init` | Dò stack, sinh config tầng 2 (gồm `[proof]`, `[github]`), đăng ký hook, sửa `.gitignore`, tuỳ chọn đồng bộ skill | `--force` ghi đè config, `--with-skills`, `--host <claude\|agents\|all>` | `2` khi có `AAF_RUN_ID`; `1` không thấy `aaf-hook` hoặc `settings.json` hỏng (file giữ nguyên) |
+| `aaf init` | Dò stack, sinh config tầng 2 (gồm `[proof]`, `[github]`), đăng ký hook, sửa `.gitignore`, tuỳ chọn đồng bộ skill | `--force` ghi đè config, `--with-skills`, `--host <claude\|agents\|all>`, **`v3.4`** `--hook-host <claude\|codex\|gemini\|all>` | `2` khi có `AAF_RUN_ID`; `1` không thấy `aaf-hook` hoặc `settings.json` hỏng (file giữ nguyên) |
 | `aaf doctor` | Kiểm git, repo, config, hook, data dir, quyền `receipt.key`; cảnh báo về hook chưa commit (`hook_committed`), `claude`, sandbox, `keychain_sandbox_exposure` (trên macOS), account, Gradle daemon đang sống, git hook gọi build không qua hàng chờ, và các mục advisory `skills_sync`, `proof_readiness`, `github_board`. Chỉ đọc. Ngoài repo git nó là doctor của máy: các mục của repo in `n/a` (`applicable: false` trong JSON) và không tính | | `2` khi mục bắt buộc FAIL; mục `warn` và `n/a` không đổi exit |
 | `aaf status` | Thống kê chỉ đọc phạm vi (`scope`), task (đủ 8 trạng thái + `blocked_reasons`), run, token/chi phí USD, trạng thái account (gồm `leased`), và khoá throttle đang hoạt động (`active_slots`, `draining`) | `--all` (mọi repo) | `0` |
 | `aaf watch` | Dashboard terminal 100% chỉ đọc (0 cổng mạng, không giữ khoá độc quyền, không tạo `receipt.key` hay file `-shm`/`-wal` trong thư mục chỉ đọc) hiển thị trực tiếp 4 bảng: task theo trạng thái + `unblock_cycles`/`blocked_reason`, khe nặng (`free`/`busy`/`orphan`/`stale`, `drain`, áp lực RAM, số lệnh đã đo), pool account (`selection_mode`, `pinned_account`, cooldown, `tokens_5h`) và biên nhận ký gần nhất | `--repo <path>`, `--all`, `--interval <SECS>` (mặc định 2), `--once` | `0` |
@@ -57,15 +57,24 @@ Cờ chung `--json`: stdout đúng một JSON object `{ok, command, status, …,
 | `aaf slot -- <cmd> [args…]` | Chạy lệnh bất kỳ qua hàng chờ lệnh nặng; stdout/stderr là của lệnh. Chạy được ngoài repo | `--label <NAME>`, `--timeout <SECS>` | exit của lệnh; `128+N` nếu bị tín hiệu N giết; `75` hết `--timeout` khi còn chờ (lệnh chưa chạy); `127`/`126` không khởi động được; `2` thiếu `--` hoặc có `--json` |
 | `aaf approve --reviewer <tên>` | Ký approval cho `lock_fp` hiện tại (việc của người) | | `2` khi stdin không phải TTY, có `AAF_RUN_ID`, hoặc không có file khoá nào đổi |
 | `aaf accounts list` / `next` / `cooldown <ID>` | Liệt kê account, account kế tiếp, đặt/xoá cooldown | `cooldown`: `--until <unix giây>`, `--clear` (mặc định 5 giờ) | `2` khi `next` không còn account dùng được |
-| `aaf board add` | Thêm task Ready cho repo hiện tại | `--title`, `--spec`, `--accept` (lặp được), `--priority P0..P3` (mặc định P2), `--blocked-by <id>` | |
+| `aaf board add` | Thêm task Ready cho repo hiện tại | `--title`, `--spec`, `--accept` (lặp được), `--priority P0..P3` (mặc định P2), `--blocked-by <id>`, **`v3.2`** `--scope <prefix>` (lặp được) | |
 | `aaf board list` / `show <ID>` / `trace <ID>` | Xem task hoặc dòng thời gian run + event (kèm `events_truncated`) | `list`: `--state`, `--all`; `trace`: `--limit <N>` | |
 | `aaf board rework <ID>` | Đưa task `review` quay lại `gating` (hoặc `ready` khi có `--rerun`) | `--reason "..."`, `--rerun` | `2` khi có `AAF_RUN_ID` hoặc task không ở `review` |
 | `aaf board split <ID>` | Chủ động tách task gốc (`Ready`/`Backlog`) thành 2..=4 subtask song song có `owned_paths` rời nhau và nối DAG (planner chỉ đọc trong sandbox) | `--max <2..=4>` (mặc định 4), `--dry-run`, `--unsandboxed` | `2` khi có `AAF_RUN_ID`, task là subtask (`depth > 0`), không ở `Ready`/`Backlog`, hoặc thiếu `--unsandboxed` ngoài macOS |
 | `aaf board import-issues` / `sync-github` | Nhập issue theo allowlist + khử trùng 72h (gọi `gh` qua `aaf_fp::tools`); đồng bộ trạng thái lên GitHub Projects v2 hoặc nhãn `status:*` | `import-issues`: `--label`, `--dry-run`; `sync-github`: `--dry-run` | `2` khi có `AAF_RUN_ID`, allowlist rỗng, `[github].enabled = false` (không `--dry-run`), hoặc `sync-github` có lỗi một phần (`partial_error`) |
 | `aaf board unblock <ID>` / `unfreeze` | Đưa task Blocked về Ready; gỡ đóng băng factory (việc của người) | | `2` khi có `AAF_RUN_ID`, hoặc task không ở Blocked |
 | `aaf run` | Chạy task Ready: worktree → agent → gate → PR hoặc merge queue | `--auto` (lặp tới khi ngắt), `--auto-merge`, `--auto-split`, `--max-parallel <N\|auto>`, `--unsandboxed` | `0` khi không task nào bị chặn (kể cả khi không mở được PR và task nằm ở Review); `2` khi có task kết thúc ở Blocked (`status: "blocked"`), lượt chạy dừng vì agent lỗi đăng nhập hay mạng (`status: "halted"`), factory đóng băng, đã có `aaf run` khác trên repo, có `AAF_RUN_ID`, hoặc không có sandbox mà thiếu `--unsandboxed` |
+| **`v3.2`** `aaf board dep add\|rm` | Thêm (kiểm tra chống vòng) hoặc xoá cạnh phụ thuộc DAG | `<task> --blocked-by <blocker>` | `2` khi tạo vòng lặp hoặc tham số không hợp lệ |
+| **`v3.2`** `aaf board graph` | In thứ tự topo, đường găng (`critical path`) và danh sách task `cascade-blocked` | `--all` | `0` |
+| **`v3.2`** `aaf board approve-plan <ID>` | Duyệt kế hoạch sau `plan_stage` và đưa task về Ready (việc của người) | | `2` khi có `AAF_RUN_ID` hoặc task không chờ duyệt plan |
+| **`v3.2`** `aaf board undo <ID>` | Lùi worktree của task về snapshot đã xác minh `refs/aaf/snapshots/*` gần nhất (việc của người) | `--dry-run` | `2` khi có `AAF_RUN_ID` hoặc không có snapshot hợp lệ |
+| **`v3.2`** `aaf board steer <ID>` | Nối ghi chú `steer:` đã lọc mà không sửa `ImmutableSpec` (việc của người) | `--note "..."` | `2` khi có `AAF_RUN_ID` hoặc note trống |
+| **`v3.2`** `aaf gc` | Dọn worktree mồ côi, ref/snapshot của task đã xong, và file stream/report hết hạn | `--dry-run` | `0` |
+| **`v3.2`** `aaf handover <ID>` | Xuất báo cáo bàn giao chỉ đọc (`md`, HTML có CSP kèm PNG đã xác minh `<= 4 MiB`, hoặc `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) | `2` khi vi phạm policy `--out`/`--open` hoặc có `AAF_RUN_ID` |
+| **`v3.2`** `aaf cockpit` | Cockpit TTY tương tác đồng bộ (0 cổng mạng, 0 crate mới, lọc ANSI/OSC, chỉ cho người dùng TTY) | `--repo <path>`, `--all` | `2` khi không phải TTY hoặc có `AAF_RUN_ID` |
+| **`v3.4`** `aaf telegram` | Companion Telegram outbound 0 cổng mạng để xem trạng thái, handover và duyệt 2 bước `/confirm` (việc của người) | `--once`, `--all`, `--repo <path>`, `--send-test` | `2` khi có `AAF_RUN_ID`, chưa bật `[telegram]` tầng 1, hoặc `allowed_chat_ids` rỗng |
 
-`aaf-hook` không phải lệnh gõ tay: nó đọc JSON PreToolUse trên stdin, exit `0` (cho qua) hoặc `2` (chặn).
+`aaf-hook` không phải lệnh gõ tay: agent host tự chạy nó (hỗ trợ `--host <auto|claude|codex|gemini>`, mặc định `auto`), đọc JSON `PreToolUse` (Claude Code / Codex CLI) hoặc `BeforeTool` (Gemini CLI) trên stdin, exit `0` (cho qua) hoặc `2` (chặn).
 
 ## Chạy task (`aaf run`)
 
@@ -78,7 +87,7 @@ Cờ chung `--json`: stdout đúng một JSON object `{ok, command, status, …,
    - `least_used`: mỗi lượt lấy account không cooldown, lease rảnh, ít token nhất trong 5 giờ; chạm limit thì task chạy tiếp trên account khác còn rảnh.
 
    `aaf accounts next --json` và `aaf doctor --json` có `selection` và `binding` (account đã gắn, nguồn, cooldown). Ở `pinned`, cross-audit chạy trên chính account của repo và ghi `same_account: true`.
-5. **Sandbox** (macOS): xem `SECURITY.md` mục 5 cho danh sách ghi được và bị đóng.
+5. **Sandbox** (macOS Seatbelt; trên Linux dùng bubblewrap `bwrap` hoặc container cứng hoá từ v3.4): xem `SECURITY.md` mục 5 cho danh sách ghi được và bị đóng.
 
 ## Cấu hình ba tầng
 
@@ -86,7 +95,7 @@ Cờ chung `--json`: stdout đúng một JSON object `{ok, command, status, …,
 |---|---|---|
 | 1, máy | `~/.config/autofactory/config.toml` (thư mục đổi bằng `AAF_CONFIG_DIR`) | `[machine]`, `[accounts]`, `[safety]`, `[notifications]`, `[cross_audit]`, `[run]` chỉ với `env_pass` |
 | 2, repo, commit | `.autofactory/config.toml` | `[project]`, `[commands]`, `[gate]`, `[unblocker]`, `[run]`, `[cross_audit]`, `[proof]`, `[github]`, `[github.columns]` |
-| 3, cục bộ, gitignore | `.autofactory/config.local.toml` | chỉ được siết `[gate]` và `[cross_audit].require_different_provider` |
+| 3, cục bộ, gitignore | `.autofactory/config.local.toml` | chỉ được siết `[gate]` và `[cross_audit]` (`require_different_provider`, `audit_scope`, `score_gate`, `min_average_score`, `min_criterion_score`) |
 
 Thứ tự: tầng 1 < tầng 2 < tầng 3 < env `AAF_*` < cờ CLI. Từ tầng 3 trở lên chỉ siết được gate: thêm `head_lock_globs`, nâng `store_compliance` (`off < auto < always`), tăng `min_android_target_sdk`. `[commands]`, `project.profile`, `run.executor`, `run.executor_cmd` chỉ đọc ở tầng 2, `run.env_pass` ở tầng 1 và 2; đặt ở tầng cao hơn thì bị bỏ qua kèm cảnh báo. `run.model`, `run.effort`, `run.max_parallel`, `run.run_timeout_secs` lấy theo tầng cao hơn. Key lạ ở bất kỳ tầng nào là lỗi load (exit 1). `commands.repro` vẫn chỉ là schema + API thư viện chạy thủ công (`ReproCommand::argv`), **không bao giờ tự thực thi** trong gate hay factory.
 
@@ -177,9 +186,9 @@ Chưa nghiệm thu thật, mới có test trên fixture hoặc đồ giả:
 - Đường GitHub: `gh pr create` tới một remote GitHub, `gh issue list`; webhook thông báo.
 - Chuyển account khi chạm limit THẬT (mới có fixture tổng hợp); nhận diện chạm limit từ output thật.
 - `aaf run --auto`, gom lô gate nhiều task, và cross-audit với agent thật.
-- Linux: không có sandbox (`aaf run` đòi `--unsandboxed`); đường đo tải qua `/proc` chưa từng chạy. Repo chưa có remote nên CI workflow cũng chưa từng chạy.
+- Linux: từ `v3.4` hỗ trợ cô lập qua bubblewrap (`bwrap`) hoặc container cứng hoá (`packaging/docker/`); chỉ khi không phát hiện cả hai thì `aaf run` mới từ chối (exit 2) cho tới khi truyền `--unsandboxed`. Việc chạy thật `bwrap`/Docker và đường đo tải qua `/proc` trên máy Linux thật vẫn cần người vận hành xác minh thực địa.
 
-Chưa có (đừng tìm): adapter hook cho agent ngoài Claude Code; lệnh mặc định cho iOS, React Native, Expo, Web, Python và cho Unity không có test EditMode; thứ gì chạy `commands.repro`; sandbox trên Linux.
+Chưa có (đừng tìm): adapter hook riêng cho agent ngoài Claude Code, Codex CLI và Gemini CLI (Antigravity, OpenCode chưa có adapter hook); lệnh mặc định cho iOS, React Native, Expo, Web, Python và cho Unity không có test EditMode; thứ gì tự chạy `commands.repro`.
 
 ## Bổ sung hệ sinh thái v3 (`lane/v3-ecosystem`)
 
@@ -212,3 +221,15 @@ Các lệnh và cấu hình mới đã có unit/integration test trên fixture, 
   - `aaf board split <ID> [--max 2..=4] [--dry-run] [--unsandboxed]`: chạy planner chỉ đọc trong sandbox để phân rã task gốc (`Ready`/`Backlog`, `depth == 0`) thành 2..=4 subtask có `owned_paths` rời nhau giữa các nhánh chạy song song và tự nối DAG (task gốc chờ toàn bộ subtask). `--dry-run` chỉ xem trước, không ghi DB; bị từ chối (exit 2) trong `AAF_RUN_ID` hoặc với subtask/task không ở `Ready`/`Backlog`.
   - `aaf run --auto-split`: trước khi chạy vòng factory, tự chạy planner tách các task gốc `Ready` chưa có subtask và chưa có ghi chú `split:`; báo `auto_split_count` trong JSON và dừng sạch (`status: "halted"`, exit 2) nếu gặp lỗi hạ tầng.
   - `aaf run --max-parallel auto`: tự tính trần song song hiệu dụng (1..=4) từ số account phát hiện được, `max_concurrent_per_account`, số lõi CPU và áp lực RAM hiện tại của kernel (`Normal`/`Warn`/`Critical`), xuất `max_parallel` trong JSON.
+
+## Bổ sung `v3.2` GOLD
+
+- **DAG, khoá phạm vi và pipeline 4 chặng**: `aaf board dep`/`graph` (đường găng `critical path`, `blocked_upstream`), khoá phạm vi `--scope` so không phân biệt hoa thường kiểu APFS, `plan_stage` chỉ-đọc + `aaf board approve-plan`, vòng `audit_rework:` có giới hạn, phanh hàng đợi `[run].max_open_review`, squash-merge đã xác minh, `aaf gc`, và migration DB `v3 -> v4` (đọc chỉ-đọc tương thích cả v3 và v4).
+- **7 Chuẩn Vàng và báo cáo bàn giao**: `[cross_audit]` đơn điệu 3 tầng (`audit_scope`: `head_lock < large < always`, `score_gate`: `bool` `false -> true`, `min_average_score` mặc định `95`, `min_criterion_score` mặc định `90`), `G1..G7` + `MechanicalScore` với huy hiệu `same_account — chưa có auditor độc lập` không gây deadlock cho solo-dev, verdict hậu gate ký HMAC `"audit\0"`, `aaf handover` (`md`/HTML có CSP kèm PNG đã xác minh `<= 4 MiB`/`json`), và PR body đã lọc bí mật (`< 60 KB`).
+- **Stream log, snapshot lùi lượt và Cockpit TTY**: log trực tiếp đã lọc secret giới hạn `2 MiB` (`streams/<run_id>.jsonl`), snapshot trước mỗi lượt (`refs/aaf/snapshots/*` + bảng `turn_snapshots`) được bảo vệ khỏi agent, `aaf board undo`/`steer`, và `aaf cockpit` TTY đồng bộ (0 cổng mạng, 0 crate mới, lọc ANSI/OSC).
+
+## Bổ sung `v3.4`
+
+- **Remote Telegram companion (`aaf telegram`)**: long-polling outbound tới Telegram Bot API (0 cổng nghe, chỉ đọc `[telegram]` tầng 1, fail-closed khi `allowed_chat_ids` rỗng, token chỉ đọc từ biến môi trường) cho `/status`, `/board`, `/show`, `/handover` chỉ-đọc và xác nhận 2 bước `/confirm <code>` cho thao tác duyệt/thay đổi.
+- **Adapter hook đa host**: `aaf-hook --host <auto|claude|codex|gemini>` và `aaf init --hook-host <claude|codex|gemini|all>` mở rộng toàn bộ bộ guard sang Codex CLI (`.codex/hooks.json`, gồm kiểm đường dẫn `apply_patch`) và Gemini CLI (`.gemini/settings.json`, sự kiện `BeforeTool`).
+- **Che bí mật theo luồng, đóng gói và Linux `bwrap`**: lọc `[secret NAME]` qua ranh giới chunk trên stream output; phát hành đa nền tảng qua `.github/workflows/release.yml` + `scripts/install.sh` (kiểm SHA-256) + công thức Homebrew (`packaging/homebrew/aaf.rb`) + Docker runner cứng hoá (`packaging/docker/`); điều phối sandbox Linux qua bubblewrap (`bwrap`) hoặc container cứng hoá; và kiểm chứng Seatbelt thực tế trên macOS (`docs/VERIFICATION_LIVE.md`, `scripts/live_verify.sh`).

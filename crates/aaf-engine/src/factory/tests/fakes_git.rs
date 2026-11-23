@@ -87,7 +87,15 @@ impl GitOps for FakeGit {
         Ok(!state.no_changes.contains(&task_of(&worktree.path)))
     }
     fn diff(&self, worktree: &TaskWorktree) -> PortResult<String> {
-        Ok(format!("+change of {}\n", task_of(&worktree.path)))
+        let id = task_of(&worktree.path);
+        Ok(format!(
+            "diff --git a/src/lib.rs b/src/lib.rs\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1,1 +1,2 @@\n\
+              fn base() {{}}\n\
+             +change of {id}\n"
+        ))
     }
     fn integrate(&self, task_ids: &[String]) -> PortResult<Integration> {
         let mut state = self.0.lock().unwrap();

@@ -133,17 +133,14 @@ fn each_blocking_yes_fails() {
 }
 
 #[test]
-fn yes_without_evidence_still_fails() {
+fn yes_without_evidence_is_inconclusive() {
     let checklist = build_checklist(&spec(), false);
     let text = answer(&checklist, &[]).replace(
         r#"{"answer":"no","evidence":"","id":"SECRET"}"#,
         r#"{"answer":"yes","id":"SECRET"}"#,
     );
     assert!(text.contains(r#"{"answer":"yes","id":"SECRET"}"#));
-    assert!(matches!(
-        parse_verdict(&text, &checklist),
-        AuditVerdict::Fail { findings, .. } if findings[0].id == "SECRET" && findings[0].evidence.is_empty()
-    ));
+    assert!(is_inconclusive(&parse_verdict(&text, &checklist)));
 }
 
 #[test]
@@ -226,12 +223,14 @@ fn two_json_objects_are_inconclusive() {
     for text in [
         format!("{pass}\n{fail}"),
         format!("{fail}\nOn reflection:\n{pass}"),
-        format!("{pass} {{}}"),
         format!("Draft: {{\"answers\":[]}} Final: {pass}"),
-        format!("{pass}\n}}"),
     ] {
         let verdict = parse_verdict(&text, &checklist);
         assert!(is_inconclusive(&verdict), "{text:?} gave {verdict:?}");
+    }
+    // Non-audit braces (empty objects, stray log braces) around one valid answer are tolerated.
+    for text in [format!("{pass} {{}}"), format!("{pass}\n}}")] {
+        assert!(parse_verdict(&text, &checklist).is_pass(), "{text:?}");
     }
 }
 

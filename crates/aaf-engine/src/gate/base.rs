@@ -5,13 +5,38 @@ use std::time::Duration;
 
 use super::GateError;
 
-const AUTO_CANDIDATES: [&str; 5] = [
-    "origin/HEAD",
-    "origin/main",
-    "origin/master",
-    "main",
-    "master",
+/// Trunks `auto` tries after `origin/HEAD`, as full ref names: a short
+/// name would let a tag or local branch called `origin/main` stand in.
+pub(crate) const AUTO_FALLBACKS: [&str; 4] = [
+    "refs/remotes/origin/main",
+    "refs/remotes/origin/master",
+    "refs/heads/main",
+    "refs/heads/master",
 ];
+
+/// The branch of `origin` the `origin/HEAD` symref names, if it may be a
+/// base. A direct ref, a symref leaving `refs/remotes/origin/` or naming a
+/// task branch would let the change pick its own base and empty the change
+/// set.
+pub(crate) fn origin_head_branch(target: &str) -> Option<&str> {
+    let branch = target.strip_prefix("refs/remotes/origin/")?;
+    let task = branch.starts_with(crate::git::worktree::BRANCH_PREFIX);
+    let parts_ok = branch.split('/').all(|p| !matches!(p, "" | "." | ".."));
+    (parts_ok && branch != "HEAD" && !task).then_some(branch)
+}
+
+/// `None` without a `refs/remotes/origin/HEAD`, `Some(None)` with one that
+/// is not usable (dangling or not a commit is caught by the caller).
+fn origin_head(repo_root: &Path, timeout: Duration) -> Result<Option<Option<String>>, GateError> {
+    let name = "refs/remotes/origin/HEAD";
+    let args = ["symbolic-ref", "--quiet", name];
+    if let Some(target) = aaf_fp::git_or_none(repo_root, &args, timeout)? {
+        let usable = origin_head_branch(&target).is_some();
+        return Ok(Some(usable.then_some(target)));
+    }
+    let args = ["rev-parse", "--verify", "--quiet", name];
+    Ok(aaf_fp::git_or_none(repo_root, &args, timeout)?.map(|_| None))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Base {
@@ -40,9 +65,12 @@ pub fn head(repo_root: &Path, timeout: Duration) -> Result<Option<String>, GateE
 
 /// Resolves `gate.base_ref` to the merge-base with `HEAD`.
 ///
-/// `auto` tries the usual trunk names and falls back to `HEAD` (only
-/// uncommitted work is then in scope). An explicit ref that does not resolve
-/// is an error: silently using `HEAD` would hide every committed change.
+/// `auto` tries the branch the `origin/HEAD` symref names, then the usual
+/// trunk refs, and takes the first that shares history with `HEAD`. With
+/// none it falls back to `HEAD` (only uncommitted work is then in scope),
+/// unless `origin/HEAD` exists: a broken one must not empty the change set.
+/// An explicit ref that does not resolve is an error: silently using `HEAD`
+/// would hide every committed change.
 pub fn resolve(repo_root: &Path, base_ref: &str, timeout: Duration) -> Result<Base, GateError> {
     let Some(head) = commit_of(repo_root, "HEAD", timeout)? else {
         let empty_tree = aaf_fp::git(
@@ -58,12 +86,22 @@ pub fn resolve(repo_root: &Path, base_ref: &str, timeout: Duration) -> Result<Ba
     };
     let wanted = base_ref.trim();
     let target = if wanted.is_empty() || wanted == "auto" {
+        let origin_head = origin_head(repo_root, timeout)?;
+        let first = origin_head.clone().flatten();
         let mut found = None;
-        for name in AUTO_CANDIDATES {
-            found = commit_of(repo_root, name, timeout)?;
+        for name in first.iter().map(String::as_str).chain(AUTO_FALLBACKS) {
+            let Some(target) = commit_of(repo_root, name, timeout)? else {
+                continue;
+            };
+            // An orphan branch (say `origin/gh-pages`) is no base: try on.
+            found = aaf_fp::git_or_none(repo_root, &["merge-base", &target, &head], timeout)?;
             if found.is_some() {
                 break;
             }
+        }
+        if found.is_none() && origin_head.is_some() {
+            let msg = "origin/HEAD is set but no base shares history with HEAD";
+            return Err(GateError::Config(format!("{msg}; set gate.base_ref")));
         }
         found
     } else {

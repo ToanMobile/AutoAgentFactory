@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use aaf_domain::blocked::UnblockTier;
 use aaf_domain::config::AuditScope;
 use aaf_domain::event::EventKind;
 use aaf_domain::gate::{GateStatus, LockStatus, Receipt, Severity};
@@ -21,7 +22,8 @@ use super::worker::GateJob;
 use super::{Deps, unblock};
 use crate::cross_audit::compute_mechanical_score;
 use crate::git::{MergeOutcome, PrOutcome};
-use crate::unblocker::FailureSignal;
+use crate::unblocker::ladder;
+use crate::unblocker::{FailureSignal, failure_digest, is_pure_test_failure};
 
 /// Written by the gate thread before it reports a task, read by the
 /// scheduler when the loop ends.
@@ -232,6 +234,21 @@ pub(crate) fn settle(
             )?;
             let mut signal = FailureSignal::empty();
             signal.gate = Some(receipt);
+            let digest = failure_digest(&signal);
+            let rerun_eligible = judged.batch_group.is_none()
+                && signal.gate.as_ref().is_some_and(is_pure_test_failure)
+                && !ladder::tried(&task, UnblockTier::T2Mechanical, &digest);
+            if rerun_eligible && let Some(receipt) = signal.gate.as_ref() {
+                match deps.gate.rerun_failed_test(&job.worktree.path, receipt) {
+                    Ok(rerun) => signal.test_rerun = rerun,
+                    Err(err) => {
+                        if let Ok(mut warnings) = round.warnings.lock() {
+                            warnings
+                                .push(format!("flaky test rerun skipped for {}: {err}", task.id));
+                        }
+                    }
+                }
+            }
             Ok(Resolution::Failed(Box::new(signal)))
         }
         Verdict::Unverified(receipt) => {

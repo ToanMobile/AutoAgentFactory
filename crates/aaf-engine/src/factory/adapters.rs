@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aaf_domain::account::{AccountProfile, AccountState, ProviderKind};
 use aaf_domain::config::{MachineConfig, RepoConfig};
@@ -11,8 +11,12 @@ use aaf_domain::ports::{AccountStore, Clock, LimitHit, PortError, PortResult, Ru
 
 use super::ports::{AccountPool, GateRunner, Grant, Notifier};
 use crate::accounts::Router;
-use crate::gate;
-use crate::throttle::Progress;
+use crate::db::private;
+use crate::gate::hidden::When;
+use crate::gate::runner::{DiffEnvFiles, HeavyContext};
+use crate::gate::{self, HiddenPolicy};
+use crate::throttle::{Progress, SystemProbe, Throttle};
+use crate::unblocker::{RerunResult, is_pure_test_failure};
 use crate::webhook::{self, WebhookEvent, WebhookOptions};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -105,6 +109,88 @@ impl GateRunner for RealGate {
             &self.cfg,
             &base.diff_target,
         ))
+    }
+
+    fn rerun_failed_test(&self, tree: &Path, receipt: &Receipt) -> PortResult<Option<RerunResult>> {
+        if !is_pure_test_failure(receipt) {
+            return Ok(None);
+        }
+        let Some(failed) = receipt
+            .commands
+            .iter()
+            .find(|c| !c.passed() && matches!(c.name.as_str(), "test_scoped" | "test_full"))
+        else {
+            return Ok(None);
+        };
+        // Always take the command string from the main checkout's RepoConfig,
+        // never from an untrusted Receipt payload.
+        let command = match failed.name.as_str() {
+            "test_scoped" => self.cfg.commands.test_scoped.trim(),
+            "test_full" => self.cfg.commands.test_full.trim(),
+            _ => return Ok(None),
+        };
+        if command.is_empty() {
+            return Ok(None);
+        }
+
+        let repo_root = std::fs::canonicalize(tree).map_err(|e| PortError::Io(e.to_string()))?;
+        private::create_dir(&self.data_dir).map_err(|e| PortError::Io(e.to_string()))?;
+        let base = gate::base::resolve(&repo_root, &self.cfg.gate.base_ref, gate::GIT_TIMEOUT)
+            .map_err(|e| PortError::Io(e.to_string()))?;
+        let set = gate::changes::collect(&repo_root, &base.diff_target, gate::GIT_TIMEOUT)
+            .map_err(|e| PortError::Io(e.to_string()))?;
+        let diff_env = DiffEnvFiles::write(receipt.mode, base.sha.as_deref(), &set.changes)
+            .map_err(|e| PortError::Io(e.to_string()))?;
+        let env_owned = diff_env.env_pairs();
+        let env_refs: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+        let timeout = Duration::from_secs(self.cfg.gate.command_timeout_secs);
+        let stats_id = gate::stats_repo_id(&repo_root);
+        let probe = SystemProbe::detect();
+        let progress = |event: &Progress<'_>| (self.progress)(tree, event);
+        let throttle = Throttle::system(&self.machine, &probe, &progress);
+        let heavy = HeavyContext {
+            data_dir: &self.data_dir,
+            stats_repo_id: &stats_id,
+            clock: &*self.clock,
+            throttle: &throttle,
+        };
+        let policy = if self.made_by_the_factory(tree) {
+            HiddenPolicy::Remove
+        } else {
+            HiddenPolicy::default()
+        };
+
+        let mut runs = 0u32;
+        let mut passed = 0u32;
+        for _ in 0..2 {
+            let before = gate::hidden::inspect(&repo_root, policy, When::BeforeCommands, false)
+                .map_err(|e| PortError::Io(e.to_string()))?;
+            if !before.blocks.is_empty() {
+                return Ok(None);
+            }
+            let result = gate::runner::run_one_heavy(
+                &repo_root,
+                &failed.name,
+                command,
+                timeout,
+                &heavy,
+                &env_refs,
+            )
+            .map_err(|e| PortError::Io(e.to_string()))?;
+            if policy == HiddenPolicy::Remove {
+                let _ = gate::hidden::inspect(&repo_root, policy, When::AfterCommands, false)
+                    .map_err(|e| PortError::Io(e.to_string()))?;
+            }
+            runs += 1;
+            if result.passed() {
+                passed += 1;
+            }
+            if result.timed_out {
+                break;
+            }
+        }
+        Ok(Some(RerunResult { runs, passed }))
     }
 }
 

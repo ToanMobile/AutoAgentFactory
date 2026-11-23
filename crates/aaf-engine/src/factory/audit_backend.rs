@@ -12,6 +12,7 @@ use aaf_domain::task::Task;
 use serde_json::json;
 
 use super::ports::{AccountPool, Grant};
+use super::rework_filter;
 use super::unblock::InfraWatch;
 use super::worker::{self, GateJob, Next, PLAN_EXECUTOR};
 use super::{Deps, unblock};
@@ -469,10 +470,11 @@ pub(crate) fn run_auditor_turn(
     let report = match cross_audit::run_scored_audit(input, &watch, &run.request, require_scores) {
         Ok(report) => report,
         Err(err) => {
-            worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0))?;
+            worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0), false)?;
             return Err(err);
         }
     };
+    let tokens_measured = watch.reports_tokens();
     let (mut infra, mut limit_hit, failed_tail) = watch.take_with_tail();
     if limit_hit.is_none()
         && infra.is_none()
@@ -488,7 +490,7 @@ pub(crate) fn run_auditor_turn(
         RunStatus::Failed
     };
     let tokens = (report.tokens_in, report.tokens_out);
-    worker::end_run(deps, task, &run, status, None, tokens)?;
+    worker::end_run(deps, task, &run, status, None, tokens, tokens_measured)?;
     Ok((report, infra, limit_hit))
 }
 
@@ -578,7 +580,8 @@ pub(crate) fn execute_audit(
     {
         return Ok(next);
     }
-    let note = format!("cross-audit rejected the changes to locked files ({text})");
+    let summary = rework_filter::fallback_verdict_summary(&report.verdict, &text);
+    let note = format!("cross-audit rejected the changes to locked files ({summary})");
     deps.store
         .append_context_note(&task.id, &unblock::one_line(&note, 400), deps.now())?;
     // Fixed verdict kind only so finding texts do not create a new failure digest every run.

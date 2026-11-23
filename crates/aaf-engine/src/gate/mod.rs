@@ -7,6 +7,9 @@ pub mod changes;
 pub mod docs_fast;
 pub mod head_lock;
 pub mod hidden;
+pub mod oracle;
+pub mod oracle_classify;
+pub(crate) mod oracle_worktree;
 pub(crate) mod proc;
 pub mod runner;
 pub mod static_checks;
@@ -348,7 +351,7 @@ pub fn run_gate_policy(
         GIT_TIMEOUT,
     )?;
     let statics = static_checks::scan(&added)?;
-    let head_lock = head_lock::evaluate_changes(data_dir, repo_root, cfg, &set.changes)?;
+    let head_lock = head_lock::evaluate_changes(data_dir, repo_root, cfg, &set.changes, &added)?;
     let store = crate::store_compliance::scan(repo_root, cfg, release);
 
     let verdict = |hidden: &[String],
@@ -376,10 +379,12 @@ pub fn run_gate_policy(
         && mode == GateMode::Scoped
         && cfg.gate.docs_fast_path
         && !test_command_missing
-        && docs_fast::is_docs_only(
+        && docs_fast::is_docs_only_in_repo(
+            repo_root,
             &set.changes,
             &cfg.gate.head_lock_globs,
             &cfg.gate.docs_fast_path_exclude_globs,
+            GIT_TIMEOUT,
         )?;
     let commands = if take_docs_fast_path {
         notes.push(format!(
@@ -437,6 +442,22 @@ pub fn run_gate_policy(
     // hidden-file policy let pass or removed.
     reasons.append(&mut notes);
     reasons.append(&mut hidden_notes);
+    let (status, reasons) = if status == GateStatus::Clear
+        && !cfg.gate.red_green_oracle.is_off()
+        && !take_docs_fast_path
+        && let Some(base_sha) = base.sha.as_deref()
+    {
+        let heavy = runner::HeavyContext {
+            data_dir,
+            stats_repo_id: &common_repo_id,
+            clock,
+            throttle,
+        };
+        let v = oracle::evaluate(repo_root, base_sha, cfg, mode, &set.changes, &added, &heavy)?;
+        oracle::apply_verdict(status, reasons, v)
+    } else {
+        (status, reasons)
+    };
 
     let receipt = Receipt {
         schema_version: RECEIPT_SCHEMA_VERSION,

@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::oracle_config::OracleMode;
+
 /// Tier 1: `~/.config/autofactory/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -324,8 +326,10 @@ pub struct GateConfig {
     /// `auto` or an explicit ref such as `origin/main`.
     pub base_ref: String,
     /// Existing files matching these globs may not be modified, deleted or
-    /// renamed without a signed approval. Newly added files are exempt,
-    /// except those matching [`AGENT_CONFIG_GLOBS`].
+    /// renamed without a signed approval. Newly added test files
+    /// ([`TEST_FILE_GLOBS`]) are exempt unless they also match a non-test
+    /// locked glob; newly added build, runner, CI, and agent config files
+    /// ([`RUNNER_CONFIG_GLOBS`], [`AGENT_CONFIG_GLOBS`], etc.) are locked.
     pub head_lock_globs: Vec<String>,
     pub store_compliance: StoreMode,
     pub min_android_target_sdk: u32,
@@ -336,65 +340,32 @@ pub struct GateConfig {
     pub docs_fast_path: bool,
     /// Extra path globs excluded from `docs_fast_path`.
     pub docs_fast_path_exclude_globs: Vec<String>,
+    /// Opt-in red->green & vacuity oracle (`off`, `warn`, `block`).
+    #[serde(default, skip_serializing_if = "OracleMode::is_off")]
+    pub red_green_oracle: OracleMode,
 }
 
-/// What coding agents load from a repository as instructions, hooks, skills
-/// and MCP servers. A task that could change them unaudited would change
-/// its own guard (`.claude/settings.json` registers `aaf-hook`) and, once
-/// merged, what runs in the owner's own sessions outside any sandbox.
-/// Part of the default `head_lock_globs`.
-pub const AGENT_CONFIG_GLOBS: [&str; 5] = [
-    "**/.claude/**",
-    "**/CLAUDE.md",
-    "**/.mcp.json",
-    "**/.agents/**",
-    "**/AGENTS.md",
-];
+// Re-export glob constants from the dedicated module so callers can import
+// them without knowing the split, and to keep this file under 520 lines.
+pub use crate::head_lock_globs::{
+    AGENT_CONFIG_GLOBS, CI_AND_MANIFEST_GLOBS, RUNNER_CONFIG_GLOBS, TEST_FILE_GLOBS,
+    default_head_lock_globs,
+};
 
 /// Google Play requirement for new apps and updates since 2026-08-31.
 pub const DEFAULT_MIN_ANDROID_TARGET_SDK: u32 = 36;
 
 impl Default for GateConfig {
     fn default() -> Self {
-        let globs = [
-            "**/*_test.*",
-            "**/*.test.*",
-            "**/*.spec.*",
-            "**/test_*.py",
-            "**/*Test.kt",
-            "**/*Test.java",
-            "**/*Tests.swift",
-            "**/*Tests.cs",
-            "**/tests/**",
-            "**/test/**",
-            "**/__tests__/**",
-            "**/androidTest/**",
-            "**/jest.config.*",
-            "**/vitest.config.*",
-            "**/pytest.ini",
-            "**/conftest.py",
-            ".github/workflows/**",
-            ".autofactory/config.toml",
-            "**/Cargo.toml",
-            "**/package.json",
-            "**/build.rs",
-            "**/build.gradle",
-            "**/build.gradle.kts",
-            "**/.adb-denylist",
-            "**/.adb-allowlist",
-        ];
         GateConfig {
             base_ref: "auto".to_string(),
-            head_lock_globs: globs
-                .iter()
-                .chain(AGENT_CONFIG_GLOBS.iter())
-                .map(|g| (*g).to_string())
-                .collect(),
+            head_lock_globs: default_head_lock_globs(),
             store_compliance: StoreMode::Auto,
             min_android_target_sdk: DEFAULT_MIN_ANDROID_TARGET_SDK,
             command_timeout_secs: 1800,
             docs_fast_path: true,
             docs_fast_path_exclude_globs: Vec::new(),
+            red_green_oracle: OracleMode::Off,
         }
     }
 }
@@ -424,7 +395,7 @@ impl Default for UnblockerConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RunConfig {
-    /// `claude`, `codex`, `antigravity`, `opencode` or `custom`.
+    /// `claude`, `codex`, `gemini`, `antigravity`, `opencode` or `custom`.
     pub executor: String,
     /// Command template for non-Claude executors; `{prompt}` is substituted.
     pub executor_cmd: Vec<String>,

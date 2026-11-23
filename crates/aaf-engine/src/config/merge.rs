@@ -1,8 +1,8 @@
 //! Overrides from tier 3 and above, and the rules for applying them.
 
 use aaf_domain::config::{
-    AuditScope, CrossAuditConfig, GlobalCrossAuditConfig, MAX_AUDIT_REWORKS_CAP, PipelineConfig,
-    RepoConfig, StoreMode,
+    AuditScope, CrossAuditConfig, GlobalCrossAuditConfig, MAX_AUDIT_REWORKS_CAP, OracleMode,
+    PipelineConfig, RepoConfig, StoreMode,
 };
 use serde::Deserialize;
 
@@ -36,6 +36,7 @@ pub struct GateOverlay {
     pub command_timeout_secs: Option<u64>,
     pub docs_fast_path: Option<bool>,
     pub docs_fast_path_exclude_globs: Option<Vec<String>>,
+    pub red_green_oracle: Option<OracleMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -473,6 +474,17 @@ pub(crate) fn apply_overlay(
             if !current.docs_fast_path_exclude_globs.contains(&glob) {
                 current.docs_fast_path_exclude_globs.push(glob);
             }
+        }
+    }
+    if let Some(mode) = gate.red_green_oracle {
+        if mode > current.red_green_oracle {
+            current.red_green_oracle = mode;
+        } else if mode < current.red_green_oracle {
+            warnings.push(format!(
+                "{source}: gate.red_green_oracle = {} ignored: it may only be raised (kept {})",
+                mode.as_str(),
+                current.red_green_oracle.as_str()
+            ));
         }
     }
 }

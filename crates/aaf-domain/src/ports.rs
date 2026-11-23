@@ -215,4 +215,11 @@ impl AgentOutcome {
 /// Runs one agent to completion. Implemented by the executors; faked in tests.
 pub trait AgentRunner: Send + Sync {
     fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome>;
+
+    /// Whether this runner measures and reports token usage in [`AgentOutcome`].
+    /// Defaults to `true`; generic CLI runners that do not parse token counts
+    /// override this to `false`.
+    fn reports_tokens(&self) -> bool {
+        true
+    }
 }

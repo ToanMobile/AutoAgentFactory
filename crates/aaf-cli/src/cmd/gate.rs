@@ -181,6 +181,9 @@ fn human(receipt: &Receipt, status: &str, receipt_path: &Path, warnings: &[Strin
             f.fix
         ));
     }
+    if receipt.suppressions > 0 {
+        text.push_str(&format!("\n  suppressions: {}", receipt.suppressions));
+    }
     for f in &receipt.store_compliance.findings {
         text.push_str(&format!(
             "\n  {} {:?} {}: {} (fix: {})",

@@ -15,6 +15,7 @@ use aaf_domain::task::{ImmutableSpec, Task, TaskState};
 use serde_json::json;
 
 use super::ports::Grant;
+use super::rework_filter::is_valid_rework_finding;
 use super::worker::{GateJob, Next, ensure_budget, halt_on_infra, hook_problem, request};
 use super::{Deps, Store};
 use crate::cross_audit::Finding;
@@ -85,6 +86,10 @@ impl AgentRunner for InfraWatch<'_> {
                 .unwrap_or_else(PoisonError::into_inner) = Some(outcome.log_tail.clone());
         }
         Ok(outcome)
+    }
+
+    fn reports_tokens(&self) -> bool {
+        self.runner.reports_tokens()
     }
 }
 
@@ -502,6 +507,34 @@ pub(crate) fn handle_audit_failure(
     if cap == 0 || prior_audit_fails >= cap {
         return Ok(None);
     }
+    let (valid, dropped): (Vec<&Finding>, Vec<&Finding>) = findings
+        .iter()
+        .partition(|finding| is_valid_rework_finding(finding));
+    if !dropped.is_empty() {
+        let items: Vec<_> = dropped
+            .iter()
+            .map(|f| {
+                let reason = if f.evidence.trim().is_empty() {
+                    "empty_evidence"
+                } else {
+                    "missing_file_line"
+                };
+                json!({ "id": f.id, "reason": reason })
+            })
+            .collect();
+        deps.emit(
+            EventKind::DetectorHit,
+            &task.id,
+            json!({
+                "source": "audit_rework_filter",
+                "dropped_count": items.len(),
+                "dropped": items,
+            }),
+        )?;
+    }
+    if valid.is_empty() {
+        return Ok(None);
+    }
     let current = ensure_budget(deps, &task.root_id)?;
     let mut projected = current.clone();
     projected.add_usage(0, 0, 1);
@@ -509,15 +542,9 @@ pub(crate) fn handle_audit_failure(
         return Ok(None);
     }
     deps.store.add_usage(&task.root_id, 0, 0, 1)?;
-    let raw = findings
+    let raw = valid
         .iter()
-        .map(|f| {
-            if f.evidence.trim().is_empty() {
-                format!("{}: {}", f.id, f.question)
-            } else {
-                format!("{}: {} ({})", f.id, f.question, f.evidence)
-            }
-        })
+        .map(|f| format!("{}: {} ({})", f.id, f.question, f.evidence.trim()))
         .collect::<Vec<_>>()
         .join("; ");
     let safe = sanitize_untrusted_close_tag(&one_line(&raw, AUDIT_FINDINGS_MAX_CHARS));

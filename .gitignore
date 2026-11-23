@@ -3,3 +3,4 @@
 .DS_Store
 .autofactory/config.local.toml
 /.claude/worktrees/
+docs/audit/*/

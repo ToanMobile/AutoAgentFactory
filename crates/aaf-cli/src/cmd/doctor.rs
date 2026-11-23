@@ -8,6 +8,7 @@
 //! hook) are reported as not applicable and decide nothing.
 
 mod accounts;
+mod head_lock;
 mod heavy;
 mod hosts;
 
@@ -15,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path};
 
-use aaf_domain::config::{AGENT_CONFIG_GLOBS, MachineConfig};
+use aaf_domain::config::MachineConfig;
 use aaf_engine::config::{EffectiveConfig, effective_profile};
 use aaf_engine::executors::find_on_path;
 use aaf_engine::github_board::has_trusted_login;
@@ -144,29 +145,6 @@ fn hook_checks(ctx: &Ctx, repo_root: &Path) -> (Result<String, String>, Result<S
             format!("{problem}; run aaf init, and start aaf run with the same PATH as this doctor")
         });
     (registered, binary)
-}
-
-/// A list in `.autofactory/config.toml` replaces the defaults, so a config
-/// written before the agent-file globs existed does not have them. The list
-/// is the repository's own and is kept; this says what it leaves open.
-fn agent_files_check(globs: &[String]) -> Result<String, String> {
-    let missing: Vec<&str> = AGENT_CONFIG_GLOBS
-        .iter()
-        .copied()
-        .filter(|glob| !globs.iter().any(|have| have == glob))
-        .collect();
-    if missing.is_empty() {
-        return Ok(format!(
-            "gate.head_lock_globs locks {}",
-            AGENT_CONFIG_GLOBS.join(", ")
-        ));
-    }
-    Err(format!(
-        "gate.head_lock_globs does not lock {}: a task can change what Claude Code loads from \
-         the repository (instructions, hooks, MCP servers) without an audit; add them to the \
-         list in .autofactory/config.toml",
-        missing.join(", ")
-    ))
 }
 
 /// git 2.34 is the first with `git add --sparse`, which the tree fingerprint
@@ -528,7 +506,11 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         advisory("machine", Ok(machine_detail(&effective.global.machine))),
         advisory(
             "head_lock_agent_files",
-            agent_files_check(&effective.repo.gate.head_lock_globs),
+            head_lock::agent_files_check(&effective.repo.gate.head_lock_globs),
+        ),
+        advisory(
+            "head_lock_runner_configs",
+            head_lock::runner_config_check(&effective.repo.gate.head_lock_globs),
         ),
         advisory(
             "gradle_daemon",
@@ -545,6 +527,15 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         root_opt.map_or_else(
             || not_applicable("multi_host_hooks"),
             |root| advisory("multi_host_hooks", hosts::multi_host_hooks(root)),
+        ),
+        root_opt.map_or_else(
+            || not_applicable("executor_token_budget"),
+            |_| {
+                advisory(
+                    "executor_token_budget",
+                    hosts::executor_token_budget(&effective.repo),
+                )
+            },
         ),
         advisory(
             "telegram",

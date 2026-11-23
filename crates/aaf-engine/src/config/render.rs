@@ -80,7 +80,8 @@ repro = {repro}
 # auto = origin/HEAD, origin/main, origin/master, main, master (first that exists).
 base_ref = {base_ref}
 # Existing files matching these globs cannot be modified, deleted or renamed
-# without a signed `aaf approve`. Newly added files are exempt.
+# without a signed `aaf approve`. Newly added test files are exempt; new
+# build, runner, CI, and agent config files are locked.
 head_lock_globs = [
 ",
         name = quoted(name),
@@ -108,6 +109,8 @@ command_timeout_secs = {command_timeout}
 # Skip lint/test_scoped in --scoped mode when only safe docs changed.
 docs_fast_path = {docs_fast_path}
 docs_fast_path_exclude_globs = []
+# Opt-in red->green & vacuity oracle: off, warn, or block.
+red_green_oracle = {red_green_oracle}
 
 # Limits on automatic unblocking of a stuck task.
 [unblocker]
@@ -170,6 +173,7 @@ allowed_tools = [
         min_sdk = gate.min_android_target_sdk,
         command_timeout = gate.command_timeout_secs,
         docs_fast_path = gate.docs_fast_path,
+        red_green_oracle = quoted(gate.red_green_oracle.as_str()),
         cycles = unblocker.max_unblock_cycles,
         depth = unblocker.max_subtask_depth,
         tokens = unblocker.max_token_budget,

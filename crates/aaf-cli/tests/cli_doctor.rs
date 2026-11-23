@@ -510,3 +510,60 @@ fn doctor_warns_when_git_ignores_the_hook_settings() {
         "{out}"
     );
 }
+
+#[test]
+fn doctor_warns_when_generic_executor_has_positive_token_budget() {
+    let sb = Sandbox::new();
+    assert_eq!(sb.json(&["init"]).0, 0);
+    let (code, out) = sb.json(&["doctor"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(check(&out, "executor_token_budget")["ok"], json!(true));
+
+    let cfg_path = sb.repo.join(".autofactory/config.toml");
+    write(
+        &cfg_path,
+        "[run]\nexecutor = \"gemini\"\nexecutor_cmd = [\"gemini\", \"-p\", \"{prompt}\"]\n\
+         [unblocker]\nmax_token_budget = 500000\n",
+    );
+    let (code, out) = sb.json(&["doctor"]);
+    assert_eq!(code, 0, "{out}");
+    let c = check(&out, "executor_token_budget");
+    assert_eq!((&c["ok"], &c["required"]), (&json!(false), &json!(false)));
+    let detail = c["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("max_token_budget=500000") && detail.contains("not enforced"),
+        "{detail}"
+    );
+
+    write(
+        &cfg_path,
+        "[run]\nexecutor = \"claude\"\n[cross_audit]\nexecutor = \"gemini\"\n\
+         [unblocker]\nmax_token_budget = 100000\n",
+    );
+    let (code, out) = sb.json(&["doctor"]);
+    assert_eq!(code, 0, "{out}");
+    let c = check(&out, "executor_token_budget");
+    assert_eq!(c["ok"], json!(false), "{out}");
+    assert!(
+        c["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cross_audit.executor")
+    );
+
+    write(
+        &cfg_path,
+        "[run]\nexecutor = \"gemini\"\nexecutor_cmd = [\"gemini\", \"-p\", \"{prompt}\"]\n\
+         [unblocker]\nmax_token_budget = 0\n",
+    );
+    let (code, out) = sb.json(&["doctor"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(check(&out, "executor_token_budget")["ok"], json!(true));
+
+    let outside = Sandbox::without_git();
+    let (_, out) = outside.json(&["doctor"]);
+    assert_eq!(
+        check(&out, "executor_token_budget")["applicable"],
+        json!(false)
+    );
+}

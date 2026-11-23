@@ -2,8 +2,10 @@
 
 use aaf_domain::blocked::BlockedReason;
 use aaf_domain::budget::BudgetCheck;
-use aaf_domain::gate::{GateStatus, Receipt};
+use aaf_domain::gate::{GateStatus, LockStatus, Receipt, Severity, StoreStatus};
 use aaf_domain::ports::AgentOutcome;
+
+use crate::gate::REASON_TREE_CHANGED;
 
 /// Consecutive identical failure digests after which a task counts as stuck.
 pub const STUCK_REPEAT_THRESHOLD: u32 = 3;
@@ -134,6 +136,17 @@ pub fn classify(signal: &FailureSignal) -> BlockedReason {
     if let Some(receipt) = signal.gate.as_ref()
         && receipt.status == GateStatus::Blocked
     {
+        if let Some(rerun) = signal.test_rerun
+            && rerun.passed > 0
+            && is_pure_test_failure(receipt)
+        {
+            return BlockedReason::FlakyTest {
+                detail: format!(
+                    "{} of {} reruns passed without a code change",
+                    rerun.passed, rerun.runs
+                ),
+            };
+        }
         return BlockedReason::GateFailed {
             summary: gate_summary(receipt),
         };
@@ -170,6 +183,43 @@ pub fn classify(signal: &FailureSignal) -> BlockedReason {
     BlockedReason::Stuck {
         detail: format!("unclassified failure (digest {digest})"),
     }
+}
+
+/// True when `receipt` blocked solely because a test command (`test_scoped` or
+/// `test_full`) exited non-zero without timing out, with no other blocking
+/// evidence (no critical static findings, head-lock/store-compliance clear,
+/// no tree-change/proof/hidden/batch-combination block, and no lint/build failure).
+pub fn is_pure_test_failure(receipt: &Receipt) -> bool {
+    if receipt.status != GateStatus::Blocked {
+        return false;
+    }
+    if receipt
+        .static_findings
+        .iter()
+        .any(|f| f.severity == Severity::Critical)
+    {
+        return false;
+    }
+    if receipt.head_lock.status == LockStatus::Blocked
+        || receipt.store_compliance.status == StoreStatus::Blocked
+    {
+        return false;
+    }
+    if receipt.reasons.iter().any(|r| {
+        r == REASON_TREE_CHANGED
+            || r.starts_with("fails only in combination with:")
+            || r.starts_with("proof required:")
+            || r.starts_with("commands skipped:")
+            || r.starts_with("no test command is configured")
+            || (r.starts_with("work tree:") && !r.starts_with("work tree: removed "))
+    }) {
+        return false;
+    }
+    let failed: Vec<_> = receipt.commands.iter().filter(|c| !c.passed()).collect();
+    !failed.is_empty()
+        && failed
+            .iter()
+            .all(|c| !c.timed_out && matches!(c.name.as_str(), "test_scoped" | "test_full"))
 }
 
 /// Short stable digest of a failure: two failures that differ only in

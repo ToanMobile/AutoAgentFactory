@@ -179,6 +179,7 @@ pub fn run_command_with_env(
         "AAF_BASE_SHA",
         "AAF_CHANGED_FILES_FILE",
         "AAF_DELETED_FILES_FILE",
+        "AAF_TEST_FILES_FILE",
     ] {
         cmd.env_remove(var);
     }
@@ -344,4 +345,19 @@ pub fn run_all_throttled_with_env(
         }
     }
     Ok(run)
+}
+
+/// Runs one heavy command through the machine throttle with verified env vars.
+pub fn run_one_heavy(
+    repo_root: &Path,
+    name: &str,
+    command: &str,
+    timeout: Duration,
+    heavy: &HeavyContext<'_>,
+    extra_env: &[(&str, &str)],
+) -> Result<CommandResult, GateError> {
+    let mut notes = Vec::new();
+    run_heavy(
+        repo_root, name, command, timeout, heavy, extra_env, &mut notes,
+    )
 }

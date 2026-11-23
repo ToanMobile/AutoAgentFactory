@@ -87,7 +87,7 @@ fn critical_static_finding_blocks_and_skips_the_commands() {
 #[test]
 fn warnings_alone_do_not_block() {
     let repo = Repo::new();
-    repo.append("src/lib.rs", &["// console.", "log(1)\n"].concat());
+    repo.append("src/lib.rs", &["pub fn f() { db", "g!(1); }\n"].concat());
     let receipt = repo.gate(&passing_cfg(), GateMode::Scoped);
     assert_eq!(receipt.status, GateStatus::Clear);
     assert_eq!(receipt.static_findings.len(), 1);
@@ -146,10 +146,26 @@ fn inline_allow_is_counted_in_the_receipt() {
     ]
     .concat();
     repo.append("src/lib.rs", &line);
-    let receipt = repo.gate(&passing_cfg(), GateMode::Scoped);
-    assert_eq!(receipt.status, GateStatus::Clear);
-    assert_eq!(receipt.suppressions, 1);
-    assert!(receipt.static_findings.is_empty());
+    let cfg = passing_cfg();
+    let blocked = repo.gate(&cfg, GateMode::Scoped);
+    assert_eq!(blocked.status, GateStatus::Blocked);
+    assert_eq!(blocked.head_lock.status, LockStatus::Blocked);
+    assert_eq!(blocked.suppressions, 1);
+    assert_eq!(
+        blocked
+            .static_findings
+            .iter()
+            .map(|f| f.rule.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ALLOW-001"]
+    );
+
+    let clock = FixedClock(6);
+    head_lock::approve(repo.data_dir(), repo.root(), &cfg, "rev", false, &clock).unwrap();
+    let clear = repo.gate(&cfg, GateMode::Scoped);
+    assert_eq!(clear.status, GateStatus::Clear, "{:?}", clear.reasons);
+    assert_eq!(clear.head_lock.status, LockStatus::Approved);
+    assert_eq!(clear.suppressions, 1);
 }
 
 #[test]

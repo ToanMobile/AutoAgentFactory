@@ -3,6 +3,7 @@
 //! clean answer becomes a signed approval for the head-lock fingerprint.
 
 pub mod checklist;
+pub mod diff_hunks;
 pub mod prompt;
 pub mod scoring;
 pub mod verdict;
@@ -14,12 +15,19 @@ use aaf_domain::ports::{AgentRequest, AgentRunner, Clock, PortError};
 use aaf_domain::task::ImmutableSpec;
 
 pub use checklist::{Item, build_checklist};
+pub use diff_hunks::{
+    Citation, DiffHunks, PathSpans, Span, evidence_in_diff, extract_citations,
+    has_file_line_reference, parse_diff_hunks, parse_diff_hunks_with_truncation,
+};
 pub use prompt::{build_prompt, build_scored_prompt};
 pub use scoring::{
     GOLDEN_IDS, GOLDEN_STANDARDS, MechanicalScoreReport, ScoreGateEvaluation,
     compute_mechanical_score, evaluate_score_gate,
 };
-pub use verdict::{AuditVerdict, Finding, ScoredParse, parse_scored_verdict, parse_verdict};
+pub use verdict::{
+    AuditVerdict, Finding, ScoredParse, parse_scored_verdict, parse_verdict,
+    validate_verdict_against_diff,
+};
 
 /// `runs.executor` of an audit run: it tells the auditor's run from the
 /// author's, both in the audit itself and in the account history.
@@ -79,7 +87,7 @@ pub fn run_scored_audit(
     require_scores: bool,
 ) -> Result<AuditReport, PortError> {
     let checklist = build_checklist(&input.spec, input.mobile);
-    let (_, diff_truncated) = prompt::truncate_diff(&input.diff);
+    let (visible_diff, diff_truncated) = prompt::truncate_diff(&input.diff);
     let mut report = AuditReport {
         verdict: inconclusive("empty diff: nothing to audit"),
         checklist,
@@ -104,6 +112,8 @@ pub fn run_scored_audit(
             inconclusive("auditor run did not complete (timeout, limit hit or non-zero exit)");
     } else {
         let parsed = parse_scored_verdict(&outcome.final_text, &report.checklist, require_scores);
+        let hunks = parse_diff_hunks_with_truncation(visible_diff, diff_truncated);
+        let parsed = validate_verdict_against_diff(parsed, &hunks);
         match parsed.verdict {
             // The auditor never saw the tail, so its "no" answers do not cover it.
             AuditVerdict::Pass { .. } if diff_truncated => {

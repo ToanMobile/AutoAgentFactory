@@ -13,6 +13,7 @@ use aaf_domain::proof::ProofRecord;
 
 use super::commit_lock::{self, CommitLock};
 use super::ports::{GitOps, Integration};
+use crate::gate::base::{AUTO_FALLBACKS, origin_head_branch};
 use crate::git::cmd::{git, git_raw};
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{
@@ -91,23 +92,25 @@ pub fn resolve_base(repo: &Path, base_ref: &str) -> PortResult<BaseRef> {
     }
     let head = git_raw(
         repo,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
     )
     .map_err(err)?;
     let origin_head = head.stdout.trim().to_string();
     let mut candidates = Vec::new();
-    if head.success() && !origin_head.is_empty() {
+    // As in the gate: `origin/HEAD` only as a symref to a non-task branch
+    // of `origin`, and full ref names a tag or branch cannot shadow.
+    if head.success() && origin_head_branch(&origin_head).is_some() {
         candidates.push(origin_head);
     }
-    candidates.extend(["origin/main", "origin/master", "main", "master"].map(String::from));
+    candidates.extend(AUTO_FALLBACKS.map(String::from));
     for name in candidates {
         if is_commit(repo, &name)? {
-            return split(repo, &name);
+            let remote = name.strip_prefix("refs/remotes/origin/");
+            let branch = remote.or(name.strip_prefix("refs/heads/"));
+            return Ok(BaseRef {
+                remote: remote.map(|_| DEFAULT_REMOTE.to_string()),
+                branch: branch.unwrap_or(&name).to_string(),
+            });
         }
     }
     let current = git(repo, &["symbolic-ref", "--short", "HEAD"]).map_err(err)?;

@@ -16,6 +16,7 @@ pub mod init;
 pub mod merge;
 pub mod plan;
 pub mod proof;
+pub mod repro;
 pub mod run;
 pub mod skills;
 pub mod slot;

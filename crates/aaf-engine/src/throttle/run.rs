@@ -345,6 +345,7 @@ impl Throttle<'_> {
             "AAF_BASE_SHA",
             "AAF_CHANGED_FILES_FILE",
             "AAF_DELETED_FILES_FILE",
+            "AAF_TEST_FILES_FILE",
         ] {
             command.env_remove(var);
         }

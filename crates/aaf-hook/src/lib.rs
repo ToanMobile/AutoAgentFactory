@@ -243,7 +243,7 @@ pub fn decide(input: &[u8], env: &HookEnv) -> Decision {
                 let path = ctx.expand(raw);
                 data_guard::check_file(raw, &path, &ctx).or_else(|| {
                     if tool == "Read" {
-                        secret_guard::check_read(&path)
+                        secret_guard::check_read_target(raw, &path, &ctx)
                     } else {
                         delete_guard::check_file(&path, &ctx)
                             .or_else(|| git_files::check_file(&path))

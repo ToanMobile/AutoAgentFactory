@@ -3,8 +3,10 @@
 
 use std::path::Path;
 
+use aaf_domain::config::RepoConfig;
 use aaf_domain::telegram::TelegramConfig;
 use aaf_engine::executors::linux_sandbox;
+use aaf_engine::factory::configured_audit_provider;
 use aaf_engine::hook_settings::multi_host::{
     HookHostTarget, HostHookStatus, check_host_if_present,
 };
@@ -114,4 +116,33 @@ pub(super) fn mcp_hygiene(repo_root: &Path) -> Result<String, String> {
             report.servers.len()
         ))
     }
+}
+
+/// Warns when a generic executor (which does not report token usage) is paired
+/// with a positive `unblocker.max_token_budget`.
+pub(super) fn executor_token_budget(repo: &RepoConfig) -> Result<String, String> {
+    let run_exec = repo.run.executor.trim();
+    let audit_exec = configured_audit_provider(run_exec, &repo.cross_audit);
+    let mut generic = Vec::new();
+    if run_exec != "claude" {
+        generic.push(format!("run.executor={run_exec:?}"));
+    }
+    if audit_exec != "claude" && audit_exec != run_exec {
+        generic.push(format!("cross_audit.executor={audit_exec:?}"));
+    }
+    if generic.is_empty() {
+        return Ok("claude reports token usage; max_token_budget enforced".to_string());
+    }
+    if repo.unblocker.max_token_budget == 0 {
+        return Ok(format!(
+            "{}: max_token_budget is disabled (0)",
+            generic.join(", ")
+        ));
+    }
+    Err(format!(
+        "{} does not report token usage so unblocker.max_token_budget={} is not enforced \
+         (only max_wall_clock_secs and max_unblock_cycles apply)",
+        generic.join(", "),
+        repo.unblocker.max_token_budget
+    ))
 }

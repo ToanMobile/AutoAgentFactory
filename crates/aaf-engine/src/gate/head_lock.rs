@@ -1,22 +1,24 @@
 //! Head lock: existing tests, CI and build files may not change without a
 //! signed approval of that exact set of changes.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use aaf_domain::config::{AGENT_CONFIG_GLOBS, RepoConfig};
+use aaf_domain::config::{RepoConfig, TEST_FILE_GLOBS};
 use aaf_domain::gate::{Approval, ChangeKind, HeadLockReport, LockStatus, LockedChange};
 use aaf_domain::ports::Clock;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
-use super::changes::{self, Change};
-use super::{GIT_TIMEOUT, GateError, base};
+use super::changes::{self, AddedLines, Change};
+use super::{GIT_TIMEOUT, GateError, base, static_checks};
 
-fn glob_set(globs: &[String]) -> Result<GlobSet, GateError> {
+fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateError> {
     let mut builder = GlobSetBuilder::new();
     for glob in globs {
         let glob = GlobBuilder::new(glob)
             .literal_separator(true)
+            .case_insensitive(case_insensitive)
             .build()
             // A glob that does not parse would silently unlock files.
             .map_err(|err| GateError::Config(format!("gate.head_lock_globs: {err}")))?;
@@ -55,44 +57,155 @@ fn status_letter(kind: ChangeKind) -> &'static str {
     }
 }
 
-/// The path `change` is locked under, if it is locked. A rename is judged by
-/// where the file used to live. New files are exempt (adding a test is
-/// always allowed), except what Claude Code loads as instructions, hooks and
-/// servers: in a repository that had none, adding them is the change.
-fn locked_path<'a>(change: &'a Change, globs: &GlobSet, agent_config: &GlobSet) -> Option<&'a str> {
-    if change.kind == ChangeKind::Added && !agent_config.is_match(&change.path) {
-        return None;
+/// Extract directory prefixes from non-test locked globs so a symlink placed
+/// at any parent directory of a locked config (e.g. `ln -s helper .cargo` or
+/// `ln -s helper .github/workflows`) is locked even though git reports the
+/// symlink entry itself rather than files beneath it.
+fn symlink_dir_prefixes(non_test_globs: &[String]) -> Vec<String> {
+    let mut prefixes = Vec::new();
+    for glob in non_test_globs {
+        let parts: Vec<&str> = glob.split('/').collect();
+        for end in 1..parts.len() {
+            let prefix = &parts[..end];
+            if prefix.iter().all(|seg| *seg == "**" || *seg == "*") {
+                continue;
+            }
+            let joined = prefix.join("/");
+            if !prefixes.contains(&joined) {
+                prefixes.push(joined);
+            }
+        }
     }
-    let path = change.old_path.as_deref().unwrap_or(&change.path);
-    globs.is_match(path).then_some(path)
+    prefixes
+}
+
+struct LockMatchers {
+    /// Configured test-file globs (case-sensitive so `*Test.kt` does not match `latest.kt`).
+    test_globs: GlobSet,
+    /// Non-test configured globs, matched case-insensitively so APFS case
+    /// variants (`cargo.toml`, `.Cargo/config.toml`, `claude.md`, `tests/Conftest.py`)
+    /// cannot bypass head-lock.
+    non_test_globs: GlobSet,
+    /// Case-insensitive directory prefixes of `non_test_globs` to catch symlinked
+    /// directories such as `ln -s helper .cargo`.
+    symlink_dir_globs: GlobSet,
+}
+
+impl LockMatchers {
+    fn from_globs(globs: &[String]) -> Result<Self, GateError> {
+        let mut test = Vec::new();
+        let mut non_test = Vec::new();
+        for g in globs {
+            if TEST_FILE_GLOBS.contains(&g.as_str()) {
+                test.push(g.clone());
+            } else {
+                non_test.push(g.clone());
+            }
+        }
+        let dir_prefixes = symlink_dir_prefixes(&non_test);
+        Ok(Self {
+            test_globs: glob_set(&test, false)?,
+            non_test_globs: glob_set(&non_test, true)?,
+            symlink_dir_globs: glob_set(&dir_prefixes, true)?,
+        })
+    }
+
+    fn matches_any(&self, path: &str) -> bool {
+        self.test_globs.is_match(path) || self.non_test_globs.is_match(path)
+    }
+
+    fn matches_symlink_dir(&self, repo_root: &Path, path: &str) -> bool {
+        self.symlink_dir_globs.is_match(path)
+            && fs::symlink_metadata(repo_root.join(path))
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+    }
+}
+
+/// The path `change` is locked under, if it is locked.
+///
+/// **Added**: exempt when the new file does not match any non-test locked glob
+/// (case-insensitive) and is not a symlink shadowing a locked config directory.
+///
+/// **Renamed**: checks `old_path` against all locked globs (blocking moving a
+/// locked file out), and when `old_path` is unlocked checks `path` against
+/// non-test locked globs and locked symlink directories (blocking renaming a
+/// benign file into a locked config while allowing unlocked -> new test file).
+///
+/// **Modified / Deleted**: judged by the file path against all locked globs
+/// (plus locked symlink directories for `Modified`).
+fn locked_path<'a>(
+    repo_root: &Path,
+    change: &'a Change,
+    matchers: &LockMatchers,
+) -> Option<&'a str> {
+    match change.kind {
+        ChangeKind::Added => (matchers.non_test_globs.is_match(&change.path)
+            || matchers.matches_symlink_dir(repo_root, &change.path))
+        .then_some(change.path.as_str()),
+        ChangeKind::Renamed => {
+            let old = change.old_path.as_deref().unwrap_or(&change.path);
+            if matchers.matches_any(old) {
+                Some(old)
+            } else if matchers.non_test_globs.is_match(&change.path)
+                || matchers.matches_symlink_dir(repo_root, &change.path)
+            {
+                Some(change.path.as_str())
+            } else {
+                None
+            }
+        }
+        ChangeKind::Modified | ChangeKind::Deleted => {
+            let path = change.old_path.as_deref().unwrap_or(&change.path);
+            (matchers.matches_any(path)
+                || (change.kind == ChangeKind::Modified
+                    && matchers.matches_symlink_dir(repo_root, path)))
+            .then_some(path)
+        }
+    }
 }
 
 /// Locked changes and their fingerprint (empty when nothing is locked).
+/// Any file whose diff adds a new inline allow marker is locked alongside
+/// glob-matched paths so suppressions require a signed approval.
 fn locked(
     repo_root: &Path,
     cfg: &RepoConfig,
     changes: &[Change],
+    added: &[AddedLines],
 ) -> Result<(Vec<LockedChange>, String), GateError> {
-    let globs = glob_set(&cfg.gate.head_lock_globs)?;
-    let agent_config: Vec<String> = AGENT_CONFIG_GLOBS
-        .iter()
-        .map(|g| (*g).to_string())
-        .collect();
-    let agent_config = glob_set(&agent_config)?;
+    let matchers = LockMatchers::from_globs(&cfg.gate.head_lock_globs)?;
+    let mut allow_paths: HashSet<&str> = HashSet::new();
+    for file in added {
+        for (_, text) in &file.lines {
+            if static_checks::contains_allow_marker(text)? {
+                allow_paths.insert(file.path.as_str());
+                break;
+            }
+        }
+    }
     let mut entries: Vec<(String, &'static str, String, String)> = Vec::new();
+    let mut report: Vec<LockedChange> = Vec::new();
     for change in changes {
-        let Some(locked_path) = locked_path(change, &globs, &agent_config) else {
+        let Some(path) = locked_path(repo_root, change, &matchers).or_else(|| {
+            allow_paths
+                .contains(change.path.as_str())
+                .then_some(change.path.as_str())
+        }) else {
             continue;
         };
         // The hash follows the content on disk, so an approval stops
         // covering the change the moment the file is edited again.
         let hash = content_hash(repo_root, &change.path)?;
         entries.push((
-            locked_path.to_string(),
+            path.to_string(),
             status_letter(change.kind),
             change.path.clone(),
             hash,
         ));
+        report.push(LockedChange {
+            path: path.to_string(),
+            change: change.kind,
+        });
     }
     if entries.is_empty() {
         return Ok((Vec::new(), String::new()));
@@ -106,15 +219,6 @@ fn locked(
         }
         material.push(b'\n');
     }
-    let report = changes
-        .iter()
-        .filter_map(|change| {
-            locked_path(change, &globs, &agent_config).map(|path| LockedChange {
-                path: path.to_string(),
-                change: change.kind,
-            })
-        })
-        .collect();
     Ok((report, aaf_fp::sha256_hex(&material)))
 }
 
@@ -164,8 +268,9 @@ pub(crate) fn evaluate_changes(
     repo_root: &Path,
     cfg: &RepoConfig,
     changes: &[Change],
+    added: &[AddedLines],
 ) -> Result<HeadLockReport, GateError> {
-    let (locked_changes, lock_fp) = locked(repo_root, cfg, changes)?;
+    let (locked_changes, lock_fp) = locked(repo_root, cfg, changes, added)?;
     if locked_changes.is_empty() {
         return Ok(HeadLockReport {
             status: LockStatus::Clear,
@@ -202,7 +307,16 @@ pub fn evaluate(
     base_sha: &str,
 ) -> HeadLockReport {
     changes::collect(repo_root, base_sha, GIT_TIMEOUT)
-        .and_then(|set| evaluate_changes(data_dir, repo_root, cfg, &set.changes))
+        .and_then(|set| {
+            let added = changes::added_lines(
+                repo_root,
+                base_sha,
+                &set.untracked,
+                &static_checks::skip_path,
+                GIT_TIMEOUT,
+            )?;
+            evaluate_changes(data_dir, repo_root, cfg, &set.changes, &added)
+        })
         .unwrap_or_else(|_| HeadLockReport {
             status: LockStatus::Blocked,
             lock_fp: String::new(),
@@ -239,7 +353,14 @@ pub fn approve(
 ) -> Result<Approval, GateError> {
     let base = base::resolve(repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
     let set = changes::collect(repo_root, &base.diff_target, GIT_TIMEOUT)?;
-    let (locked_changes, lock_fp) = locked(repo_root, cfg, &set.changes)?;
+    let added = changes::added_lines(
+        repo_root,
+        &base.diff_target,
+        &set.untracked,
+        &static_checks::skip_path,
+        GIT_TIMEOUT,
+    )?;
+    let (locked_changes, lock_fp) = locked(repo_root, cfg, &set.changes, &added)?;
     // `aaf merge` evaluates head-lock against the trusted config on `base` inside
     // a clean detached scratch worktree (no untracked local worktree files such
     // as `.agents/` or `.claude/`). Sign the exact content-bound fingerprints for
@@ -251,14 +372,13 @@ pub fn approve(
         toml::from_str::<RepoConfig>(&raw).ok()
     });
     let base_lock_fp = base_cfg.as_ref().and_then(|bcfg| {
-        let (base_locked, fp) = locked(repo_root, bcfg, &set.changes).ok()?;
+        let (base_locked, fp) = locked(repo_root, bcfg, &set.changes, &added).ok()?;
         (!base_locked.is_empty()).then_some(fp)
     });
     let tracked_changes: Vec<Change> = if set.untracked.is_empty() {
         Vec::new()
     } else {
-        let untracked_set: std::collections::HashSet<&str> =
-            set.untracked.iter().map(String::as_str).collect();
+        let untracked_set: HashSet<&str> = set.untracked.iter().map(String::as_str).collect();
         set.changes
             .iter()
             .filter(|c| !(c.kind == ChangeKind::Added && untracked_set.contains(c.path.as_str())))
@@ -270,13 +390,13 @@ pub fn approve(
         extra_fps.push(fp);
     }
     if !tracked_changes.is_empty() {
-        if let Ok((tl, fp)) = locked(repo_root, cfg, &tracked_changes)
+        if let Ok((tl, fp)) = locked(repo_root, cfg, &tracked_changes, &added)
             && !tl.is_empty()
         {
             extra_fps.push(fp);
         }
         if let Some(bcfg) = base_cfg.as_ref()
-            && let Ok((tl, fp)) = locked(repo_root, bcfg, &tracked_changes)
+            && let Ok((tl, fp)) = locked(repo_root, bcfg, &tracked_changes, &added)
             && !tl.is_empty()
         {
             extra_fps.push(fp);

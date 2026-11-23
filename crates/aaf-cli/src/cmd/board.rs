@@ -16,6 +16,7 @@ use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{BudgetStore, Clock, EventSink, PortError, RunStore, TaskStore};
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
+use aaf_engine::detector::repro::DEFAULT_RUNS;
 use aaf_engine::factory::adapters::SystemClock;
 use aaf_engine::factory::schedule_order::normalize_scope;
 use aaf_engine::factory::{is_frozen, unfreeze};
@@ -87,6 +88,16 @@ pub struct AddArgs {
     /// Relative path prefix owned by this task; repeat the flag for more.
     #[arg(long = "scope")]
     pub scope: Vec<String>,
+    /// Optional repro pre-flight: program to run via argv (must fail every run
+    /// before the task is created).
+    #[arg(long = "repro-cmd")]
+    pub repro_cmd: Option<String>,
+    /// Argument passed to `--repro-cmd` without shell expansion; repeat for more.
+    #[arg(long = "repro-arg", requires = "repro_cmd")]
+    pub repro_arg: Vec<String>,
+    /// Number of repro runs that must all fail (default 2).
+    #[arg(long = "repro-runs", default_value_t = DEFAULT_RUNS)]
+    pub repro_runs: u32,
 }
 
 #[derive(Debug, clap::Args)]
@@ -190,6 +201,18 @@ fn add(args: &AddArgs, ctx: &Ctx) -> CmdResult {
             scope_paths.push(norm);
         }
     }
+
+    if let Some(program) = &args.repro_cmd
+        && let Some(rejected) = crate::cmd::repro::preflight_for_board_add(
+            program,
+            &args.repro_arg,
+            args.repro_runs,
+            ctx,
+        )
+    {
+        return Ok(rejected);
+    }
+
     let repo = repo_root(ctx)?.to_string_lossy().into_owned();
     let db = open_db(ctx)?;
     // Checked before anything is written, so a bad id leaves no task behind.

@@ -1,0 +1,327 @@
+//! Opt-in Red->Green & Vacuity Oracle (G6).
+//!
+//! Partitions production vs test changes (G6a), prepares a throwaway detached
+//! worktree with production files reverted to `base` (G6b+G6c), runs the gate's
+//! test command through the machine throttle, and maps the classified outcome
+//! to a gate verdict.
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use aaf_domain::config::{OracleMode, RepoConfig};
+use aaf_domain::gate::{ChangeKind, GateMode, GateStatus};
+
+use super::changes::{AddedLines, Change};
+use super::oracle_classify::{OracleOutcome, classify};
+use super::oracle_worktree::{ScratchWorktree, overlay_live_changes, revert_prod_files};
+use super::runner::HeavyContext;
+use super::{GateError, static_checks};
+use crate::throttle::HeavyJob;
+
+/// Capture up to 64 KiB of combined test output for oracle classification.
+pub const ORACLE_OUTPUT_CAP_BYTES: usize = 64 * 1024;
+
+static ORACLE_ENV_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const LOCKFILES: &[&str] = &[
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "npm-shrinkwrap.json",
+    "go.sum",
+    "gradle.lockfile",
+    "Package.resolved",
+];
+
+const ROOT_GENERATED_DIRS: &[&str] = &["target", "node_modules", ".gradle", "Pods"];
+
+const RUNTIME_DATA_DIRS: &[&str] = &[
+    "assets",
+    "res",
+    "resources",
+    "raw",
+    "testdata",
+    "fixtures",
+    "golden",
+    "snapshots",
+    "schemas",
+];
+
+/// Result of running the opt-in red->green oracle after a `Clear` gate run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OracleVerdict {
+    Skipped,
+    Applied {
+        status: Option<GateStatus>,
+        reason: String,
+    },
+}
+
+/// Applies an [`OracleVerdict`] to the gate's verdict before signing the receipt.
+pub fn apply_verdict(
+    status: GateStatus,
+    mut reasons: Vec<String>,
+    verdict: OracleVerdict,
+) -> (GateStatus, Vec<String>) {
+    match verdict {
+        OracleVerdict::Skipped => (status, reasons),
+        OracleVerdict::Applied {
+            status: next,
+            reason,
+        } => {
+            reasons.push(reason);
+            (next.unwrap_or(status), reasons)
+        }
+    }
+}
+
+/// Recognizes test paths via `static_checks::is_test_path` plus `test.*`/`tests.*` stems.
+pub fn is_oracle_test_path(path: &str) -> bool {
+    if static_checks::is_test_path(path) {
+        return true;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(stem, "test" | "tests")
+}
+
+/// True when `line` starts with a `#[cfg(test)]` attribute (ignoring leading
+/// indentation and interior whitespace), never matching comments or strings.
+pub(crate) fn is_cfg_test_attr_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("#[") {
+        return false;
+    }
+    let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.starts_with("#[cfg(test)]")
+}
+
+fn is_ignored_non_prod(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let Some((&name, dirs)) = parts.split_last() else {
+        return false;
+    };
+    if dirs
+        .first()
+        .is_some_and(|root| ROOT_GENERATED_DIRS.contains(root))
+    {
+        return true;
+    }
+    if name.ends_with(".lock") || LOCKFILES.contains(&name) {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "license"
+            | "license.txt"
+            | "copying"
+            | "changelog"
+            | ".gitignore"
+            | ".gitattributes"
+            | ".editorconfig"
+    ) {
+        return true;
+    }
+    let is_doc_ext = matches!(
+        lower.rsplit_once('.').map(|(_, ext)| ext),
+        Some("md" | "markdown" | "rst" | "adoc")
+    );
+    is_doc_ext
+        && !dirs
+            .iter()
+            .any(|d| RUNTIME_DATA_DIRS.contains(&d.to_ascii_lowercase().as_str()))
+}
+
+fn inline_rust_test_files(added: &[AddedLines]) -> BTreeSet<String> {
+    added
+        .iter()
+        .filter(|f| f.path.ends_with(".rs") && !is_oracle_test_path(&f.path))
+        .filter(|f| f.lines.iter().any(|(_, text)| is_cfg_test_attr_line(text)))
+        .map(|f| f.path.clone())
+        .collect()
+}
+
+struct TestFilesEnv(PathBuf);
+
+impl TestFilesEnv {
+    fn write(files: &BTreeSet<String>) -> Result<Self, GateError> {
+        let seq = ORACLE_ENV_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("aaf-oracle-tests-{}-{seq}.txt", std::process::id()));
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&path)?;
+        for entry in files {
+            writeln!(file, "{entry}")?;
+        }
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TestFilesEnv {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn select_test_command(cfg: &RepoConfig, mode: GateMode) -> Option<(&'static str, &str)> {
+    let scoped = cfg.commands.test_scoped.trim();
+    let full = cfg.commands.test_full.trim();
+    match mode {
+        GateMode::Full | GateMode::Release => {
+            if !full.is_empty() {
+                Some(("test_full", full))
+            } else if !scoped.is_empty() {
+                Some(("test_scoped", scoped))
+            } else {
+                None
+            }
+        }
+        GateMode::Scoped => {
+            if !scoped.is_empty() {
+                Some(("test_scoped", scoped))
+            } else if !full.is_empty() {
+                Some(("test_full", full))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn map_outcome(mode: OracleMode, outcome: OracleOutcome) -> OracleVerdict {
+    let applied = |status, reason| OracleVerdict::Applied { status, reason };
+    match (mode, outcome) {
+        (OracleMode::Off, _) => OracleVerdict::Skipped,
+        (_, OracleOutcome::Proven) => applied(None, "oracle: red_green=proven".to_string()),
+        (OracleMode::Block, OracleOutcome::Vacuous) => applied(
+            Some(GateStatus::Blocked),
+            "oracle: vacuous test — tests still pass after reverting production changes"
+                .to_string(),
+        ),
+        (OracleMode::Warn, OracleOutcome::Vacuous) => applied(
+            None,
+            "warning: oracle: vacuous test — tests still pass after reverting production changes"
+                .to_string(),
+        ),
+        (OracleMode::Block, OracleOutcome::CompileRed(msg)) => applied(
+            Some(GateStatus::Unverified),
+            format!("oracle: inconclusive (compile_red: {msg})"),
+        ),
+        (OracleMode::Warn, OracleOutcome::CompileRed(msg)) => applied(
+            None,
+            format!("warning: oracle: compile_red ({msg}); not vacuous, behavioral red unproven"),
+        ),
+        (OracleMode::Block, OracleOutcome::Inconclusive(msg)) => applied(
+            Some(GateStatus::Unverified),
+            format!("oracle: inconclusive ({msg})"),
+        ),
+        (OracleMode::Warn, OracleOutcome::Inconclusive(msg)) => {
+            applied(None, format!("warning: oracle: inconclusive ({msg})"))
+        }
+    }
+}
+
+/// Runs G6a (test-change detection) and G6b+G6c (scratch worktree prod revert + test run).
+pub fn evaluate(
+    repo_root: &Path,
+    base_sha: &str,
+    cfg: &RepoConfig,
+    mode: GateMode,
+    changes: &[Change],
+    added: &[AddedLines],
+    heavy: &HeavyContext<'_>,
+) -> Result<OracleVerdict, GateError> {
+    let oracle_mode = cfg.gate.red_green_oracle;
+    if oracle_mode == OracleMode::Off {
+        return Ok(OracleVerdict::Skipped);
+    }
+    let mut prod_changes = Vec::new();
+    let mut test_files = BTreeSet::new();
+    for ch in changes {
+        let dest_is_test = is_oracle_test_path(&ch.path);
+        if dest_is_test && ch.kind != ChangeKind::Deleted {
+            test_files.insert(ch.path.clone());
+        }
+        let dest_is_prod = !dest_is_test && !is_ignored_non_prod(&ch.path);
+        let old_is_prod = ch.kind == ChangeKind::Renamed
+            && ch
+                .old_path
+                .as_deref()
+                .is_some_and(|old| !is_oracle_test_path(old) && !is_ignored_non_prod(old));
+        if dest_is_prod || old_is_prod {
+            prod_changes.push(ch);
+        }
+    }
+    if prod_changes.is_empty() {
+        return Ok(OracleVerdict::Skipped);
+    }
+    let inline_rust_tests = inline_rust_test_files(added);
+    if test_files.is_empty() && inline_rust_tests.is_empty() {
+        let msg = "oracle: no test changes detected for production diff";
+        return Ok(match oracle_mode {
+            OracleMode::Block => OracleVerdict::Applied {
+                status: Some(GateStatus::Blocked),
+                reason: msg.to_string(),
+            },
+            OracleMode::Warn => OracleVerdict::Applied {
+                status: None,
+                reason: format!("warning: {msg}"),
+            },
+            OracleMode::Off => OracleVerdict::Skipped,
+        });
+    }
+    let Some((cmd_label, cmd_str)) = select_test_command(cfg, mode) else {
+        return Ok(OracleVerdict::Skipped);
+    };
+
+    let scratch = ScratchWorktree::create(repo_root)?;
+    overlay_live_changes(repo_root, scratch.path())?;
+    revert_prod_files(
+        repo_root,
+        scratch.path(),
+        base_sha,
+        &prod_changes,
+        &inline_rust_tests,
+    )?;
+
+    let mut env_files = test_files;
+    env_files.extend(inline_rust_tests);
+    let test_files_env = TestFilesEnv::write(&env_files)?;
+    let test_files_path = test_files_env.0.to_string_lossy().into_owned();
+    let mode_str = match mode {
+        GateMode::Scoped => "scoped",
+        GateMode::Full => "full",
+        GateMode::Release => "release",
+    };
+    let extra_env = [
+        ("AAF_GATE_MODE", mode_str),
+        ("AAF_BASE_SHA", base_sha),
+        ("AAF_TEST_FILES_FILE", test_files_path.as_str()),
+    ];
+    let job = HeavyJob {
+        repo_id: heavy.stats_repo_id,
+        label: cmd_label,
+        command: cmd_str,
+        cwd: scratch.path(),
+        timeout: Duration::from_secs(cfg.gate.command_timeout_secs),
+        log_tail_bytes: ORACLE_OUTPUT_CAP_BYTES,
+    };
+    let run = heavy
+        .throttle
+        .run_heavy_with_env(heavy.data_dir, heavy.clock, &job, &extra_env)?;
+    let output = String::from_utf8_lossy(&run.output);
+    Ok(map_outcome(
+        oracle_mode,
+        classify(run.exit_code, run.timed_out, &output),
+    ))
+}

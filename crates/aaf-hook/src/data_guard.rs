@@ -130,18 +130,176 @@ fn inside_after_chdir<'a>(mut words: impl Iterator<Item = &'a str>, ctx: &Ctx) -
     false
 }
 
+const GIT_OTHER_VALUED: &[&str] = &[
+    "-F",
+    "--file",
+    "-C",
+    "-c",
+    "--reuse-message",
+    "--reedit-message",
+    "--fixup",
+    "--squash",
+    "--author",
+    "--date",
+    "-t",
+    "--template",
+    "--cleanup",
+    "--trailer",
+    "--pathspec-from-file",
+    "--local-user",
+    "--strategy",
+    "-X",
+    "--strategy-option",
+];
+const GH_OTHER_VALUED: &[&str] = &[
+    "-F",
+    "--body-file",
+    "-R",
+    "--repo",
+    "-B",
+    "--base",
+    "-H",
+    "--head",
+    "-a",
+    "--assignee",
+    "-l",
+    "--label",
+    "-m",
+    "--milestone",
+    "-p",
+    "--project",
+    "-r",
+    "--reviewer",
+    "-T",
+    "--template",
+];
+
+fn is_git_m_flag(word: &str, allow_cluster: bool) -> bool {
+    word == "-m"
+        || word == "--message"
+        || (allow_cluster
+            && !word.starts_with("--")
+            && word
+                .strip_prefix('-')
+                .and_then(|f| f.strip_suffix('m'))
+                .is_some_and(|pre| !pre.is_empty() && pre.chars().all(|c| matches!(c, 'a' | 's'))))
+}
+
+fn mark_flags(
+    cmd: &Cmd,
+    start: usize,
+    exempt: &mut [bool],
+    separate: impl Fn(&str) -> bool,
+    glued: impl Fn(&str) -> bool,
+    other_valued: &[&str],
+) {
+    let is_dyn = |i: usize| cmd.arg_dynamic.get(i).copied().unwrap_or(true);
+    let mut i = start;
+    while let Some(word) = cmd.words.get(i).map(String::as_str) {
+        if word == "--" {
+            break;
+        }
+        if separate(word) {
+            if !is_dyn(i) && i + 1 < cmd.words.len() && !is_dyn(i + 1) {
+                exempt[i + 1] = true;
+            }
+            i += 2;
+        } else if glued(word) {
+            if !is_dyn(i) {
+                exempt[i] = true;
+            }
+            i += 1;
+        } else if other_valued.contains(&word) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Mask parallel to `cmd.words` marking static (non-dynamic) message values on
+/// allowlisted `git`/`gh` subcommands that are exempt from `data_guard` only.
+/// Returns `None` on the fast path without allocating.
+fn msg_exempt_mask(cmd: &Cmd) -> Option<Vec<bool>> {
+    if cmd.dynamic_name {
+        return None;
+    }
+    match cmd.words.first().map(String::as_str) {
+        Some("git") => {
+            let call = crate::git_guard::split(cmd.args());
+            let (start, cluster) = match call.sub {
+                "commit" | "tag" => (2 + call.globals.len(), true),
+                "merge" => (2 + call.globals.len(), false),
+                "notes"
+                    if matches!(
+                        call.rest.first().map(String::as_str),
+                        Some("add" | "append")
+                    ) =>
+                {
+                    (3 + call.globals.len(), false)
+                }
+                _ => return None,
+            };
+            let mut exempt = vec![false; cmd.words.len()];
+            mark_flags(
+                cmd,
+                start,
+                &mut exempt,
+                |w| is_git_m_flag(w, cluster),
+                |w| (w.starts_with("-m") && w.len() > 2) || w.starts_with("--message="),
+                GIT_OTHER_VALUED,
+            );
+            Some(exempt)
+        }
+        Some("gh")
+            if matches!(cmd.words.get(1).map(String::as_str), Some("pr" | "issue"))
+                && matches!(
+                    cmd.words.get(2).map(String::as_str),
+                    Some("create" | "edit" | "comment")
+                ) =>
+        {
+            let mut exempt = vec![false; cmd.words.len()];
+            mark_flags(
+                cmd,
+                3,
+                &mut exempt,
+                |w| matches!(w, "-t" | "--title" | "-b" | "--body"),
+                |w| {
+                    (w.starts_with("-t") && w.len() > 2)
+                        || (w.starts_with("-b") && w.len() > 2)
+                        || w.starts_with("--title=")
+                        || w.starts_with("--body=")
+                },
+                GH_OTHER_VALUED,
+            );
+            Some(exempt)
+        }
+        _ => None,
+    }
+}
+
 pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     // Only the command typed as plain `aaf` is the CLI: `/tmp/evil/aaf` and a
     // name built at run time are some other program, and so is `aaf` on a
     // line that rebinds the word.
     let literal = cmd.words.first().is_some_and(|word| word == "aaf") && !cmd.dynamic_name;
     let is_aaf = literal && !cmd.aaf_untrusted;
+    let exempt = msg_exempt_mask(cmd);
     let assigns = cmd
         .assigns
         .iter()
         .flat_map(|(key, value)| [key.as_str(), value.as_str()]);
-    // A stripped wrapper's words are still paths the line names.
-    let argv = || cmd.wrapped.iter().chain(&cmd.words).map(String::as_str);
+    // A stripped wrapper's words are still paths the line names; exempt static
+    // message values are skipped here only (all other guards still inspect them).
+    let argv = || {
+        cmd.wrapped.iter().map(String::as_str).chain(
+            cmd.words
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !exempt.as_ref().is_some_and(|m| m[*i]))
+                .map(|(_, word)| word.as_str()),
+        )
+    };
     // Redirects are opened by the shell, whoever the command is.
     let redirects = cmd.redirects.iter().map(|r| r.target.as_str());
     let named = argv()

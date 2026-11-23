@@ -206,7 +206,7 @@ pub fn build_runner_with(cfg: &RunConfig, mut env: ExecEnv) -> PortResult<Box<dy
                 ClaudeCodeRunner::new(bin, env).with_model_and_effort(&cfg.model, &cfg.effort),
             ))
         }
-        "codex" | "antigravity" | "opencode" | "custom" => {
+        "codex" | "gemini" | "antigravity" | "opencode" | "custom" => {
             Ok(Box::new(GenericRunner::new(cfg.executor_cmd.clone(), env)?))
         }
         other => Err(PortError::Invalid(format!("unknown executor {other:?}"))),
@@ -303,11 +303,23 @@ fn create_missing_roots<'a>(
 /// reaps what is left. `account` says which config paths the agent's own
 /// account needs to write.
 pub(crate) fn run_confined(
+    spec: CommandSpec,
+    request: &AgentRequest,
+    env: &ExecEnv,
+    account: AccountPaths,
+    on_line: Option<LineCallback>,
+) -> PortResult<PtyOutput> {
+    run_confined_with_tail(spec, request, env, account, on_line, DEFAULT_TAIL_BYTES)
+}
+
+/// [`run_confined`] with a caller-chosen bounded PTY output buffer cap.
+pub(crate) fn run_confined_with_tail(
     mut spec: CommandSpec,
     request: &AgentRequest,
     env: &ExecEnv,
     account: AccountPaths,
     on_line: Option<LineCallback>,
+    tail_bytes: usize,
 ) -> PortResult<PtyOutput> {
     reaper::validate_run_id(&request.run_id)?;
     // Where the environment is built, so a runner made without
@@ -453,7 +465,7 @@ pub(crate) fn run_confined(
     let mut output = pty::run_pty(
         &spec,
         Duration::from_secs(request.timeout_secs),
-        DEFAULT_TAIL_BYTES,
+        tail_bytes,
         on_line,
     )?;
     // The run itself is over and its result stands; a failed scan is recorded

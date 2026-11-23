@@ -111,8 +111,8 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | Area | What you get | Where |
 |---|---|---|
 | **Board and factory** | A SQLite-backed task board (`aaf board`) and a factory loop (`aaf run`). Each task gets its own git worktree and its own agent run. Gate runs are batched, and a failing batch is split in halves until the culprit is found. A five-tier unblocker retries, adds context, splits a task or escalates it to you. | `main` |
-| **Sandbox** | On macOS, agents started by `aaf run` run inside a generated Seatbelt profile (`/usr/bin/sandbox-exec`). | `main` |
-| **Hook guards** | `aaf-hook` is a Claude Code PreToolUse hook covering `Bash`, `Write`, `Edit`, `MultiEdit` and `Read`. It has guards for git, protected files, the data directory, `adb`/`fastboot`, store submission, human-only actions and heavy commands. | `main` |
+| **Sandbox** | Agents started by `aaf run` run inside a generated Seatbelt profile (`/usr/bin/sandbox-exec`) on macOS, or bubblewrap (`bwrap`) / a hardened container (`packaging/docker/`) on Linux (`v3.4`). | `main` / **`v3.4`** |
+| **Hook guards** | `aaf-hook` is a multi-host guard hook (`--host <auto\|claude\|codex\|gemini>`) covering Claude Code `PreToolUse` (`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`), Codex CLI `PreToolUse` (including `apply_patch`), and Gemini CLI `BeforeTool` (`v3.4`). It has guards for git, protected files, the data directory, `adb`/`fastboot`, store submission, human-only actions and heavy commands. | `main` / **`v3.4`** |
 | **Gate and receipts** | Scoped, full and release modes. Static checks run on added lines. Head lock, App Store / Google Play compliance scan, and HMAC-SHA256 receipts and approvals. | `main` |
 | **Throttle and `aaf slot`** | One queue for heavy commands, shared by the gate, agents, git hooks and CI runners on the same machine. | `main` |
 | **Accounts** | Discovers Claude Code profiles (`~/.claude`, `~/.claude-*`). Account selection is `pinned`, `sticky` or `least_used`; cooldowns are set by hand or after limits. | `main` |
@@ -152,7 +152,19 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 
 ## Installation
 
-`aaf` is installed by building it from source. There is no packaged release channel.
+`aaf` ships with packaged install options (**`v3.4`**) alongside building from source:
+
+- **POSIX installer (`scripts/install.sh`):** downloads SHA-256 verified release tarballs published by `.github/workflows/release.yml` (macOS and Linux, `arm64` and `x86_64`), or builds locally with `--from-source`:
+
+  ```sh
+  sh scripts/install.sh                      # latest GitHub release -> ~/.local/bin
+  sh scripts/install.sh --version v0.1.0     # pin a release tag
+  sh scripts/install.sh --from-source        # build from local checkout via cargo
+  ```
+
+- **Homebrew (`packaging/homebrew/aaf.rb`):** formula installing both `aaf` and `aaf-hook` for macOS and Linux.
+- **Docker (`packaging/docker/`):** multi-stage hardened Linux runner image (`Dockerfile` + `docker-compose.yml`, non-root user with `bubblewrap`).
+- **Build from source:**
 
 ```sh
 git clone https://github.com/ToanMobile/AutoAgentFactory.git
@@ -503,10 +515,10 @@ executor_cmd = ""              # command template when executor is custom
 model = ""
 effort = ""
 require_different_provider = false  # true = refuse to run when the auditor would use the author's provider
-audit_scope = "head_lock_only"      # v3.2: head_lock_only < large_diff < always (monotonic across tiers)
-score_gate = "off"                  # v3.2: off < warn < block (monotonic across tiers)
+audit_scope = "head_lock"           # v3.2: head_lock < large < always (monotonic across tiers)
+score_gate = false                  # v3.2: bool (false -> true, tighten-only across tiers)
 min_average_score = 95              # v3.2: 7 Golden Standards (G1..G7) average floor (tighten-only)
-min_criterion_score = 80            # v3.2: per-criterion floor across G1..G7 (tighten-only)
+min_criterion_score = 90            # v3.2: per-criterion floor across G1..G7 (tighten-only)
 
 [proof]
 required = false               # true = `aaf gate` blocks without a valid signed proof for the current tree
@@ -538,7 +550,7 @@ How `[cross_audit]` merges:
 
 - Non-empty tier 2 values win over the tier 1 defaults.
 - `require_different_provider` is OR-ed across tiers.
-- Tier 3 can only tighten `[cross_audit]`: raise `require_different_provider` (`false -> true`), `audit_scope` (`head_lock_only < large_diff < always`), `score_gate` (`off < warn < block`), `min_average_score`, and `min_criterion_score`. Any attempt to loosen them is ignored with a warning.
+- Tier 3 can only tighten `[cross_audit]`: raise `require_different_provider` (`false -> true`), `audit_scope` (`head_lock < large < always`), `score_gate` (`false -> true`), `min_average_score`, and `min_criterion_score`. Any attempt to loosen them is ignored with a warning.
 - Under single-account solo-dev runs where `require_different_provider = false`, `MechanicalScore` runs alongside the 7 Golden Standards (`G1..G7`) and surfaces the non-deadlocking badge `same_account — chưa có auditor độc lập`; post-gate verdicts are HMAC-signed with the dedicated `"audit\0"` domain tag.
 
 ---
@@ -549,7 +561,7 @@ How `[cross_audit]` merges:
 
 | Command | Purpose | Useful flags |
 |---|---|---|
-| `aaf init` | Detect the stack, write tier 2 config, register the hook, update `.gitignore` | `--force`; **`v3`**: `--with-skills`, `--host <claude\|agents\|all>` |
+| `aaf init` | Detect the stack, write tier 2 config, register the hook, update `.gitignore` | `--force`; **`v3`**: `--with-skills`, `--host <claude\|agents\|all>`; **`v3.4`**: `--hook-host <claude\|codex\|gemini\|all>` |
 | `aaf doctor` | Read-only check of the machine and the repo | — |
 | `aaf gate` | Run the gate and write a signed receipt | `--scoped` (default), `--full`, `--release` (pick one) |
 | `aaf approve` | Sign an approval for the current head-lock fingerprint (**human only**) | `--reviewer <name>` (required) |
@@ -585,7 +597,7 @@ How `[cross_audit]` merges:
 | **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
 | **`v3.5`** `aaf upgrade` / `completions` | SHA-256 verified self-updater (**human only**) and shell completions (`bash`, `zsh`, `fish`, `powershell`) | `upgrade`: `--check`, `--version`, `--dry-run`; `completions <shell>` |
 
-`aaf-hook` is not a command you type. Claude Code runs it: it reads the PreToolUse JSON on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.
+`aaf-hook` is not a command you type. Your coding-agent host runs it (with optional `--host <auto|claude|codex|gemini>`, defaulting to `auto`): it reads the Claude Code / Codex CLI `PreToolUse` or Gemini CLI `BeforeTool` JSON payload on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.
 
 ### `aaf gate`
 
@@ -822,7 +834,7 @@ sequenceDiagram
 
 *One tool call, layer by layer. The agent, the hook and every command it runs share the Seatbelt sandbox; the hook answers each call with exit `0` or `2`; the gate that signs the receipt runs only after the agent's turn, outside the sandbox, with a key the agent cannot read.*
 
-**1. The sandbox (macOS, `aaf run` only).** This is the main boundary. The generated Seatbelt profile allows by default, then denies file writes, except to:
+**1. The sandbox (macOS Seatbelt / Linux `bwrap` or hardened container, `aaf run` only).** This is the main boundary. On Linux (`v3.4`), `aaf run` uses bubblewrap (`bwrap`) when available (enforcing per-run worktree and `AAF_DATA_DIR` confinement) or detects a hardened container (`packaging/docker/`), and refuses (exit 2) until `--unsandboxed` if neither is present. On macOS, the generated Seatbelt profile allows by default, then denies file writes, except to:
 
 - the task's own worktree, and the shared git directory of the repo;
 - temporary directories;
@@ -889,7 +901,7 @@ Inside the factory, the only other source of an approval is a cross-audit run th
 - **Cache poisoning is not prevented.** Writable build caches (`~/.gradle/caches`, `~/.m2`, toolchains, npm packages) hold code that later builds run outside the sandbox.
 - **Gate commands run unsandboxed.** `[commands]` run with your full user rights and environment, so test code the agent just wrote is executed there.
 - **Plain pushes are not blocked.** The hook does not stop a non-forced `git push origin main`. Configure branch protection on your remote.
-- **Only `aaf run` agents are sandboxed.** A Claude Code session you open yourself only has the hook. Other agent CLIs (Codex, Antigravity, OpenCode) have no hook.
+- **Only `aaf run` agents are sandboxed.** Sessions you open yourself only have the hook when configured for that host (`aaf init --hook-host <claude|codex|gemini|all>` supports Claude Code, Codex CLI, and Gemini CLI). Other agent CLIs (Antigravity, OpenCode) have no native hook adapter.
 
 Read [`SECURITY.md`](SECURITY.md) for the full threat model, each guard's exact rules, the writable and blocked path lists, and every known bypass.
 

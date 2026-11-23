@@ -6,6 +6,9 @@
 //! (secret scan, etc.), head-lock, store-compliance, and proof checks still
 //! run in full.
 
+use std::path::Path;
+use std::time::Duration;
+
 use aaf_domain::config::AGENT_CONFIG_GLOBS;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
@@ -38,7 +41,14 @@ const DENIED_DIRS: &[&str] = &[
     "__tests__",
     "spec",
     "specs",
+    "templates",
 ];
+
+/// Markers (case-insensitive ERE) on a tracked non-doc line that compile a file
+/// into a build or run it as a test. Each hit is read with 4 trailing lines,
+/// since rustfmt and TOML arrays wrap the path onto the next lines.
+const EMBED_PATTERN: &str =
+    "include_str!|include_bytes!|include_dir!|doctest|mdbook[[:space:]]+test";
 
 /// Basenames (lowercase) that end in `.txt` or similar but affect builds,
 /// dependency resolution, or site security policies.
@@ -125,6 +135,64 @@ pub fn is_docs_only(
     Ok(true)
 }
 
+/// True when a lowercased grep hunk (marker + context) may pull the lowercased
+/// `doc` into a build or a test run. Paths the hunk cannot spell out
+/// (`concat!`, macro `$var`, `"."`, the crate root) count as embedding.
+fn block_embeds(block: &str, doc: &str) -> bool {
+    let has = |needle: &str| block.contains(needle);
+    let mut parts = doc.rsplit('/');
+    let file = parts.next().unwrap_or(doc);
+    if has(file) || parts.any(|dir| !dir.is_empty() && has(dir)) {
+        return true;
+    }
+    let dynamic = has("concat!(") || has("$");
+    let ext = file.rsplit_once('.').map(|(_, ext)| format!(".{ext}"));
+    ((has("include_str!") || has("include_bytes!")) && dynamic)
+        || (has("include_dir!")
+            && (dynamic || has("\".\"") || has("\"./\"") || has("cargo_manifest_dir")))
+        || (has("doctest") && ext.is_some_and(|ext| has(&ext)))
+        || (has("sphinx-build") && has("doctest"))
+        || has("mdbook")
+        || has("doc_comment::doctest!")
+}
+
+/// [`is_docs_only`], plus a scan of the tracked non-doc files of `repo_root`:
+/// a changed doc named on an embed or doctest line is not docs-only. A scan
+/// git cannot answer is taken as "embedded" (fail-closed: tests still run).
+pub fn is_docs_only_in_repo(
+    repo_root: &Path,
+    changes: &[Change],
+    head_lock_globs: &[String],
+    exclude_globs: &[String],
+    timeout: Duration,
+) -> Result<bool, GateError> {
+    if !is_docs_only(changes, head_lock_globs, exclude_globs)? {
+        return Ok(false);
+    }
+    // `-n` makes the hunk separator `--` unambiguous (content lines carry `N:`
+    // or `N-`); `-h` keeps the source file's own path out of the hunk text.
+    let mut args = vec!["grep", "-h", "-n", "-I", "-i", "--no-color", "-A", "4"];
+    args.extend(["-E", "-e", EMBED_PATTERN, "--"]);
+    let excludes: Vec<String> = ALLOWED_EXTS
+        .iter()
+        .map(|ext| format!(":(exclude,icase)*.{ext}"))
+        .collect();
+    args.extend(excludes.iter().map(String::as_str));
+    let hits = match aaf_fp::git_or_none(repo_root, &args, timeout) {
+        Ok(Some(out)) => out,
+        Ok(None) => return Ok(true),
+        Err(_) => return Ok(false),
+    };
+    let docs: Vec<String> = changes
+        .iter()
+        .flat_map(|c| std::iter::once(c.path.as_str()).chain(c.old_path.as_deref()))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let hits = hits.to_ascii_lowercase();
+    let mut blocks = hits.split("\n--\n");
+    Ok(!blocks.any(|block| docs.iter().any(|doc| block_embeds(block, doc))))
+}
+
 #[cfg(test)]
 mod tests {
     use aaf_domain::config::GateConfig;
@@ -195,5 +263,119 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    /// Temp repo committing `files`. Fixtures spell most macro names from
+    /// pieces or placeholders, so few lines of this source read as embeds.
+    fn repo_with(files: &[(&str, String)]) -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        for (path, body) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        for args in [
+            &["init", "-q"][..],
+            &["add", "."],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "i",
+            ],
+        ] {
+            aaf_fp::git(dir.path(), args, &[], Duration::from_secs(30)).unwrap();
+        }
+        dir
+    }
+
+    fn in_repo(dir: &Path, path: &str) -> bool {
+        let globs = GateConfig::default().head_lock_globs;
+        let change = ch(ChangeKind::Modified, path, None);
+        is_docs_only_in_repo(dir, &[change], &globs, &[], Duration::from_secs(30)).unwrap()
+    }
+
+    #[test]
+    fn docs_in_repo_blocks_embedded_docs_and_keeps_plain_docs_fast() {
+        let (inc, dt) = (concat!("include", "_str!"), concat!("doc", "test"));
+        let repo = repo_with(&[
+            ("README.md", "# r\n".into()),
+            ("docs/guide.md", "# g\n".into()),
+            ("book/ch1.rst", "c\n".into()),
+            ("src/lib.rs", format!("#![doc = {inc}(\"../README.md\")]\n")),
+            (
+                "src/data.rs",
+                format!("const D: &str = {inc}(\"notes.txt\");\n"),
+            ),
+            ("pytest.ini", format!("addopts = --{dt}-glob=*.rst\n")),
+        ]);
+        assert!(!in_repo(repo.path(), "README.md"), "embedded via macro");
+        assert!(!in_repo(repo.path(), "book/ch1.rst"), "test glob target");
+        assert!(
+            in_repo(repo.path(), "docs/guide.md"),
+            "plain doc stays fast"
+        );
+        assert!(!in_repo(repo.path(), "templates/skills/x/SKILL.md"));
+        let not_git = tempfile::TempDir::new().unwrap();
+        assert!(!in_repo(not_git.path(), "docs/guide.md"), "fail-closed");
+    }
+
+    /// Rows: (tracked non-doc body, changed doc, may take fast path), one repo
+    /// each. `@` and `%` stand for the include_str!/include_dir! macros.
+    #[test]
+    fn docs_in_repo_blocks_wrapped_macro_cased_and_whole_dir_embeds() {
+        let rows = [
+            ("#![doc = @(\n    \"../docs/g.md\"\n)]", "docs/g.md", false),
+            ("doc_comment::doctest!(\n    \"../g.md\"\n);", "g.md", false),
+            (
+                "($n:literal) => { @(concat!(\"fx/\", $n)) };",
+                "docs/a.md",
+                false,
+            ),
+            ("($p:expr) => { @($p) };", "docs/a.md", false),
+            ("($p:expr) => { %($p) };", "docs/a.md", false),
+            ("doctest_glob = [\n    \"*.rst\",\n]", "book/a.rst", false),
+            ("sphinx-build -b doctest src out", "docs/a.md", false),
+            ("mdbook  test", "docs/a.md", false),
+            ("#![doc = @(\"../readme.md\")]", "README.md", false),
+            ("doctest_glob = *.rst", "docs/GUIDE.RST", false),
+            ("static D: Dir = %(\".\");", "README.md", false),
+            (
+                "static D: Dir = %(\"$CARGO_MANIFEST_DIR\");",
+                "docs/g.md",
+                false,
+            ),
+            ("static D: Dir = %(\"docs\");", "docs/g.md", false),
+            ("static D: Dir = %(\"./\");", "README.md", false),
+            (
+                "include_bytes!(concat!(\"fx/\", \"b\"))",
+                "docs/a.md",
+                false,
+            ),
+            (
+                "doc_comment::doctest!(\n    \"../x.txt\"\n);",
+                "g.md",
+                false,
+            ),
+            (
+                "#![doc = @(\"../README.md\")]\n\n\n\n\nfn f() {}",
+                "docs/g.md",
+                true,
+            ),
+            ("static D: Dir = %(\"web\");", "docs/g.md", true),
+        ];
+        let wrong: Vec<_> = rows
+            .iter()
+            .filter(|(body, doc, fast)| {
+                let body = body
+                    .replace('@', "include_str!")
+                    .replace('%', "include_dir!");
+                in_repo(repo_with(&[("t.cfg", body)]).path(), doc) != *fast
+            })
+            .collect();
+        assert!(wrong.is_empty(), "wrong verdict: {wrong:#?}");
     }
 }

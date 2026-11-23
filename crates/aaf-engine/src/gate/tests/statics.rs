@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aaf_domain::gate::Severity;
+use aaf_domain::gate::{GateMode, GateStatus, Severity, StaticFinding};
 
-use super::super::changes::{AddedLines, parse_added};
+use super::super::GIT_TIMEOUT;
+use super::super::changes::{AddedLines, added_lines, lines_head_has_nul, parse_added};
 use super::super::static_checks::{StaticReport, is_test_path, scan, skip_path};
-use super::support::fake_secret;
+use super::support::{Repo, fake_secret, passing_cfg};
 
 fn scan_text(path: &str, lines: &[&str]) -> StaticReport {
     let lines = lines
@@ -201,22 +202,48 @@ fn inline_allow_silences_only_the_named_rule_and_is_counted() {
     let scan_with = |tail: String| scan_text("src/a.rs", &[&format!("{stub} {tail}")]);
 
     let report = scan_with(marker("LAZY-001", " fixture"));
-    assert!(report.findings.is_empty());
+    assert_eq!(report.critical(), 0);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|f| f.rule.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ALLOW-001"]
+    );
     assert_eq!(report.suppressions, 1);
 
-    // Wrong rule id: not silenced.
+    // Wrong rule id: not silenced, and the newly added marker still warns.
     let report = scan_with(marker("LOG-001", " fixture"));
-    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.critical(), 1);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|f| f.rule.as_str())
+            .collect::<Vec<_>>(),
+        vec!["LAZY-001", "ALLOW-001"]
+    );
     assert_eq!(report.suppressions, 0);
 
-    // No reason given: not silenced.
+    // No reason given: not silenced and not a valid allow marker.
     let report = scan_with(marker("LAZY-001", ""));
     assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].rule, "LAZY-001");
     assert_eq!(report.suppressions, 0);
 
-    // A marker on a clean line counts nothing.
+    // A marker on a clean line counts no suppression, but still surfaces ALLOW-001.
     let clean = format!("let x = 1; {}", marker("LAZY-001", " why"));
-    assert_eq!(scan_text("src/a.rs", &[&clean]).suppressions, 0);
+    let report = scan_text("src/a.rs", &[&clean]);
+    assert_eq!(report.suppressions, 0);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|f| f.rule.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ALLOW-001"]
+    );
 }
 
 #[test]
@@ -367,4 +394,103 @@ fn diff_parser_is_not_fooled_by_content_that_looks_like_a_header() {
     assert_eq!(files[0].path, "a.txt");
     assert_eq!(files[0].lines[0], (1, "++ b/other.txt".to_string()));
     assert_eq!(files[0].lines[1], (2, "second".to_string()));
+}
+
+#[test]
+fn a_tracked_real_binary_is_skipped_while_text_lines_still_reach_the_scan() {
+    let repo = Repo::new();
+    // `* -diff` makes git call every file binary; the gate diffs as text
+    // anyway and drops only files whose content really holds a NUL byte.
+    repo.write(".gitattributes", "* -diff\n");
+    let stub = j(&["pub fn x() {\n    to", "do!()\n}\n"]);
+    repo.write("src/blob.dat", &format!("\0\0\0\n{stub}"));
+    repo.append("src/lib.rs", "pub fn two() -> u32 {\n    2\n}\n");
+    repo.commit("binary blob and a text edit");
+
+    let files = added_lines(repo.root(), "main", &[], &skip_path, GIT_TIMEOUT).unwrap();
+    assert!(
+        files.iter().all(|file| file.path != "src/blob.dat"),
+        "{files:?}"
+    );
+    let lib = files.iter().find(|file| file.path == "src/lib.rs");
+    assert_eq!(
+        lib.map(|file| file.lines.first().cloned()),
+        Some(Some((4, "pub fn two() -> u32 {".to_string()))),
+        "{files:?}"
+    );
+
+    let receipt = repo.gate(&passing_cfg(), GateMode::Scoped);
+    assert_eq!(receipt.status, GateStatus::Clear, "{:?}", receipt.reasons);
+    assert!(
+        receipt.static_findings.is_empty(),
+        "{:?}",
+        receipt.static_findings
+    );
+}
+
+const STUB: [&str; 2] = ["pub fn charge() {\n    to", "do!()\n}\n"];
+
+fn assert_lazy_blocked(repo: &Repo, case: &str) {
+    let receipt = repo.gate(&passing_cfg(), GateMode::Scoped);
+    assert_eq!(
+        receipt.status,
+        GateStatus::Blocked,
+        "{case}: {:?}",
+        receipt.reasons
+    );
+    let lazy = |f: &StaticFinding| {
+        f.severity == Severity::Critical && f.rule == "LAZY-001" && f.file == "src/pay.rs"
+    };
+    let found = &receipt.static_findings;
+    assert!(found.iter().any(lazy), "{case}: {found:?}");
+}
+
+#[test]
+fn a_utf16_working_tree_encoding_source_is_still_scanned() {
+    // UTF-16 on disk holds NULs, but git diffs the re-encoded UTF-8 text, and
+    // looks for a NUL only in its first 8000 bytes.
+    let pad = "// pad\n".repeat(1200);
+    for (prefix, nul) in [("", ""), (pad.as_str(), "// \0\n"), ("", "// \0\n")] {
+        let repo = Repo::new();
+        let attributes = "src/pay.rs working-tree-encoding=UTF-16\n";
+        fs::write(repo.path(".git/info/attributes"), attributes).unwrap();
+        let source = j(&["\u{feff}", prefix, nul, STUB[0], STUB[1]]);
+        let utf16: Vec<u8> = source.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        fs::write(repo.path("src/pay.rs"), utf16).unwrap();
+        repo.commit("utf-16 source");
+        assert_lazy_blocked(&repo, &format!("prefix {} nul {nul:?}", prefix.len()));
+    }
+}
+
+#[test]
+fn a_nul_source_git_was_told_to_diff_as_text_is_still_scanned() {
+    let cases = [
+        ("*.rs diff\n", ""),
+        ("*.rs diff=mydrv\n", "mydrv"),
+        ("", "default"),
+        ("*.rs diff=nosuch\n", "default"),
+    ];
+    for (attributes, driver) in cases {
+        let repo = Repo::new();
+        repo.write(".gitattributes", attributes);
+        if !driver.is_empty() {
+            repo.git(&["config", &format!("diff.{driver}.binary"), "false"]);
+        }
+        repo.write("src/pay.rs", &j(&["// \0\n", STUB[0], STUB[1]]));
+        repo.commit("nul in a text source");
+        assert_lazy_blocked(&repo, &format!("{attributes:?} driver {driver:?}"));
+    }
+}
+
+#[test]
+fn only_a_nul_in_the_first_8000_diffed_bytes_marks_a_binary() {
+    // A line of `pad` bytes and its newline put the NUL at offset `pad + 1`.
+    for (pad, expected) in [(7998, true), (7999, false)] {
+        let lines = vec![(1, "x".repeat(pad)), (2, "\0".to_string())];
+        let file = AddedLines {
+            path: "a".into(),
+            lines,
+        };
+        assert_eq!(lines_head_has_nul(&file), expected, "pad {pad}");
+    }
 }

@@ -21,6 +21,7 @@ mod git_real;
 pub mod ports;
 mod post_audit;
 pub mod prompt;
+mod rework_filter;
 pub mod schedule_order;
 mod scheduler;
 mod select_pool;

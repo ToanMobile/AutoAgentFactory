@@ -205,10 +205,11 @@ fn a_terminate_sent_to_aaf_gate_alone_ends_its_command_and_frees_the_slot() {
     write(
         &sb.repo.join(".autofactory/config.toml"),
         &format!(
-            "[commands]\ntest_scoped = \"{}\"\n",
+            "[gate]\ndocs_fast_path = false\n[commands]\ntest_scoped = \"{}\"\n",
             stand_in(&sb.home.join("first.pid"))
         ),
     );
+    sb.commit_all("config");
     let command = sb.command(&["gate", "--scoped", "--json"]);
     signal_alone_ends_the_command(&sb, command, "TERM", 15);
 }

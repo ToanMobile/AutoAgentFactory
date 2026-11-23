@@ -5,8 +5,8 @@ use std::path::Path;
 
 use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
 
-use super::pty::CommandSpec;
-use super::{AccountPaths, ExecEnv, open_stream_log, run_confined};
+use super::pty::{CommandSpec, GENERIC_TAIL_BYTES};
+use super::{AccountPaths, ExecEnv, open_stream_log, run_confined_with_tail};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
 
@@ -87,13 +87,14 @@ impl AgentRunner for GenericRunner {
             .to_string();
         let mut log = open_stream_log(&self.env, request);
         log.write_start(&program, None);
-        let output = run_confined(spec, request, &self.env, account, None)?;
+        let output =
+            run_confined_with_tail(spec, request, &self.env, account, None, GENERIC_TAIL_BYTES)?;
         log.write_generic_finish(&program, output.exit_code, output.timed_out, &output.tail);
         Ok(AgentOutcome {
             exit_code: output.exit_code,
             timed_out: output.timed_out,
-            // An arbitrary CLI has no structured answer; its output is it.
-            final_text: output.tail.trim().to_string(),
+            // An arbitrary CLI has no structured answer; strip trailing `[aaf]` notices.
+            final_text: strip_aaf_notices(&output.tail),
             tokens_in: 0,
             tokens_out: 0,
             limit_hit: None,
@@ -103,6 +104,24 @@ impl AgentRunner for GenericRunner {
             log_tail: output.tail,
         })
     }
+
+    fn reports_tokens(&self) -> bool {
+        false
+    }
+}
+
+/// Drops trailing `[aaf] ...` diagnostic lines appended after the child exited.
+fn strip_aaf_notices(tail: &str) -> String {
+    let mut lines: Vec<&str> = tail.lines().collect();
+    while let Some(&last) = lines.last() {
+        let trimmed = last.trim();
+        if trimmed.is_empty() || trimmed.starts_with("[aaf] ") {
+            lines.pop();
+        } else {
+            break;
+        }
+    }
+    lines.join("\n").trim().to_string()
 }
 
 #[cfg(test)]

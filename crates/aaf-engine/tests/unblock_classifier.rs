@@ -164,14 +164,29 @@ fn precedence_table() {
             "merge_conflict",
         ),
         (
-            "gate over flaky",
+            "non-test gate over flaky",
+            FailureSignal {
+                open_dependency: None,
+                outcome: Some(timed_out()),
+                merge_conflict_files: vec![],
+                gate: Some({
+                    let mut r = receipt(GateStatus::Blocked, &["lint failed"], "err");
+                    r.commands[0].name = "lint".to_string();
+                    r
+                }),
+                ..all()
+            },
+            "gate_failed",
+        ),
+        (
+            "flaky over pure-test gate",
             FailureSignal {
                 open_dependency: None,
                 outcome: Some(timed_out()),
                 merge_conflict_files: vec![],
                 ..all()
             },
-            "gate_failed",
+            "flaky_test",
         ),
         (
             "flaky over timeout",

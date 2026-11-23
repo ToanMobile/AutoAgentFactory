@@ -130,6 +130,28 @@ fn doctor_warns_when_the_repo_list_does_not_lock_the_agents_own_files() {
         json!(true),
         "{out}"
     );
+    assert_eq!(
+        check(&out, "head_lock_runner_configs")["ok"],
+        json!(true),
+        "{out}"
+    );
+}
+
+#[test]
+fn doctor_warns_when_the_repo_list_misses_runner_config_globs() {
+    let sb = Sandbox::new();
+    write(
+        &sb.repo.join(".autofactory/config.toml"),
+        "[gate]\nhead_lock_globs = [\"**/tests/**\"]\n",
+    );
+    let (_, out) = sb.json(&["doctor"]);
+    let c = check(&out, "head_lock_runner_configs");
+    assert_eq!(c["ok"], json!(false), "{out}");
+    assert_eq!(c["required"], json!(false), "{out}");
+    let detail = c["detail"].as_str().unwrap();
+    assert!(detail.contains("**/.cargo/config*"), "{detail}");
+    assert!(detail.contains("**/pyproject.toml"), "{detail}");
+    assert!(detail.contains("**/gradlew"), "{detail}");
 }
 
 /// A `git` first on PATH that answers `--version` and fails everything else

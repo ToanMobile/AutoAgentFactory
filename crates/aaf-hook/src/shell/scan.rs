@@ -2,7 +2,7 @@
 
 use std::mem;
 
-use super::MAX_QUOTE_NESTING;
+use super::{Cmd, MAX_QUOTE_NESTING};
 
 /// Index of the `)` closing a `$(` whose body starts at `start`.
 pub(super) fn find_close(chars: &[char], start: usize, nesting: usize) -> Option<usize> {
@@ -128,4 +128,64 @@ fn skip_heredoc(chars: &[char], from: usize, delim: &str, strip_tabs: bool) -> O
         }
     }
     None
+}
+
+/// Allowlisted data-sink commands whose single-command quoted heredoc body is
+/// literal data (never code). The owning command's words, assigns, and
+/// redirects still go through every guard (`data_guard`, `git_files`, …).
+pub(super) fn heredoc_data_sink(cmd: &Cmd) -> bool {
+    if cmd.dynamic_name
+        || !cmd.assigns.is_empty()
+        || !cmd.wrapped.is_empty()
+        || cmd.xargs
+        || cmd.feeder.is_some()
+        || cmd.env_cleared
+        || !cmd.redirects.iter().all(|r| r.op == ">" || r.op == ">>")
+    {
+        return false;
+    }
+    match cmd.words.first().map(String::as_str) {
+        Some("cat") => cmd.args().is_empty() || cmd.args() == ["-"],
+        Some("git") => {
+            let call = crate::git_guard::split(cmd.args());
+            matches!(call.sub, "commit" | "tag")
+                && has_stdin_flag(
+                    cmd,
+                    2 + call.globals.len(),
+                    &["-F", "--file"],
+                    &["-F-", "--file=-"],
+                )
+        }
+        Some("gh") => {
+            matches!(cmd.words.get(1).map(String::as_str), Some("pr" | "issue"))
+                && cmd.words.get(2).map(String::as_str) == Some("create")
+                && has_stdin_flag(cmd, 3, &["--body-file", "-F"], &["--body-file=-", "-F-"])
+        }
+        _ => false,
+    }
+}
+
+fn has_stdin_flag(cmd: &Cmd, start: usize, separate: &[&str], glued: &[&str]) -> bool {
+    let is_dyn = |i: usize| cmd.arg_dynamic.get(i).copied().unwrap_or(true);
+    let mut i = start;
+    while let Some(word) = cmd.words.get(i).map(String::as_str) {
+        if word == "--" {
+            break;
+        }
+        if !is_dyn(i) && glued.contains(&word) {
+            return true;
+        }
+        if !is_dyn(i) && separate.contains(&word) {
+            return cmd.words.get(i + 1).map(String::as_str) == Some("-") && !is_dyn(i + 1);
+        }
+        if matches!(
+            word,
+            "-m" | "--message" | "-t" | "--title" | "-b" | "--body" | "-C" | "-c"
+        ) {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }

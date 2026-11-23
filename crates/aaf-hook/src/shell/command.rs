@@ -203,6 +203,7 @@ impl Lexer<'_, '_> {
         self.out.cmds.push(Cmd {
             assigns,
             dynamic_name: words.first().is_some_and(|tok| tok.dynamic),
+            arg_dynamic: words.iter().map(|tok| tok.dynamic).collect(),
             words: words.into_iter().map(|tok| tok.text).collect(),
             redirects,
             wrapped,

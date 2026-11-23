@@ -10,6 +10,8 @@ pub mod config;
 pub mod dag;
 pub mod event;
 pub mod gate;
+pub mod head_lock_globs;
+pub mod oracle_config;
 pub mod ports;
 pub mod proof;
 pub mod run;

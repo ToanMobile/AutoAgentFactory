@@ -4,6 +4,7 @@ use aaf_domain::gate::GoldenScore;
 use serde::Deserialize;
 
 use super::checklist::Item;
+use super::diff_hunks::{DiffHunks, evidence_in_diff, has_file_line_reference};
 use super::scoring::GOLDEN_IDS;
 
 /// A checklist item the auditor answered "yes".
@@ -11,7 +12,7 @@ use super::scoring::GOLDEN_IDS;
 pub struct Finding {
     pub id: String,
     pub question: String,
-    /// The auditor's evidence; may be empty (a bare "yes" still counts).
+    /// Concrete `file:line` evidence from the diff supporting the finding.
     pub evidence: String,
 }
 
@@ -82,22 +83,99 @@ fn scored_inconclusive(reason: impl Into<String>) -> ScoredParse {
     }
 }
 
-/// Extracts the single JSON object of `text`. Any brace outside that object
-/// (a second object, a broken fragment) is rejected rather than guessed at,
-/// which also covers one object wrapped in a markdown fence.
-fn single_object(text: &str) -> Result<RawAnswers, String> {
-    let start = text.find('{').ok_or("no JSON object in the answer")?;
-    let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<RawAnswers>();
-    let parsed = match stream.next() {
-        Some(Ok(parsed)) => parsed,
-        Some(Err(err)) => return Err(format!("answer is not the required JSON: {err}")),
-        None => return Err("no JSON object in the answer".to_string()),
-    };
-    let rest = &text[start + stream.byte_offset()..];
-    if rest.contains(['{', '}']) {
-        return Err("answer contains more than one JSON object".to_string());
+const MAX_AUDIT_JSON_SCAN_BYTES: usize = 512 * 1024;
+const MAX_AUDIT_JSON_CANDIDATES: usize = 4096;
+
+/// Returns the byte offset just past the matching `}` for the `{` at `start`,
+/// respecting JSON string quoting and backslash escapes.
+fn balanced_json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    for (idx, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(idx + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
-    Ok(parsed)
+    None
+}
+
+/// Extracts the single valid `RawAnswers` JSON object from `text`, tolerating
+/// surrounding non-audit CLI logs, banners, braces, or trailing `[aaf]` lines.
+/// Fails closed if zero or more than one valid `RawAnswers` object is found.
+fn extract_answers_json(text: &str) -> Result<RawAnswers, String> {
+    if text.len() > MAX_AUDIT_JSON_SCAN_BYTES {
+        return Err(format!(
+            "audit output exceeds {MAX_AUDIT_JSON_SCAN_BYTES} byte scan limit"
+        ));
+    }
+    let bytes = text.as_bytes();
+    let mut found: Option<RawAnswers> = None;
+    let mut candidates = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let Some(rel) = bytes[i..].iter().position(|&b| b == b'{') else {
+            break;
+        };
+        let start = i + rel;
+        let next_non_ws = bytes[start + 1..]
+            .iter()
+            .copied()
+            .find(|b| !b.is_ascii_whitespace());
+        if next_non_ws != Some(b'"') {
+            i = start + 1;
+            continue;
+        }
+        candidates += 1;
+        if candidates > MAX_AUDIT_JSON_CANDIDATES {
+            return Err("audit output contains too many JSON object candidates".to_string());
+        }
+        let Some(end) = balanced_json_object_end(bytes, start) else {
+            i = start + 1;
+            continue;
+        };
+        let slice = &text[start..end];
+        match serde_json::from_str::<RawAnswers>(slice) {
+            Ok(parsed) => {
+                if found.is_some() {
+                    return Err("answer contains more than one audit JSON object".to_string());
+                }
+                found = Some(parsed);
+                i = end;
+            }
+            Err(_) => {
+                if serde_json::from_str::<serde_json::Value>(slice).is_ok() {
+                    i = end;
+                } else {
+                    i = start + 1;
+                }
+            }
+        }
+    }
+    found.ok_or_else(|| "no valid audit JSON object found".to_string())
+}
+
+/// Extracts the single audit JSON object of `text` (bounded, fail-closed).
+fn single_object(text: &str) -> Result<RawAnswers, String> {
+    extract_answers_json(text)
 }
 
 fn parse_golden_scores(raw_scores: Vec<RawGoldenScore>) -> Result<Vec<GoldenScore>, String> {
@@ -179,27 +257,41 @@ pub fn parse_scored_verdict(text: &str, checklist: &[Item], require_scores: bool
 
     let mut findings = Vec::new();
     let mut warnings = Vec::new();
+    let mut unbacked_blocking = Vec::new();
     for (item, answer) in checklist.iter().zip(answers) {
         let Some((yes, evidence)) = answer else {
             return scored_inconclusive(format!("checklist id {} not answered", item.id));
         };
         if yes {
-            let finding = Finding {
-                id: item.id.clone(),
-                question: item.question.clone(),
-                evidence,
-            };
+            let valid = has_file_line_reference(&evidence);
             if item.blocking {
-                findings.push(finding);
-            } else {
-                warnings.push(finding);
+                if valid {
+                    findings.push(Finding {
+                        id: item.id.clone(),
+                        question: item.question.clone(),
+                        evidence,
+                    });
+                } else {
+                    unbacked_blocking.push(item.id.clone());
+                }
+            } else if valid {
+                warnings.push(Finding {
+                    id: item.id.clone(),
+                    question: item.question.clone(),
+                    evidence,
+                });
             }
         }
     }
-    let verdict = if findings.is_empty() {
-        AuditVerdict::Pass { warnings }
-    } else {
+    let verdict = if !findings.is_empty() {
         AuditVerdict::Fail { findings, warnings }
+    } else if !unbacked_blocking.is_empty() {
+        return scored_inconclusive(format!(
+            "blocking finding(s) {} lack concrete file:line evidence",
+            unbacked_blocking.join(", ")
+        ));
+    } else {
+        AuditVerdict::Pass { warnings }
     };
 
     let scores = match raw.scores {
@@ -221,4 +313,50 @@ pub fn parse_scored_verdict(text: &str, checklist: &[Item], require_scores: bool
 /// or "no", no unknown id, and "no" on every blocking item.
 pub fn parse_verdict(text: &str, checklist: &[Item]) -> AuditVerdict {
     parse_scored_verdict(text, checklist, false).verdict
+}
+
+/// Validates every finding's `file:line` citation against the parsed diff hunks.
+///
+/// Blocking findings whose citations do not match any hunk are dropped; if no
+/// valid blocking findings remain, the verdict becomes `Inconclusive`. Advisory
+/// warnings with out-of-diff citations are dropped without turning `Pass`
+/// inconclusive.
+pub fn validate_verdict_against_diff(parsed: ScoredParse, hunks: &DiffHunks) -> ScoredParse {
+    let ScoredParse { verdict, scores } = parsed;
+    match verdict {
+        AuditVerdict::Fail { findings, warnings } => {
+            let valid_findings: Vec<Finding> = findings
+                .into_iter()
+                .filter(|f| evidence_in_diff(&f.evidence, hunks))
+                .collect();
+            let valid_warnings: Vec<Finding> = warnings
+                .into_iter()
+                .filter(|w| evidence_in_diff(&w.evidence, hunks))
+                .collect();
+            if valid_findings.is_empty() {
+                scored_inconclusive("blocking finding(s) cite file:line not present in the diff")
+            } else {
+                ScoredParse {
+                    verdict: AuditVerdict::Fail {
+                        findings: valid_findings,
+                        warnings: valid_warnings,
+                    },
+                    scores,
+                }
+            }
+        }
+        AuditVerdict::Pass { warnings } => {
+            let valid_warnings: Vec<Finding> = warnings
+                .into_iter()
+                .filter(|w| evidence_in_diff(&w.evidence, hunks))
+                .collect();
+            ScoredParse {
+                verdict: AuditVerdict::Pass {
+                    warnings: valid_warnings,
+                },
+                scores,
+            }
+        }
+        AuditVerdict::Inconclusive { reason } => scored_inconclusive(reason),
+    }
 }

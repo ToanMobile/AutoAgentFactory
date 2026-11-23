@@ -4,7 +4,6 @@
 //! into a single [`ToolAction`] so every host runs through the exact same
 //! guard suite, and renders the host-specific allow/deny JSON response.
 
-use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
@@ -393,28 +392,8 @@ pub fn parse_payload(input: &[u8], requested: HookHost) -> Result<ParsedCall, De
 
 fn check_read_path(raw: &str, ctx: &Ctx) -> Option<Denial> {
     let path = ctx.expand(raw);
-    if let Some(denial) = crate::data_guard::check_file(raw, &path, ctx)
-        .or_else(|| crate::secret_guard::check_read(&path))
-    {
-        return Some(denial);
-    }
-    // Check glob targets (e.g. Gemini `read_many_files` with `.env*`) against
-    // existing secret files in the target directory.
-    if crate::paths::has_glob(raw)
-        && let Some(parent) = path.parent()
-        && let Some(last) = path.file_name().and_then(|name| name.to_str())
-        && let Ok(entries) = fs::read_dir(parent)
-    {
-        for entry in entries.flatten() {
-            if let Ok(name) = entry.file_name().into_string()
-                && crate::paths::glob_match(last, &name)
-                && let Some(denial) = crate::secret_guard::check_read(&parent.join(&name))
-            {
-                return Some(denial);
-            }
-        }
-    }
-    None
+    crate::data_guard::check_file(raw, &path, ctx)
+        .or_else(|| crate::secret_guard::check_read_target(raw, &path, ctx))
 }
 
 fn check_write_path(raw: &str, ctx: &Ctx) -> Option<Denial> {

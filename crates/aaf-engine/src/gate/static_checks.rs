@@ -32,6 +32,8 @@ struct Spec {
     id: &'static str,
     severity: Severity,
     skip_tests: bool,
+    only_tests: bool,
+    extensions: Option<&'static [&'static str]>,
     /// Skip comment-only lines and documentation files (true for code-syntax
     /// rules like `ERR-001` and `LOG-001`; false for secrets and TODO stubs).
     skip_comments_and_docs: bool,
@@ -40,11 +42,34 @@ struct Spec {
     patterns: &'static [&'static [&'static str]],
 }
 
+const TEST_SKIP_MSG: &str = "a test is disabled or skipped in source control";
+const TEST_SKIP_FIX: &str = "fix the test or remove the skip marker";
+
+const fn test_skip(
+    only_tests: bool,
+    extensions: &'static [&'static str],
+    patterns: &'static [&'static [&'static str]],
+) -> Spec {
+    Spec {
+        id: "TEST-SKIP",
+        severity: Severity::Warn,
+        skip_tests: false,
+        only_tests,
+        extensions: Some(extensions),
+        skip_comments_and_docs: false,
+        message: TEST_SKIP_MSG,
+        fix: TEST_SKIP_FIX,
+        patterns,
+    }
+}
+
 const SPECS: &[Spec] = &[
     Spec {
         id: "SEC-001",
         severity: Severity::Critical,
         skip_tests: false,
+        only_tests: false,
+        extensions: None,
         skip_comments_and_docs: false,
         message: "a credential or private key is added in plain text",
         fix: "remove it, rotate the credential and load it from the environment or a secret manager",
@@ -62,6 +87,8 @@ const SPECS: &[Spec] = &[
         id: "SEC-002",
         severity: Severity::Warn,
         skip_tests: false,
+        only_tests: false,
+        extensions: None,
         skip_comments_and_docs: false,
         message: "a password or token is assigned a string literal",
         fix: "read the value from the environment or a secret manager",
@@ -74,6 +101,8 @@ const SPECS: &[Spec] = &[
         id: "LAZY-001",
         severity: Severity::Critical,
         skip_tests: false,
+        only_tests: false,
+        extensions: None,
         skip_comments_and_docs: false,
         message: "placeholder left where real code is expected",
         fix: "write the implementation or remove the stub",
@@ -89,6 +118,8 @@ const SPECS: &[Spec] = &[
         id: "ERR-001",
         severity: Severity::Critical,
         skip_tests: false,
+        only_tests: false,
+        extensions: None,
         skip_comments_and_docs: true,
         message: "an error is caught and silently discarded",
         fix: "log it with context, handle it or rethrow",
@@ -101,6 +132,8 @@ const SPECS: &[Spec] = &[
         id: "LOG-001",
         severity: Severity::Warn,
         skip_tests: true,
+        only_tests: false,
+        extensions: None,
         skip_comments_and_docs: true,
         message: "raw debug output in production code",
         fix: "use the project's structured logger or remove the statement",
@@ -111,6 +144,65 @@ const SPECS: &[Spec] = &[
             &[r"\bdb", r"g!\s*\("],
         ],
     },
+    // Rust inline `#[cfg(test)]` modules live in ordinary `.rs` files.
+    test_skip(
+        false,
+        &["rs"],
+        &[
+            &[r"#\[\s*ig", r"nore\b"],
+            &[r"#\[\s*(?:test|cfg_attr)\b[^\]]*\big", r"nore\b"],
+        ],
+    ),
+    test_skip(
+        true,
+        &["js", "ts", "jsx", "tsx", "mjs", "cjs"],
+        &[
+            &[r"\b(?:xd", r"escribe|xit|xtest|fit|fd", r"escribe)\s*\("],
+            &[
+                r"\b(?:test|it|describe|context|suite)(?:\.concurrent)?\.",
+                r"(?:sk",
+                r"ip|only|fixme|to",
+                r"do)\s*(?:\(|\.)",
+            ],
+        ],
+    ),
+    test_skip(
+        true,
+        &["py"],
+        &[
+            &[
+                r"(?:^|\W)(?:@?pytest\.mark\.(?:sk",
+                r"ip|skipif|xfail)|@unittest\.sk",
+                r"ip(?:If|Unless)?)\b",
+            ],
+            &[
+                r"\b(?:pytest\.sk",
+                r"ip|self\.skipTest|unittest\.Sk",
+                r"ipTest)\s*\(",
+            ],
+        ],
+    ),
+    // Scoped to test paths so Room annotations on production Kotlin/Java models stay clean.
+    test_skip(
+        true,
+        &["kt", "java"],
+        &[&[
+            r"@(?:org\.junit\.(?:jupiter\.api\.)?)?(?:Ig",
+            r"nore|Dis",
+            r"abled(?:If)?)\b",
+        ]],
+    ),
+    test_skip(true, &["go"], &[&[r"\b[tb]\.Sk", r"ip(?:f|Now)?\s*\("]]),
+    test_skip(true, &["dart"], &[&[r"\bsk", r#"ip\s*:\s*(?:true|['"])"#]]),
+    test_skip(
+        true,
+        &["cs"],
+        &[
+            &[r"\[\s*(?:[^\]]*,\s*)?Ig", r"nore\b"],
+            &[r"\[\s*(?:Fact|Theory)\s*\([^)]*\bSk", r"ip\s*="],
+        ],
+    ),
+    test_skip(true, &["swift"], &[&[r"\bXCTSk", r"ip(?:If|Unless)?\s*\("]]),
 ];
 
 /// Index of the swallowed-error rule in [`SPECS`], for the two-line form.
@@ -123,7 +215,7 @@ const TWO_LINE: &[(&[&str], &[&str])] = &[
         &[r"^\s*pass\s*", "(?:#.*)?$"],
     ),
 ];
-const ALLOW: &[&str] = &["aaf:al", r"low\(([A-Z]+-[0-9]{3})\)\s+\S"];
+const ALLOW: &[&str] = &["aaf:al", r"low\(([A-Z]+-(?:[0-9]{3}|[A-Z0-9]+))\)\s+\S"];
 
 const GENERATED_DIRS: &[&str] = &["target", "build", "node_modules", "dist", ".gradle", "Pods"];
 const LOCKFILES: &[&str] = &[
@@ -134,7 +226,16 @@ const LOCKFILES: &[&str] = &[
     "gradle.lockfile",
     "Package.resolved",
 ];
-const TEST_DIRS: &[&str] = &["tests", "test", "__tests__", "androidTest", "spec", "e2e"];
+const TEST_DIRS: &[&str] = &[
+    "tests",
+    "test",
+    "__tests__",
+    "androidTest",
+    "integrationTest",
+    "unit_tests",
+    "spec",
+    "e2e",
+];
 
 struct Rules {
     rules: Vec<Vec<Regex>>,
@@ -171,6 +272,10 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+fn extension(path: &str) -> &str {
+    file_name(path).rsplit_once('.').map_or("", |(_, ext)| ext)
+}
+
 fn dirs(path: &str) -> impl Iterator<Item = &str> {
     let mut parts: Vec<&str> = path.split('/').collect();
     parts.pop();
@@ -188,14 +293,23 @@ pub fn skip_path(path: &str) -> bool {
 pub fn is_test_path(path: &str) -> bool {
     let name = file_name(path);
     let stem = name.split('.').next().unwrap_or(name);
+    let ext = extension(path);
     dirs(path).any(|dir| TEST_DIRS.contains(&dir))
         || name.starts_with("test_")
-        || ["_test.", ".test.", ".spec."]
+        || ["_test.", "_tests.", ".test.", ".tests.", ".spec."]
             .iter()
             .any(|mark| name.contains(mark))
         || ["Test", "Tests", "Spec"]
             .iter()
             .any(|end| stem.ends_with(end))
+        || (stem.starts_with("Test") && matches!(ext, "java" | "kt"))
+        || matches!(stem, "test" | "tests")
+}
+
+/// Returns `true` when `line` contains an inline suppression marker with a
+/// rule id and a non-empty reason.
+pub fn contains_allow_marker(line: &str) -> Result<bool, GateError> {
+    Ok(rules()?.allow.is_match(line))
 }
 
 fn is_comment_line(text: &str) -> bool {
@@ -229,26 +343,38 @@ fn allowed(rules: &Rules, text: &str, id: &str) -> bool {
 }
 
 /// Scans added lines. A line carrying the allow marker for a rule, followed
-/// by a reason, silences that rule on that line and is counted.
+/// by a reason, silences that rule on that line and is counted; any newly
+/// added allow marker also emits an `ALLOW-001` warning so it cannot slip
+/// through silently without approval.
 pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
     let rules = rules()?;
     let mut report = StaticReport::default();
     for file in files.iter().filter(|file| !skip_path(&file.path)) {
         let is_test = is_test_path(&file.path);
+        let ext = extension(&file.path);
         let is_doc = is_doc_path(&file.path);
         let mut previous: Option<(u32, &str)> = None;
         for (number, text) in &file.lines {
             let is_comment = is_comment_line(text);
             let mut hits: Vec<(usize, u32, bool)> = Vec::new();
             for (index, patterns) in rules.rules.iter().enumerate() {
-                if SPECS[index].skip_tests && is_test {
+                let spec = &SPECS[index];
+                if spec.skip_tests && is_test {
                     continue;
                 }
-                if SPECS[index].skip_comments_and_docs && (is_comment || is_doc) {
+                if spec.only_tests && !is_test {
+                    continue;
+                }
+                if let Some(exts) = spec.extensions
+                    && !exts.contains(&ext)
+                {
+                    continue;
+                }
+                if spec.skip_comments_and_docs && (is_comment || is_doc) {
                     continue;
                 }
                 if patterns.iter().any(|pattern| pattern.is_match(text)) {
-                    hits.push((index, *number, allowed(rules, text, SPECS[index].id)));
+                    hits.push((index, *number, allowed(rules, text, spec.id)));
                 }
             }
             if !is_doc
@@ -280,6 +406,17 @@ pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
                     line: Some(line),
                     message: spec.message.to_string(),
                     fix: spec.fix.to_string(),
+                });
+            }
+            if rules.allow.is_match(text) {
+                report.findings.push(StaticFinding {
+                    rule: "ALLOW-001".to_string(),
+                    severity: Severity::Warn,
+                    file: file.path.clone(),
+                    line: Some(*number),
+                    message: "newly added inline allow marker requires approval".to_string(),
+                    fix: "remove the inline allow marker or sign an approval with aaf approve"
+                        .to_string(),
                 });
             }
             previous = Some((*number, text.as_str()));

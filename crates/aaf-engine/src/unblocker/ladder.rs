@@ -78,7 +78,7 @@ fn marker(tier: UnblockTier, digest: &str) -> String {
     format!("unblock[{}] digest={digest}", tier.as_str())
 }
 
-fn tried(task: &Task, tier: UnblockTier, digest: &str) -> bool {
+pub(crate) fn tried(task: &Task, tier: UnblockTier, digest: &str) -> bool {
     let marker = marker(tier, digest);
     // Human rework resets the unblock tier ladder: scan only notes appended
     // after the most recent `rework:` note.

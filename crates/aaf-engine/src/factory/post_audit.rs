@@ -11,6 +11,7 @@ use serde_json::json;
 
 use super::audit_backend::{self, AuditBackend};
 use super::ports::{AccountPool, Grant};
+use super::rework_filter;
 use super::worker::{self, GateJob, Next, Outcome};
 use super::{Deps, unblock};
 use crate::cross_audit::{
@@ -179,7 +180,7 @@ pub(crate) fn needs_post_gate_audit(deps: &Deps, job: &GateJob, receipt: &Receip
         || is_large_worktree_diff(deps, &job.worktree)
 }
 
-fn collect_rework_findings(
+pub(crate) fn collect_rework_findings(
     verdict: &AuditVerdict,
     scores: &[aaf_domain::gate::GoldenScore],
     reasons: &[String],
@@ -191,9 +192,10 @@ fn collect_rework_findings(
         _ => Vec::new(),
     };
     if cfg.score_gate {
+        let low_average = effective_score < cfg.min_average_score;
         for s in scores {
             if s.score < cfg.min_criterion_score
-                || (!s.deduction_reason.trim().is_empty() && s.score < 100)
+                || (low_average && s.score < 100 && !s.deduction_reason.trim().is_empty())
             {
                 actionable.push(Finding {
                     id: s.id.clone(),
@@ -394,7 +396,8 @@ fn execute_post_gate_audit(
         }
     }
 
-    let note = format!("post-gate cross-audit rejected the changes ({event_verdict})");
+    let summary = rework_filter::fallback_verdict_summary(&report.verdict, &event_verdict);
+    let note = format!("post-gate cross-audit rejected the changes ({summary})");
     deps.store
         .append_context_note(&task.id, &unblock::one_line(&note, 400), deps.now())?;
     let signal =

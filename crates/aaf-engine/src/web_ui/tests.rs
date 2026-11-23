@@ -456,7 +456,9 @@ fn sse_events_accepts_query_token_and_clean_shutdown_unblocks() {
     let mut collected = String::new();
     let mut buf = [0u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && !collected.contains("event: stream") {
+    while Instant::now() < deadline
+        && !(collected.contains("event: stream") && collected.contains("run-42"))
+    {
         let n = stream.read(&mut buf).unwrap();
         if n == 0 {
             break;

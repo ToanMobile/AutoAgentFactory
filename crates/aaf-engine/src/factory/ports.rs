@@ -11,7 +11,7 @@ use aaf_domain::gate::{HeadLockReport, Receipt};
 use aaf_domain::ports::{LimitHit, PortResult};
 
 use crate::git::{GitError, MergeOutcome, PrOutcome, TaskWorktree};
-use crate::unblocker::QuotaRoute;
+use crate::unblocker::{QuotaRoute, RerunResult};
 use crate::webhook::WebhookEvent;
 
 pub trait GateRunner: Send + Sync {
@@ -21,6 +21,16 @@ pub trait GateRunner: Send + Sync {
     fn run(&self, tree: &Path) -> PortResult<Receipt>;
     /// Head-lock state of `tree` without running any command.
     fn head_lock(&self, tree: &Path) -> PortResult<HeadLockReport>;
+    /// Reruns the failed test command from `receipt` on the unchanged `tree`
+    /// to detect flaky tests (PLAN §C.9). Returns `Ok(None)` when not
+    /// supported or when `receipt` has no rerunnable test command.
+    fn rerun_failed_test(
+        &self,
+        _tree: &Path,
+        _receipt: &Receipt,
+    ) -> PortResult<Option<RerunResult>> {
+        Ok(None)
+    }
 }
 
 /// An integration worktree: the base plus every branch that merged cleanly.

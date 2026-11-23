@@ -214,13 +214,17 @@ pub fn limit_outcome(reset_at: Option<i64>) -> AgentOutcome {
     }
 }
 
-/// The auditor's answer; ids in `yes` are answered "yes".
+/// The auditor's answer; ids in `yes` are answered "yes" with concrete evidence.
 pub fn audit_answer(yes: &[&str]) -> String {
     let answers: Vec<serde_json::Value> = build_checklist(&spec(), false)
         .iter()
         .map(|item| {
             let hit = yes.contains(&item.id.as_str());
-            serde_json::json!({ "id": item.id, "answer": if hit { "yes" } else { "no" } })
+            serde_json::json!({
+                "id": item.id,
+                "answer": if hit { "yes" } else { "no" },
+                "evidence": if hit { "src/lib.rs:2" } else { "" },
+            })
         })
         .collect();
     serde_json::json!({ "answers": answers }).to_string()

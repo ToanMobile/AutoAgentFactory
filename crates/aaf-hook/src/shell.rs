@@ -10,7 +10,7 @@ mod command;
 mod scan;
 
 pub use command::{DECLARERS, NAME_SETTERS};
-use scan::find_close;
+use scan::{find_close, heredoc_data_sink};
 
 /// Nesting of `$(…)`, backticks, `sh -c` and `eval` that is still analysed.
 pub const MAX_DEPTH: usize = 8;
@@ -40,6 +40,8 @@ pub struct Cmd {
     pub words: Vec<String>,
     /// The command word contains an expansion or glob: it could be anything.
     pub dynamic_name: bool,
+    /// Per-word dynamic flag parallel to `words` (`true` on `$VAR`, `$(…)`, backtick, or unquoted glob).
+    pub arg_dynamic: Vec<bool>,
     pub redirects: Vec<Redirect>,
     /// The wrapper words stripped from the front (`env -C dir`, `xargs -a
     /// file`): no longer the command, but still paths the line names.
@@ -152,6 +154,9 @@ struct Lexer<'o, 'd> {
     cmd_deferred: Vec<String>,
     /// The command before the `|` just passed, for the next command.
     feeder: Option<Box<Cmd>>,
+    /// Any pipe, command chaining (`;`, `&&`, `||`, `&`, `(`, `)`), process
+    /// substitution (`<(` / `>(`), or `$(…)` / backtick appeared at this level.
+    compound: bool,
     failed: bool,
 }
 
@@ -187,6 +192,7 @@ impl<'o, 'd> Lexer<'o, 'd> {
             bodies: Vec::new(),
             cmd_deferred: Vec::new(),
             feeder: None,
+            compound: false,
             failed: false,
         }
     }
@@ -228,6 +234,7 @@ impl Lexer<'_, '_> {
                     self.read_heredocs();
                 }
                 ';' | '(' | ')' => {
+                    self.compound = true;
                     self.note_function();
                     self.pos += 1;
                     self.end_cmd();
@@ -235,6 +242,7 @@ impl Lexer<'_, '_> {
                 '|' => self.pipe(),
                 '&' if self.chars.get(self.pos + 1) == Some(&'>') => self.redirect(),
                 '&' => {
+                    self.compound = true;
                     self.pos += 1;
                     self.end_cmd();
                 }
@@ -285,6 +293,7 @@ impl Lexer<'_, '_> {
     /// `|` and `|&` hand the command just ended to the next one as its
     /// feeder; `||` starts an unrelated command.
     fn pipe(&mut self) {
+        self.compound = true;
         self.pos += 1;
         let before = self.out.cmds.len();
         self.end_cmd();
@@ -400,6 +409,7 @@ impl Lexer<'_, '_> {
     }
 
     fn substitute(&mut self, inner: &str) {
+        self.compound = true;
         let mut deferred = Vec::new();
         lex(inner, self.depth + 1, self.out, Some(&mut deferred));
         self.cmd_deferred.append(&mut deferred);
@@ -484,7 +494,10 @@ impl Lexer<'_, '_> {
         }
         match self.peek() {
             // Process substitution: the parenthesis splits the commands.
-            Some('(') => return,
+            Some('(') => {
+                self.compound = true;
+                return;
+            }
             Some(c @ ('&' | '|')) => {
                 op.push(c);
                 self.pos += 1;
@@ -548,11 +561,15 @@ impl Lexer<'_, '_> {
     /// Heredoc bodies are commands unless proven to be data: a body can feed
     /// `bash`, and an unquoted one runs its own `$(…)`.
     fn finish_bodies(&mut self) {
-        let lone_cat = !self.failed
-            && self.out.cmds.len() == self.first_cmd + 1
+        let single = !self.failed && !self.compound && self.out.cmds.len() == self.first_cmd + 1;
+        let lone_cat = single
             && self.out.cmds.last().is_some_and(|c| {
                 c.words == ["cat"] && c.assigns.is_empty() && c.redirects.is_empty()
             });
+        // Top-level single-command quoted heredoc to an allowlisted data sink;
+        // the owning command's words, assigns, and redirects still hit every guard.
+        let data_sink =
+            single && self.depth == 0 && self.out.cmds.last().is_some_and(heredoc_data_sink);
         for (body, quoted, cleared) in mem::take(&mut self.bodies) {
             if quoted && lone_cat {
                 // `cat <<'EOF'` alone only prints. Inside a substitution the
@@ -561,7 +578,7 @@ impl Lexer<'_, '_> {
                 if let Some(defer) = self.defer.as_deref_mut() {
                     defer.push(body);
                 }
-            } else {
+            } else if !(quoted && data_sink) {
                 let outer_cleared = self.out.env_cleared;
                 self.out.env_cleared |= cleared;
                 lex(&body, self.depth + 1, self.out, None);

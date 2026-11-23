@@ -72,6 +72,8 @@ enum Command {
     Completions(cmd::completions::CompletionsArgs),
     /// Live read-only terminal dashboard for tasks, heavy slots, accounts and receipt.
     Watch(cmd::watch::WatchArgs),
+    /// Manual operator pre-flight: confirm a bug reproduces before creating a task.
+    Repro(cmd::repro::ReproArgs),
 }
 
 impl Command {
@@ -100,6 +102,7 @@ impl Command {
             Command::Upgrade(_) => "upgrade",
             Command::Completions(_) => "completions",
             Command::Watch(_) => "watch",
+            Command::Repro(_) => "repro",
         }
     }
 }
@@ -155,6 +158,7 @@ fn main() -> ExitCode {
         Command::Upgrade(args) => cmd::upgrade::run(args, &ctx),
         Command::Completions(args) => cmd::completions::run(args, &ctx),
         Command::Watch(args) => cmd::watch::run(args, &ctx, cli.json),
+        Command::Repro(args) => cmd::repro::run(args, &ctx),
     });
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     ExitCode::from(output::emit(cli.json, name, &result, millis))

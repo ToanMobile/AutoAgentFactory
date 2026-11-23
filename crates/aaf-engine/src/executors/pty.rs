@@ -19,6 +19,8 @@ use super::reaper::{self, ProcessTracker, Signal};
 
 /// Bytes of output kept for the run log.
 pub const DEFAULT_TAIL_BYTES: usize = 64 * 1024;
+/// Larger bounded output cap for generic CLIs whose answer lives inside raw stdout/stderr.
+pub const GENERIC_TAIL_BYTES: usize = 256 * 1024;
 
 /// How long a child gets to exit after SIGTERM before SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);

@@ -231,8 +231,12 @@ fn command_left_by_a_killed_aaf_gate_keeps_its_slot_until_it_ends() {
     let pid_file = sb.home.join("first.pid");
     write(
         &sb.repo.join(".autofactory/config.toml"),
-        &format!("[commands]\ntest_scoped = \"{}\"\n", stand_in(&pid_file)),
+        &format!(
+            "[gate]\ndocs_fast_path = false\n[commands]\ntest_scoped = \"{}\"\n",
+            stand_in(&pid_file)
+        ),
     );
+    sb.commit_all("config");
     let aaf = sb
         .command(&["gate", "--scoped", "--json"])
         .stdout(Stdio::null())

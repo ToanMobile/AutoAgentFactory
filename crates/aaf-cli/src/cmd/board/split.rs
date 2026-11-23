@@ -100,6 +100,10 @@ impl AgentRunner for SplitInfraWatch<'_> {
         }
         Ok(outcome)
     }
+
+    fn reports_tokens(&self) -> bool {
+        self.runner.reports_tokens()
+    }
 }
 
 fn format_outcome(outcome: &SplitOutcome) -> Result<CmdOutput, CmdError> {

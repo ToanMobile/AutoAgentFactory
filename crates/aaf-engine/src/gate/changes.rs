@@ -2,6 +2,7 @@
 //! files) and the lines they add.
 
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -240,6 +241,80 @@ fn untracked_lines(repo_root: &Path, path: &str) -> Result<Option<AddedLines>, G
     }))
 }
 
+/// Whether the first 8000 bytes of the diffed (re-encoded) lines hold a NUL.
+pub(crate) fn lines_head_has_nul(file: &AddedLines) -> bool {
+    let mut seen = 0;
+    for (_, text) in &file.lines {
+        let Some(room) = 8000usize.checked_sub(seen).filter(|room| *room > 0) else {
+            return false;
+        };
+        if text.bytes().take(room).any(|b| b == 0) {
+            return true;
+        }
+        seen += text.len() + 1;
+    }
+    false
+}
+
+/// Whether git was told to diff `path` as text despite a NUL: a
+/// `working-tree-encoding` (the disk bytes are not what git diffs), a set
+/// `diff` attribute, or a `diff=<driver>` (`default` when unspecified) whose
+/// `diff.<driver>.binary` is false. A failed lookup counts as text.
+fn diffed_as_text(repo_root: &Path, path: &str, timeout: Duration) -> bool {
+    let args = [
+        "check-attr",
+        "-z",
+        "diff",
+        "working-tree-encoding",
+        "--",
+        path,
+    ];
+    let Ok(raw) = git_bytes(repo_root, &args, timeout) else {
+        return true;
+    };
+    let fields = nul_fields(&raw);
+    let value = |attr: &str| {
+        let triple = fields.chunks(3).find(|t| t.len() == 3 && t[1] == attr);
+        triple.map(|t| t[2].as_str())
+    };
+    let (Some(diff), Some(encoding)) = (value("diff"), value("working-tree-encoding")) else {
+        return true;
+    };
+    let driver = match (encoding, diff) {
+        ("unspecified" | "unset", "set") => return true,
+        ("unspecified" | "unset", "unset") => return false,
+        ("unspecified" | "unset", "unspecified") => "default",
+        ("unspecified" | "unset", driver) => driver,
+        _ => return true,
+    };
+    // Git uses `default` for a driver with no config at all; asking it for
+    // any driver errs towards scanning.
+    [driver, "default"].iter().any(|driver| {
+        let key = format!("diff.{driver}.binary");
+        let args = ["config", "--type=bool", "--get", key.as_str()];
+        git_bytes(repo_root, &args, timeout).is_ok_and(|out| out.trim_ascii() == b"false")
+    })
+}
+
+/// True for a real binary, by the heuristic git itself uses: a NUL in the
+/// first 8000 bytes of the diffed lines and of the file on disk, with no
+/// attribute telling git to diff it as text anyway. Symlinks, missing paths
+/// and read errors count as text: their lines are scanned rather than skipped.
+fn is_binary(repo_root: &Path, file: &AddedLines, timeout: Duration) -> bool {
+    if !lines_head_has_nul(file) {
+        return false;
+    }
+    let full = repo_root.join(&file.path);
+    if !fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let mut head = Vec::with_capacity(8000);
+    let disk_nul = fs::File::open(&full)
+        .and_then(|file| file.take(8000).read_to_end(&mut head))
+        .is_ok_and(|_| head.contains(&0));
+    disk_nul && !diffed_as_text(repo_root, &file.path, timeout)
+}
+
 /// Added lines of tracked changes plus the whole content of untracked text
 /// files. `skip` filters paths that are never scanned.
 pub fn added_lines(
@@ -260,6 +335,10 @@ pub fn added_lines(
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
+            // A `-diff` or `binary` attribute (in `.gitattributes` or
+            // `.git/info/attributes`) would otherwise hide every added line
+            // behind "Binary files differ". Real binaries are dropped below.
+            "--text",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             base,
@@ -268,7 +347,7 @@ pub fn added_lines(
         timeout,
     )?;
     let mut files = parse_added(&String::from_utf8_lossy(&raw));
-    files.retain(|file| !skip(&file.path));
+    files.retain(|file| !skip(&file.path) && !is_binary(repo_root, file, timeout));
     for path in untracked.iter().filter(|path| !skip(path)) {
         files.extend(untracked_lines(repo_root, path)?);
     }

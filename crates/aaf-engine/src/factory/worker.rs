@@ -289,6 +289,7 @@ pub(super) fn end_run(
     status: RunStatus,
     exit_code: Option<i32>,
     tokens: (u64, u64),
+    tokens_measured: bool,
 ) -> PortResult<()> {
     let ended = deps.now();
     deps.store.finish_run(
@@ -313,6 +314,7 @@ pub(super) fn end_run(
             "status": status.as_str(),
             "tokens_in": tokens.0,
             "tokens_out": tokens.1,
+            "tokens_measured": tokens_measured,
         }),
     )
 }
@@ -379,7 +381,7 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
         &*deps.accounts,
     )?;
     if let Err(err) = snapshot_turn(deps, &task.id, &worktree, &run.request.run_id) {
-        let _ = end_run(deps, &task, &run, RunStatus::Failed, None, (0, 0));
+        let _ = end_run(deps, &task, &run, RunStatus::Failed, None, (0, 0), false);
         return Err(err);
     }
     let profile = crate::config::effective_profile(&deps.settings.repo, &worktree.path);
@@ -439,13 +441,21 @@ fn invoke_runner(deps: &Deps, task: &Task, run: &OpenRun) -> PortResult<AgentOut
     let outcome = match deps.runner.run(&run.request) {
         Ok(outcome) => outcome,
         Err(err) => {
-            end_run(deps, task, run, RunStatus::Failed, None, (0, 0))?;
+            end_run(deps, task, run, RunStatus::Failed, None, (0, 0), false)?;
             return Err(err);
         }
     };
     let tokens = (outcome.tokens_in, outcome.tokens_out);
     let status = status_of(&outcome);
-    end_run(deps, task, run, status, outcome.exit_code, tokens)?;
+    end_run(
+        deps,
+        task,
+        run,
+        status,
+        outcome.exit_code,
+        tokens,
+        deps.runner.reports_tokens(),
+    )?;
     Ok(outcome)
 }
 

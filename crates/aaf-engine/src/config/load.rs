@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use aaf_domain::config::{GlobalConfig, RepoConfig, StoreMode};
+use aaf_domain::config::{GlobalConfig, OracleMode, RepoConfig, StoreMode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -22,6 +22,7 @@ pub const REPO_CONFIG_REL: &str = ".autofactory/config.toml";
 pub const LOCAL_CONFIG_REL: &str = ".autofactory/config.local.toml";
 
 const ENV_STORE_COMPLIANCE: &str = "AAF_STORE_COMPLIANCE";
+const ENV_RED_GREEN_ORACLE: &str = "AAF_RED_GREEN_ORACLE";
 const ENV_MIN_ANDROID_TARGET_SDK: &str = "AAF_MIN_ANDROID_TARGET_SDK";
 const ENV_AUTO_MERGE: &str = "AAF_AUTO_MERGE";
 const ENV_MAX_PARALLEL: &str = "AAF_MAX_PARALLEL";
@@ -283,6 +284,12 @@ fn env_overlay(
         env_parsed(env, ENV_STORE_COMPLIANCE, "off, auto or always", |v| {
             StoreMode::parse(v)
         })?;
+    overlay.gate.red_green_oracle = env_parsed(
+        env,
+        ENV_RED_GREEN_ORACLE,
+        "off, warn or block",
+        OracleMode::parse,
+    )?;
     overlay.gate.min_android_target_sdk = env_parsed(
         env,
         ENV_MIN_ANDROID_TARGET_SDK,

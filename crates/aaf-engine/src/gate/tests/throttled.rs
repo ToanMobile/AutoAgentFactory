@@ -52,6 +52,7 @@ fn lint_that_starts_gradle_waits_for_the_slot_and_gets_the_daemon_switches() {
     repo.write(".gitignore", "*.mark\n");
     repo.write("gradlew", "printf '%s' \"$GRADLE_OPTS\" > lint.mark\n");
     repo.commit("wrapper");
+    repo.git(&["branch", "-f", "main", "HEAD"]);
     let (rig, held) = busy_machine(&repo);
     let held = Arc::new(Mutex::new(Some(held)));
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -272,6 +273,7 @@ fn gradle_daemon_left_running_is_a_reason_and_the_gate_stays_clear() {
     let mode = std::fs::Permissions::from_mode(0o755);
     std::fs::set_permissions(repo.path("gradlew"), mode).unwrap();
     repo.commit("wrapper");
+    repo.git(&["branch", "-f", "main", "HEAD"]);
     let rig = Rig::calm();
     let left = BuildDaemon {
         pid: 4321,
