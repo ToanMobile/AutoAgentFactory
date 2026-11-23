@@ -211,6 +211,23 @@ pub fn evaluate(
         })
 }
 
+fn write_approval_everywhere(
+    data_dir: &Path,
+    key: &[u8],
+    repo_root: &Path,
+    approval: &Approval,
+) -> Result<(), GateError> {
+    aaf_fp::write_approval(data_dir, key, repo_root, approval)?;
+    // Also mirror under the primary repository root so `aaf merge` (running in a
+    // detached scratch worktree) finds approvals signed in any feature worktree.
+    if let Some(common_root) = common_repo_root(repo_root)
+        && common_root != repo_root
+    {
+        let _ = aaf_fp::write_approval(data_dir, key, &common_root, approval);
+    }
+    Ok(())
+}
+
 /// Signs a `PASS` approval for the locked changes as they are right now.
 pub fn approve(
     data_dir: &Path,
@@ -223,24 +240,45 @@ pub fn approve(
     let base = base::resolve(repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
     let set = changes::collect(repo_root, &base.diff_target, GIT_TIMEOUT)?;
     let (locked_changes, lock_fp) = locked(repo_root, cfg, &set.changes)?;
-    if locked_changes.is_empty() {
+    // `aaf merge` evaluates head-lock against the trusted config on `base`,
+    // which can differ from the PR branch's `.autofactory/config.toml` when
+    // the PR itself updates `head_lock_globs`. Sign that exact base-evaluated
+    // content fingerprint as well so the human approval covers both views.
+    let base_lock_fp = base.sha.as_deref().and_then(|sha| {
+        let spec = format!("{sha}:.autofactory/config.toml");
+        let raw = aaf_fp::git(repo_root, &["show", &spec], &[], GIT_TIMEOUT).ok()?;
+        let base_cfg: RepoConfig = toml::from_str(&raw).ok()?;
+        let (base_locked, fp) = locked(repo_root, &base_cfg, &set.changes).ok()?;
+        (!base_locked.is_empty()).then_some(fp)
+    });
+    let primary_fp = if !locked_changes.is_empty() {
+        lock_fp
+    } else if let Some(fp) = base_lock_fp.clone() {
+        fp
+    } else {
         return Err(GateError::NothingLocked);
-    }
+    };
+    let created_at = clock.now();
     let approval = Approval {
-        lock_fp,
+        lock_fp: primary_fp,
         reviewer: reviewer.to_string(),
         verdict: "PASS".to_string(),
         same_account,
-        created_at: clock.now(),
+        created_at,
     };
     let key = aaf_fp::load_or_create_key(data_dir)?;
-    aaf_fp::write_approval(data_dir, &key, repo_root, &approval)?;
-    // Also mirror under the primary repository root so `aaf merge` (running in a
-    // detached scratch worktree) finds approvals signed in any feature worktree.
-    if let Some(common_root) = common_repo_root(repo_root)
-        && common_root != repo_root
+    write_approval_everywhere(data_dir, &key, repo_root, &approval)?;
+    if let Some(base_fp) = base_lock_fp
+        && base_fp != approval.lock_fp
     {
-        let _ = aaf_fp::write_approval(data_dir, &key, &common_root, &approval);
+        let base_approval = Approval {
+            lock_fp: base_fp,
+            reviewer: reviewer.to_string(),
+            verdict: "PASS".to_string(),
+            same_account,
+            created_at,
+        };
+        write_approval_everywhere(data_dir, &key, repo_root, &base_approval)?;
     }
     Ok(approval)
 }

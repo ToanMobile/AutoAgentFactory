@@ -315,3 +315,51 @@ fn merge_ignores_pr_config_tampering_and_uses_docs_fast_path_for_docs_pr() {
     }
     assert_eq!(gh_docs.merged_calls.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn approval_unlocks_merge_when_pr_tightens_head_lock_globs_and_edits_newly_locked_doc() {
+    let fx = Fixture::new("true");
+    // PR adds `docs/plan.md` to head_lock_globs in `.autofactory/config.toml`
+    // AND modifies `docs/plan.md`. Approving on the PR branch uses the PR's
+    // config (2 locked files), while `aaf merge` evaluates against origin/main's
+    // trusted base config (1 locked file: `.autofactory/config.toml`).
+    let head = fx.make_pr_branch("chore/tighten-lock", |root| {
+        let cfg = fs::read_to_string(root.join(".autofactory/config.toml")).unwrap();
+        let updated = cfg.replace(
+            "docs_fast_path = true",
+            "docs_fast_path = true\nhead_lock_globs = [\".autofactory/config.toml\", \"docs/plan.md\"]",
+        );
+        fs::write(root.join(".autofactory/config.toml"), updated).unwrap();
+        fs::write(root.join("docs/plan.md"), "# Plan\n- Tightened lock\n").unwrap();
+    });
+
+    // Sign approval on the PR branch using the PR branch's own config (as `aaf approve` does).
+    git(fx.work.path(), &["checkout", "chore/tighten-lock"]);
+    let pr_cfg: RepoConfig = toml::from_str(
+        &fs::read_to_string(fx.work.path().join(".autofactory/config.toml")).unwrap(),
+    )
+    .unwrap();
+    head_lock::approve(
+        fx.data.path(),
+        fx.work.path(),
+        &pr_cfg,
+        "independent-reviewer",
+        false,
+        &FixedClock(20),
+    )
+    .unwrap();
+    git(fx.work.path(), &["checkout", "main"]);
+
+    let gh = FakeGh {
+        pr: pr_info(566, "chore/tighten-lock", &head),
+        checks: vec![],
+        merged_calls: AtomicUsize::new(0),
+    };
+    let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
+    let out = merge_pr(&fx.req(566, &head, false), &gh, &FixedClock(21), &noop).unwrap();
+    match out {
+        PrMergeOutcome::Merged { pr_number, .. } => assert_eq!(pr_number, 566),
+        other => panic!("expected Merged when PR tightened head_lock_globs, got {other:?}"),
+    }
+    assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 1);
+}
