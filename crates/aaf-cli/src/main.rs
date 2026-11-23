@@ -57,8 +57,18 @@ enum Command {
     Proof(cmd::proof::ProofArgs),
     /// List or sync bundled domain skills into `.claude/skills`.
     Skills(cmd::skills::SkillsArgs),
+    /// List, inspect, scaffold, validate, run, and approve declarative SOP workflows.
+    Sop(cmd::sop::SopArgs),
+    /// Inspect installed coding-agent CLIs, fallback routing, role profiles, and `.mcp.json` hygiene.
+    Executors(cmd::executors::ExecutorsArgs),
     /// Run the outbound Telegram remote companion (status, handover, two-step approvals).
     Telegram(cmd::telegram::TelegramArgs),
+    /// Start the authenticated local/LAN Web & Mobile Cockpit (HTTP + SSE + QR).
+    Ui(cmd::ui::UiArgs),
+    /// Self-update `aaf` and `aaf-hook` with SHA-256 verification (human-only).
+    Upgrade(cmd::upgrade::UpgradeArgs),
+    /// Generate ready-to-eval shell completion scripts (bash, zsh, fish, powershell).
+    Completions(cmd::completions::CompletionsArgs),
     /// Live read-only terminal dashboard for tasks, heavy slots, accounts and receipt.
     Watch(cmd::watch::WatchArgs),
 }
@@ -82,7 +92,12 @@ impl Command {
             Command::Plan(_) => "plan",
             Command::Proof(_) => "proof",
             Command::Skills(_) => "skills",
+            Command::Sop(_) => "sop",
+            Command::Executors(_) => "executors",
             Command::Telegram(_) => "telegram",
+            Command::Ui(_) => "ui",
+            Command::Upgrade(_) => "upgrade",
+            Command::Completions(_) => "completions",
             Command::Watch(_) => "watch",
         }
     }
@@ -132,7 +147,12 @@ fn main() -> ExitCode {
         Command::Plan(args) => cmd::plan::run(args, &ctx),
         Command::Proof(args) => cmd::proof::run(args, &ctx),
         Command::Skills(args) => cmd::skills::run(args, &ctx),
+        Command::Sop(args) => cmd::sop::run(args, &ctx),
+        Command::Executors(args) => cmd::executors::run(args, &ctx),
         Command::Telegram(args) => cmd::telegram::run(args, &ctx),
+        Command::Ui(args) => cmd::ui::run(args, &ctx),
+        Command::Upgrade(args) => cmd::upgrade::run(args, &ctx),
+        Command::Completions(args) => cmd::completions::run(args, &ctx),
         Command::Watch(args) => cmd::watch::run(args, &ctx, cli.json),
     });
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);

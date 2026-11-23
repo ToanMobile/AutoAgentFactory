@@ -130,6 +130,10 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | **Remote Telegram companion (`aaf telegram`)** | Zero-port outbound Telegram Bot API long-polling (Tier-1 config only, fail-closed `allowed_chat_ids`, env-only token) for read-only `/status`, `/board`, `/show`, `/handover` and opt-in two-step `/confirm <code>` approvals/mutations. | **`v3.4`** |
 | **Multi-host hook adapters** | `aaf-hook --host <auto\|claude\|codex\|gemini>` and `aaf init --hook-host <claude\|codex\|gemini\|all>` extend the full guard suite to Codex CLI (including `apply_patch` path checks) and Gemini CLI (`BeforeTool`). | **`v3.4`** |
 | **Packaging, `[secret NAME]` masking & Linux `bwrap`** | Streaming chunk-boundary `[secret NAME]` masking, GitHub Release workflow + SHA-256 verified `scripts/install.sh` + Homebrew formula + hardened Docker runner, and Linux bubblewrap (`bwrap`) / container isolation dispatch. | **`v3.4`** |
+| **Declarative SOP workflows (`aaf sop`)** | TOML SOP pipelines (`Agent`, `Script`, `Gate`, `HumanGate`) with DAG validation, bounded `on_fail_goto` rework edges, 5 built-in blueprints (`backend`, `frontend`, `mobile-android`, `unity-game`, `bugfix`), and crash-safe checkpoint resume (`approve`, `send-back`). | **`v3.5`** |
+| **10-CLI executor registry, roles & MCP audit (`aaf executors`)** | Unified descriptors and PATH inventory for 10 coding CLIs (`claude`, `codex`, `gemini`, `opencode`, `cursor`, `antigravity`, `codebuddy`, `kimi`, `pi`, `deepseek`), ordered fallback routing with audit trail, `.autofactory/roles/*.toml`, and read-only `.mcp.json` inline-secret scanning. | **`v3.5`** |
+| **Web & Mobile Cockpit (`aaf ui`)** | Zero-dependency embedded warm-paper/dark SPA over `std::net::TcpListener` + SSE live stream, Needs Review approval inbox, scannable terminal QR pairing (`#token=` fragment), strict CSP, Bearer auth, Origin/Host CSRF protection, and fail-closed LAN bind enforcement. | **`v3.5`** |
+| **Cross-OS self-updater & onboarding (`aaf upgrade`, `aaf completions`)** | Fail-closed SHA-256 self-updater across 5 targets (macOS/Linux/Windows), Windows PowerShell `scripts/install.ps1`, shell completions (`bash`/`zsh`/`fish`/`powershell`), and [`docs/QUICKSTART.md`](docs/QUICKSTART.md). | **`v3.5`** |
 
 ---
 
@@ -576,6 +580,10 @@ How `[cross_audit]` merges:
 | **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
 | **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
 | **`v3.4`** `aaf telegram` | Zero-port outbound Telegram companion for status, handover, and opt-in two-step `/confirm` approvals (**human only**) | `--once`, `--all`, `--repo <path>`, `--send-test` |
+| **`v3.5`** `aaf sop` | Declarative TOML SOP workflows (list, show, init, validate, runs, run/resume, approve, send-back) | `list`, `show`, `init`, `validate`, `runs`, `run`, `approve`, `send-back` |
+| **`v3.5`** `aaf executors` | 10-CLI inventory, fallback resolution preview, reusable role profiles, and read-only `.mcp.json` secret audit | `list`, `resolve`, `roles`, `mcp` |
+| **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
+| **`v3.5`** `aaf upgrade` / `completions` | SHA-256 verified self-updater (**human only**) and shell completions (`bash`, `zsh`, `fish`, `powershell`) | `upgrade`: `--check`, `--version`, `--dry-run`; `completions <shell>` |
 
 `aaf-hook` is not a command you type. Claude Code runs it: it reads the PreToolUse JSON on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.
 

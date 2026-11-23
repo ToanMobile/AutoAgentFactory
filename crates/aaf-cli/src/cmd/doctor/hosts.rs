@@ -75,3 +75,43 @@ pub(super) fn telegram_status(cfg: &TelegramConfig) -> Result<String, String> {
         Err(issues.join("; "))
     }
 }
+
+/// Reports installed coding-agent CLIs across the 10-CLI registry (no subprocesses).
+pub(super) fn executors_summary(path_var: &std::ffi::OsStr) -> Result<String, String> {
+    let inv = aaf_engine::executors::registry::discover_inventory(path_var);
+    let installed: Vec<&str> = inv
+        .iter()
+        .filter(|item| item.installed)
+        .map(|item| item.id.as_str())
+        .collect();
+    if installed.is_empty() {
+        Err(format!("0/{} coding-agent CLIs found on PATH", inv.len()))
+    } else {
+        Ok(format!(
+            "{}/{} installed ({})",
+            installed.len(),
+            inv.len(),
+            installed.join(", ")
+        ))
+    }
+}
+
+/// Read-only `.mcp.json` inline-secret hygiene summary.
+pub(super) fn mcp_hygiene(repo_root: &Path) -> Result<String, String> {
+    let report = aaf_engine::roles::inspect_mcp_servers(repo_root)?;
+    if !report.present {
+        return Ok("no .mcp.json".to_string());
+    }
+    if report.has_warnings() {
+        Err(format!(
+            "{} server(s), {} inline-secret warning(s); run `aaf executors mcp`",
+            report.servers.len(),
+            report.total_warnings()
+        ))
+    } else {
+        Ok(format!(
+            "{} server(s), no inline secret warnings",
+            report.servers.len()
+        ))
+    }
+}

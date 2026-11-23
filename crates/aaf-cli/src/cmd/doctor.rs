@@ -549,6 +549,11 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
             "telegram",
             hosts::telegram_status(&effective.global.telegram),
         ),
+        advisory("executors", hosts::executors_summary(&ctx.path_var)),
+        root_opt.map_or_else(
+            || not_applicable("mcp_hygiene"),
+            |r| advisory("mcp_hygiene", hosts::mcp_hygiene(r)),
+        ),
     ];
     #[cfg(target_os = "macos")]
     checks.push(keychain_sandbox_exposure_check());

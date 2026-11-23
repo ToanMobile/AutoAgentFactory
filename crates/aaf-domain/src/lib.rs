@@ -13,6 +13,7 @@ pub mod gate;
 pub mod ports;
 pub mod proof;
 pub mod run;
+pub mod sop;
 pub mod task;
 pub mod telegram;
 

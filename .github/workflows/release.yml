@@ -34,6 +34,8 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
 
     steps:
       - name: Checkout repository
@@ -80,7 +82,8 @@ jobs:
           set -euo pipefail
           cargo build --release --locked --target "${{ matrix.target }}" -p aaf-cli -p aaf-hook
 
-      - name: Package tarball
+      - name: Package tarball (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -95,11 +98,28 @@ jobs:
           tar -czf "dist/${PKG_DIR}.tar.gz" -C staging "${PKG_DIR}"
           ls -lh "dist/${PKG_DIR}.tar.gz"
 
-      - name: Upload target tarball
+      - name: Package zip archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Tag = "${{ steps.meta.outputs.tag }}"
+          $Target = "${{ matrix.target }}"
+          $PkgDir = "aaf-$Tag-$Target"
+          $StageDir = Join-Path "staging" $PkgDir
+          New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
+          New-Item -ItemType Directory -Path "dist" -Force | Out-Null
+          Copy-Item "target/$Target/release/aaf.exe" (Join-Path $StageDir "aaf.exe")
+          Copy-Item "target/$Target/release/aaf-hook.exe" (Join-Path $StageDir "aaf-hook.exe")
+          Copy-Item "LICENSE", "README.md" $StageDir
+          Compress-Archive -Path $StageDir -DestinationPath "dist/$PkgDir.zip" -Force
+          Get-Item "dist/$PkgDir.zip" | Format-List Name, Length
+
+      - name: Upload target archive
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
-          path: dist/aaf-*.tar.gz
+          path: dist/aaf-*
           if-no-files-found: error
 
   publish:
@@ -123,7 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          LC_ALL=C sha256sum aaf-*.tar.gz | sort -k2 > SHA256SUMS.txt
+          LC_ALL=C sha256sum aaf-*.tar.gz aaf-*.zip | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Publish GitHub Release
@@ -134,4 +154,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/aaf-*.tar.gz
+            dist/aaf-*.zip
             dist/SHA256SUMS.txt

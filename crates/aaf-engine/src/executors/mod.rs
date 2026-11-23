@@ -8,6 +8,7 @@ pub mod generic;
 pub mod linux_sandbox;
 pub mod pty;
 pub mod reaper;
+pub mod registry;
 pub mod sandbox;
 pub mod sandbox_check;
 pub mod secret_mask;

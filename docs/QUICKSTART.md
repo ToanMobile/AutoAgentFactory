@@ -1,0 +1,177 @@
+# AutoAgentFactory (`aaf`) — 3-Minute Quickstart
+
+Get from zero to a receipt-verified autonomous agent workflow on macOS, Linux, or Windows in under three minutes.
+
+---
+
+## 1. Install `aaf` and `aaf-hook`
+
+Every release binary is verified byte-for-byte against `SHA256SUMS.txt` before extraction.
+
+### macOS & Linux (1-line installer)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ToanMobile/AutoAgentFactory/main/scripts/install.sh | sh
+```
+
+Pin a release or custom directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ToanMobile/AutoAgentFactory/main/scripts/install.sh | sh -s -- --version v0.1.0 --dir ~/.local/bin
+```
+
+### Homebrew (macOS & Linux)
+
+```sh
+brew install --formula packaging/homebrew/aaf.rb
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/ToanMobile/AutoAgentFactory/main/scripts/install.ps1 | iex
+```
+
+Pin a release or custom directory:
+
+```powershell
+.\scripts\install.ps1 -Version v0.1.0 -InstallDir "$env:LOCALAPPDATA\Programs\aaf\bin"
+```
+
+### Docker (hardened Linux runner with `bwrap`)
+
+```sh
+docker build -f packaging/docker/Dockerfile -t aaf:local .
+docker run --rm -v "$PWD:/workspace" aaf:local doctor
+```
+
+Verify both binaries are on your `PATH`:
+
+```sh
+aaf --version
+```
+
+---
+
+## 2. Enable Shell Completions
+
+Enable tab-completion for all `aaf` subcommands and `--json`:
+
+```sh
+# Zsh (~/.zshrc)
+eval "$(aaf completions zsh)"
+
+# Bash (~/.bashrc)
+eval "$(aaf completions bash)"
+
+# Fish (~/.config/fish/config.fish)
+aaf completions fish | source
+```
+
+```powershell
+# PowerShell ($PROFILE)
+aaf completions powershell | Out-String | Invoke-Expression
+```
+
+---
+
+## 3. Initialize Your Repository
+
+Run inside any git repository to detect the stack, write `.autofactory/config.toml`, sync bundled domain skills, and install PreToolUse hooks for Claude Code, Codex CLI, and Gemini CLI:
+
+```sh
+cd /path/to/your-repo
+aaf init --with-skills --hook-host all
+```
+
+Commit the generated repo config and hook registration so isolated task worktrees inherit them:
+
+```sh
+git add .autofactory/config.toml .claude/settings.json .gitignore
+git commit -m "chore: initialize aaf"
+```
+
+---
+
+## 4. Check Machine & Repo Health
+
+```sh
+aaf doctor
+```
+
+`aaf doctor` exits `0` when git, config, hook registration, `aaf-hook` binary, data directory, and HMAC receipt key are all healthy (or `2` if a required check fails). Add `--json` for machine-readable output.
+
+---
+
+## 5. Run Built-In SOP Workflows
+
+Inspect and run repeatable Standard Operating Procedures (SOPs):
+
+```sh
+aaf sop list
+aaf sop run <sop-name>
+```
+
+Or queue and run individual tasks directly:
+
+```sh
+aaf board add \
+  --title "Add empty state for orders screen" \
+  --spec "Render an empty-state illustration when the user has zero orders." \
+  --accept "Empty list renders empty-state view" \
+  --priority P1
+
+aaf run
+```
+
+---
+
+## 6. Local Web UI & Mobile QR Pairing
+
+Launch the zero-dependency local web dashboard and print a terminal QR code to pair from your phone on the local network:
+
+```sh
+aaf ui --qr
+```
+
+---
+
+## 7. Remote Telegram Companion (Zero Open Ports)
+
+Run the outbound-only Telegram long-polling companion to inspect `/status`, `/board`, `/handover`, and issue two-step `/confirm` approvals from your phone:
+
+```sh
+export AAF_TELEGRAM_BOT_TOKEN="<your-bot-token>"
+aaf telegram --send-test
+aaf telegram
+```
+
+Configure `allowed_chat_ids` in `~/.config/autofactory/config.toml` (Tier 1 machine config). `aaf telegram` fails closed if no chat IDs are allowlisted.
+
+---
+
+## 8. Keep `aaf` Up to Date (Fail-Closed Self-Upgrade)
+
+`aaf upgrade` is **human-only** (refused inside agent runs when `AAF_RUN_ID` is set) and verifies SHA-256 checksums before replacing `aaf` and `aaf-hook` atomically:
+
+```sh
+# Check whether a newer version exists (read-only)
+aaf upgrade --check
+
+# Download and verify SHA-256 without overwriting binaries
+aaf upgrade --dry-run
+
+# Upgrade to the latest verified release
+aaf upgrade
+
+# Pin or roll back to a specific tag
+aaf upgrade --version v0.1.0
+```
+
+---
+
+## Next Steps
+
+- Full configuration & safety model: [README.md](../README.md)
+- Security architecture & threat boundaries: [SECURITY.md](../SECURITY.md)
+- Machine-readable automation: append `--json` to any command (except `aaf slot`).

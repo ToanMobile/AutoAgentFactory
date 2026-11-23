@@ -14,7 +14,8 @@ pub const ACTION_WORDS: &[&str] = &["approve", "unblock", "unfreeze"];
 
 /// Top-level `aaf` subcommands that include at least one guarded human action.
 const TOP_LEVEL_ACTIONS: &[&str] = &[
-    "approve", "board", "cockpit", "run", "init", "gc", "proof", "skills", "telegram",
+    "approve", "board", "cockpit", "run", "init", "gc", "proof", "skills", "sop", "telegram", "ui",
+    "upgrade",
 ];
 
 /// aaf sets this for everything a factory run starts, and refuses `approve`,
@@ -60,7 +61,11 @@ pub fn names_action(tokens: &[&str]) -> bool {
     non_flags.windows(2).any(|pair| {
         let (first, second) = (pair[0], pair[1]);
         (basename(first) == "aaf"
-            && matches!(second, "run" | "init" | "gc" | "cockpit" | "telegram"))
+            && matches!(
+                second,
+                "run" | "init" | "gc" | "cockpit" | "telegram" | "ui" | "upgrade"
+            ))
+            || (first == "sop" && matches!(second, "run" | "approve" | "send-back" | "init"))
             || (first == "proof" && second == "record")
             || (first == "skills" && second == "sync")
             || (first == "board"
@@ -154,6 +159,16 @@ fn action(args: &[String], certain: bool) -> Option<&'static str> {
         "init" => Some("init"),
         "gc" => Some("gc"),
         "telegram" => Some("telegram"),
+        "ui" => Some("ui"),
+        "upgrade" => Some("upgrade"),
+        "sop" => match positional.next()? {
+            "run" => Some("sop run"),
+            "approve" => Some("sop approve"),
+            "send-back" => Some("sop send-back"),
+            "init" => Some("sop init"),
+            sub if unknown(sub) => Some("sop <action chosen at run time>"),
+            _ => None,
+        },
         "proof" => match positional.next()? {
             "record" => Some("proof record"),
             sub if unknown(sub) => Some("proof <action chosen at run time>"),
