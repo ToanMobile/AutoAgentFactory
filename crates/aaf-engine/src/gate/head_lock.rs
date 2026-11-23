@@ -235,5 +235,12 @@ pub fn approve(
     };
     let key = aaf_fp::load_or_create_key(data_dir)?;
     aaf_fp::write_approval(data_dir, &key, repo_root, &approval)?;
+    // Also mirror under the primary repository root so `aaf merge` (running in a
+    // detached scratch worktree) finds approvals signed in any feature worktree.
+    if let Some(common_root) = common_repo_root(repo_root)
+        && common_root != repo_root
+    {
+        let _ = aaf_fp::write_approval(data_dir, &key, &common_root, &approval);
+    }
     Ok(approval)
 }
