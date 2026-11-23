@@ -65,7 +65,8 @@ enum Command {
     Telegram(cmd::telegram::TelegramArgs),
     /// Start the authenticated local/LAN Web & Mobile Cockpit (HTTP + SSE + QR).
     Ui(cmd::ui::UiArgs),
-    /// Self-update `aaf` and `aaf-hook` with SHA-256 verification (human-only).
+    /// Self-update `aaf` and `aaf-hook` (auto-builds from source inside the AAF repo, or downloads SHA-256 verified release; human-only).
+    #[command(visible_alias = "update")]
     Upgrade(cmd::upgrade::UpgradeArgs),
     /// Generate ready-to-eval shell completion scripts (bash, zsh, fish, powershell).
     Completions(cmd::completions::CompletionsArgs),

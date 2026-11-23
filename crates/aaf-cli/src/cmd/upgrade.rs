@@ -1,6 +1,9 @@
-//! `aaf upgrade`: fail-closed SHA-256 verified self-updater (human-only).
+//! `aaf upgrade` (alias `aaf update`): fail-closed SHA-256 verified self-updater
+//! or local `--from-source` Cargo installer (human-only).
 
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use aaf_engine::updater::{
     DEFAULT_REPO, HttpReleaseSource, ReleaseSource, UpdateError, UpdatePlan, check_for_update,
@@ -19,9 +22,14 @@ pub struct UpgradeArgs {
     /// Install a specific release tag (e.g. `v0.2.0`) instead of the latest release.
     #[arg(long)]
     pub version: Option<String>,
-    /// Download and verify SHA-256 without overwriting installed binaries.
+    /// Download/verify or preview source build without overwriting installed binaries.
     #[arg(long)]
     pub dry_run: bool,
+    /// Build and install `aaf` and `aaf-hook` locally via `cargo install --locked`
+    /// from an AutoAgentFactory checkout (defaults to current directory when no path is given).
+    /// Also auto-activated when run inside an AutoAgentFactory checkout without `--version`/`--check`.
+    #[arg(long, num_args = 0..=1, default_missing_value = ".")]
+    pub from_source: Option<PathBuf>,
     /// Destination directory for `aaf` and `aaf-hook` (defaults to the directory of this `aaf` binary).
     #[arg(long)]
     pub dir: Option<PathBuf>,
@@ -48,6 +56,10 @@ pub fn run_with_source(
         );
         return Ok(CmdOutput::policy("refused", format!("refused: {reason}"))
             .field("reason", json!(reason)));
+    }
+
+    if let Some(source_root) = resolve_source_checkout(args, ctx)? {
+        return upgrade_from_source(&source_root, args);
     }
 
     let target = current_target_triple().map_err(map_update_err)?;
@@ -205,4 +217,213 @@ fn attach_plan_fields(out: CmdOutput, plan: &UpdatePlan) -> CmdOutput {
 
 fn map_update_err(err: UpdateError) -> CmdError {
     CmdError::new(format!("upgrade: {err}"))
+}
+
+/// Returns `true` when `root` looks like a genuine AutoAgentFactory workspace
+/// (contains `Cargo.toml`, `crates/aaf-cli/Cargo.toml`, and `crates/aaf-hook/Cargo.toml`).
+pub(crate) fn is_aaf_source_checkout(root: &Path) -> bool {
+    let ws = root.join("Cargo.toml");
+    let cli = root.join("crates/aaf-cli/Cargo.toml");
+    let hook = root.join("crates/aaf-hook/Cargo.toml");
+    if !(ws.is_file() && cli.is_file() && hook.is_file()) {
+        return false;
+    }
+    let cli_ok = fs::read_to_string(&cli)
+        .ok()
+        .is_some_and(|t| t.contains("name = \"aaf-cli\""));
+    let hook_ok = fs::read_to_string(&hook)
+        .ok()
+        .is_some_and(|t| t.contains("name = \"aaf-hook\""));
+    cli_ok && hook_ok
+}
+
+fn find_aaf_checkout_root(start: &Path) -> Option<PathBuf> {
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        if is_aaf_source_checkout(dir) {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+fn resolve_source_checkout(args: &UpgradeArgs, ctx: &Ctx) -> Result<Option<PathBuf>, CmdError> {
+    if let Some(raw) = &args.from_source {
+        let candidate = if raw.is_absolute() {
+            raw.clone()
+        } else {
+            ctx.cwd.join(raw)
+        };
+        let resolved = find_aaf_checkout_root(&candidate).ok_or_else(|| {
+            CmdError::new(format!(
+                "upgrade: {} is not an AutoAgentFactory source checkout (missing crates/aaf-cli and crates/aaf-hook)",
+                candidate.display()
+            ))
+        })?;
+        return Ok(Some(resolved));
+    }
+    if args.version.is_none() && !args.check {
+        return Ok(find_aaf_checkout_root(&ctx.cwd));
+    }
+    Ok(None)
+}
+
+fn cargo_install_root(dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = dir?;
+    if dir.file_name().and_then(|n| n.to_str()) == Some("bin") {
+        dir.parent().map(Path::to_path_buf)
+    } else {
+        Some(dir.to_path_buf())
+    }
+}
+
+fn upgrade_from_source(root: &Path, args: &UpgradeArgs) -> CmdResult {
+    let crates = ["crates/aaf-cli", "crates/aaf-hook"];
+    let install_root = cargo_install_root(args.dir.as_deref());
+    if args.dry_run {
+        let mut lines = vec![format!("dry-run source upgrade from {}", root.display())];
+        for rel in crates {
+            let mut cmd_str = format!("cargo install --path {} --locked", root.join(rel).display());
+            if let Some(r) = &install_root {
+                cmd_str.push_str(&format!(" --root {}", r.display()));
+            }
+            lines.push(format!("  would run: {cmd_str}"));
+        }
+        return Ok(CmdOutput::ok("dry_run_source", lines.join("\n"))
+            .field("mode", json!("from_source"))
+            .field("source_root", json!(root))
+            .field("crates", json!(crates)));
+    }
+
+    for rel in crates {
+        let crate_path = root.join(rel);
+        notice(
+            "upgrade",
+            &format!("building and installing {}...", crate_path.display()),
+        );
+        let mut cmd = Command::new("cargo");
+        cmd.arg("install")
+            .arg("--path")
+            .arg(&crate_path)
+            .arg("--locked");
+        if let Some(r) = &install_root {
+            cmd.arg("--root").arg(r);
+        }
+        let status = cmd
+            .status()
+            .map_err(|err| CmdError::new(format!("upgrade: failed to run cargo install: {err}")))?;
+        if !status.success() {
+            return Err(CmdError::new(format!(
+                "upgrade: cargo install failed for {} (exit {:?})",
+                crate_path.display(),
+                status.code()
+            )));
+        }
+    }
+
+    let text = format!(
+        "upgraded aaf and aaf-hook from local source ({})\n  all repositories using PATH now run the updated binaries",
+        root.display()
+    );
+    Ok(CmdOutput::ok("upgraded_from_source", text)
+        .field("mode", json!("from_source"))
+        .field("source_root", json!(root))
+        .field("crates", json!(crates)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aaf_engine::updater::ReleaseSource;
+
+    struct PanicSource;
+    impl ReleaseSource for PanicSource {
+        fn latest_tag(&self, _repo: &str) -> Result<String, UpdateError> {
+            panic!("should not query remote releases when building from source");
+        }
+        fn fetch_text(&self, _url: &str) -> Result<String, UpdateError> {
+            panic!("should not query remote releases when building from source");
+        }
+        fn fetch_bytes(&self, _url: &str, _max_bytes: usize) -> Result<Vec<u8>, UpdateError> {
+            panic!("should not query remote releases when building from source");
+        }
+    }
+
+    fn make_fake_aaf_checkout(dir: &Path) {
+        fs::create_dir_all(dir.join("crates/aaf-cli")).unwrap();
+        fs::create_dir_all(dir.join("crates/aaf-hook")).unwrap();
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(
+            dir.join("crates/aaf-cli/Cargo.toml"),
+            "[package]\nname = \"aaf-cli\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("crates/aaf-hook/Cargo.toml"),
+            "[package]\nname = \"aaf-hook\"\n",
+        )
+        .unwrap();
+    }
+
+    fn base_args() -> UpgradeArgs {
+        UpgradeArgs {
+            check: false,
+            version: None,
+            dry_run: true,
+            from_source: None,
+            dir: None,
+            repo: DEFAULT_REPO.to_string(),
+        }
+    }
+
+    fn make_ctx(cwd: PathBuf, base: &Path, run_id: Option<&str>) -> Ctx {
+        Ctx {
+            cwd,
+            home: base.join("home"),
+            data_dir: base.join("data"),
+            config_dir: base.join("config"),
+            worktrees_dir: base.join("worktrees"),
+            path_var: std::ffi::OsString::new(),
+            run_id: run_id.map(str::to_string),
+            stdin_is_tty: true,
+            aaf_env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn auto_detects_aaf_checkout_from_nested_subdir_in_dry_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_fake_aaf_checkout(tmp.path());
+        let nested = tmp.path().join("crates/aaf-cli");
+        let ctx = make_ctx(nested, tmp.path(), None);
+        let out = run_with_source(&base_args(), &ctx, &PanicSource, "0.1.0").unwrap();
+        assert_eq!(out.status, "dry_run_source");
+        assert!(out.text.contains("cargo install --path"));
+    }
+
+    #[test]
+    fn refuses_inside_agent_run_even_with_from_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_fake_aaf_checkout(tmp.path());
+        let mut args = base_args();
+        args.from_source = Some(tmp.path().to_path_buf());
+        let ctx = make_ctx(tmp.path().to_path_buf(), tmp.path(), Some("run-123"));
+        let out = run_with_source(&args, &ctx, &PanicSource, "0.1.0").unwrap();
+        assert_eq!(out.status, "refused");
+        assert_eq!(out.exit, crate::output::Exit::Policy);
+    }
+
+    #[test]
+    fn rejects_non_aaf_dir_for_explicit_from_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = base_args();
+        args.from_source = Some(tmp.path().to_path_buf());
+        let ctx = make_ctx(tmp.path().to_path_buf(), tmp.path(), None);
+        let err = run_with_source(&args, &ctx, &PanicSource, "0.1.0").unwrap_err();
+        assert!(
+            err.message
+                .contains("not an AutoAgentFactory source checkout")
+        );
+    }
 }

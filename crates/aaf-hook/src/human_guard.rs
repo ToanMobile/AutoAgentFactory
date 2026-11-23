@@ -15,7 +15,7 @@ pub const ACTION_WORDS: &[&str] = &["approve", "unblock", "unfreeze"];
 /// Top-level `aaf` subcommands that include at least one guarded human action.
 const TOP_LEVEL_ACTIONS: &[&str] = &[
     "approve", "board", "cockpit", "run", "init", "gc", "proof", "skills", "sop", "telegram", "ui",
-    "upgrade",
+    "update", "upgrade",
 ];
 
 /// aaf sets this for everything a factory run starts, and refuses `approve`,
@@ -63,7 +63,7 @@ pub fn names_action(tokens: &[&str]) -> bool {
         (basename(first) == "aaf"
             && matches!(
                 second,
-                "run" | "init" | "gc" | "cockpit" | "telegram" | "ui" | "upgrade"
+                "run" | "init" | "gc" | "cockpit" | "telegram" | "ui" | "update" | "upgrade"
             ))
             || (first == "sop" && matches!(second, "run" | "approve" | "send-back" | "init"))
             || (first == "proof" && second == "record")
@@ -160,6 +160,7 @@ fn action(args: &[String], certain: bool) -> Option<&'static str> {
         "gc" => Some("gc"),
         "telegram" => Some("telegram"),
         "ui" => Some("ui"),
+        "update" => Some("update"),
         "upgrade" => Some("upgrade"),
         "sop" => match positional.next()? {
             "run" => Some("sop run"),
