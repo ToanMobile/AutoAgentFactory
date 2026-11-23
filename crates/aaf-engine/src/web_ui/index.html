@@ -42,7 +42,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 .brand{display:flex;align-items:center;gap:10px;min-width:0}
 .logo{width:28px;height:28px;border-radius:8px;background:var(--ink);color:var(--bg);display:grid;place-items:center;font-weight:700;font-size:13px;letter-spacing:.03em;flex:none}
 .brand-title{font-weight:700;font-size:15px;letter-spacing:-.01em}
-.brand-sub{font-size:12px;color:var(--muted);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brand-sub{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .top-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .sse-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);font-size:12px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
@@ -81,7 +81,10 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 .task-main{min-width:0;flex:1}
 .task-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px}
 .task-title{font-weight:600;font-size:14px;word-break:break-word}
+.task-desc{font-size:12.5px;color:var(--muted);margin-top:5px;white-space:pre-line;word-break:break-word;line-height:1.45}
 .task-meta{font-size:12px;color:var(--muted);margin-top:4px;display:flex;gap:10px;flex-wrap:wrap}
+.tab.need-you-tab{border-color:color-mix(in srgb,var(--err) 40%,var(--border));color:var(--err)}
+.tab.need-you-tab.active{background:var(--err);color:#fff;border-color:var(--err)}
 .review-grid{display:grid;grid-template-columns:minmax(260px,360px) minmax(0,1fr);gap:12px;align-items:start}
 @media(max-width:860px){.review-grid{grid-template-columns:1fr}}
 .review-item{padding:11px 12px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;margin-bottom:8px}
@@ -138,6 +141,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="board">Board <span id="cntBoard" class="count">0</span></button>
+    <button class="tab need-you-tab" id="needYouTabBtn" type="button">Need You <span id="cntNeedYou" class="count">0</span></button>
     <button class="tab" data-tab="review">Needs Review <span id="cntReview" class="count">0</span></button>
     <button class="tab" data-tab="stream">Live Stream</button>
     <button class="tab" data-tab="machine">Machine &amp; Accounts</button>
@@ -238,7 +242,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 (() => {
   const TOKEN_KEY = "aaf_ui_token";
   const THEME_KEY = "aaf_ui_theme";
-  const STATES = ["all","ready","running","gating","review","blocked","done","backlog"];
+  const STATES = ["all","need_you","ready","running","gating","review","blocked","done","backlog"];
+  const STATE_LABELS = { need_you: "Need You" };
   let token = "";
   let meta = { read_only: true, scope: "", version: "" };
   let statusData = null;
@@ -339,13 +344,39 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     sse.onerror = () => setSseState("err", "Reconnecting…");
   }
 
+  function cleanSpec(raw) {
+    let s = String(raw || "");
+    s = s.replace(/<<<UNTRUSTED_DATA_BEGIN[^>]*>>>\s*/g, "").replace(/\s*<<<UNTRUSTED_DATA_END[^>]*>>>/g, "");
+    return s.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  function isNeedYouTask(t) {
+    if (!t) return false;
+    return t.state === "blocked" && (t.blocked_reason === "needs_human" || /needs?\s*you/i.test(t.blocked_detail || ""));
+  }
+
+  function formatBlockedText(b) {
+    if (!b) return "";
+    if (typeof b === "string") return b;
+    return b.why || b.detail || b.summary || JSON.stringify(b);
+  }
+
   function renderChips() {
     $("stateChips").innerHTML = STATES.map((s) =>
-      `<button class="chip ${stateFilter===s?"active":""}" data-st="${s}">${esc(s)}</button>`
+      `<button class="chip ${stateFilter===s?"active":""}" data-st="${s}">${esc(STATE_LABELS[s] || s)}</button>`
     ).join("");
     $("stateChips").querySelectorAll(".chip").forEach((b) => {
-      b.onclick = () => { stateFilter = b.dataset.st; renderChips(); renderBoard(); };
+      b.onclick = () => { stateFilter = b.dataset.st; syncBoardTabHighlight(); renderChips(); renderBoard(); };
     });
+  }
+
+  function syncBoardTabHighlight() {
+    const onBoard = activeTab === "board";
+    document.querySelectorAll(".tab[data-tab]").forEach((b) => {
+      const isBoardTab = b.dataset.tab === "board";
+      b.classList.toggle("active", isBoardTab ? (onBoard && stateFilter !== "need_you") : b.dataset.tab === activeTab);
+    });
+    $("needYouTabBtn").classList.toggle("active", onBoard && stateFilter === "need_you");
   }
 
   function renderStatusChrome() {
@@ -366,30 +397,54 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function renderBoard() {
     const prio = $("prioFilter").value;
     const q = $("searchBox").value.trim().toLowerCase();
-    const list = boardTasks.filter((t) => {
-      if (stateFilter !== "all" && t.state !== stateFilter) return false;
+    let list = boardTasks.filter((t) => {
+      if (stateFilter === "need_you") { if (!isNeedYouTask(t)) return false; }
+      else if (stateFilter !== "all" && t.state !== stateFilter) return false;
       if (prio && t.priority !== prio) return false;
-      if (q && !(t.id.toLowerCase().includes(q) || (t.title || "").toLowerCase().includes(q))) return false;
+      if (q) {
+        const hay = [t.id, t.title, t.repo_name, t.fingerprint, t.blocked_detail, t.spec_description].join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
       return true;
     });
+    if (stateFilter === "need_you") {
+      list = list.slice().sort((a, b) => {
+        const aNy = /needs?\s*you/i.test(a.blocked_detail || "") ? 0 : 1;
+        const bNy = /needs?\s*you/i.test(b.blocked_detail || "") ? 0 : 1;
+        return aNy - bNy;
+      });
+    }
     $("cntBoard").textContent = String(boardTasks.length);
+    const needYouCount = boardTasks.filter(isNeedYouTask).length;
+    $("cntNeedYou").textContent = String(needYouCount);
     const reviewCount = boardTasks.filter((t) => t.state === "review" || t.state === "blocked").length;
     $("cntReview").textContent = String(reviewCount);
+    syncBoardTabHighlight();
     if (!list.length) {
       $("boardList").innerHTML = `<div class="empty">No tasks match the current filters.</div>`;
       return;
     }
     $("boardList").innerHTML = list.map((t) => {
       const deps = (t.deps || []).length ? `<span>Deps: <span class="mono">${esc(t.deps.join(", "))}</span></span>` : "";
-      const blk = t.blocked_reason ? `<span style="color:var(--err)">Blocked: ${esc(t.blocked_reason)}</span>` : "";
+      const blkText = t.blocked_detail || t.blocked_reason || "";
+      const blk = blkText ? `<span style="color:var(--err);font-weight:600">Blocked: ${esc(blkText)}</span>` : "";
+      const repoBadge = t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : "";
+      const fpBadge = t.fingerprint ? `<span class="mono" style="font-size:11px;color:var(--muted)">${esc(t.fingerprint)}</span>` : "";
+      const needYouBadge = isNeedYouTask(t) ? `<span class="pill pill-blocked">${/needs?\s*you/i.test(t.blocked_detail || "") ? "Need You" : "Human"}</span>` : "";
+      const specBody = cleanSpec(t.spec_description || "");
+      const specPreview = specBody;
       return `<div class="task-row" data-id="${esc(t.id)}">
         <div class="task-main">
           <div class="task-head">
             <span class="mono" style="font-weight:700">${esc(t.id)}</span>
+            ${repoBadge}
             <span class="pill pill-${esc(t.priority.toLowerCase())}">${esc(t.priority)}</span>
             <span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>
+            ${needYouBadge}
+            ${fpBadge}
           </div>
           <div class="task-title">${esc(t.title)}</div>
+          ${specPreview ? `<div class="task-desc">${esc(specPreview)}</div>` : ""}
           <div class="task-meta">${deps}${blk}<span>Cycles: ${esc(t.unblock_cycles ?? 0)}</span></div>
         </div>
         <button class="btn-sm">Inspect</button>
@@ -411,14 +466,20 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const events = d.events || [];
       const deps = d.deps || [];
       const notes = t.context_notes || [];
+      const specText = cleanSpec(typeof t.spec === "string" ? t.spec : (t.spec && t.spec.description) || "");
+      const acceptance = (t.spec && Array.isArray(t.spec.acceptance)) ? t.spec.acceptance : [];
+      const blkText = formatBlockedText(t.blocked_reason);
       $("drawerBody").innerHTML = `
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <span class="pill pill-${esc((t.priority||"p2").toLowerCase())}">${esc(t.priority)}</span>
           <span class="pill pill-${esc(t.state||"backlog")}">${esc(t.state)}</span>
-          ${t.blocked_reason ? `<span class="pill pill-blocked">${esc(typeof t.blocked_reason === "string" ? t.blocked_reason : JSON.stringify(t.blocked_reason))}</span>` : ""}
+          ${t.fingerprint ? `<span class="pill pill-slate mono">${esc(t.fingerprint)}</span>` : ""}
+          ${blkText ? `<span class="pill pill-blocked">${esc(blkText)}</span>` : ""}
         </div>
-        <div style="font-weight:700;font-size:16px">${esc(t.title)}</div>
-        <div class="muted">${esc(t.spec && t.spec.description || "")}</div>
+        <div style="font-weight:700;font-size:16px;word-break:break-word">${esc(t.title)}</div>
+        ${t.repo_root ? `<div class="mono" style="font-size:12px;color:var(--muted)">${esc(t.repo_root)}</div>` : ""}
+        ${specText ? `<div class="kv-section"><div class="kv-title">Task Content / Spec</div><div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(specText)}</div></div>` : ""}
+        ${acceptance.length ? `<div class="kv-section"><div class="kv-title">Acceptance Criteria</div>${acceptance.map((a)=>`<div style="margin-bottom:4px">• ${esc(a)}</div>`).join("")}</div>` : ""}
         ${deps.length ? `<div class="kv-section"><div class="kv-title">Dependencies</div><div class="mono">${esc(deps.join(", "))}</div></div>` : ""}
         ${notes.length ? `<div class="kv-section"><div class="kv-title">Context / Steering Notes</div>${notes.map((n)=>`<div class="mono" style="margin-bottom:4px">• ${esc(n)}</div>`).join("")}</div>` : ""}
         <div class="kv-section">
@@ -647,7 +708,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
   function switchTab(tab) {
     activeTab = tab;
-    document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    syncBoardTabHighlight();
     ["board","review","stream","machine"].forEach((t) => $("view-" + t).classList.toggle("hidden", t !== tab));
     if (tab === "review") renderReviewQueue();
     if (tab === "machine") renderMachine();
@@ -668,7 +729,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   async function boot() {
     initTheme();
     renderChips();
-    document.querySelectorAll(".tab").forEach((b) => { b.onclick = () => switchTab(b.dataset.tab); });
+    document.querySelectorAll(".tab[data-tab]").forEach((b) => { b.onclick = () => { if (b.dataset.tab === "board" && stateFilter === "need_you") { stateFilter = "all"; renderChips(); renderBoard(); } switchTab(b.dataset.tab); }; });
+    $("needYouTabBtn").onclick = () => { stateFilter = "need_you"; switchTab("board"); renderChips(); renderBoard(); };
     $("prioFilter").onchange = renderBoard;
     $("searchBox").oninput = renderBoard;
     $("refreshBtn").onclick = () => refreshAll().then(() => toast("Refreshed")).catch((e) => toast(e.message));

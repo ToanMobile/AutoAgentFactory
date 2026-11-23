@@ -293,10 +293,20 @@ impl UiBackend for CliUiBackend {
                 let latest_run_id = db.runs_for_task(&t.id).ok().and_then(|rs| {
                     rs.into_iter().max_by_key(|r| (r.started_at, r.id.clone())).map(|r| r.id)
                 });
+                let repo_name = Path::new(&t.repo_root)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let blocked_detail = t.blocked_reason.as_ref().map(format_blocked_detail);
                 json!({
                     "id": t.id, "title": t.title, "state": t.state.as_str(),
                     "priority": t.priority.as_str(),
                     "blocked_reason": t.blocked_reason.as_ref().map(|b| b.kind()),
+                    "blocked_detail": blocked_detail,
+                    "spec_description": t.spec.description,
+                    "acceptance": t.spec.acceptance,
+                    "fingerprint": t.fingerprint,
+                    "repo_name": repo_name,
                     "unblock_cycles": t.unblock_cycles, "deps": deps, "repo_root": t.repo_root,
                     "created_at": t.created_at, "updated_at": t.updated_at, "latest_run_id": latest_run_id,
                 })
@@ -594,4 +604,21 @@ fn maybe_approve_on_unblock(db: &Db, task: &Task, now: i64) -> Result<bool, Port
         .unwrap_or(why);
     db.append_context_note(&task.id, &format!("{PLAN_APPROVED_PREFIX} {plan}"), now)?;
     Ok(true)
+}
+
+fn format_blocked_detail(reason: &BlockedReason) -> String {
+    match reason {
+        BlockedReason::NeedsHuman { why } => why.clone(),
+        BlockedReason::GateFailed { summary } => summary.clone(),
+        BlockedReason::Dependency { task_id } => format!("waiting on {task_id}"),
+        BlockedReason::MergeConflict { detail }
+        | BlockedReason::FlakyTest { detail }
+        | BlockedReason::Stuck { detail }
+        | BlockedReason::BudgetExceeded { detail }
+        | BlockedReason::Infra { detail } => detail.clone(),
+        BlockedReason::Quota { reset_at } => match reset_at {
+            Some(ts) => format!("quota exhausted (reset_at={ts})"),
+            None => "quota exhausted".to_string(),
+        },
+    }
 }
