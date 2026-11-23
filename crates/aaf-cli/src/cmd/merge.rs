@@ -77,7 +77,7 @@ pub struct MergeArgs {
     #[arg(long, default_value_t = 0)]
     ci_wait: u64,
     /// Seconds to wait for the per-repo merge lock.
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = 1800)]
     lock_timeout: u64,
     /// Verify the merged tree under the lock without merging on GitHub.
     #[arg(long)]

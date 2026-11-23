@@ -27,6 +27,8 @@ use crate::gate::{self, HiddenPolicy};
 use crate::throttle::{Progress, SystemProbe, Throttle};
 
 const MAX_OPTIMISTIC_RETRIES: usize = 2;
+/// How often a waiter on the per-repo merge lock prints progress to stderr.
+const MERGE_LOCK_PROGRESS_SECS: u64 = 15;
 /// Maximum seconds to wait for GitHub's PR view API to reflect a just-pushed
 /// head commit when `--ci-wait > 0` before returning `head_mismatch`.
 const HEAD_SETTLE_MAX_SECS: u64 = 15;
@@ -134,22 +136,43 @@ impl Drop for ScratchWorktree {
 struct MergeLockGuard(File);
 
 impl MergeLockGuard {
-    fn acquire(locks_dir: &Path, common_id: &str, timeout: Duration) -> Result<Self, GitError> {
-        fs::create_dir_all(locks_dir)?;
+    /// Returns `Ok(Some((guard, waited)))` when acquired (`waited == true` if
+    /// another merge held the lock at least once), or `Ok(None)` on timeout.
+    fn acquire(
+        locks_dir: &Path,
+        common_id: &str,
+        pr_number: u64,
+        timeout: Duration,
+        progress: &dyn Fn(&Progress<'_>),
+    ) -> Result<Option<(Self, bool)>, GitError> {
+        crate::db::private::create_dir(locks_dir)?;
         let path = locks_dir.join(format!("{common_id}.merge.lock"));
-        let file = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)?;
-        let deadline = Instant::now() + timeout;
+        let file = crate::db::private::open_file(&path)?;
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut last_report: Option<Instant> = None;
+        let mut waited = false;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(MergeLockGuard(file)),
+                Ok(()) => return Ok(Some((MergeLockGuard(file), waited))),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(50));
+                    waited = true;
+                    let now = Instant::now();
+                    let should_report = last_report.is_none_or(|prev| {
+                        now.saturating_duration_since(prev).as_secs() >= MERGE_LOCK_PROGRESS_SECS
+                    });
+                    if should_report {
+                        last_report = Some(now);
+                        progress(&Progress::WaitingForMergeLock {
+                            pr_number,
+                            waited_secs: now.saturating_duration_since(started).as_secs(),
+                            timeout_secs: timeout.as_secs(),
+                        });
+                    }
+                    let rem = deadline.saturating_duration_since(now);
+                    thread::sleep(rem.min(Duration::from_millis(50)));
                 }
-                Err(TryLockError::WouldBlock) => return Err(GitError::LockTimeout(path)),
+                Err(TryLockError::WouldBlock) => return Ok(None),
                 Err(TryLockError::Error(err)) => return Err(err.into()),
             }
         }
@@ -471,6 +494,93 @@ pub fn merge_pr(
     let probe = SystemProbe::detect();
     let throttle = Throttle::system(&req.machine, &probe, progress);
 
+    // Serial per-repo merge queue (canonical lock order: MergeLock -> HeavySlot,
+    // matching `merge_queue::merge`). Acquiring the repo merge lock after CI and
+    // before `verify_merged_tree` prevents duplicate `aaf merge <same-PR>` calls
+    // and back-to-back PRs in the same repo from burning duplicate RAM/Gradle
+    // runs against a stale base. `--dry-run` stays lock-free.
+    let _lock = if req.dry_run {
+        None
+    } else {
+        let locks_dir = req.data_dir.join("locks");
+        match MergeLockGuard::acquire(
+            &locks_dir,
+            &common_id,
+            req.pr_number,
+            req.lock_timeout,
+            progress,
+        )? {
+            Some((guard, waited)) => {
+                // Re-check PR state only when we actually waited on another merge:
+                // avoids an extra GitHub API round-trip on uncontended merges while
+                // still catching AlreadyMerged / draft / head changes after waiting.
+                if waited {
+                    let pr_after_lock = gh.view_pr(&req.repo_root, req.pr_number)?;
+                    if pr_after_lock.state.eq_ignore_ascii_case("MERGED") {
+                        return Ok(PrMergeOutcome::AlreadyMerged {
+                            pr_number: pr_after_lock.number,
+                            url: pr_after_lock.url,
+                        });
+                    }
+                    if !pr_after_lock.state.eq_ignore_ascii_case("OPEN") {
+                        return Ok(PrMergeOutcome::Blocked {
+                            code: "pr_not_open".to_string(),
+                            reason: format!(
+                                "PR #{} is in state {}",
+                                pr_after_lock.number, pr_after_lock.state
+                            ),
+                            receipt: None,
+                        });
+                    }
+                    if pr_after_lock.is_draft {
+                        return Ok(PrMergeOutcome::Blocked {
+                            code: "pr_is_draft".to_string(),
+                            reason: format!(
+                                "PR #{} is a draft; mark it ready for review first",
+                                pr_after_lock.number
+                            ),
+                            receipt: None,
+                        });
+                    }
+                    if !pr_after_lock
+                        .head_ref_oid
+                        .eq_ignore_ascii_case(&req.expect_head)
+                    {
+                        return Ok(PrMergeOutcome::Blocked {
+                            code: "head_mismatch".to_string(),
+                            reason: format!(
+                                "PR #{} head is {}, expected {}",
+                                pr_after_lock.number, pr_after_lock.head_ref_oid, req.expect_head
+                            ),
+                            receipt: None,
+                        });
+                    }
+                    pr = pr_after_lock;
+                }
+                Some(guard)
+            }
+            None => {
+                // One last check in case the active merger just landed this PR.
+                if let Ok(pr_now) = gh.view_pr(&req.repo_root, req.pr_number)
+                    && pr_now.state.eq_ignore_ascii_case("MERGED")
+                {
+                    return Ok(PrMergeOutcome::AlreadyMerged {
+                        pr_number: pr_now.number,
+                        url: pr_now.url,
+                    });
+                }
+                return Ok(PrMergeOutcome::Blocked {
+                    code: "merge_in_progress".to_string(),
+                    reason: format!(
+                        "another merge in this repository held the merge lock for {}s",
+                        req.lock_timeout.as_secs()
+                    ),
+                    receipt: None,
+                });
+            }
+        }
+    };
+
     let mut attempt = 0usize;
     loop {
         let (base_sha, head_sha) =
@@ -499,9 +609,6 @@ pub fn merge_pr(
             }
         };
 
-        let locks_dir = req.data_dir.join("locks");
-        let _lock = MergeLockGuard::acquire(&locks_dir, &common_id, req.lock_timeout)?;
-
         let pr_now = gh.view_pr(&req.repo_root, req.pr_number)?;
         if pr_now.state.eq_ignore_ascii_case("MERGED") {
             return Ok(PrMergeOutcome::AlreadyMerged {
@@ -524,8 +631,10 @@ pub fn merge_pr(
         let final_receipt = if base_now == base_sha {
             receipt
         } else if attempt < MAX_OPTIMISTIC_RETRIES {
+            // An external actor (e.g. GitHub Web UI) moved base while we verified;
+            // re-verify cleanly while keeping the repo merge lock held.
             attempt += 1;
-            drop(_lock);
+            pr = pr_now;
             continue;
         } else {
             let cfg_now =

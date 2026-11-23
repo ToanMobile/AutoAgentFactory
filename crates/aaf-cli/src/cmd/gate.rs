@@ -97,11 +97,27 @@ pub(crate) fn progress_line(event: &Progress<'_>) -> String {
             label,
             load_percent,
             max_load_percent,
+            cpu_busy_percent,
+            max_cpu_percent,
             waited_secs,
             gives_up_after_secs,
+        } => match (cpu_busy_percent, max_cpu_percent) {
+            (Some(busy), Some(max_cpu)) => format!(
+                "{label}: waiting for CPU busy {busy}% to drop below {max_cpu}% \
+                 (loadavg {load_percent}%), {waited_secs}s (runs anyway after {gives_up_after_secs}s)"
+            ),
+            _ => format!(
+                "{label}: waiting for CPU load {load_percent}% to drop to {max_load_percent}%, \
+                 {waited_secs}s (runs anyway after {gives_up_after_secs}s)"
+            ),
+        },
+        Progress::WaitingForMergeLock {
+            pr_number,
+            waited_secs,
+            timeout_secs,
         } => format!(
-            "{label}: waiting for CPU load {load_percent}% to drop to {max_load_percent}%, \
-             {waited_secs}s (runs anyway after {gives_up_after_secs}s)"
+            "PR #{pr_number}: waiting for another merge in this repo to finish, \
+             {waited_secs}s (timeout {timeout_secs}s)"
         ),
         Progress::Paused { label, slot } => {
             format!("{label}: paused under critical memory pressure (slot {slot})")

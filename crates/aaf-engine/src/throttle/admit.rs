@@ -150,6 +150,20 @@ impl Throttle<'_> {
                         let Some(load) = load.filter(|load| *load > max) else {
                             break;
                         };
+                        // Two-stage lazy check: on macOS, `vm.loadavg` counts I/O-waiting
+                        // threads and can exceed `max_load_percent` while real CPU is idle.
+                        // Verify real CPU busy% only when loadavg exceeds the ceiling.
+                        let max_cpu = self.machine.max_cpu_percent;
+                        let cpu_busy = if max_cpu > 0 {
+                            self.probe.cpu_busy_percent()
+                        } else {
+                            None
+                        };
+                        if let Some(busy) = cpu_busy
+                            && busy < max_cpu
+                        {
+                            break;
+                        }
                         let since = *load_wait_started.get_or_insert(now);
                         if waited_from(since, now) >= self.machine.heavy_wait_secs {
                             degraded = true;
@@ -159,6 +173,8 @@ impl Throttle<'_> {
                             label,
                             load_percent: load,
                             max_load_percent: max,
+                            cpu_busy_percent: cpu_busy,
+                            max_cpu_percent: cpu_busy.map(|_| max_cpu),
                             waited_secs: waited(now),
                             gives_up_after_secs: self.machine.heavy_wait_secs,
                         }

@@ -295,10 +295,11 @@ fn heavy_ceiling(machine: &MachineConfig) -> u32 {
 
 fn machine_detail(machine: &MachineConfig) -> String {
     format!(
-        "max_heavy_parallel={} (effective {}), max_load_percent={}, heavy_wait_secs={}, low_priority={}",
+        "max_heavy_parallel={} (effective {}), max_load_percent={}, max_cpu_percent={}, heavy_wait_secs={}, low_priority={}",
         machine.max_heavy_parallel,
         heavy_ceiling(machine),
         machine.max_load_percent,
+        machine.max_cpu_percent,
         machine.heavy_wait_secs,
         machine.low_priority
     )
@@ -587,6 +588,7 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
                 "max_heavy_parallel": effective.global.machine.max_heavy_parallel,
                 "effective_heavy_parallel": heavy_ceiling(&effective.global.machine),
                 "max_load_percent": effective.global.machine.max_load_percent,
+                "max_cpu_percent": effective.global.machine.max_cpu_percent,
                 "heavy_wait_secs": effective.global.machine.heavy_wait_secs,
                 "low_priority": effective.global.machine.low_priority,
             }),

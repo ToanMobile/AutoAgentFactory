@@ -51,6 +51,12 @@ pub struct MachineConfig {
     /// percentage of the CPU count, or while memory pressure is not normal.
     /// 0 disables the load check.
     pub max_load_percent: u32,
+    /// Real CPU busy percentage ceiling (0..=100) verified via OS CPU counters
+    /// when load average exceeds `max_load_percent`. Default 85 prevents macOS
+    /// I/O-inflated `vm.loadavg` from falsely blocking builds while real CPU
+    /// has headroom. Set 0 to disable real-CPU verification and rely solely on
+    /// `max_load_percent`.
+    pub max_cpu_percent: u32,
     /// Longest wait for the CPU load to drop. After it the command runs anyway
     /// (at low priority): load alone never stalls a task. Memory pressure and
     /// a taken slot are waited out without this ceiling, because every slot
@@ -79,6 +85,7 @@ impl Default for MachineConfig {
         MachineConfig {
             max_heavy_parallel: 0,
             max_load_percent: 150,
+            max_cpu_percent: 85,
             heavy_wait_secs: 1800,
             low_priority: true,
             exclusive_build_tools: true,

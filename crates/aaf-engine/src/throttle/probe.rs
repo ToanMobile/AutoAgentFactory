@@ -19,6 +19,12 @@ pub enum Pressure {
 pub trait LoadProbe: Send + Sync {
     /// 1-minute load average as a percentage of the CPU count.
     fn load_percent(&self) -> Option<u32>;
+    /// Real system-wide CPU busy percentage (`0..=100`, i.e. `100 - idle%`),
+    /// queried lazily only when `load_percent` exceeds `max_load_percent`.
+    /// Default `None` falls back to `load_percent` alone.
+    fn cpu_busy_percent(&self) -> Option<u32> {
+        None
+    }
     fn pressure(&self) -> Option<Pressure>;
     /// Memory a new process can take without swapping, in bytes.
     fn free_memory_bytes(&self) -> Option<u64>;
@@ -27,6 +33,8 @@ pub trait LoadProbe: Send + Sync {
 /// Budget for one measurement tool. They answer in milliseconds; a tool that
 /// hangs must not hang the gate.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Budget for a 1-second real-CPU sample (`iostat -C -n 0 -c 2 -w 1`).
+const CPU_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// PSI `full avg10` at or above this is `Critical`.
 /// ponytail: project default, not measured on a real Linux host; tune it
@@ -58,6 +66,65 @@ pub fn parse_loadavg(text: &str) -> Option<f64> {
 pub fn load_percent(load: f64, cpus: usize) -> u32 {
     // Float-to-integer `as` saturates, so an absurd load cannot wrap.
     (load * 100.0 / cpus.max(1) as f64).round() as u32
+}
+
+/// Real CPU busy percentage (`0..=100`) from macOS `iostat -C -n 0 -c 2 -w 1`.
+///
+/// Requires the `us sy id` header and at least two data rows (row 1 is the
+/// since-boot average; row 2 is the live 1-second sample). Returns `100 - id`.
+pub fn parse_macos_iostat_cpu(text: &str) -> Option<u32> {
+    let mut id_col: Option<usize> = None;
+    let mut samples: Vec<u32> = Vec::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.is_empty() {
+            continue;
+        }
+        if id_col.is_none() {
+            if let Some(pos) = cols.windows(3).position(|w| w == ["us", "sy", "id"]) {
+                id_col = Some(pos + 2);
+            }
+            continue;
+        }
+        if let Some(col) = id_col
+            && let Some(raw) = cols.get(col)
+            && let Ok(idle) = raw.parse::<u32>()
+            && idle <= 100
+        {
+            samples.push(100u32.saturating_sub(idle));
+        }
+    }
+    (samples.len() >= 2).then(|| *samples.last().unwrap_or(&0))
+}
+
+/// Real CPU busy percentage (`0..=100`) from two snapshots of Linux `/proc/stat`.
+///
+/// Treats `idle` + `iowait` as non-CPU-busy so disk I/O wait does not inflate CPU busy.
+pub fn parse_linux_proc_stat_cpu(before: &str, after: &str) -> Option<u32> {
+    let parse_cpu = |text: &str| -> Option<(u64, u64)> {
+        let line = text.lines().find(|l| l.starts_with("cpu "))?;
+        let vals: Vec<u64> = line
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        if vals.len() < 4 {
+            return None;
+        }
+        let idle = vals[3].saturating_add(vals.get(4).copied().unwrap_or(0));
+        let total: u64 = vals.iter().copied().fold(0u64, u64::saturating_add);
+        Some((total, idle))
+    };
+    let (t1, i1) = parse_cpu(before)?;
+    let (t2, i2) = parse_cpu(after)?;
+    let total_delta = t2.checked_sub(t1)?;
+    if total_delta == 0 {
+        return None;
+    }
+    let idle_delta = i2.saturating_sub(i1).min(total_delta);
+    let busy_delta = total_delta - idle_delta;
+    let pct = (busy_delta.saturating_mul(100) + total_delta / 2) / total_delta;
+    Some(u32::try_from(pct.min(100)).unwrap_or(100))
 }
 
 /// `sysctl -n kern.memorystatus_vm_pressure_level`: 1 normal, 2 warn,
@@ -293,18 +360,28 @@ pub(crate) fn first_existing(candidates: &[&'static str]) -> Option<&'static str
         .find(|path| Path::new(path).exists())
 }
 
-/// Stdout of a measurement tool, or `None` when it is missing, fails or
-/// exceeds [`PROBE_TIMEOUT`].
-pub(crate) fn tool_output(candidates: &[&'static str], args: &[&str]) -> Option<String> {
+/// Stdout of a measurement tool with an explicit timeout, or `None` on failure.
+fn tool_output_with_timeout(
+    candidates: &[&'static str],
+    args: &[&str],
+    timeout: Duration,
+) -> Option<String> {
     let mut command = Command::new(first_existing(candidates)?);
     command.args(args).env("LC_ALL", "C");
-    let finished = crate::process::run_with_timeout(command, PROBE_TIMEOUT, true).ok()?;
+    let finished = crate::process::run_with_timeout(command, timeout, true).ok()?;
     finished.status.filter(std::process::ExitStatus::success)?;
     String::from_utf8(finished.stdout).ok()
 }
 
+/// Stdout of a measurement tool, or `None` when it is missing, fails or
+/// exceeds [`PROBE_TIMEOUT`].
+pub(crate) fn tool_output(candidates: &[&'static str], args: &[&str]) -> Option<String> {
+    tool_output_with_timeout(candidates, args, PROBE_TIMEOUT)
+}
+
 const SYSCTL: &[&str] = &["/usr/sbin/sysctl", "/sbin/sysctl"];
 const VM_STAT: &[&str] = &["/usr/bin/vm_stat"];
+const IOSTAT: &[&str] = &["/usr/sbin/iostat", "/usr/bin/iostat"];
 
 /// Reads the real machine: `sysctl` and `vm_stat` on macOS, `/proc` elsewhere.
 #[derive(Debug, Clone, Copy)]
@@ -331,6 +408,22 @@ impl LoadProbe for SystemProbe {
             fs::read_to_string("/proc/loadavg").ok()?
         };
         Some(load_percent(parse_loadavg(&text)?, self.cpus))
+    }
+
+    fn cpu_busy_percent(&self) -> Option<u32> {
+        if cfg!(target_os = "macos") {
+            let text = tool_output_with_timeout(
+                IOSTAT,
+                &["-C", "-n", "0", "-c", "2", "-w", "1"],
+                CPU_PROBE_TIMEOUT,
+            )?;
+            parse_macos_iostat_cpu(&text)
+        } else {
+            let before = fs::read_to_string("/proc/stat").ok()?;
+            std::thread::sleep(Duration::from_millis(250));
+            let after = fs::read_to_string("/proc/stat").ok()?;
+            parse_linux_proc_stat_cpu(&before, &after)
+        }
     }
 
     fn pressure(&self) -> Option<Pressure> {

@@ -331,3 +331,60 @@ fn newer_measured_waiter_yields_to_older_fifo_ticket_when_slots_are_scarce() {
         .unwrap();
     assert!(admitted.is_some());
 }
+
+#[test]
+fn high_loadavg_with_calm_real_cpu_admits_immediately() {
+    let data = TempDir::new().unwrap();
+    let rig = Rig::calm();
+    // macOS I/O-inflated loadavg (172% > 150%), but real CPU busy is only 55% (< 85%).
+    rig.probe.load.set(vec![Some(172)]);
+    rig.probe.cpu_busy.set(vec![Some(55)]);
+
+    let admitted = rig
+        .throttle()
+        .admit(data.path(), &*rig.clock, REPO, LABEL)
+        .unwrap();
+    assert!(!admitted.degraded);
+    assert_eq!(admitted.waited_secs, 0);
+    assert_eq!(rig.sleeper.count(), 0);
+    assert_eq!(rig.probe.cpu_busy.calls(), 1);
+}
+
+#[test]
+fn high_loadavg_and_saturated_real_cpu_waits_until_cpu_drops() {
+    let data = TempDir::new().unwrap();
+    let rig = Rig::calm();
+    rig.probe.load.set(vec![Some(180)]);
+    rig.probe.cpu_busy.set(vec![Some(92), Some(85), Some(60)]);
+
+    let admitted = rig
+        .throttle()
+        .admit(data.path(), &*rig.clock, REPO, LABEL)
+        .unwrap();
+    assert!(!admitted.degraded);
+    assert_eq!(rig.sleeper.count(), 2);
+    let events = rig.events();
+    assert!(
+        events[0].contains("cpu_busy_percent: Some(92)"),
+        "{events:?}"
+    );
+    assert!(
+        events[0].contains("max_cpu_percent: Some(85)"),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn calm_loadavg_never_queries_slow_cpu_busy_probe() {
+    let data = TempDir::new().unwrap();
+    let rig = Rig::calm();
+    rig.probe.load.set(vec![Some(120)]);
+    rig.probe.cpu_busy.set(vec![Some(99)]);
+
+    let admitted = rig
+        .throttle()
+        .admit(data.path(), &*rig.clock, REPO, LABEL)
+        .unwrap();
+    assert!(!admitted.degraded);
+    assert_eq!(rig.probe.cpu_busy.calls(), 0);
+}

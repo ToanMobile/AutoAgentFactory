@@ -63,6 +63,7 @@ impl<T: Clone> Script<T> {
 
 pub struct FakeProbe {
     pub load: Script<Option<u32>>,
+    pub cpu_busy: Script<Option<u32>>,
     pub pressure: Script<Option<Pressure>>,
     pub free: Script<Option<u64>>,
 }
@@ -72,6 +73,7 @@ impl FakeProbe {
     pub fn calm() -> FakeProbe {
         FakeProbe {
             load: Script::new(vec![Some(10)]),
+            cpu_busy: Script::new(vec![None]),
             pressure: Script::new(vec![Some(Pressure::Normal)]),
             free: Script::new(vec![Some(64 * GIB)]),
         }
@@ -81,6 +83,10 @@ impl FakeProbe {
 impl LoadProbe for FakeProbe {
     fn load_percent(&self) -> Option<u32> {
         self.load.next()
+    }
+
+    fn cpu_busy_percent(&self) -> Option<u32> {
+        self.cpu_busy.next()
     }
 
     fn pressure(&self) -> Option<Pressure> {

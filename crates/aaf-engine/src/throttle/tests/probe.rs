@@ -191,5 +191,45 @@ fn system_probe_reads_this_machine() {
     if cfg!(target_os = "macos") {
         // Linux containers often hide /proc/pressure; macOS always answers.
         assert!(probe.pressure().is_some());
+        let cpu = probe.cpu_busy_percent();
+        assert!(cpu.is_some_and(|pct| pct <= 100), "{cpu:?}");
     }
+}
+
+#[test]
+fn parse_macos_iostat_cpu_uses_second_sample_and_dynamic_id_column() {
+    use super::super::probe::parse_macos_iostat_cpu;
+
+    let clean = "\
+      cpu    load average
+ us sy id   1m   5m   15m
+ 33 16 51  11.59 13.72 14.02
+ 47 15 39  11.59 13.72 14.02
+";
+    assert_eq!(parse_macos_iostat_cpu(clean), Some(61));
+
+    // Also works when disk columns precede `us sy id`.
+    let with_disks = "\
+disk0               cpu    load average
+    KB/t  tps  MB/s  us sy id   1m   5m   15m
+   25.08 1406 34.44  33 16 51  13.87 15.83 14.02
+   25.08  693 16.97  42 14 44  13.87 15.83 14.02
+";
+    assert_eq!(parse_macos_iostat_cpu(with_disks), Some(56));
+
+    // Only 1 sample (since-boot average) or missing header -> None.
+    let one_row = " us sy id\n 33 16 51\n";
+    assert_eq!(parse_macos_iostat_cpu(one_row), None);
+    assert_eq!(parse_macos_iostat_cpu("garbage"), None);
+}
+
+#[test]
+fn parse_linux_proc_stat_cpu_excludes_idle_and_iowait() {
+    use super::super::probe::parse_linux_proc_stat_cpu;
+
+    let before = "cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 50 0 25 400 25 0 0 0 0 0\n";
+    // +40 user, +20 sys, +30 idle, +10 iowait => total +100, non-busy +40 => 60% busy
+    let after = "cpu  140 0 70 830 60 0 0 0 0 0\n";
+    assert_eq!(parse_linux_proc_stat_cpu(before, after), Some(60));
+    assert_eq!(parse_linux_proc_stat_cpu(before, before), None);
 }

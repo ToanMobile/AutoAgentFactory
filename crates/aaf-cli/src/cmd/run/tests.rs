@@ -96,6 +96,8 @@ fn a_wait_of_the_gate_is_one_line_that_names_the_tree_and_the_reason() {
         label: "build",
         load_percent: 400,
         max_load_percent: 150,
+        cpu_busy_percent: None,
+        max_cpu_percent: None,
         waited_secs: 30,
         gives_up_after_secs: 1800,
     };

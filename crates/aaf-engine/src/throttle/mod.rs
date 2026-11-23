@@ -69,8 +69,18 @@ pub enum Progress<'a> {
         label: &'a str,
         load_percent: u32,
         max_load_percent: u32,
+        /// Real system CPU busy percentage (`0..=100`) when verified via OS counters.
+        cpu_busy_percent: Option<u32>,
+        /// Configured real-CPU ceiling when real-CPU verification was active.
+        max_cpu_percent: Option<u32>,
         waited_secs: u64,
         gives_up_after_secs: u64,
+    },
+    /// Waiting for an active `aaf merge` on the same repository to finish.
+    WaitingForMergeLock {
+        pr_number: u64,
+        waited_secs: u64,
+        timeout_secs: u64,
     },
     /// The running command was stopped under critical memory pressure.
     Paused {
