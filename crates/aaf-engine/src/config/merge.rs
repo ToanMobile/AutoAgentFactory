@@ -34,6 +34,8 @@ pub struct GateOverlay {
     pub store_compliance: Option<StoreMode>,
     pub min_android_target_sdk: Option<u32>,
     pub command_timeout_secs: Option<u64>,
+    pub docs_fast_path: Option<bool>,
+    pub docs_fast_path_exclude_globs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -456,5 +458,21 @@ pub(crate) fn apply_overlay(
     }
     if let Some(timeout) = gate.command_timeout_secs {
         current.command_timeout_secs = timeout;
+    }
+    match gate.docs_fast_path {
+        Some(false) => current.docs_fast_path = false,
+        Some(true) if !current.docs_fast_path => {
+            warnings.push(format!(
+                "{source}: gate.docs_fast_path = true ignored: it may only be turned off (kept false)"
+            ));
+        }
+        Some(true) | None => {}
+    }
+    if let Some(globs) = gate.docs_fast_path_exclude_globs {
+        for glob in globs {
+            if !current.docs_fast_path_exclude_globs.contains(&glob) {
+                current.docs_fast_path_exclude_globs.push(glob);
+            }
+        }
     }
 }

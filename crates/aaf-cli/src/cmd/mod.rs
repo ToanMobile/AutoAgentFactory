@@ -11,6 +11,7 @@ pub mod gate;
 pub mod gc;
 pub mod handover;
 pub mod init;
+pub mod merge;
 pub mod plan;
 pub mod proof;
 pub mod run;

@@ -90,6 +90,11 @@ impl Approval {
     pub fn passes(&self, lock_fp: &str) -> bool {
         self.verdict == "PASS" && self.lock_fp == lock_fp
     }
+
+    /// Strict pass check requiring an independent reviewer (`same_account == false`).
+    pub fn passes_independent(&self, lock_fp: &str) -> bool {
+        self.passes(lock_fp) && !self.same_account
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

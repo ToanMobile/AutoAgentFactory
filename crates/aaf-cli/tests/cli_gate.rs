@@ -377,3 +377,29 @@ mod skip_rule {
         decide(Some(Pressure::Warn), true);
     }
 }
+
+#[test]
+fn gate_when_idle_defers_with_exit_2_when_a_heavy_slot_is_held() {
+    let sb = repo_with_test_command("true");
+    write(
+        &sb.repo.join(".autofactory/config.toml"),
+        "[commands]\ntest_full = \"true\"\n",
+    );
+    sb.commit_all("full");
+    let slot = aaf_engine::throttle::slots::slot_path(&sb.data, 0);
+    write(&slot, "");
+    let slot_file = File::options().read(true).write(true).open(&slot).unwrap();
+    slot_file.try_lock().unwrap();
+
+    let (code, body) = sb.json(&["gate", "--full", "--when-idle"]);
+    assert_eq!(code, 2, "{body}");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["status"], "BUSY");
+    assert_eq!(body["deferred"], true);
+    assert!(
+        body["idle_blockers"]
+            .as_array()
+            .is_some_and(|b| b.iter().any(|v| v.as_str().unwrap_or("").contains("slot"))),
+        "{body}"
+    );
+}

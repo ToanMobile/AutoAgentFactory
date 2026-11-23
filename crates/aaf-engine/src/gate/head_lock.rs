@@ -118,14 +118,45 @@ fn locked(
     Ok((report, aaf_fp::sha256_hex(&material)))
 }
 
-fn valid_approval(data_dir: &Path, repo_root: &Path, lock_fp: &str) -> Option<Approval> {
+fn common_repo_root(repo_root: &Path) -> Option<std::path::PathBuf> {
+    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+    let common = aaf_fp::git(repo_root, &args, &[], GIT_TIMEOUT).ok()?;
+    let common = Path::new(&common);
+    let main_root = match common.parent() {
+        Some(parent) if common.file_name().is_some_and(|name| name == ".git") => parent,
+        _ => common,
+    };
+    Some(main_root.to_path_buf())
+}
+
+fn valid_approval(
+    data_dir: &Path,
+    repo_root: &Path,
+    lock_fp: &str,
+    require_independent: bool,
+) -> Option<Approval> {
     // No key means nothing was ever signed here. An unreadable, unsigned or
     // tampered approval file is treated as no approval.
     let key = aaf_fp::load_key(data_dir).ok()?;
-    aaf_fp::read_approval(data_dir, &key, repo_root, lock_fp)
-        .ok()
-        .flatten()
-        .filter(|approval| approval.passes(lock_fp))
+    let check = |approval: &Approval| {
+        if require_independent {
+            approval.passes_independent(lock_fp)
+        } else {
+            approval.passes(lock_fp)
+        }
+    };
+    if let Ok(Some(approval)) = aaf_fp::read_approval(data_dir, &key, repo_root, lock_fp) {
+        return check(&approval).then_some(approval);
+    }
+    // Also accept a content-bound approval signed in the repository's primary
+    // checkout (e.g. when `aaf merge` verifies in a detached scratch worktree).
+    if let Some(common_root) = common_repo_root(repo_root)
+        && common_root != repo_root
+        && let Ok(Some(approval)) = aaf_fp::read_approval(data_dir, &key, &common_root, lock_fp)
+    {
+        return check(&approval).then_some(approval);
+    }
+    None
 }
 
 pub(crate) fn evaluate_changes(
@@ -143,7 +174,12 @@ pub(crate) fn evaluate_changes(
             approval: None,
         });
     }
-    let approval = valid_approval(data_dir, repo_root, &lock_fp);
+    let approval = valid_approval(
+        data_dir,
+        repo_root,
+        &lock_fp,
+        cfg.cross_audit.require_different_provider,
+    );
     Ok(HeadLockReport {
         status: if approval.is_some() {
             LockStatus::Approved

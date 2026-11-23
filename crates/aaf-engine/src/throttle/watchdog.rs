@@ -337,6 +337,10 @@ impl<'a> Watchdog<'a> {
             .and_then(|state| state.leader_started);
         let record = orphans::record_pause(self.data_dir, pgid, started.as_deref()).ok();
         let stopped = self.control.stop(pgid);
+        if stopped && !self.tracked.is_empty() {
+            // Also pause helpers in separate process groups (e.g. GradleDaemon / Unity workers).
+            let _ = self.control.signal_members("-STOP", &self.tracked);
+        }
         match (stopped, record) {
             (true, record) => self.record = record,
             (false, Some(record)) => record.clear(),
@@ -349,6 +353,9 @@ impl<'a> Watchdog<'a> {
         // A failed SIGCONT leaves the group stopped; keep reporting it paused
         // so the next sample tries again and no timeout is charged.
         if self.control.resume(pgid) {
+            if !self.tracked.is_empty() {
+                let _ = self.control.signal_members("-CONT", &self.tracked);
+            }
             self.paused = false;
             if let Some(record) = self.record.take() {
                 record.clear();

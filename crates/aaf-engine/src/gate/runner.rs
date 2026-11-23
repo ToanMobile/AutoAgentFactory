@@ -1,16 +1,118 @@
 //! Runs the repo's own lint, build and test commands.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use aaf_domain::config::CommandsConfig;
-use aaf_domain::gate::{CommandResult, GateMode};
+use aaf_domain::gate::{ChangeKind, CommandResult, GateMode};
 use aaf_domain::ports::Clock;
 
 use super::GateError;
+use super::changes::Change;
 use super::proc::capture;
 use crate::throttle::{HeavyJob, Throttle, heavy_tool};
+
+static DIFF_ENV_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Temp files exposing the verified gate change set to `lint` / `test_scoped`
+/// commands via `AAF_GATE_MODE`, `AAF_BASE_SHA`, `AAF_CHANGED_FILES_FILE`,
+/// and `AAF_DELETED_FILES_FILE`. Removed automatically on drop.
+pub struct DiffEnvFiles {
+    mode: String,
+    base_sha: String,
+    changed_path: PathBuf,
+    deleted_path: PathBuf,
+}
+
+impl DiffEnvFiles {
+    pub fn write(
+        mode: GateMode,
+        base_sha: Option<&str>,
+        changes: &[Change],
+    ) -> Result<DiffEnvFiles, GateError> {
+        let mut changed = BTreeSet::new();
+        let mut deleted = BTreeSet::new();
+        for ch in changes {
+            match ch.kind {
+                ChangeKind::Deleted => {
+                    deleted.insert(ch.path.as_str());
+                }
+                ChangeKind::Renamed => {
+                    changed.insert(ch.path.as_str());
+                    if let Some(old) = &ch.old_path {
+                        deleted.insert(old.as_str());
+                    }
+                }
+                ChangeKind::Added | ChangeKind::Modified => {
+                    changed.insert(ch.path.as_str());
+                }
+            }
+        }
+        let seq = DIFF_ENV_SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+        let changed_path = dir.join(format!("aaf-changed-{pid}-{seq}.txt"));
+        let deleted_path = dir.join(format!("aaf-deleted-{pid}-{seq}.txt"));
+        write_lines_private(&changed_path, &changed)?;
+        if let Err(err) = write_lines_private(&deleted_path, &deleted) {
+            let _ = fs::remove_file(&changed_path);
+            return Err(err.into());
+        }
+        let mode_str = match mode {
+            GateMode::Scoped => "scoped",
+            GateMode::Full => "full",
+            GateMode::Release => "release",
+        };
+        Ok(DiffEnvFiles {
+            mode: mode_str.to_string(),
+            base_sha: base_sha.unwrap_or_default().to_string(),
+            changed_path,
+            deleted_path,
+        })
+    }
+
+    pub fn env_pairs(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("AAF_GATE_MODE", self.mode.clone()),
+            ("AAF_BASE_SHA", self.base_sha.clone()),
+            (
+                "AAF_CHANGED_FILES_FILE",
+                self.changed_path.to_string_lossy().into_owned(),
+            ),
+            (
+                "AAF_DELETED_FILES_FILE",
+                self.deleted_path.to_string_lossy().into_owned(),
+            ),
+        ]
+    }
+}
+
+impl Drop for DiffEnvFiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.changed_path);
+        let _ = fs::remove_file(&self.deleted_path);
+    }
+}
+
+fn write_lines_private(path: &Path, lines: &BTreeSet<&str>) -> std::io::Result<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    for line in lines {
+        writeln!(file, "{line}")?;
+    }
+    Ok(())
+}
 
 /// Bytes of combined output kept per command.
 pub const LOG_TAIL_BYTES: usize = 4096;
@@ -33,6 +135,7 @@ pub fn test_command(commands: &CommandsConfig, mode: GateMode) -> (&'static str,
 pub fn plan(commands: &CommandsConfig, mode: GateMode) -> Vec<(&'static str, String)> {
     let mut steps = vec![("lint", commands.lint.trim())];
     if mode != GateMode::Scoped {
+        steps.push(("lint_full", commands.lint_full.trim()));
         steps.push(("build", commands.build.trim()));
     }
     steps.push(test_command(commands, mode));
@@ -51,14 +154,36 @@ pub fn run_command(
     command: &str,
     timeout: Duration,
 ) -> Result<CommandResult, GateError> {
+    run_command_with_env(repo_root, name, command, timeout, &[])
+}
+
+/// [`run_command`] with verified extra environment variables.
+pub fn run_command_with_env(
+    repo_root: &Path,
+    name: &str,
+    command: &str,
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+) -> Result<CommandResult, GateError> {
     // By path: a bare `sh` is looked up in `PATH` at every spawn, where the
     // task can have put one of its own.
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(command).current_dir(repo_root);
     // When the gate itself runs inside a git hook these would point the
-    // command's own git calls at the wrong repository.
-    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+    // command's own git calls at the wrong repository. Strip ambient diff vars too.
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "AAF_GATE_MODE",
+        "AAF_BASE_SHA",
+        "AAF_CHANGED_FILES_FILE",
+        "AAF_DELETED_FILES_FILE",
+    ] {
         cmd.env_remove(var);
+    }
+    for (k, v) in extra_env {
+        cmd.env(k, v);
     }
     let done = capture(cmd, timeout, Some(LOG_TAIL_BYTES), true)?;
     Ok(CommandResult {
@@ -100,7 +225,8 @@ pub fn run_all(
 /// name of the config key does not make it cheaper. The decision comes from
 /// the one classifier the throttle, `aaf slot` and the doctor share.
 pub fn is_heavy(name: &str, command: &str) -> bool {
-    matches!(name, "build" | "test_scoped" | "test_full") || heavy_tool(command).is_some()
+    matches!(name, "lint_full" | "build" | "test_scoped" | "test_full")
+        || heavy_tool(command).is_some()
 }
 
 /// What the throttled commands need besides the plan itself.
@@ -125,6 +251,7 @@ fn run_heavy(
     command: &str,
     timeout: Duration,
     heavy: &HeavyContext<'_>,
+    extra_env: &[(&str, &str)],
     notes: &mut Vec<String>,
 ) -> Result<CommandResult, GateError> {
     let job = HeavyJob {
@@ -137,7 +264,7 @@ fn run_heavy(
     };
     let run = heavy
         .throttle
-        .run_heavy(heavy.data_dir, heavy.clock, &job)?;
+        .run_heavy_with_env(heavy.data_dir, heavy.clock, &job, extra_env)?;
     if run.waited_secs > 0 {
         notes.push(format!(
             "{THROTTLE_NOTE}{name} waited {}s for a heavy slot or a calmer machine",
@@ -180,15 +307,35 @@ pub fn run_all_throttled(
     timeout: Duration,
     heavy: &HeavyContext<'_>,
 ) -> Result<ThrottledRun, GateError> {
+    run_all_throttled_with_env(repo_root, commands, mode, timeout, heavy, &[])
+}
+
+/// [`run_all_throttled`] with verified extra environment variables.
+pub fn run_all_throttled_with_env(
+    repo_root: &Path,
+    commands: &CommandsConfig,
+    mode: GateMode,
+    timeout: Duration,
+    heavy: &HeavyContext<'_>,
+    extra_env: &[(&str, &str)],
+) -> Result<ThrottledRun, GateError> {
     let mut run = ThrottledRun {
         results: Vec::new(),
         notes: Vec::new(),
     };
     for (name, command) in plan(commands, mode) {
         let result = if is_heavy(name, &command) {
-            run_heavy(repo_root, name, &command, timeout, heavy, &mut run.notes)?
+            run_heavy(
+                repo_root,
+                name,
+                &command,
+                timeout,
+                heavy,
+                extra_env,
+                &mut run.notes,
+            )?
         } else {
-            run_command(repo_root, name, &command, timeout)?
+            run_command_with_env(repo_root, name, &command, timeout, extra_env)?
         };
         let passed = result.passed();
         run.results.push(result);

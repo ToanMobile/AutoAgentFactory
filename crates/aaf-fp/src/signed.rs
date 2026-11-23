@@ -87,6 +87,8 @@ pub const APPROVAL_DOMAIN: &str = "approval\0";
 pub const PROOF_DOMAIN: &str = "proof\0";
 /// Domain tag of a signed post-gate cross-audit verdict.
 pub const AUDIT_DOMAIN: &str = "audit\0";
+/// Domain tag of a cross-worktree content-addressed receipt cache entry.
+pub const COMMON_RECEIPT_DOMAIN: &str = "common_receipt\0";
 
 fn mac_for(key: &[u8], domain: &str, payload: &str) -> Result<Hmac<Sha256>, FpError> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| FpError::BadKey)?;
@@ -235,6 +237,63 @@ pub fn write_receipt(data_dir: &Path, key: &[u8], receipt: &Receipt) -> Result<P
 /// Loads the latest receipt for `repo_root`; fails unless its signature holds.
 pub fn read_receipt(data_dir: &Path, key: &[u8], repo_root: &Path) -> Result<Receipt, FpError> {
     read_signed(&receipt_path(data_dir, repo_root), key, RECEIPT_DOMAIN)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommonReceiptEnvelope {
+    common_repo_id: String,
+    receipt: Receipt,
+}
+
+/// Content-addressed receipt cache path shared across worktrees of the same repo.
+pub fn common_receipt_path(data_dir: &Path, common_repo_id: &str, tree_fp: &str) -> PathBuf {
+    let safe_repo: String = common_repo_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    let fp_hash = sha256_hex(tree_fp.as_bytes());
+    data_dir
+        .join("receipts")
+        .join("common")
+        .join(safe_repo)
+        .join(format!("{fp_hash}.json"))
+}
+
+/// Signs and caches a `Clear` receipt under `(common_repo_id, tree_fp)`.
+pub fn write_common_receipt(
+    data_dir: &Path,
+    key: &[u8],
+    common_repo_id: &str,
+    receipt: &Receipt,
+) -> Result<PathBuf, FpError> {
+    let path = common_receipt_path(data_dir, common_repo_id, &receipt.tree_fp);
+    let envelope = CommonReceiptEnvelope {
+        common_repo_id: common_repo_id.to_string(),
+        receipt: receipt.clone(),
+    };
+    write_signed(data_dir, &path, key, COMMON_RECEIPT_DOMAIN, &envelope)?;
+    Ok(path)
+}
+
+/// Loads a signed cross-worktree cached receipt if it matches `common_repo_id`.
+pub fn read_common_receipt(
+    data_dir: &Path,
+    key: &[u8],
+    common_repo_id: &str,
+    tree_fp: &str,
+) -> Result<Receipt, FpError> {
+    let path = common_receipt_path(data_dir, common_repo_id, tree_fp);
+    let env: CommonReceiptEnvelope = read_signed(&path, key, COMMON_RECEIPT_DOMAIN)?;
+    if env.common_repo_id != common_repo_id {
+        return Err(FpError::BadSignature);
+    }
+    Ok(env.receipt)
+}
+
+/// Evicts any cached cross-worktree receipt for `(common_repo_id, tree_fp)`.
+pub fn remove_common_receipt(data_dir: &Path, common_repo_id: &str, tree_fp: &str) {
+    let path = common_receipt_path(data_dir, common_repo_id, tree_fp);
+    let _ = fs::remove_file(path);
 }
 
 pub fn write_approval(

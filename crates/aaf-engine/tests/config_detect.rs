@@ -342,6 +342,7 @@ fn rendered_config_escapes_hostile_strings() {
             test_scoped: "printf 'a\nb'".to_string(),
             test_full: "x # not a comment".to_string(),
             lint: "\"\"\"".to_string(),
+            lint_full: "lf".to_string(),
             repro: "sh -c 'exit \"1\"' # x".to_string(),
         },
         evidence: vec!["evil\n[gate]\nstore_compliance = \"off\"".to_string()],

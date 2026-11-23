@@ -27,6 +27,8 @@ struct Cli {
 enum Command {
     /// Detect the stack, write `.autofactory/config.toml`, register the hook.
     Init(cmd::init::InitArgs),
+    /// Verify a PR on latest base under the merge lock and merge it via GitHub.
+    Merge(cmd::merge::MergeArgs),
     /// Check the installation on this machine and in this repo.
     Doctor(cmd::doctor::DoctorArgs),
     /// List accounts, pick the next one, set or clear a cooldown.
@@ -63,6 +65,7 @@ impl Command {
     fn name(&self) -> &'static str {
         match self {
             Command::Init(_) => "init",
+            Command::Merge(_) => "merge",
             Command::Doctor(_) => "doctor",
             Command::Accounts(_) => "accounts",
             Command::Gate(_) => "gate",
@@ -111,6 +114,7 @@ fn main() -> ExitCode {
     let name = cli.command.name();
     let result = ctx::Ctx::from_process_env().and_then(|ctx| match &cli.command {
         Command::Init(args) => cmd::init::run(args, &ctx),
+        Command::Merge(args) => cmd::merge::run(args, &ctx),
         Command::Doctor(args) => cmd::doctor::run(args, &ctx),
         Command::Accounts(args) => cmd::accounts::run(args, &ctx),
         Command::Gate(args) => cmd::gate::run(args, &ctx),

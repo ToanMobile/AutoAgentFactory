@@ -16,6 +16,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::Sleeper;
+use super::heavy::HeavyTool;
 use super::paths::{ensure_closed_dir, guest_dir, is_guest, open_guest_file, read_guest_file};
 use crate::db::private;
 
@@ -75,6 +76,24 @@ pub fn recorded_peak(data_dir: &Path, repo_id: &str, label: &str) -> Option<u64>
         .map(|sample| sample.peak_rss_bytes)
         .max()
         .filter(|peak| *peak > 0)
+}
+
+/// Shared tool-level stats label so runs with custom `--label` (e.g. `red`)
+/// reuse the repo's measured tool peak RSS instead of running Unmeasured.
+pub fn tool_label(tool: HeavyTool) -> String {
+    format!("@tool:{}", tool.name())
+}
+
+/// Like [`recorded_peak`], falling back to `<repo_id>/@tool:<tool>` when
+/// the exact `(repo_id, label)` key has no prior measurement.
+pub fn recorded_peak_with_tool(
+    data_dir: &Path,
+    repo_id: &str,
+    label: &str,
+    tool: Option<HeavyTool>,
+) -> Option<u64> {
+    recorded_peak(data_dir, repo_id, label)
+        .or_else(|| tool.and_then(|t| recorded_peak(data_dir, repo_id, &tool_label(t))))
 }
 
 fn lock_file(data_dir: &Path, guest: bool, sleeper: &dyn Sleeper) -> io::Result<Option<File>> {

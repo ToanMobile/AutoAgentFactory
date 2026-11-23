@@ -4,6 +4,7 @@
 
 pub mod base;
 pub mod changes;
+pub mod docs_fast;
 pub mod head_lock;
 pub mod hidden;
 pub(crate) mod proc;
@@ -173,6 +174,9 @@ fn mode_rank(mode: GateMode) -> u8 {
 struct Asked<'a> {
     /// Canonical repo root.
     repo_root: &'a Path,
+    /// Shared repository id across all worktrees of the same repo.
+    common_repo_id: &'a str,
+    allow_common_cache: bool,
     tree_fp: &'a str,
     /// The base as it resolves now.
     base_sha: Option<&'a str>,
@@ -180,24 +184,44 @@ struct Asked<'a> {
     mode: GateMode,
 }
 
-/// The stored receipt, when it already proves what is being asked: signed,
-/// `Clear`, for exactly this repo root, tree, base and gate configuration,
-/// from a mode at least as strict. Anything else, a tampered file included,
-/// is a miss.
-///
-/// The base is part of it because the static checks and the head lock judge
-/// the difference to the base: the same files compared with a base that has
-/// moved can delete or change a locked file.
-fn reusable_receipt(data_dir: &Path, key: &[u8], asked: &Asked<'_>) -> Option<Receipt> {
-    let stored = aaf_fp::read_receipt(data_dir, key, asked.repo_root).ok()?;
-    let proves = stored.schema_version == RECEIPT_SCHEMA_VERSION
+fn receipt_matches(stored: &Receipt, asked: &Asked<'_>, check_repo_root: bool) -> bool {
+    stored.schema_version == RECEIPT_SCHEMA_VERSION
         && stored.status == GateStatus::Clear
-        && Path::new(&stored.repo_root) == asked.repo_root
+        && (!check_repo_root || Path::new(&stored.repo_root) == asked.repo_root)
         && stored.tree_fp == asked.tree_fp
         && stored.base_sha.as_deref() == asked.base_sha
         && stored.config_hash == asked.config_hash
-        && mode_rank(stored.mode) >= mode_rank(asked.mode);
-    proves.then_some(stored)
+        && mode_rank(stored.mode) >= mode_rank(asked.mode)
+}
+
+/// The stored receipt, when it already proves what is being asked: signed,
+/// `Clear`, for exactly this repo root (or sibling worktree of the same repo
+/// when proof is not required), tree, base and gate configuration, from a mode
+/// at least as strict. Anything else, a tampered file included, is a miss.
+fn reusable_receipt(data_dir: &Path, key: &[u8], asked: &Asked<'_>) -> Option<Receipt> {
+    let local_path = aaf_fp::receipt_path(data_dir, asked.repo_root);
+    if local_path.exists() {
+        // Fail closed on a tampered or foreign local receipt: never fall back
+        // to the cross-worktree cache when this checkout's own receipt is bad.
+        let stored = aaf_fp::read_receipt(data_dir, key, asked.repo_root).ok()?;
+        if Path::new(&stored.repo_root) != asked.repo_root {
+            return None;
+        }
+        if receipt_matches(&stored, asked, true) {
+            return Some(stored);
+        }
+    }
+    if asked.allow_common_cache
+        && let Ok(mut stored) =
+            aaf_fp::read_common_receipt(data_dir, key, asked.common_repo_id, asked.tree_fp)
+        && receipt_matches(&stored, asked, false)
+    {
+        stored.repo_root = asked.repo_root.to_string_lossy().into_owned();
+        // Materialize locally so hooks/handover reading `receipt_path(repo_root)` see it.
+        let _ = aaf_fp::write_receipt(data_dir, key, &stored);
+        return Some(stored);
+    }
+    None
 }
 
 /// Key of the repository in the learned memory statistics. Every worktree
@@ -290,8 +314,11 @@ pub fn run_gate_policy(
     } else {
         None
     };
+    let common_repo_id = stats_repo_id(repo_root);
     let asked = Asked {
         repo_root,
+        common_repo_id: &common_repo_id,
+        allow_common_cache: !cfg.proof.required,
         tree_fp: &fp_before,
         base_sha: base.sha.as_deref(),
         config_hash: &config_hash,
@@ -341,19 +368,45 @@ pub fn run_gate_policy(
         })
     };
     let mut notes = Vec::new();
+    let test_command_missing = runner::test_command(&cfg.commands, mode).1.is_empty();
     // With no command result yet, `Blocked` means an earlier stage blocks.
     let unblocked =
         verdict(&hidden, proof_block.as_deref(), Some(&[]), false).0 != GateStatus::Blocked;
-    let commands = if unblocked {
+    let take_docs_fast_path = unblocked
+        && mode == GateMode::Scoped
+        && cfg.gate.docs_fast_path
+        && !test_command_missing
+        && docs_fast::is_docs_only(
+            &set.changes,
+            &cfg.gate.head_lock_globs,
+            &cfg.gate.docs_fast_path_exclude_globs,
+        )?;
+    let commands = if take_docs_fast_path {
+        notes.push(format!(
+            "{}skipped lint and test_scoped for {} safe doc file(s)",
+            docs_fast::DOCS_FAST_PATH_NOTE,
+            set.changes.len()
+        ));
+        Some(Vec::new())
+    } else if unblocked {
         let timeout = Duration::from_secs(cfg.gate.command_timeout_secs);
-        let stats_repo_id = stats_repo_id(repo_root);
         let heavy = runner::HeavyContext {
             data_dir,
-            stats_repo_id: &stats_repo_id,
+            stats_repo_id: &common_repo_id,
             clock,
             throttle,
         };
-        let run = runner::run_all_throttled(repo_root, &cfg.commands, mode, timeout, &heavy)?;
+        let diff_env = runner::DiffEnvFiles::write(mode, base.sha.as_deref(), &set.changes)?;
+        let env_owned = diff_env.env_pairs();
+        let env_refs: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let run = runner::run_all_throttled_with_env(
+            repo_root,
+            &cfg.commands,
+            mode,
+            timeout,
+            &heavy,
+            &env_refs,
+        )?;
         notes = run.notes;
         Some(run.results)
     } else {
@@ -403,6 +456,11 @@ pub fn run_gate_policy(
         created_at: clock.now(),
     };
     aaf_fp::write_receipt(data_dir, &key, &receipt)?;
+    if receipt.status == GateStatus::Clear && !cfg.proof.required {
+        let _ = aaf_fp::write_common_receipt(data_dir, &key, &common_repo_id, &receipt);
+    } else {
+        aaf_fp::remove_common_receipt(data_dir, &common_repo_id, &receipt.tree_fp);
+    }
     Ok(GateRun {
         receipt,
         reused: false,

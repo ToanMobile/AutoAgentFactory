@@ -58,6 +58,19 @@ pub struct MachineConfig {
     /// Run heavy commands at low CPU and I/O priority so the desktop stays
     /// responsive.
     pub low_priority: bool,
+    /// When true (default), Gradle, Unity and xcodebuild commands always run
+    /// exclusively across all heavy slots regardless of recorded peak memory.
+    /// When false, measured runs share slots once free memory covers 1.25x
+    /// their recorded peak RSS (unmeasured first runs still run alone, and
+    /// same-worktree / Unity-editor correctness locks still apply).
+    pub exclusive_build_tools: bool,
+    /// Machine-wide cap on concurrent Unity Editor batch runs when
+    /// `exclusive_build_tools = false`. Default 1 prevents Unity License/Library
+    /// contention without blocking Gradle or other build tools.
+    pub max_unity_parallel: u32,
+    /// Load percentage ceiling (100 = 1.0x CPU count) used by `aaf gate --when-idle`.
+    /// 0 disables the load check in idle mode.
+    pub idle_max_load_percent: u32,
 }
 
 impl Default for MachineConfig {
@@ -67,6 +80,9 @@ impl Default for MachineConfig {
             max_load_percent: 150,
             heavy_wait_secs: 1800,
             low_priority: true,
+            exclusive_build_tools: true,
+            max_unity_parallel: 1,
+            idle_max_load_percent: 100,
         }
     }
 }
@@ -264,6 +280,8 @@ pub struct CommandsConfig {
     pub test_scoped: String,
     pub test_full: String,
     pub lint: String,
+    /// Heavy project-wide lint run only in `--full` and `--release` modes.
+    pub lint_full: String,
     /// A command that reproduces a reported failure. Read and stored, but
     /// nothing runs it yet: `aaf_engine::detector::repro` has no caller.
     pub repro: String,
@@ -304,6 +322,12 @@ pub struct GateConfig {
     pub store_compliance: StoreMode,
     pub min_android_target_sdk: u32,
     pub command_timeout_secs: u64,
+    /// Skip `lint` and `test_scoped` in `--scoped` mode when every changed
+    /// path is a safe documentation file (still runs hidden-file, static,
+    /// head-lock, store-compliance, and proof checks).
+    pub docs_fast_path: bool,
+    /// Extra path globs excluded from `docs_fast_path`.
+    pub docs_fast_path_exclude_globs: Vec<String>,
 }
 
 /// What coding agents load from a repository as instructions, hooks, skills
@@ -361,6 +385,8 @@ impl Default for GateConfig {
             store_compliance: StoreMode::Auto,
             min_android_target_sdk: DEFAULT_MIN_ANDROID_TARGET_SDK,
             command_timeout_secs: 1800,
+            docs_fast_path: true,
+            docs_fast_path_exclude_globs: Vec::new(),
         }
     }
 }

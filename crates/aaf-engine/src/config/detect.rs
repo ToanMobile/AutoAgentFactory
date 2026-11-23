@@ -49,6 +49,7 @@ fn commands(build: &str, test_scoped: &str, test_full: &str, lint: &str) -> Comm
         test_scoped: test_scoped.to_string(),
         test_full: test_full.to_string(),
         lint: lint.to_string(),
+        lint_full: String::new(),
         // A repro command is specific to the reported failure; never guessed.
         repro: String::new(),
     }

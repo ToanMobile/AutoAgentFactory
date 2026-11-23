@@ -171,6 +171,7 @@ fn running_gradle_command_blocks_every_other_command() {
     let ask = Ask {
         repo_id: REPO,
         label: "test_full",
+        tool: heavy_tool("./gradlew test"),
         exclusive: heavy_tool("./gradlew test").is_some(),
         wait_limit_secs: None,
     };

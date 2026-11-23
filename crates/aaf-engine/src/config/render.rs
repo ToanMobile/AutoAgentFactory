@@ -71,6 +71,8 @@ test_scoped = {test_scoped}
 # Whole suite for `aaf gate --full` and `--release`.
 test_full = {test_full}
 lint = {lint}
+# Heavy project-wide lint run only in `--full` and `--release` modes.
+lint_full = {lint_full}
 # Reproduces a reported failure; a task is filed only when it fails twice in a row.
 repro = {repro}
 
@@ -87,6 +89,7 @@ head_lock_globs = [
         test_scoped = quoted(&cmds.test_scoped),
         test_full = quoted(&cmds.test_full),
         lint = quoted(&cmds.lint),
+        lint_full = quoted(&cmds.lint_full),
         repro = quoted(&cmds.repro),
         base_ref = quoted(&gate.base_ref),
     );
@@ -102,6 +105,9 @@ store_compliance = {store}
 min_android_target_sdk = {min_sdk}
 # Per gate command; the process group is killed when it expires.
 command_timeout_secs = {command_timeout}
+# Skip lint/test_scoped in --scoped mode when only safe docs changed.
+docs_fast_path = {docs_fast_path}
+docs_fast_path_exclude_globs = []
 
 # Limits on automatic unblocking of a stuck task.
 [unblocker]
@@ -163,6 +169,7 @@ allowed_tools = [
         store = quoted(store),
         min_sdk = gate.min_android_target_sdk,
         command_timeout = gate.command_timeout_secs,
+        docs_fast_path = gate.docs_fast_path,
         cycles = unblocker.max_unblock_cycles,
         depth = unblocker.max_subtask_depth,
         tokens = unblocker.max_token_budget,

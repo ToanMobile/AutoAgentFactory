@@ -249,3 +249,45 @@ fn empty_command_is_an_error_and_takes_no_slot() {
             .is_ok()
     );
 }
+
+#[test]
+fn measured_build_tool_shares_slots_when_exclusive_build_tools_is_false() {
+    let data = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    let gradlew = work.path().join("gradlew");
+    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut rig = Rig::calm();
+    rig.machine.max_heavy_parallel = 2;
+    rig.machine.exclusive_build_tools = false;
+    let sample = HeavySample {
+        peak_rss_bytes: 1024,
+        duration_ms: 1,
+    };
+    record(data.path(), REPO, "job", sample, &rig.sleeper).unwrap();
+    // Slot 0 stays held throughout; a measured build tool must take slot 1 immediately.
+    let _holder = try_acquire(data.path(), 2, SMALL, &plenty)
+        .unwrap()
+        .unwrap();
+
+    let command = argv(&["./gradlew", "lint"]);
+    let done = run(&rig, data.path(), &job(work.path(), &command, Some(1)));
+    assert!(
+        done.is_some(),
+        "measured build tool should share slot 1 when exclusive_build_tools = false"
+    );
+    let done = done.unwrap();
+    assert!(done.status.success());
+    assert_eq!((done.slot, rig.sleeper.count()), (1, 0));
+
+    // Unmeasured build tools still run alone even when exclusive_build_tools = false.
+    let unmeasured_job = SlotJob {
+        repo_id: REPO,
+        label: "never-measured",
+        argv: &command,
+        cwd: work.path(),
+        wait_limit_secs: Some(1),
+        inherit_stdin: false,
+    };
+    assert!(run(&rig, data.path(), &unmeasured_job).is_none());
+}

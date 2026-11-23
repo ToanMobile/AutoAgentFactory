@@ -4,11 +4,12 @@
 //! not run at all (bad config, git failure).
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use aaf_domain::gate::{GateMode, GateStatus, Receipt, Severity};
 use aaf_engine::config::EffectiveConfig;
 use aaf_engine::gate::{GateError, GateRun};
-use aaf_engine::throttle::{Busy, Progress};
+use aaf_engine::throttle::{Busy, Progress, SystemProbe, idle};
 use serde_json::json;
 
 use crate::ctx::{Ctx, SystemClock};
@@ -16,7 +17,7 @@ use crate::output::{CmdError, CmdOutput, CmdResult, notice};
 
 #[derive(Debug, clap::Args)]
 #[group(multiple = false)]
-pub struct GateArgs {
+struct ModeArgs {
     /// Lint and the scoped tests (default).
     #[arg(long)]
     scoped: bool,
@@ -28,11 +29,25 @@ pub struct GateArgs {
     release: bool,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct GateArgs {
+    #[command(flatten)]
+    mode: ModeArgs,
+    /// Only run the gate when the machine is idle (no active heavy slots,
+    /// no active external Gradle/Unity/xcodebuild processes, normal memory
+    /// pressure, calm CPU load). Exits 2 (`BUSY`) if still busy after waiting.
+    #[arg(long)]
+    when_idle: bool,
+    /// Seconds to wait for the machine to become idle when `--when-idle` is set.
+    #[arg(long, default_value_t = 0)]
+    idle_wait_secs: u64,
+}
+
 impl GateArgs {
     fn mode(&self) -> GateMode {
-        if self.release {
+        if self.mode.release {
             GateMode::Release
-        } else if self.full {
+        } else if self.mode.full {
             GateMode::Full
         } else {
             GateMode::Scoped
@@ -196,6 +211,30 @@ fn mode_word(mode: GateMode) -> &'static str {
 pub fn run(args: &GateArgs, ctx: &Ctx) -> CmdResult {
     let repo_root = ctx.repo_root()?;
     let cfg = ctx.load_config(&repo_root)?;
+    if args.when_idle {
+        let probe = SystemProbe::detect();
+        let deadline = Instant::now() + Duration::from_secs(args.idle_wait_secs);
+        let mut last_blockers = idle::probe_idle(&ctx.data_dir, &cfg.global.machine, &probe);
+        while !last_blockers.is_empty() && Instant::now() < deadline {
+            notice(
+                "gate",
+                &format!("waiting for idle machine ({})", last_blockers.join("; ")),
+            );
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_secs(2)));
+            last_blockers = idle::probe_idle(&ctx.data_dir, &cfg.global.machine, &probe);
+        }
+        if !last_blockers.is_empty() {
+            let mut text = format!("BUSY ({}, deferred by --when-idle)", mode_word(args.mode()));
+            for b in &last_blockers {
+                text.push_str(&format!("\n  blocker: {b}"));
+            }
+            return Ok(CmdOutput::policy("BUSY", text)
+                .field("mode", json!(args.mode()))
+                .field("deferred", json!(true))
+                .field("idle_blockers", json!(last_blockers)));
+        }
+    }
     let GateRun { receipt, reused } =
         call_gate(ctx, &repo_root, &cfg, args.mode()).map_err(|e| {
             let mut message = format!("gate: {e}");
@@ -245,9 +284,14 @@ pub fn run(args: &GateArgs, ctx: &Ctx) -> CmdResult {
     for warning in &warnings {
         notice("gate", warning);
     }
+    let docs_fast_path = receipt
+        .reasons
+        .iter()
+        .any(|r| r.starts_with(aaf_engine::gate::docs_fast::DOCS_FAST_PATH_NOTE));
     Ok(out
         .field("mode", json!(receipt.mode))
         .field("repo_root", json!(receipt.repo_root))
+        .field("docs_fast_path", json!(docs_fast_path))
         .field("reasons", json!(receipt.reasons))
         .field("warnings", json!(warnings))
         .field("tree_fp", json!(receipt.tree_fp))

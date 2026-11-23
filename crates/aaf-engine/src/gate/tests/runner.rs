@@ -46,12 +46,19 @@ fn plan_follows_the_mode() {
         test_scoped: "ts".to_string(),
         test_full: "tf".to_string(),
         lint: "l".to_string(),
+        lint_full: "lf".to_string(),
         repro: "r".to_string(),
     };
     let names = |mode| -> Vec<&str> { plan(&commands, mode).into_iter().map(|s| s.0).collect() };
     assert_eq!(names(GateMode::Scoped), vec!["lint", "test_scoped"]);
-    assert_eq!(names(GateMode::Full), vec!["lint", "build", "test_full"]);
-    assert_eq!(names(GateMode::Release), vec!["lint", "build", "test_full"]);
+    assert_eq!(
+        names(GateMode::Full),
+        vec!["lint", "lint_full", "build", "test_full"]
+    );
+    assert_eq!(
+        names(GateMode::Release),
+        vec!["lint", "lint_full", "build", "test_full"]
+    );
     let only_test = CommandsConfig {
         test_scoped: " ts ".to_string(),
         ..CommandsConfig::default()

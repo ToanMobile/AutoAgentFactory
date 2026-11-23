@@ -8,15 +8,19 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub mod cmd;
+pub mod gh_client;
 pub mod merge_queue;
 pub mod pr;
+pub mod pr_merge;
 pub mod worktree;
 
 #[cfg(test)]
 mod tests;
 
+pub use gh_client::{GhClient, MergeStrategy, PrCheck, PrInfo, SystemGh};
 pub use merge_queue::{MergeOutcome, MergeRequest, merge};
 pub use pr::{PrOutcome, PrRequest, open_pr, open_pr_with_proof, pr_body, pr_body_with_proof};
+pub use pr_merge::{PrMergeOutcome, PrMergeRequest, merge_pr};
 pub use worktree::{TaskWorktree, WorktreeEntry};
 
 #[derive(Debug, thiserror::Error)]

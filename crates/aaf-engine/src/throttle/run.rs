@@ -10,6 +10,7 @@ use aaf_domain::ports::Clock;
 
 use super::daemons::{self, BuildDaemon};
 use super::heavy::{self, HeavyTool};
+use super::pools;
 use super::{
     Ask, HeavyJob, HeavyRun, HeavySample, Progress, Throttle, orphans, stats, token, watchdog,
 };
@@ -115,6 +116,34 @@ impl Throttle<'_> {
         // Before the wait for a slot: a stopped orphan may keep memory that
         // the admission below is waiting for.
         orphans::resume_orphans(data_dir, self.control);
+        // Layer 1: when `exclusive_build_tools = false` allows concurrent heavy
+        // builds to share Layer-2 capacity slots by RAM, acquire correctness locks
+        // (Unity pool -> Worktree lock) strictly BEFORE Layer 2 capacity slots.
+        // When `exclusive_build_tools = true`, Layer-2 already serializes every
+        // build tool exclusively across the machine.
+        let _correctness = if !self.machine.exclusive_build_tools {
+            let cwd_for_lock = command
+                .get_current_dir()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| data_dir.to_path_buf())
+                });
+            let correctness_ask = pools::CorrectnessAsk {
+                tool,
+                cwd: &cwd_for_lock,
+                max_unity_parallel: self.machine.max_unity_parallel,
+                wait_limit_secs: ask.wait_limit_secs,
+                jitter_seed: self.jitter_seed,
+            };
+            let Some(guard) =
+                pools::acquire_correctness(data_dir, &correctness_ask, clock, self.sleeper)?
+            else {
+                return Ok(None);
+            };
+            Some(guard)
+        } else {
+            None
+        };
         let Some(admitted) = self.admit_ask(data_dir, clock, &ask)? else {
             return Ok(None);
         };
@@ -204,8 +233,11 @@ impl Throttle<'_> {
         } else {
             Vec::new()
         };
-        let passed = !done.timed_out && done.status.success();
-        if let (true, Some(peak_rss_bytes)) = (passed, dog.peak_rss_bytes) {
+        // Record peak RSS when the command succeeded OR ran long enough (>= 5s)
+        // to produce a representative memory sample even if tests failed.
+        let recordable =
+            !done.timed_out && (done.status.success() || done.duration >= Duration::from_secs(5));
+        if let (true, Some(peak_rss_bytes)) = (recordable, dog.peak_rss_bytes) {
             let sample = HeavySample {
                 peak_rss_bytes,
                 duration_ms: u64::try_from(done.duration.as_millis()).unwrap_or(u64::MAX),
@@ -214,6 +246,10 @@ impl Throttle<'_> {
             // command stays "never measured" and keeps running alone, which
             // is the safe side; the result is unaffected.
             let _ = stats::record(data_dir, ask.repo_id, ask.label, sample, self.sleeper);
+            if let Some(t) = tool {
+                let tool_key = stats::tool_label(t);
+                let _ = stats::record(data_dir, ask.repo_id, &tool_key, sample, self.sleeper);
+            }
         }
         Ok(Some(Supervised {
             status: done.status,
@@ -238,9 +274,29 @@ impl Throttle<'_> {
         clock: &dyn Clock,
         job: &HeavyJob<'_>,
     ) -> io::Result<HeavyRun> {
-        self.run_heavy_with(data_dir, clock, job, &Inherited::from_process_env())
+        self.run_heavy_with_env(data_dir, clock, job, &[])
     }
 
+    /// [`Throttle::run_heavy`] with verified extra environment variables (after
+    /// stripping inherited `AAF_GATE_MODE`, `AAF_BASE_SHA`,
+    /// `AAF_CHANGED_FILES_FILE`, and `AAF_DELETED_FILES_FILE`).
+    pub fn run_heavy_with_env(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &HeavyJob<'_>,
+        extra_env: &[(&str, &str)],
+    ) -> io::Result<HeavyRun> {
+        self.run_heavy_with_all(
+            data_dir,
+            clock,
+            job,
+            &Inherited::from_process_env(),
+            extra_env,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn run_heavy_with(
         &self,
         data_dir: &Path,
@@ -248,20 +304,44 @@ impl Throttle<'_> {
         job: &HeavyJob<'_>,
         inherited: &Inherited,
     ) -> io::Result<HeavyRun> {
+        self.run_heavy_with_all(data_dir, clock, job, inherited, &[])
+    }
+
+    fn run_heavy_with_all(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &HeavyJob<'_>,
+        inherited: &Inherited,
+        extra_env: &[(&str, &str)],
+    ) -> io::Result<HeavyRun> {
         let tool = heavy::heavy_tool(job.command);
         let ask = Ask {
             repo_id: job.repo_id,
             label: job.label,
-            exclusive: tool.is_some(),
+            tool,
+            exclusive: self.machine.exclusive_build_tools && tool.is_some(),
             wait_limit_secs: None,
         };
         let argv = watchdog::heavy_argv(job.command, self.machine.low_priority, &self.tools);
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]).current_dir(job.cwd);
         // When the gate itself runs inside a git hook these would point the
-        // command's own git calls at the wrong repository.
-        for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        // command's own git calls at the wrong repository. Also strip ambient
+        // diff-context env vars so callers cannot spoof gate diff inputs.
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "AAF_GATE_MODE",
+            "AAF_BASE_SHA",
+            "AAF_CHANGED_FILES_FILE",
+            "AAF_DELETED_FILES_FILE",
+        ] {
             command.env_remove(var);
+        }
+        for (k, v) in extra_env {
+            command.env(k, v);
         }
         let launch = Launch {
             ask,
@@ -318,7 +398,8 @@ impl Throttle<'_> {
         let ask = Ask {
             repo_id: job.repo_id,
             label: job.label,
-            exclusive: tool.is_some(),
+            tool,
+            exclusive: self.machine.exclusive_build_tools && tool.is_some(),
             wait_limit_secs: job.wait_limit_secs,
         };
         let argv = watchdog::priority_argv(job.argv, self.machine.low_priority, &self.tools);

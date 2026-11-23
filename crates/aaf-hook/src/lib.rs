@@ -21,6 +21,7 @@ pub mod git_persist;
 pub mod heavy_guard;
 pub mod human_guard;
 pub mod paths;
+pub mod pr_merge_guard;
 pub mod shell;
 pub mod store_guard;
 
@@ -262,6 +263,7 @@ pub(crate) fn judge(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
         .or_else(|| git_files::check_cmd(cmd, ctx))
         .or_else(|| adb_guard::check(cmd, ctx))
         .or_else(|| delete_guard::check_cmd(cmd, ctx))
+        .or_else(|| pr_merge_guard::check(cmd))
         .or_else(|| store_guard::check(cmd, ctx))
         .or_else(|| heavy_guard::check(cmd))
 }
