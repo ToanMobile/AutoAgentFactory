@@ -44,6 +44,16 @@ impl GenericRunner {
     /// The prompt is substituted inside one argv element and no shell is
     /// involved, so nothing in it can add arguments or run commands.
     pub fn command(&self, request: &AgentRequest) -> CommandSpec {
+        let program_name = Path::new(&self.template[0])
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or(&self.template[0]);
+        let mut env = Vec::new();
+        if program_name == "gemini" {
+            // Headless Gemini CLI exits 55 in fresh worktrees under
+            // ~/.cache/autofactory/worktrees unless workspace trust is enabled.
+            env.push(("GEMINI_CLI_TRUST_WORKSPACE".to_string(), "true".to_string()));
+        }
         CommandSpec {
             program: self.template[0].clone(),
             args: self.template[1..]
@@ -51,7 +61,7 @@ impl GenericRunner {
                 .map(|arg| arg.replace(PROMPT_PLACEHOLDER, &request.prompt))
                 .collect(),
             cwd: None,
-            env: Vec::new(),
+            env,
             env_clear: false,
         }
     }
@@ -92,5 +102,40 @@ impl AgentRunner for GenericRunner {
             infra: None,
             log_tail: output.tail,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aaf_domain::ports::SandboxPolicy;
+
+    use super::*;
+
+    #[test]
+    fn gemini_command_sets_headless_workspace_trust_env() {
+        let req = AgentRequest {
+            run_id: "r1".to_string(),
+            cwd: "/tmp".to_string(),
+            prompt: "audit".to_string(),
+            account: None,
+            timeout_secs: 60,
+            sandbox: SandboxPolicy::default(),
+        };
+        let runner = GenericRunner::new(
+            vec![
+                "gemini".to_string(),
+                "-p".to_string(),
+                "{prompt}".to_string(),
+            ],
+            ExecEnv::default(),
+        )
+        .unwrap();
+        let spec = runner.command(&req);
+        assert!(
+            spec.env
+                .contains(&("GEMINI_CLI_TRUST_WORKSPACE".to_string(), "true".to_string())),
+            "{:?}",
+            spec.env
+        );
     }
 }
