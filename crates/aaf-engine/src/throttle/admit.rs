@@ -112,6 +112,7 @@ impl Throttle<'_> {
         let mut free_unreadable = false;
         let mut load_wait_started: Option<i64> = None;
         let mut warned = (false, false);
+        let mut ever_waited = false;
 
         // Wait for a calm machine BEFORE locking any heavy slot to eliminate
         // hold-and-wait starvation when memory pressure is Warn/Critical or
@@ -183,6 +184,7 @@ impl Throttle<'_> {
                 if expired(now) {
                     return Ok(None);
                 }
+                ever_waited = true;
                 self.report(&mut reporter, now, &event);
                 self.sleeper.sleep(calm_backoff.next_delay());
             }
@@ -294,6 +296,7 @@ impl Throttle<'_> {
                             reason,
                             waited_secs: waited(now),
                         };
+                        ever_waited = true;
                         self.report(&mut reporter, now, &event);
                         self.sleeper.sleep(slot_backoff.next_delay());
                     }
@@ -308,12 +311,13 @@ impl Throttle<'_> {
             // never hold-and-wait on a pressured machine.
             let pressure_now = self.probe.pressure();
             if matches!(pressure_now, Some(Pressure::Warn | Pressure::Critical)) {
+                ever_waited = true;
                 drop(slot);
                 continue;
             }
             return Ok(Some(Admitted {
                 slot,
-                waited_secs: waited(clock.now()),
+                waited_secs: if ever_waited { waited(clock.now()) } else { 0 },
                 degraded,
             }));
         }

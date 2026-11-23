@@ -39,8 +39,12 @@ fn gate_makes_an_open_data_dir_private_and_writes_owner_only_files() {
     .unwrap();
     let rig = Rig::calm();
     // A memory reading, so that the run is remembered in heavy_stats.json.
+    // Keep the command alive briefly (>5ms poll) so the watchdog always takes
+    // at least one sample even on fast Linux runners.
     rig.group.rss.lock().unwrap().push_back(Some(4096));
-    let receipt = repo.gate_on(&rig, &passing_cfg(), GateMode::Scoped, &*rig.clock);
+    let mut cfg = passing_cfg();
+    cfg.commands.test_scoped = "sleep 0.05".to_string();
+    let receipt = repo.gate_on(&rig, &cfg, GateMode::Scoped, &*rig.clock);
     assert_eq!(receipt.status, GateStatus::Clear, "{:?}", receipt.reasons);
 
     assert_eq!(mode(repo.data_dir()), 0o700);

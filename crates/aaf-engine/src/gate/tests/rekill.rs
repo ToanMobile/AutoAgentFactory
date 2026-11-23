@@ -20,13 +20,44 @@ use super::super::proc::capture;
 
 const ATTEMPTS: usize = 12;
 
+/// True while process group `pgid` still has a live (non-zombie) member.
+/// On Linux, killed orphaned children briefly remain as zombies until PID 1
+/// reaps them, and bare `kill -0 -- -<pgid>` still reports success for them.
 fn group_alive(pgid: u32) -> bool {
-    Command::new("/bin/kill")
+    let exists = Command::new("/bin/kill")
         .args(["-0", "--", &format!("-{pgid}")])
         .stderr(Stdio::null())
         .status()
         .unwrap()
-        .success()
+        .success();
+    if !exists {
+        return false;
+    }
+    let Ok(out) = Command::new("/bin/ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.trim().is_empty() {
+        return true;
+    }
+    let target = pgid.to_string();
+    text.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        let Some(g) = cols.next() else {
+            return false;
+        };
+        let Some(stat) = cols.next() else {
+            return false;
+        };
+        g == target && !stat.starts_with('Z')
+    })
 }
 
 /// Ends whatever the attempt left behind, so no `sleep 600` outlives the
