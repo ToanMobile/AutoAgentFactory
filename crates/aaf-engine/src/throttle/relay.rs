@@ -88,23 +88,35 @@ if [ -n "$armed" ]; then
   watcher=$!
   trap 'kill "$watcher" 2>/dev/null' EXIT
 fi
+group_live() {
+  kill -0 -"$1" 2>/dev/null || return 1
+  out=$(/bin/ps -A -o pgid=,stat= 2>/dev/null) || return 0
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | (
+    while read -r g s; do
+      [ "$g" = "$1" ] || continue
+      case "$s" in Z*) ;; *) exit 0 ;; esac
+    done
+    exit 1
+  )
+}
 [ -n "$sig" ] || wait "$reader"
 said=$?
 if [ -z "$sig" ]; then
   [ "$said" -ne 0 ] && [ -n "$armed" ] || exit 0
-  kill -0 -"$1" 2>/dev/null || exit 0
+  group_live "$1" || exit 0
   sig=TERM
 fi
 kill -"$sig" -"$1" 2>/dev/null
 n=0
-while kill -0 -"$1" 2>/dev/null && [ "$n" -lt "$2" ]; do
+while group_live "$1" && [ "$n" -lt "$2" ]; do
   /bin/sleep 1
   n=$((n+1))
 done
 n=0
 while :; do
   kill -KILL -"$1" 2>/dev/null
-  kill -0 -"$1" 2>/dev/null || exit 0
+  group_live "$1" || exit 0
   n=$((n+1))
   [ "$n" -lt "$3" ] || break
   /bin/sleep 0.1

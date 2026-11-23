@@ -25,15 +25,44 @@ const ATTEMPTS: usize = 12;
 /// Bound on every wait below; reached only when something is broken.
 const LIMIT: Duration = Duration::from_secs(60);
 
-/// True also when `kill` cannot be started (the process table is full):
+/// True while process group `pgid` has at least one live (non-zombie) member.
+/// Also true when `kill`/`ps` cannot be started (the process table is full):
 /// the [`Reaper`] then keeps trying, where a panic in its `drop` during an
 /// unwind aborted the test binary and left the forking group running.
 fn group_alive(pgid: u32) -> bool {
-    Command::new("/bin/kill")
+    let exists = Command::new("/bin/kill")
         .args(["-0", "--", &format!("-{pgid}")])
         .stderr(Stdio::null())
         .status()
-        .map_or(true, |status| status.success())
+        .map_or(true, |status| status.success());
+    if !exists {
+        return false;
+    }
+    let Ok(out) = Command::new("/bin/ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.trim().is_empty() {
+        return true;
+    }
+    let target = pgid.to_string();
+    text.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        let Some(g) = cols.next() else {
+            return false;
+        };
+        let Some(stat) = cols.next() else {
+            return false;
+        };
+        g == target && !stat.starts_with('Z')
+    })
 }
 
 /// Ends whatever the attempt left behind, so no `sleep 600` outlives the
@@ -222,9 +251,10 @@ fn a_relay_told_the_command_is_over_leaves_the_group_alone() {
 fn a_relay_for_a_group_its_owner_did_not_start_never_ends_it_unasked() {
     let dir = TempDir::new().unwrap();
     let pid_file = dir.path().join("pgid");
-    // `set -m` puts the background `sleep` in a group of its own, led by
-    // a grandchild of this process.
-    let mut outer = Command::new("/bin/sh")
+    // `/bin/bash` with `set -m` puts the background `sleep` in its own
+    // process group even without a controlling terminal (Ubuntu's `/bin/sh`
+    // is `dash`, which silently turns off `set -m` when `/dev/tty` is absent).
+    let mut outer = Command::new("/bin/bash")
         .arg("-c")
         .arg(format!(
             "set -m; /bin/sleep 600 & echo $! > '{}'; wait",
@@ -244,6 +274,10 @@ fn a_relay_for_a_group_its_owner_did_not_start_never_ends_it_unasked() {
         .parse()
         .unwrap();
     let reaper = Reaper(pgid);
+    assert!(
+        group_alive(pgid),
+        "grandchild sleep {pgid} did not lead its own process group"
+    );
     let mut relay = SignalRelay::start(pgid).unwrap();
     assert!(wait_for(&|| reader_started(relay.id())), "relay not ready");
 
@@ -266,7 +300,7 @@ fn a_relay_for_a_group_its_owner_did_not_start_never_ends_it_unasked() {
 fn a_relay_ends_the_group_when_its_owner_dies_while_the_pipe_is_still_held() {
     let dir = TempDir::new().unwrap();
     let pid_file = dir.path().join("pgid");
-    let mut owner = Command::new("/bin/sh")
+    let mut owner = Command::new("/bin/bash")
         .arg("-c")
         .arg(format!(
             "set -m; /bin/sleep 600 & echo $! > '{}'; wait",
@@ -286,6 +320,10 @@ fn a_relay_ends_the_group_when_its_owner_dies_while_the_pipe_is_still_held() {
         .parse()
         .unwrap();
     let _reaper = Reaper(pgid);
+    assert!(
+        group_alive(pgid),
+        "grandchild sleep {pgid} did not lead its own process group"
+    );
     let mut relay = SignalRelay::start_for(pgid, 0, owner.id()).unwrap();
     assert!(wait_for(&|| reader_started(relay.id())), "relay not ready");
 

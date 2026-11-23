@@ -119,22 +119,61 @@ fn kill(args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// True when process group `pgid` still has at least one non-zombie member.
+///
+/// On macOS, `kill -0 -- -<pgid>` already reports empty once only an unreaped
+/// zombie leader remains; on Linux it still succeeds until the leader is
+/// reaped. Checking `ps -A -o pgid=,stat=` after `kill -0` succeeds avoids
+/// spinning for the full [`KILL_LIMIT`] against a zombie leader on Linux,
+/// while failing safe (returning `true`) if `ps` cannot run.
+fn group_has_live_member(pgid: u32) -> bool {
+    let group = format!("-{pgid}");
+    if !kill(&["-0", "--", &group]) {
+        return false;
+    }
+    let Ok(out) = Command::new("/bin/ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.trim().is_empty() {
+        return true;
+    }
+    let target = pgid.to_string();
+    text.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        let Some(g) = cols.next() else {
+            return false;
+        };
+        let Some(stat) = cols.next() else {
+            return false;
+        };
+        g == target && !stat.starts_with('Z')
+    })
+}
+
 /// SIGKILL to every process in the group led by `pgid`, again and again
-/// until the group is empty, for at most `limit`. False when members were
-/// still there at the end.
+/// until no live (non-zombie) member remains, for at most `limit`. False when
+/// live members were still there at the end.
 ///
 /// One SIGKILL is not enough on macOS: a child being forked at that instant
 /// is created after the signal went out, keeps the group id and runs on
 /// (measured with a shell that forks in a loop). Called before the leader is
-/// reaped, so the group id cannot belong to anyone else yet; a group whose
-/// only member is the unreaped leader already counts as empty for `kill -0`.
+/// reaped, so the group id cannot belong to anyone else yet.
 fn kill_group_until_empty(pgid: u32, limit: Duration) -> bool {
     let group = format!("-{pgid}");
     let end = Instant::now() + limit;
     loop {
         // A non-zero exit is "no such process": the group ended by itself.
         kill(&["-KILL", "--", &group]);
-        if !kill(&["-0", "--", &group]) {
+        if !group_has_live_member(pgid) {
             return true;
         }
         if Instant::now() >= end {
