@@ -73,7 +73,7 @@ trap 'sig=TERM' TERM
 trap 'sig=HUP' HUP
 armed=
 leader_parent=$(/bin/ps -o ppid= -p "$1" 2>/dev/null)
-leader_parent=${leader_parent##* }
+for p in $leader_parent; do leader_parent=$p; break; done
 [ -n "$leader_parent" ] && [ "$leader_parent" = "$4" ] && armed=1
 exec 3<&0
 /bin/sh -c 'IFS= read -r said && [ "$said" = done ]' aaf-relay-reader <&3 >/dev/null 2>&1 &
@@ -92,19 +92,19 @@ fi
 said=$?
 if [ -z "$sig" ]; then
   [ "$said" -ne 0 ] && [ -n "$armed" ] || exit 0
-  kill -0 -- -"$1" 2>/dev/null || exit 0
+  kill -0 -"$1" 2>/dev/null || exit 0
   sig=TERM
 fi
-kill -"$sig" -- -"$1" 2>/dev/null
+kill -"$sig" -"$1" 2>/dev/null
 n=0
-while kill -0 -- -"$1" 2>/dev/null && [ "$n" -lt "$2" ]; do
+while kill -0 -"$1" 2>/dev/null && [ "$n" -lt "$2" ]; do
   /bin/sleep 1
   n=$((n+1))
 done
 n=0
 while :; do
-  kill -KILL -- -"$1" 2>/dev/null
-  kill -0 -- -"$1" 2>/dev/null || exit 0
+  kill -KILL -"$1" 2>/dev/null
+  kill -0 -"$1" 2>/dev/null || exit 0
   n=$((n+1))
   [ "$n" -lt "$3" ] || break
   /bin/sleep 0.1

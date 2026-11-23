@@ -258,7 +258,31 @@ fn board_split_runs_in_throwaway_worktree_and_checks_claude_hooks() {
     git(&fx2.repo, &["commit", "--quiet", "-m", "claude executor"]);
     let id2 = fx2.add("claude missing hook");
 
-    let refused = fx2.aaf(&["board", "split", &id2, "--dry-run", "--unsandboxed"]);
+    // Provide a stub `claude` binary on PATH so runner construction succeeds
+    // and the missing `.claude/settings.json` hook check is reached on CI
+    // runners where Claude CLI is not installed.
+    #[cfg(unix)]
+    let extra_path = {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = fx2.root().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("claude");
+        fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    };
+    #[cfg(not(unix))]
+    let extra_path = std::env::var("PATH").unwrap_or_default();
+
+    let refused = fx2.aaf_in(
+        &fx2.repo,
+        &["board", "split", &id2, "--dry-run", "--unsandboxed"],
+        &[("PATH", &extra_path)],
+    );
     assert_eq!(refused.code, 2, "{}", refused.stderr);
     assert_eq!(refused.json["status"], json!("refused"));
 }

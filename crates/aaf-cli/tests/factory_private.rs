@@ -47,8 +47,20 @@ fn accounts_and_run_leave_nothing_others_can_read() {
     assert_eq!(listed.code, 0, "{}", listed.stderr);
     assert_eq!(mode(&fx.data), 0o700);
 
-    // Nothing to do, but the run lock and the store are opened.
-    let ran = fx.aaf(&["run", "--unsandboxed"]);
+    // Nothing to do, but the run lock and the store are opened. Provide a
+    // stub `claude` binary on PATH so this test does not depend on a real
+    // Claude CLI installation on CI runners.
+    let bin = fx.root().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("claude");
+    fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = fx.aaf_in(&fx.repo, &["run", "--unsandboxed"], &[("PATH", &path)]);
     assert_eq!(ran.code, 0, "{}", ran.stderr);
 
     let mut found = Vec::new();
