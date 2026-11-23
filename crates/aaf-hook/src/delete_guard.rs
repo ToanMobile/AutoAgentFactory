@@ -60,19 +60,66 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     }
     match name {
         "rm" | "unlink" | "truncate" | "mv" | "tee" | "shred" => {
-            let takes_dirs = name == "mv"
-                || (name == "rm"
-                    && args
-                        .iter()
-                        .any(|a| a == "--recursive" || short_has(a, &['r', 'R'])));
-            positional(args)
-                .into_iter()
-                .find_map(|arg| target(arg, takes_dirs, name, ctx))
+            let is_recursive_rm = name == "rm"
+                && args
+                    .iter()
+                    .any(|a| a == "--recursive" || short_has(a, &['r', 'R']));
+            let takes_dirs = name == "mv" || is_recursive_rm;
+            positional(args).into_iter().find_map(|arg| {
+                if is_recursive_rm && let Some(denial) = check_recursive_rm_target(arg, "rm", ctx) {
+                    return Some(denial);
+                }
+                target(arg, takes_dirs, name, ctx)
+            })
         }
         "git" => git(args, ctx),
         "find" => find(args, ctx),
         _ => None,
     }
+}
+
+/// Enforces home/system protection, unresolved-var fail-closed, and repo-root
+/// containment (allowing only `/tmp/...` and `$TMPDIR/...` subpaths outside the
+/// repository) for recursive deletion targets (`rm -r`/`-rf`, `shutil.rmtree`, etc.).
+pub(crate) fn check_recursive_rm_target(raw: &str, verb: &str, ctx: &Ctx) -> Option<Denial> {
+    if paths::references_home(raw) && ctx.env.home.is_none() {
+        return Some(deny(format!(
+            "{verb} {raw}: home directory path cannot be safely verified"
+        )));
+    }
+    if paths::has_unresolved_var(raw) {
+        return Some(deny(format!(
+            "{verb} {raw}: recursive delete target contains an unresolved variable or substitution"
+        )));
+    }
+    let path = ctx.expand(raw);
+    let check_path = if raw.ends_with('/') {
+        paths::real(&path)
+    } else {
+        path
+    };
+    if let Some(why) = paths::is_system_or_home_danger(&check_path, ctx.env.home.as_deref()) {
+        return Some(deny(format!("{verb} {raw}: refuses to delete {why}")));
+    }
+    // Fast path: a target strictly inside `cwd` is already inside the repo (or
+    // cwd when outside any repo) without spawning git for `repo_root`.
+    if !ctx.cwd.as_os_str().is_empty()
+        && paths::is_inside(&check_path, &ctx.cwd)
+        && (!raw.ends_with('/') || paths::is_inside(&check_path, &paths::real(&ctx.cwd)))
+    {
+        return None;
+    }
+    let repo = ctx.root();
+    let in_repo = match &repo {
+        Some(root) => paths::is_inside(&check_path, root),
+        None => check_path.is_relative(),
+    };
+    if !in_repo && !paths::is_allowed_tmp_subpath(raw, &check_path, repo.as_deref()) {
+        return Some(deny(format!(
+            "{verb} {raw}: recursive delete target lies outside the repository root (only repo-local paths or /tmp / $TMPDIR subpaths are allowed)"
+        )));
+    }
+    None
 }
 
 /// Tools that remove or empty the files `find -exec` hands them. A shell is

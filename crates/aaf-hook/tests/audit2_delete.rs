@@ -135,8 +135,11 @@ fn a_wrapper_option_value_is_not_the_command() {
             // allowed
             ("sudo --user root rm notes.txt", ALLOW),
             ("timeout --signal KILL 5 rm notes.txt", ALLOW),
-            ("nice --adjustment 5 cat .env", ALLOW),
-            ("stdbuf -oL cat .env", ALLOW),
+            ("nice --adjustment 5 cat notes.txt", ALLOW),
+            ("stdbuf -oL cat notes.txt", ALLOW),
+            // reading `.env` through a wrapper is now blocked by secret_guard
+            ("nice --adjustment 5 cat .env", Some("secret_guard")),
+            ("stdbuf -oL cat .env", Some("secret_guard")),
             ("env --unset FOO ls", ALLOW),
             ("setsid rm build/a.tmp", ALLOW),
         ],

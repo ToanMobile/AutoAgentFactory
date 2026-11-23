@@ -95,7 +95,8 @@ fn a_variable_named_at_run_time_is_refused_next_to_a_slot() {
             ("$RUNNER xcodebuild -scheme App build", HEAVY),
             // allowed
             ("export \"$V\"=0", ALLOW),
-            ("export $(cat .env | xargs); npm test", ALLOW),
+            ("export $(cat .env.example | xargs); npm test", ALLOW),
+            ("export $(cat .env | xargs); npm test", Some("secret_guard")),
             (
                 "export JAVA_HOME=$(mise where java); aaf slot -- ./gradlew b",
                 ALLOW,

@@ -20,8 +20,10 @@ pub mod git_guard;
 pub mod git_persist;
 pub mod heavy_guard;
 pub mod human_guard;
+pub mod interp_guard;
 pub mod paths;
 pub mod pr_merge_guard;
+pub mod secret_guard;
 pub mod shell;
 pub mod store_guard;
 
@@ -239,12 +241,12 @@ pub fn decide(input: &[u8], env: &HookEnv) -> Decision {
             Some(raw) => {
                 let path = ctx.expand(raw);
                 data_guard::check_file(raw, &path, &ctx).or_else(|| {
-                    (tool != "Read")
-                        .then(|| {
-                            delete_guard::check_file(&path, &ctx)
-                                .or_else(|| git_files::check_file(&path))
-                        })
-                        .flatten()
+                    if tool == "Read" {
+                        secret_guard::check_read(&path)
+                    } else {
+                        delete_guard::check_file(&path, &ctx)
+                            .or_else(|| git_files::check_file(&path))
+                    }
                 })
             }
             None => return bad_input("file tool call without tool_input.file_path"),
@@ -263,6 +265,8 @@ pub(crate) fn judge(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
         .or_else(|| git_files::check_cmd(cmd, ctx))
         .or_else(|| adb_guard::check(cmd, ctx))
         .or_else(|| delete_guard::check_cmd(cmd, ctx))
+        .or_else(|| secret_guard::check_cmd(cmd, ctx))
+        .or_else(|| interp_guard::check_cmd(cmd, ctx))
         .or_else(|| pr_merge_guard::check(cmd))
         .or_else(|| store_guard::check(cmd, ctx))
         .or_else(|| heavy_guard::check(cmd))

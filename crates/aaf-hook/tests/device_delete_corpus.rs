@@ -8,6 +8,7 @@ use common::{Fixture, run_corpus, run_file_corpus};
 
 const ADB: Option<&str> = Some("adb_guard");
 const DELETE: Option<&str> = Some("delete_guard");
+const SECRET: Option<&str> = Some("secret_guard");
 const OPAQUE: Option<&str> = Some("unparsable_command");
 const ALLOW: Option<&str> = None;
 
@@ -212,8 +213,8 @@ fn delete_guard_bypass_corpus() {
         ("git clean -fd", ALLOW),
         ("git clean -n -x", ALLOW),
         ("git clean --dry-run -fdx", ALLOW),
-        ("cat .env", ALLOW),
-        ("cp .env /tmp/copy", ALLOW),
+        ("cat .env", SECRET),
+        ("cp .env /tmp/copy", SECRET),
         ("mv notes.txt renamed.txt", ALLOW),
         ("echo x > notes.txt", ALLOW),
         ("echo x 2> build/err.txt", ALLOW),
@@ -240,7 +241,8 @@ fn file_tools_cannot_write_protected_files() {
             ("Edit", "notes.txt", ALLOW),
             ("Write", "/tmp/outside/.env", ALLOW),
             ("Write", ".claude/commands/x.md", ALLOW),
-            ("Read", ".env", ALLOW),
+            ("Read", ".env", SECRET),
+            ("Read", ".env.example", ALLOW),
         ],
     );
 }

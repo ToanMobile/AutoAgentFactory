@@ -2,23 +2,194 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// Resolves `raw` the way the shell would for a literal word: `~`, `$HOME`
-/// and relative paths, then `.`/`..` without touching the file system.
+/// Resolves `raw` the way the shell would for a literal word: `~`, `$HOME`,
+/// `$PWD`, `$TMPDIR` and relative paths, then `.`/`..` without touching the file system.
 pub fn expand(raw: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     // `$HOMEWORK` is not `$HOME`: the prefix must end at a separator.
     let home_rest = ["~", "$HOME", "${HOME}"]
         .iter()
         .find_map(|prefix| raw.strip_prefix(prefix))
         .filter(|rest| rest.is_empty() || rest.starts_with('/'));
-    let path = match (home_rest, home) {
-        (Some(rest), Some(home)) => home.join(rest.trim_start_matches('/')),
-        _ => PathBuf::from(raw),
+    let pwd_rest = ["$PWD", "${PWD}"]
+        .iter()
+        .find_map(|prefix| raw.strip_prefix(prefix))
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
+    let tmp_rest = ["$TMPDIR", "${TMPDIR}"]
+        .iter()
+        .find_map(|prefix| raw.strip_prefix(prefix))
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
+    let path = if let (Some(rest), Some(home)) = (home_rest, home) {
+        home.join(rest.trim_start_matches('/'))
+    } else if let Some(rest) = pwd_rest {
+        cwd.join(rest.trim_start_matches('/'))
+    } else if let Some(rest) = tmp_rest
+        && let Some(tmpdir) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty())
+    {
+        PathBuf::from(tmpdir).join(rest.trim_start_matches('/'))
+    } else {
+        PathBuf::from(raw)
     };
     if path.is_absolute() {
         normalize(&path)
     } else {
         normalize(&cwd.join(path))
     }
+}
+
+/// True when `raw` starts with `~`, `$HOME`, or `${HOME}` (whole path or prefix).
+pub fn references_home(raw: &str) -> bool {
+    ["~", "$HOME", "${HOME}"].iter().any(|prefix| {
+        raw.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+/// True when `raw` still contains an unresolved shell variable (`$VAR`, `${...}`,
+/// `$(...)`) or backtick command substitution after stripping known safe prefixes
+/// (`$HOME`, `${HOME}`, `$PWD`, `${PWD}`, `$TMPDIR`, `${TMPDIR}`).
+pub fn has_unresolved_var(raw: &str) -> bool {
+    let tail = ["${HOME}", "$HOME", "${PWD}", "$PWD", "${TMPDIR}", "$TMPDIR"]
+        .iter()
+        .find_map(|prefix| {
+            raw.strip_prefix(prefix)
+                .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+        .unwrap_or(raw);
+    tail.contains('$') || tail.contains('`')
+}
+
+/// System roots whose recursive deletion is always catastrophic.
+const SYSTEM_EXACT_OR_PREFIX: &[&str] = &[
+    "/System",
+    "/Library",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/etc",
+    "/Applications",
+    "/opt",
+];
+
+/// Container roots whose direct deletion is catastrophic (while specific
+/// repo-local subpaths inside `/Volumes/<vol>/...` or `/Users/<u >/repo/...`
+/// are governed separately by repo-root containment).
+const CONTAINER_EXACT: &[&str] = &[
+    "/",
+    "/Users",
+    "/Volumes",
+    "/var",
+    "/private",
+    "/private/var",
+    "/tmp",
+    "/private/tmp",
+];
+
+fn check_one_system_or_home(p: &Path, home: Option<&Path>) -> Option<&'static str> {
+    if p == Path::new("/") {
+        return Some("filesystem root `/`");
+    }
+    if let Some(h) = home {
+        let h_norm = normalize(h);
+        if p == h_norm || h_norm.starts_with(p) {
+            return Some("user home directory");
+        }
+    }
+    let s = p.to_string_lossy();
+    if CONTAINER_EXACT.iter().any(|root| s == *root) {
+        return Some("system root directory");
+    }
+    // Block top-level mounted volume root `/Volumes/<vol>` itself.
+    if let Some(rest) = s.strip_prefix("/Volumes/")
+        && !rest.is_empty()
+        && !rest.contains('/')
+    {
+        return Some("mounted volume root");
+    }
+    if SYSTEM_EXACT_OR_PREFIX
+        .iter()
+        .any(|sys| p == Path::new(sys) || p.starts_with(sys))
+    {
+        return Some("system directory");
+    }
+    None
+}
+
+/// Returns a reason if `path` (or its symlink target) is `/` or a home/system root.
+pub fn is_system_or_home_danger(path: &Path, home: Option<&Path>) -> Option<&'static str> {
+    let real_home = home.map(real);
+    check_one_system_or_home(path, home)
+        .or_else(|| check_one_system_or_home(&real(path), real_home.as_deref()))
+}
+
+fn strictly_inside(child: &Path, parent: &Path) -> bool {
+    child.starts_with(parent) && child != parent
+}
+
+/// True iff `path` (and its symlink target) is strictly inside `/tmp`,
+/// `/private/tmp`, or `$TMPDIR` (never the root itself, and never escaping via
+/// symlinks). When `repo_root` itself lives inside `$TMPDIR` (e.g. unit tests),
+/// `$TMPDIR` is only exempted if `raw` explicitly referenced `$TMPDIR`/`${TMPDIR}`.
+pub fn is_allowed_tmp_subpath(raw: &str, path: &Path, repo_root: Option<&Path>) -> bool {
+    let resolved = real(path);
+    let in_tmp = |p: &Path| {
+        strictly_inside(p, Path::new("/tmp")) || strictly_inside(p, Path::new("/private/tmp"))
+    };
+    if in_tmp(path) && in_tmp(&resolved) {
+        return true;
+    }
+    if let Some(tmpdir_os) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()) {
+        let tmpdir = normalize(&PathBuf::from(tmpdir_os));
+        let tmpdir_real = real(&tmpdir);
+        let explicit_tmpdir = raw.starts_with("$TMPDIR/") || raw.starts_with("${TMPDIR}/");
+        let repo_in_tmpdir = repo_root.is_some_and(|r| {
+            strictly_inside(r, &tmpdir) || strictly_inside(&real(r), &tmpdir_real)
+        });
+        if (explicit_tmpdir || !repo_in_tmpdir)
+            && (strictly_inside(path, &tmpdir) || strictly_inside(path, &tmpdir_real))
+            && (strictly_inside(&resolved, &tmpdir) || strictly_inside(&resolved, &tmpdir_real))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+const SECRET_SUFFIXES: &[&str] = &[".keystore", ".jks", ".p12", ".pem", ".mobileprovision"];
+const SECRET_EXACT: &[&str] = &[
+    "keystore.properties",
+    "google-services.json",
+    "googleservice-info.plist",
+];
+const SECRET_ENV_ALLOWLIST: &[&str] = &[".env.example", ".env.sample", ".env.template"];
+
+/// Matches files that hold secrets or credentials (`.env`, `.env.*` except
+/// public templates, keystores, `keystore.properties`, `google-services.json`,
+/// PEM/P12 keys, SSH private keys).
+pub fn is_secret_file(path: &Path) -> Option<&'static str> {
+    let name = fold(path.file_name()?.to_str()?);
+    if SECRET_ENV_ALLOWLIST.contains(&name.as_str()) {
+        return None;
+    }
+    if name == ".env" {
+        return Some(".env");
+    }
+    if name.starts_with(".env.") {
+        return Some(".env.*");
+    }
+    if let Some(exact) = SECRET_EXACT.iter().find(|n| name == **n) {
+        return Some(exact);
+    }
+    if name == "id_rsa"
+        || name.starts_with("id_rsa.")
+        || name == "id_ed25519"
+        || name.starts_with("id_ed25519.")
+    {
+        return Some("ssh private key");
+    }
+    SECRET_SUFFIXES
+        .iter()
+        .find(|s| name.ends_with(**s))
+        .copied()
 }
 
 /// Removes `.` and resolves `..` lexically. A `..` that climbs above a

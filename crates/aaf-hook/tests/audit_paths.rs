@@ -13,6 +13,7 @@ use common::{Fixture, run_corpus, run_corpus_in, run_file_corpus};
 const ADB: Option<&str> = Some("adb_guard");
 const DATA: Option<&str> = Some("data_dir_guard");
 const DELETE: Option<&str> = Some("delete_guard");
+const SECRET: Option<&str> = Some("secret_guard");
 const STORE: Option<&str> = Some("store_submit_guard");
 const ALLOW: Option<&str> = None;
 
@@ -46,7 +47,9 @@ fn file_tools_follow_a_symlink_to_a_protected_file() {
             ("Write", "notes_link", ALLOW),
             ("Edit", "{root}/notes_link", ALLOW),
             ("Write", "ext_link", ALLOW),
-            ("Read", "env_link", ALLOW),
+            ("Read", "notes_link", ALLOW),
+            // reading a symlink to `.env` is blocked by secret_guard
+            ("Read", "env_link", SECRET),
         ],
     );
 }
@@ -70,7 +73,9 @@ fn bash_follows_a_symlink_to_a_protected_file() {
             ("rm notes_link", ALLOW),
             ("truncate -s 0 notes_link", ALLOW),
             ("echo x > ext_link", ALLOW),
-            ("cat env_link", ALLOW),
+            ("cat notes_link", ALLOW),
+            // reading a symlink to `.env` is blocked by secret_guard
+            ("cat env_link", SECRET),
         ],
     );
 }
