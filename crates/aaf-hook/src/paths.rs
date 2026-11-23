@@ -127,15 +127,24 @@ fn strictly_inside(child: &Path, parent: &Path) -> bool {
 
 /// True iff `path` (and its symlink target) is strictly inside `/tmp`,
 /// `/private/tmp`, or `$TMPDIR` (never the root itself, and never escaping via
-/// symlinks). When `repo_root` itself lives inside `$TMPDIR` (e.g. unit tests),
-/// `$TMPDIR` is only exempted if `raw` explicitly referenced `$TMPDIR`/`${TMPDIR}`.
+/// symlinks). When `repo_root` itself lives inside `/tmp` or `$TMPDIR` (e.g.
+/// tests or temp workspaces), relative escapes and siblings inside the same
+/// temp container directory are not exempted.
 pub fn is_allowed_tmp_subpath(raw: &str, path: &Path, repo_root: Option<&Path>) -> bool {
     let resolved = real(path);
     let in_tmp = |p: &Path| {
         strictly_inside(p, Path::new("/tmp")) || strictly_inside(p, Path::new("/private/tmp"))
     };
     if in_tmp(path) && in_tmp(&resolved) {
-        return true;
+        let repo_in_tmp = repo_root.is_some_and(|r| in_tmp(r) || in_tmp(&real(r)));
+        let explicit_tmp = raw.starts_with("/tmp/") || raw.starts_with("/private/tmp/");
+        let in_repo_parent_container = repo_root
+            .and_then(Path::parent)
+            .filter(|parent| in_tmp(parent) || in_tmp(&real(parent)))
+            .is_some_and(|parent| is_inside(path, parent) || is_inside(&resolved, parent));
+        if !repo_in_tmp || (explicit_tmp && !in_repo_parent_container) {
+            return true;
+        }
     }
     if let Some(tmpdir_os) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()) {
         let tmpdir = normalize(&PathBuf::from(tmpdir_os));
