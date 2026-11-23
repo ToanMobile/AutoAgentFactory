@@ -20,7 +20,8 @@ use super::heavy::HeavyTool;
 use super::paths::{ensure_closed_dir, guest_dir, is_guest, open_guest_file, read_guest_file};
 use crate::db::private;
 
-/// Runs remembered per command; the admission figure is their maximum.
+/// Runs remembered per command; the admission figure is their p75 (2nd
+/// highest once 4+ runs are recorded, conservative max for 1..=3 runs).
 pub const KEEP_RUNS: usize = 5;
 
 const FILE: &str = "heavy_stats.json";
@@ -69,13 +70,28 @@ pub fn samples(data_dir: &Path, repo_id: &str, label: &str) -> Vec<HeavySample> 
         .unwrap_or_default()
 }
 
-/// Largest peak among the remembered runs; `None` means "never measured".
+/// Representative peak among the remembered runs; `None` means "never measured".
+///
+/// Uses the conservative maximum while fewer than 4 samples exist, and drops
+/// the single highest outlier (p75 / 2nd highest) once 4 or more runs are
+/// recorded so one anomalous cold-build spike does not over-reserve memory for
+/// the next 5 runs.
 pub fn recorded_peak(data_dir: &Path, repo_id: &str, label: &str) -> Option<u64> {
-    samples(data_dir, repo_id, label)
-        .iter()
+    let mut peaks: Vec<u64> = samples(data_dir, repo_id, label)
+        .into_iter()
         .map(|sample| sample.peak_rss_bytes)
-        .max()
         .filter(|peak| *peak > 0)
+        .collect();
+    if peaks.is_empty() {
+        return None;
+    }
+    peaks.sort_unstable();
+    let idx = if peaks.len() >= 4 {
+        peaks.len() - 2
+    } else {
+        peaks.len() - 1
+    };
+    peaks.get(idx).copied()
 }
 
 /// Shared tool-level stats label so runs with custom `--label` (e.g. `red`)

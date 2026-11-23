@@ -42,7 +42,7 @@ fn record_then_read_back_per_repo_and_label() {
 }
 
 #[test]
-fn peak_is_the_maximum_of_the_last_five_runs() {
+fn peak_uses_p75_of_the_last_five_runs_and_drops_old_entries() {
     let data = TempDir::new().unwrap();
     let sleeper = sleeper();
     // The huge first run falls out of the window after five more.
@@ -52,7 +52,36 @@ fn peak_is_the_maximum_of_the_last_five_runs() {
     let kept = samples(data.path(), "repo", "build");
     assert_eq!(kept.len(), KEEP_RUNS);
     assert_eq!(kept[0], sample(100));
-    assert_eq!(recorded_peak(data.path(), "repo", "build"), Some(400));
+    // Sorted window is [100, 150, 200, 300, 400]; p75 drops the single top outlier (400 -> 300).
+    assert_eq!(recorded_peak(data.path(), "repo", "build"), Some(300));
+}
+
+#[test]
+fn recorded_peak_drops_single_high_outlier_once_four_or_more_samples_exist() {
+    let data = TempDir::new().unwrap();
+    let sleeper = sleeper();
+
+    // 1..=3 samples: keep conservative max so early runs never under-reserve.
+    record(data.path(), "repo", "lint", sample(1_800), &sleeper).unwrap();
+    assert_eq!(recorded_peak(data.path(), "repo", "lint"), Some(1_800));
+    record(data.path(), "repo", "lint", sample(5_500), &sleeper).unwrap();
+    assert_eq!(recorded_peak(data.path(), "repo", "lint"), Some(5_500));
+    record(data.path(), "repo", "lint", sample(2_200), &sleeper).unwrap();
+    assert_eq!(recorded_peak(data.path(), "repo", "lint"), Some(5_500));
+
+    // 4th sample: single cold-build spike (5_500) is dropped in favor of 2nd highest (2_500).
+    record(data.path(), "repo", "lint", sample(2_500), &sleeper).unwrap();
+    assert_eq!(recorded_peak(data.path(), "repo", "lint"), Some(2_500));
+
+    // 5th sample: still ignores the lone 5_500 outlier -> 2_600.
+    record(data.path(), "repo", "lint", sample(2_600), &sleeper).unwrap();
+    assert_eq!(recorded_peak(data.path(), "repo", "lint"), Some(2_600));
+
+    // Two genuinely high runs stay protected (drops only the single highest).
+    for peak in [1_800, 2_200, 3_800, 5_183, 5_505] {
+        record(data.path(), "repo", "heavy", sample(peak), &sleeper).unwrap();
+    }
+    assert_eq!(recorded_peak(data.path(), "repo", "heavy"), Some(5_183));
 }
 
 #[test]
