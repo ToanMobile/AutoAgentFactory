@@ -80,7 +80,7 @@ fn run_gh(repo_root: &Path, args: &[&str]) -> Result<String, GitError> {
     let mut cmd = Command::new(gh_bin);
     cmd.args(args).current_dir(repo_root);
     let label = format!("gh {}", args.join(" "));
-    let finished = run_with_timeout(cmd, GH_TIMEOUT, false)?;
+    let finished = run_with_timeout(cmd, GH_TIMEOUT, true)?;
     let Some(status) = finished.status else {
         return Err(GitError::Timeout { command: label });
     };
@@ -122,7 +122,7 @@ impl GhClient for SystemGh {
         let mut cmd = Command::new(gh_bin);
         cmd.args(["pr", "checks", &pr, "--json", "name,state,bucket"])
             .current_dir(repo_root);
-        let finished = run_with_timeout(cmd, GH_TIMEOUT, false)?;
+        let finished = run_with_timeout(cmd, GH_TIMEOUT, true)?;
         let Some(status) = finished.status else {
             return Err(GitError::Timeout {
                 command: format!("gh pr checks {pr}"),
