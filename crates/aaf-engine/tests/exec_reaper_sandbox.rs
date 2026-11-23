@@ -76,6 +76,9 @@ fn run_id(marks: &RunMarks) -> String {
 
 #[test]
 fn the_reaper_kills_what_is_left_in_this_runs_sandbox_and_nothing_else() {
+    if !Path::new("/usr/bin/sandbox-exec").exists() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path().canonicalize().unwrap();
     let mine = marks(&dir, "mine");
