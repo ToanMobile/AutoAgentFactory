@@ -147,7 +147,7 @@ pub fn run(args: &TelegramArgs, ctx: &Ctx) -> CmdResult {
         .field("ignored_unauthorized", json!(s.ignored_unauthorized)))
 }
 
-fn read_bot_token(env_name: &str, ctx: &Ctx) -> Result<String, CmdError> {
+pub(crate) fn read_bot_token(env_name: &str, ctx: &Ctx) -> Result<String, CmdError> {
     let key = env_name.trim();
     if key.is_empty() {
         return Err(CmdError::new("telegram.bot_token_env is empty"));
