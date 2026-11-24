@@ -281,12 +281,32 @@ fn a_pull_request_of_a_task_gated_alone_keeps_the_plain_wording() {
 }
 
 #[test]
-fn a_batch_of_one_is_gated_again_on_the_base_it_lands_on() {
+fn a_batch_of_one_rebases_before_gating_and_lands_with_one_gate_run() {
     let world = auto_merge_world();
 
     let round = round(&world, 1);
 
-    // Its own worktree was gated on the base it was cut from.
+    // Pre-gate rebase covers the current base so merge_queue skips a second gate.
+    assert_eq!(world.gate.runs(), vec![strings(&["t1"])]);
+    assert_eq!(round.gate_runs, 1);
+    assert_eq!(world.git.0.lock().unwrap().rebases, vec!["t1"]);
+    assert_eq!(merged(&world), strings(&["t1"]));
+}
+
+#[test]
+fn a_batch_of_one_is_gated_again_when_base_moves_before_merge() {
+    let world = auto_merge_world();
+    world
+        .git
+        .0
+        .lock()
+        .unwrap()
+        .external_before
+        .insert("t1".to_string());
+
+    let round = round(&world, 1);
+
+    // Base moved after pre-gate rebase, so merge_queue must re-gate safely.
     assert_eq!(world.gate.runs(), vec![strings(&["t1"]), strings(&["t1"])]);
     assert_eq!(round.gate_runs, 2);
     assert_eq!(merged(&world), strings(&["t1"]));

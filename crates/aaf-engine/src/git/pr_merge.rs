@@ -3,27 +3,30 @@
 //! Security & correctness invariants:
 //! 1. Tier-2 config is always loaded from the immutable `<base_sha>` (`git show`), never from the PR;
 //!    the tighten-only tier-1/tier-3/`AAF_*` overlays are layered on top as `aaf gate` does.
-//! 2. `cross_audit.require_different_provider` is enforced unconditionally (`same_account=true`
+//! 2. Independent cross-provider approval is enforced unconditionally (`same_account=true`
 //!    approvals never unlock head-locked changes during merge).
 //! 3. Verifies `headRefOid == expect_head` both before and inside the per-repo merge lock,
 //!    and passes `--match-head-commit <expect_head>` to `gh pr merge`.
-//! 4. Merges `<base_sha>` + `<expect_head>` in an isolated detached scratch worktree
-//!    (cleaned up on `Drop`) and runs the full `aaf gate` on the merged result.
+//! 4. Pre-checks non-FF merges in memory via `git merge-tree --write-tree` (catching
+//!    conflicts and hitting signed common receipts with zero worktree overhead);
+//!    on cache miss merges `<base_sha>` + `<expect_head>` in an isolated warm slot
+//!    (wiped on `Drop`) and runs the full `aaf gate` on the merged result.
 //! 5. Never touches uncommitted changes or sibling worktrees in the local checkout.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aaf_domain::config::{MachineConfig, RepoConfig};
+use aaf_domain::config::{GlobalConfig, MachineConfig, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus, LockStatus, Receipt};
 use aaf_domain::ports::Clock;
 
 use super::cmd::{git, git_raw};
 use super::gh_client::{GhClient, MergeStrategy, PrInfo};
 use super::pr_merge_support::{
-    MAX_WAIT_SECS, MergeLockGuard, ScratchWorktree, bounded_deadline, fetch_base_and_pr,
-    load_trusted_base_config,
+    InMemoryMerge, ScratchWorktree, acquire_merge_lock, bounded_deadline, check_ci,
+    fetch_base_and_pr, has_local_commit_and_tree, in_memory_merge_tree, load_trusted_base_config,
+    ls_remote_head, sync_local_base, valid_sha40,
 };
 use super::{GitError, has_remote};
 use crate::gate::{self, HiddenPolicy};
@@ -34,8 +37,6 @@ const MAX_OPTIMISTIC_RETRIES: usize = 2;
 /// head commit when `--ci-wait > 0` before returning `head_mismatch`.
 const HEAD_SETTLE_MAX_SECS: u64 = 15;
 const HEAD_SETTLE_POLL: Duration = Duration::from_millis(500);
-/// How often a waiter on the per-repo merge lock reports progress.
-const MERGE_LOCK_PROGRESS_SECS: u64 = 15;
 
 #[derive(Debug, Clone)]
 pub struct PrMergeRequest {
@@ -52,6 +53,7 @@ pub struct PrMergeRequest {
     pub lock_timeout: Duration,
     pub dry_run: bool,
     pub machine: MachineConfig,
+    pub global_config: Option<GlobalConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,91 +92,6 @@ fn blocked(code: &str, reason: String, receipt: Option<Receipt>) -> PrMergeOutco
         code: code.to_string(),
         reason,
         receipt: receipt.map(Box::new),
-    }
-}
-
-fn valid_sha40(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn check_ci(
-    gh: &dyn GhClient,
-    repo_root: &Path,
-    pr_number: u64,
-    wait_secs: u64,
-) -> Result<Option<(String, String)>, GitError> {
-    let deadline = bounded_deadline(Duration::from_secs(wait_secs.min(MAX_WAIT_SECS)));
-    loop {
-        let checks = gh.pr_checks(repo_root, pr_number)?;
-        let failed: Vec<&str> = checks
-            .iter()
-            .filter(|c| matches!(c.bucket.as_str(), "fail" | "cancel"))
-            .map(|c| c.name.as_str())
-            .collect();
-        if !failed.is_empty() {
-            return Ok(Some((
-                "ci_failed".to_string(),
-                format!("PR checks failed: {}", failed.join(", ")),
-            )));
-        }
-        let pending: Vec<&str> = checks
-            .iter()
-            .filter(|c| c.bucket == "pending")
-            .map(|c| c.name.as_str())
-            .collect();
-        if pending.is_empty() {
-            return Ok(None);
-        }
-        if Instant::now() >= deadline {
-            return Ok(Some((
-                "ci_pending".to_string(),
-                format!("PR checks still pending: {}", pending.join(", ")),
-            )));
-        }
-        let rem = deadline.saturating_duration_since(Instant::now());
-        thread::sleep(rem.min(Duration::from_secs(3)));
-    }
-}
-
-/// Acquires the per-repo merge lock with private permissions, bounded deadline,
-/// and periodic `WaitingForMergeLock` progress reports. Returns `Ok(None)` on timeout.
-fn acquire_merge_lock(
-    locks_dir: &Path,
-    common_id: &str,
-    pr_number: u64,
-    timeout: Duration,
-    progress: &dyn Fn(&Progress<'_>),
-) -> Result<Option<(MergeLockGuard, bool)>, GitError> {
-    crate::db::private::create_dir(locks_dir)?;
-    let lock_path = locks_dir.join(format!("{common_id}.merge.lock"));
-    drop(crate::db::private::open_file(&lock_path)?);
-    let started = Instant::now();
-    let deadline = bounded_deadline(timeout);
-    let mut last_report: Option<Instant> = None;
-    let mut waited = false;
-    loop {
-        match MergeLockGuard::acquire(locks_dir, common_id, Duration::ZERO) {
-            Ok(guard) => return Ok(Some((guard, waited))),
-            Err(GitError::LockTimeout(_)) if Instant::now() < deadline => {
-                waited = true;
-                let now = Instant::now();
-                let should_report = last_report.is_none_or(|prev| {
-                    now.saturating_duration_since(prev).as_secs() >= MERGE_LOCK_PROGRESS_SECS
-                });
-                if should_report {
-                    last_report = Some(now);
-                    progress(&Progress::WaitingForMergeLock {
-                        pr_number,
-                        waited_secs: now.saturating_duration_since(started).as_secs(),
-                        timeout_secs: timeout.as_secs(),
-                    });
-                }
-                let rem = deadline.saturating_duration_since(now);
-                thread::sleep(rem.min(Duration::from_millis(50)));
-            }
-            Err(GitError::LockTimeout(_)) => return Ok(None),
-            Err(err) => return Err(err),
-        }
     }
 }
 
@@ -250,29 +167,46 @@ fn verify_merged_tree(
             None,
         )));
     }
-    if !trusted_cfg.proof.required {
-        let base_in_head = git_raw(
-            &req.repo_root,
-            &["merge-base", "--is-ancestor", base_sha, head_sha],
-        )?;
+    let base_in_head = git_raw(
+        &req.repo_root,
+        &["merge-base", "--is-ancestor", base_sha, head_sha],
+    )?
+    .success();
+
+    let candidate_tree = if base_in_head {
         let tree_spec = format!("{head_sha}^{{tree}}");
-        if base_in_head.success()
-            && let Ok(head_tree) = git(&req.repo_root, &["rev-parse", &tree_spec])
-        {
-            let tree_fp = format!("git-tree:{head_tree}");
-            if let Some(receipt) = gate::reuse::probe_common_receipt(
-                &req.data_dir,
-                &req.repo_root,
-                trusted_cfg,
-                req.mode,
-                &tree_fp,
-                base_sha,
-                true,
-            ) {
-                return Ok(VerifyOutcome::Clear(Box::new(receipt)));
+        git(&req.repo_root, &["rev-parse", &tree_spec]).ok()
+    } else {
+        match in_memory_merge_tree(&req.repo_root, base_sha, head_sha)? {
+            InMemoryMerge::Conflict { detail } => {
+                return Ok(VerifyOutcome::Blocked(blocked(
+                    "merge_conflict",
+                    format!("merge conflict with base {base_sha}: {detail}"),
+                    None,
+                )));
             }
+            InMemoryMerge::Clean { tree_oid } => Some(tree_oid),
+            InMemoryMerge::Unsupported => None,
+        }
+    };
+
+    if !trusted_cfg.proof.required
+        && let Some(tree_oid) = candidate_tree
+    {
+        let tree_fp = format!("git-tree:{tree_oid}");
+        if let Some(receipt) = gate::reuse::probe_common_receipt(
+            &req.data_dir,
+            &req.repo_root,
+            trusted_cfg,
+            req.mode,
+            &tree_fp,
+            base_sha,
+            true,
+        ) {
+            return Ok(VerifyOutcome::Clear(Box::new(receipt)));
         }
     }
+
     let scratch = ScratchWorktree::create(
         &req.repo_root,
         &req.data_dir,
@@ -281,7 +215,7 @@ fn verify_merged_tree(
         base_sha,
     )?;
     let merge_res = git_raw(
-        &scratch.path,
+        scratch.path(),
         &[
             // Never run hooks inside the scratch: a repo-relative core.hooksPath
             // resolves to PR-controlled files that would run before the gate.
@@ -304,8 +238,8 @@ fn verify_merged_tree(
     )?;
     if !merge_res.success() {
         let conflicts =
-            git(&scratch.path, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-        let _ = git_raw(&scratch.path, &["merge", "--abort"]);
+            git(scratch.path(), &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+        let _ = git_raw(scratch.path(), &["merge", "--abort"]);
         let reason = format!(
             "merge conflict with base {base_sha}: {}",
             conflicts.lines().collect::<Vec<_>>().join(", ")
@@ -318,7 +252,7 @@ fn verify_merged_tree(
     }
     let gate_run = gate::run_gate_with_options(
         &req.data_dir,
-        &scratch.path,
+        scratch.path(),
         trusted_cfg,
         req.mode,
         clock,
@@ -327,6 +261,8 @@ fn verify_merged_tree(
             policy: HiddenPolicy::Remove,
             base_ref_override: Some(base_sha),
             require_independent_approval: true,
+            allow_common_receipt_write: true,
+            strip_compiler_wrappers: true,
         },
     )
     .map_err(|e| GitError::Gate(e.to_string()))?;
@@ -342,35 +278,6 @@ fn verify_merged_tree(
         };
         let reason = receipt.reasons.join("; ");
         Ok(VerifyOutcome::Blocked(blocked(code, reason, Some(receipt))))
-    }
-}
-
-fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str) -> String {
-    let refspec = format!("+refs/heads/{base_branch}:refs/remotes/{remote}/{base_branch}");
-    if git(repo_root, &["fetch", "--quiet", "--", remote, &refspec]).is_err() {
-        return format!("warning: could not fetch {remote}/{base_branch} after merge");
-    }
-    let current = git(repo_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
-    if current != base_branch {
-        return format!(
-            "local checkout is on `{current}` (not `{base_branch}`); skipped local fast-forward"
-        );
-    }
-    let dirty = git(repo_root, &["status", "--porcelain"]).unwrap_or_else(|_| "dirty".into());
-    if !dirty.is_empty() {
-        return format!(
-            "warning: local `{base_branch}` has uncommitted changes; skipped local fast-forward"
-        );
-    }
-    let target = format!("{remote}/{base_branch}");
-    match git_raw(
-        repo_root,
-        &["merge", "--ff-only", "--no-overwrite-ignore", &target],
-    ) {
-        Ok(st) if st.success() => format!("fast-forwarded local `{base_branch}` to `{target}`"),
-        _ => format!(
-            "warning: local `{base_branch}` could not fast-forward to `{target}` (diverged)"
-        ),
     }
 }
 
@@ -430,7 +337,8 @@ pub fn merge_pr(
             receipt: None,
         });
     }
-    if let Some((code, reason)) = check_ci(gh, &req.repo_root, req.pr_number, req.ci_wait_secs)? {
+    let (ci_blocked, ci_waited) = check_ci(gh, &req.repo_root, req.pr_number, req.ci_wait_secs)?;
+    if let Some((code, reason)) = ci_blocked {
         return Ok(PrMergeOutcome::Blocked {
             code,
             reason,
@@ -447,8 +355,8 @@ pub fn merge_pr(
     // before `verify_merged_tree` prevents duplicate `aaf merge <same-PR>` calls
     // and back-to-back PRs in the same repo from burning duplicate RAM/Gradle
     // runs against a stale base. `--dry-run` stays lock-free.
-    let _lock = if req.dry_run {
-        None
+    let (_lock, waited) = if req.dry_run {
+        (None, false)
     } else {
         let locks_dir = req.data_dir.join("locks");
         match acquire_merge_lock(
@@ -458,21 +366,7 @@ pub fn merge_pr(
             req.lock_timeout,
             progress,
         )? {
-            Some((guard, waited)) => {
-                // Re-check PR state only when we actually waited on another merge:
-                // avoids an extra GitHub API round-trip on uncontended merges while
-                // still catching AlreadyMerged / draft / head changes after waiting.
-                if waited {
-                    let pr_after_lock = gh.view_pr(&req.repo_root, req.pr_number)?;
-                    if let Some(outcome) =
-                        check_pr_open_and_head(&pr_after_lock, &req.expect_head, false, None)
-                    {
-                        return Ok(outcome);
-                    }
-                    pr = pr_after_lock;
-                }
-                Some(guard)
-            }
+            Some((guard, waited)) => (Some(guard), waited),
             None => {
                 // One last check in case the active merger just landed this PR.
                 if let Ok(pr_now) = gh.view_pr(&req.repo_root, req.pr_number)
@@ -494,12 +388,25 @@ pub fn merge_pr(
             }
         }
     };
+    // Re-check PR state only when we actually waited on another merge or slept
+    // waiting for pending CI checks: avoids an extra GitHub API round-trip on
+    // immediate uncontended merges while still catching AlreadyMerged / draft /
+    // head changes after waiting.
+    if waited || ci_waited {
+        let pr_after_wait = gh.view_pr(&req.repo_root, req.pr_number)?;
+        if let Some(outcome) = check_pr_open_and_head(&pr_after_wait, &req.expect_head, false, None)
+        {
+            return Ok(outcome);
+        }
+        pr = pr_after_wait;
+    }
 
     let mut attempt = 0usize;
     loop {
         let (base_sha, head_sha) =
             fetch_base_and_pr(&req.repo_root, &req.remote, &pr, &req.expect_head)?;
-        let trusted_cfg = load_trusted_base_config(&req.repo_root, &base_sha)?;
+        let trusted_cfg =
+            load_trusted_base_config(&req.repo_root, &base_sha, req.global_config.as_ref())?;
         let receipt = match verify_merged_tree(
             req,
             &common_id,
@@ -513,16 +420,36 @@ pub fn merge_pr(
             VerifyOutcome::Blocked(outcome) => return Ok(outcome),
         };
 
-        let pr_now = gh.view_pr(&req.repo_root, req.pr_number)?;
+        // Phase B3b: parallel post-gate refresh (`gh.view_pr` + `ls_remote_head`).
+        let (pr_now_res, remote_base_res) = thread::scope(|scope| {
+            let ls_handle =
+                scope.spawn(|| ls_remote_head(&req.repo_root, &req.remote, &pr.base_ref_name));
+            let pr_res = gh.view_pr(&req.repo_root, req.pr_number);
+            let ls_res = ls_handle.join().unwrap_or_else(|_| {
+                Err(GitError::Invalid("ls-remote worker panicked".to_string()))
+            });
+            (pr_res, ls_res)
+        });
+        let pr_now = pr_now_res?;
         if let Some(outcome) =
             check_pr_open_and_head(&pr_now, &req.expect_head, true, Some(&receipt))
         {
             return Ok(outcome);
         }
-        // `fetch_base_and_pr` skips the PR-head network fetch when GitHub still
-        // reports `expect_head` and the commit + tree already exist locally.
-        let (base_now, head_now) =
-            fetch_base_and_pr(&req.repo_root, &req.remote, &pr_now, &req.expect_head)?;
+        let remote_base_sha = remote_base_res.ok().flatten();
+        let can_skip_fetch = pr_now.state.eq_ignore_ascii_case("OPEN")
+            && pr_now.head_ref_oid.eq_ignore_ascii_case(&req.expect_head)
+            && pr_now.base_ref_name == pr.base_ref_name
+            && remote_base_sha
+                .as_deref()
+                .is_some_and(|sha| sha.eq_ignore_ascii_case(&base_sha))
+            && has_local_commit_and_tree(&req.repo_root, &req.expect_head)?;
+        let (base_now, head_now) = if can_skip_fetch {
+            (base_sha.clone(), head_sha.clone())
+        } else {
+            fetch_base_and_pr(&req.repo_root, &req.remote, &pr_now, &req.expect_head)?
+        };
+
         let final_receipt = if base_now == base_sha {
             receipt
         } else if attempt < MAX_OPTIMISTIC_RETRIES {
@@ -532,7 +459,8 @@ pub fn merge_pr(
             pr = pr_now;
             continue;
         } else {
-            let cfg_now = load_trusted_base_config(&req.repo_root, &base_now)?;
+            let cfg_now =
+                load_trusted_base_config(&req.repo_root, &base_now, req.global_config.as_ref())?;
             match verify_merged_tree(
                 req, &common_id, &base_now, &head_now, &cfg_now, clock, &throttle,
             )? {

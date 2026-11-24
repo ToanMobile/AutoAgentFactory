@@ -165,6 +165,7 @@ require_different_provider = false
                 max_load_percent: 0,
                 ..MachineConfig::default()
             },
+            global_config: None,
         }
     }
 }

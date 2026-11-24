@@ -17,7 +17,7 @@ pub use detect::{Detected, PROFILES, detect_stack, effective_profile};
 pub use load::{
     ConfigError, ConfigInputs, EffectiveConfig, LOCAL_CONFIG_REL, REPO_CONFIG_REL,
     global_config_path, load, load_from_env, load_from_env_with, load_over_repo,
-    load_over_repo_from_env,
+    load_over_repo_from_env, tighten_trusted_base, tighten_trusted_base_from_env,
 };
 pub use merge::{ConfigOverlay, GateOverlay, ProjectOverlay, RunOverlay};
 pub use render::render_repo_config;

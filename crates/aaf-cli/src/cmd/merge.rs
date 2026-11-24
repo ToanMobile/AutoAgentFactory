@@ -101,6 +101,7 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
         lock_timeout: Duration::from_secs(args.lock_timeout),
         dry_run: args.dry_run,
         machine: cfg.global.machine.clone(),
+        global_config: Some(cfg.global.clone()),
     };
     let progress = |event: &Progress<'_>| notice("merge", &progress_line(event));
     let outcome = merge_pr(&req, &SystemGh, &SystemClock, &progress)

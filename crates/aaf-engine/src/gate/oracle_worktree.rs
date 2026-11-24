@@ -1,14 +1,12 @@
-//! Throwaway detached worktree + live-overlay + selective production revert
-//! used by the opt-in red->green oracle. Never mutates the live worktree,
-//! never follows symlinks outside `scratch`, and never runs global
-//! `git worktree prune`.
+//! Detached oracle worktree + live-overlay + selective production revert
+//! used by the opt-in red->green oracle. Backed by a fixed-path persistent
+//! [`WarmSlot`] (with ephemeral fallback under contention), never mutating the
+//! live worktree or following symlinks outside `scratch`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use aaf_domain::gate::ChangeKind;
 
@@ -16,71 +14,41 @@ use super::changes::{self, Change};
 use super::oracle::{is_cfg_test_attr_line, is_oracle_test_path};
 use super::proc::git_bytes;
 use super::{GIT_TIMEOUT, GateError};
+use crate::git::warm_slot::{SlotKind, WarmSlot};
 
-static WORKTREE_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Directory under the data dir holding the oracle's scratch worktrees.
+/// Directory under the data dir where earlier builds put one-shot oracle
+/// scratch worktrees (`<common_id>-<pid>-<seq>`); `aaf gc` still sweeps the
+/// ones a killed gate left there. The oracle itself now runs in a warm slot
+/// (`warm-slots/oracle/<common_id>/`), which `aaf gc` sweeps as well.
 pub const ORACLE_SCRATCH_DIR: &str = "oracle-scratch";
 
-/// Targeted RAII guard for a throwaway detached git worktree.
+/// RAII guard for a detached oracle worktree backed by a persistent warm slot.
 pub(crate) struct ScratchWorktree {
-    repo_root: PathBuf,
-    path: PathBuf,
+    slot: WarmSlot,
 }
 
 impl ScratchWorktree {
-    /// Creates the scratch at `<data_dir>/oracle-scratch/<common_id>-<pid>-<seq>`:
-    /// a gate killed before `Drop` leaves it where `aaf gc` sweeps dead owners.
     pub(crate) fn create(
         repo_root: &Path,
         data_dir: &Path,
         common_id: &str,
+        head_sha: &str,
+        _base_sha: &str,
     ) -> Result<Self, GateError> {
-        let base = data_dir.join(ORACLE_SCRATCH_DIR);
-        fs::create_dir_all(&base)?;
-        let base = fs::canonicalize(&base)?;
-        let pid = std::process::id();
-        let mut path = loop {
-            let seq = WORKTREE_SEQ.fetch_add(1, Ordering::Relaxed);
-            let candidate = base.join(format!("{common_id}-{pid}-{seq}"));
-            if fs::symlink_metadata(&candidate).is_err() {
-                break candidate;
-            }
-        };
-        let path_str = path.to_string_lossy().into_owned();
-        git_bytes(
+        let slot = WarmSlot::acquire(
             repo_root,
-            &["worktree", "add", "--detach", &path_str, "HEAD"],
-            GIT_TIMEOUT,
-        )?;
-        path = fs::canonicalize(&path)?;
-        Ok(Self {
-            repo_root: repo_root.to_path_buf(),
-            path,
-        })
+            data_dir,
+            common_id,
+            SlotKind::Oracle,
+            head_sha,
+            "oracle",
+        )
+        .map_err(|err| GateError::Git(err.to_string()))?;
+        Ok(Self { slot })
     }
 
     pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ScratchWorktree {
-    fn drop(&mut self) {
-        let p = self.path.to_string_lossy().into_owned();
-        let _ = git_bytes(
-            &self.repo_root,
-            &["worktree", "remove", "--force", &p],
-            Duration::from_secs(30),
-        );
-        if self.path.exists() {
-            let _ = fs::remove_dir_all(&self.path);
-            let _ = git_bytes(
-                &self.repo_root,
-                &["worktree", "remove", &p],
-                Duration::from_secs(30),
-            );
-        }
+        self.slot.path()
     }
 }
 

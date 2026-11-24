@@ -152,6 +152,40 @@ pub const LOG_TAIL_BYTES: usize = 4096;
 /// the unblocker's failure digest leaves these reasons out.
 pub const THROTTLE_NOTE: &str = "throttle: ";
 
+/// Compiler wrapper and shared compilation-cache environment variables stripped
+/// from gate commands when `GateRunOptions::strip_compiler_wrappers` is set
+/// (e.g. during trusted `aaf merge` verification) so poisoned or ambient caches
+/// cannot influence the build/test verdict.
+pub const COMPILER_WRAPPER_ENV_VARS: &[&str] = &[
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_TARGET_DIR",
+    "SCCACHE_DIR",
+    "SCCACHE_CONF",
+    "SCCACHE_SERVER_PORT",
+    "SCCACHE_SERVER_UDS",
+    "SCCACHE_ENDPOINT",
+    "SCCACHE_BUCKET",
+    "SCCACHE_REDIS",
+    "SCCACHE_MEMCACHED",
+    "SCCACHE_GCS_BUCKET",
+    "CCACHE_DIR",
+    "CCACHE_CONFIGPATH",
+    "CCACHE_PREFIX",
+    "CCACHE_REMOTE_STORAGE",
+];
+
+/// Explicit environment overrides applied alongside [`COMPILER_WRAPPER_ENV_VARS`]
+/// removal so config-file defaults (e.g. `[build] rustc-wrapper` in
+/// `~/.cargo/config.toml` or `ccache.conf`) are neutralized too.
+pub const COMPILER_WRAPPER_DISABLE_ENV: &[(&str, &str)] = &[
+    ("RUSTC_WRAPPER", ""),
+    ("RUSTC_WORKSPACE_WRAPPER", ""),
+    ("CCACHE_DISABLE", "1"),
+];
+
 /// The test command the mode requires; empty means the gate cannot verify.
 pub fn test_command(commands: &CommandsConfig, mode: GateMode) -> (&'static str, &str) {
     match mode {
@@ -194,6 +228,19 @@ pub fn run_command_with_env(
     timeout: Duration,
     extra_env: &[(&str, &str)],
 ) -> Result<CommandResult, GateError> {
+    run_command_with_env_and_removals(repo_root, name, command, timeout, extra_env, &[])
+}
+
+/// [`run_command_with_env`] that also strips every variable listed in
+/// `env_remove` (e.g. compiler wrapper and shared cache overrides).
+pub fn run_command_with_env_and_removals(
+    repo_root: &Path,
+    name: &str,
+    command: &str,
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+    env_remove: &[&str],
+) -> Result<CommandResult, GateError> {
     // By path: a bare `sh` is looked up in `PATH` at every spawn, where the
     // task can have put one of its own.
     let mut cmd = Command::new("/bin/sh");
@@ -210,6 +257,9 @@ pub fn run_command_with_env(
         "AAF_DELETED_FILES_FILE",
         "AAF_TEST_FILES_FILE",
     ] {
+        cmd.env_remove(var);
+    }
+    for var in env_remove {
         cmd.env_remove(var);
     }
     for (k, v) in extra_env {
@@ -275,13 +325,19 @@ pub struct ThrottledRun {
     pub notes: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+struct CommandEnv<'a> {
+    extra: &'a [(&'a str, &'a str)],
+    remove: &'a [&'a str],
+}
+
 fn run_heavy(
     repo_root: &Path,
     name: &str,
     command: &str,
     timeout: Duration,
     heavy: &HeavyContext<'_>,
-    extra_env: &[(&str, &str)],
+    env: CommandEnv<'_>,
     notes: &mut Vec<String>,
 ) -> Result<CommandResult, GateError> {
     let job = HeavyJob {
@@ -292,9 +348,19 @@ fn run_heavy(
         timeout,
         log_tail_bytes: LOG_TAIL_BYTES,
     };
-    let run = heavy
-        .throttle
-        .run_heavy_with_env(heavy.data_dir, heavy.clock, &job, extra_env)?;
+    let filtered_remove: Vec<&str> = env
+        .remove
+        .iter()
+        .copied()
+        .filter(|var| !env.extra.iter().any(|(k, _)| k == var))
+        .collect();
+    let run = heavy.throttle.run_heavy_with_env_and_removals(
+        heavy.data_dir,
+        heavy.clock,
+        &job,
+        env.extra,
+        &filtered_remove,
+    )?;
     if run.waited_secs > 0 {
         notes.push(format!(
             "{THROTTLE_NOTE}{name} waited {}s for a heavy slot or a calmer machine",
@@ -360,9 +426,27 @@ pub fn run_all_throttled_with_env(
     heavy: &HeavyContext<'_>,
     extra_env: &[(&str, &str)],
 ) -> Result<ThrottledRun, GateError> {
+    run_all_throttled_with_options(repo_root, commands, mode, timeout, heavy, extra_env, &[])
+}
+
+/// [`run_all_throttled_with_env`] that also strips `env_remove` from both
+/// light and heavy commands.
+pub fn run_all_throttled_with_options(
+    repo_root: &Path,
+    commands: &CommandsConfig,
+    mode: GateMode,
+    timeout: Duration,
+    heavy: &HeavyContext<'_>,
+    extra_env: &[(&str, &str)],
+    env_remove: &[&str],
+) -> Result<ThrottledRun, GateError> {
     let mut run = ThrottledRun {
         results: Vec::new(),
         notes: Vec::new(),
+    };
+    let env = CommandEnv {
+        extra: extra_env,
+        remove: env_remove,
     };
     for (name, command) in plan(commands, mode) {
         let result = if is_heavy(name, &command) {
@@ -372,11 +456,13 @@ pub fn run_all_throttled_with_env(
                 &command,
                 timeout,
                 heavy,
-                extra_env,
+                env,
                 &mut run.notes,
             )?
         } else {
-            run_command_with_env(repo_root, name, &command, timeout, extra_env)?
+            run_command_with_env_and_removals(
+                repo_root, name, &command, timeout, extra_env, env_remove,
+            )?
         };
         let passed = result.passed();
         run.results.push(result);
@@ -397,9 +483,11 @@ pub fn run_one_heavy(
     extra_env: &[(&str, &str)],
 ) -> Result<CommandResult, GateError> {
     let mut notes = Vec::new();
-    run_heavy(
-        repo_root, name, command, timeout, heavy, extra_env, &mut notes,
-    )
+    let env = CommandEnv {
+        extra: extra_env,
+        remove: &[],
+    };
+    run_heavy(repo_root, name, command, timeout, heavy, env, &mut notes)
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use aaf_domain::ports::{ClosedFingerprint, PortResult};
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
-use super::batch::{Group, Judged, Member, Verdict, gate_batch};
+use super::batch::{Group, Judged, Member, Verdict, gate_batch, gate_one};
 use super::post_audit;
 use super::worker::GateJob;
 use super::{Deps, unblock};
@@ -24,6 +24,9 @@ use crate::cross_audit::compute_mechanical_score;
 use crate::git::{MergeOutcome, PrOutcome};
 use crate::unblocker::ladder;
 use crate::unblocker::{FailureSignal, failure_digest, is_pure_test_failure};
+
+mod transient;
+use transient::{is_config_error, is_transient_oracle, retry_transient};
 
 /// Written by the gate thread before it reports a task, read by the
 /// scheduler when the loop ends.
@@ -34,18 +37,13 @@ pub(super) struct GateStats {
 }
 
 /// One gate round: judges `jobs` with as few gate runs as possible and hands
-/// every job's resolution to `answer`, in board order.
+/// every job's resolution to `answer` as soon as it is ready.
 pub(super) fn judge_round(
     deps: &Deps,
     jobs: Vec<GateJob>,
     stats: &GateStats,
     answer: &dyn Fn(GateJob, Result<Resolution, String>),
 ) {
-    let member = |job: &GateJob| Member {
-        task_id: job.task_id.clone(),
-        worktree: job.worktree.clone(),
-    };
-
     let always_solo = deps.settings.repo.proof.required
         || deps.settings.repo.cross_audit.score_gate
         || deps.settings.repo.cross_audit.audit_scope == AuditScope::Always;
@@ -91,89 +89,171 @@ pub(super) fn judge_round(
         }
     }
 
-    let members: Vec<Member> = batch.iter().map(member).collect();
-    let mut outcome = gate_batch(&*deps.git, &*deps.gate, &members);
-    for job in &alone {
-        let single = gate_batch(&*deps.git, &*deps.gate, &[member(job)]);
-        outcome.verdicts.extend(single.verdicts);
-        outcome.gate_runs += single.gate_runs;
-    }
-    stats.runs.fetch_add(outcome.gate_runs, Ordering::Relaxed);
-    if let Ok(mut warnings) = stats.warnings.lock() {
-        warnings.append(&mut outcome.warnings);
+    // Settle cached-receipt jobs first (no gate needed; lands on base before
+    // subsequent jobs rebase/integrate in `auto_merge`, avoids bubbles in PR mode).
+    if !cached_ready.is_empty() {
+        let mut round = Round::solo(stats);
+        for (job, receipt) in cached_ready {
+            let covered = (deps.settings.auto_merge && !deps.settings.repo.proof.required)
+                .then(|| receipt.base_sha.clone())
+                .flatten();
+            let judged = Judged {
+                task_id: job.task_id.clone(),
+                verdict: Verdict::Clear(receipt),
+                batch_group: None,
+            };
+            let res = settle(deps, &job, judged, covered, &mut round).map_err(|e| e.to_string());
+            answer(job, res);
+        }
     }
 
-    // Only the batch has groups: a task gated alone has no integration tree.
-    let mut round = Round {
-        groups: std::mem::take(&mut outcome.groups),
-        gate_runs: &stats.runs,
-        warnings: &stats.warnings,
-    };
-    // Board order, so the merges of a clear batch land by priority.
-    for job in batch.into_iter().chain(alone) {
-        let Some(at) = outcome
-            .verdicts
-            .iter()
-            .position(|j| j.task_id == job.task_id)
-        else {
-            answer(job, Err("the gate returned no verdict".to_string()));
-            continue;
-        };
-        let judged = outcome.verdicts.swap_remove(at);
-        let resolution = settle(deps, &job, judged, &mut round).map_err(|e| e.to_string());
-        answer(job, resolution);
+    // A batch of one has no integration tree; routing it at the front of `alone`
+    // preserves board order while enabling pre-gate rebase and parallel PR gating.
+    if batch.len() == 1 {
+        alone.insert(0, batch.remove(0));
     }
-    for (job, receipt) in cached_ready {
-        let judged = Judged {
-            task_id: job.task_id.clone(),
-            verdict: Verdict::Clear(receipt),
-            batch_group: None,
+
+    if !batch.is_empty() {
+        let members: Vec<Member> = batch
+            .iter()
+            .map(|j| Member {
+                task_id: j.task_id.clone(),
+                worktree: j.worktree.clone(),
+            })
+            .collect();
+        let mut outcome = gate_batch(&*deps.git, &*deps.gate, &members);
+        stats.runs.fetch_add(outcome.gate_runs, Ordering::Relaxed);
+        if let Ok(mut warnings) = stats.warnings.lock() {
+            warnings.append(&mut outcome.warnings);
+        }
+        let mut round = Round {
+            groups: std::mem::take(&mut outcome.groups),
+            gate_runs: &stats.runs,
+            warnings: &stats.warnings,
         };
-        let resolution = settle(deps, &job, judged, &mut round).map_err(|e| e.to_string());
-        answer(job, resolution);
+        for job in batch {
+            let Some(at) = outcome
+                .verdicts
+                .iter()
+                .position(|j| j.task_id == job.task_id)
+            else {
+                answer(job, Err("the gate returned no verdict".to_string()));
+                continue;
+            };
+            let judged = outcome.verdicts.swap_remove(at);
+            let res = settle(deps, &job, judged, None, &mut round).map_err(|e| e.to_string());
+            answer(job, res);
+        }
+    }
+
+    if !deps.settings.auto_merge && alone.len() > 1 {
+        // PR mode: no shared base mutation; gate + settle in parallel and stream answers.
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            for job in alone {
+                let tx = tx.clone();
+                scope.spawn(move || {
+                    let res = run_solo_job(deps, &job, stats);
+                    let _ = tx.send((job, res));
+                });
+            }
+            drop(tx);
+            for (job, res) in rx {
+                answer(job, res);
+            }
+        });
+    } else {
+        // `auto_merge` (or single solo job): run end-to-end so job N+1 rebases onto job N.
+        for job in alone {
+            let res = run_solo_job(deps, &job, stats);
+            answer(job, res);
+        }
     }
 }
 
-/// The base can move between the rebase and the fast-forward when another
-/// process merges; each retry rebases again.
+enum PreRebase {
+    Ready(Option<String>),
+    Done(Result<Resolution, String>),
+}
+
+fn push_warning(warnings: &Mutex<Vec<String>>, msg: String) {
+    if let Ok(mut list) = warnings.lock() {
+        list.push(msg);
+    }
+}
+
+fn conflict_resolution(deps: &Deps, task_id: &str, files: Vec<String>) -> PortResult<Resolution> {
+    deps.emit(
+        EventKind::MergeResult,
+        task_id,
+        json!({ "merged": false, "conflict": files }),
+    )?;
+    let mut signal = FailureSignal::empty();
+    signal.merge_conflict_files = files;
+    Ok(Resolution::Failed(Box::new(signal)))
+}
+
+/// Rebases a solo job onto the current base before gating in `auto_merge` mode
+/// (skipped when `proof.required`, which binds commit SHAs to the signed proof).
+fn pre_gate_rebase(deps: &Deps, job: &GateJob) -> PreRebase {
+    if !deps.settings.auto_merge || deps.settings.repo.proof.required {
+        return PreRebase::Ready(None);
+    }
+    let base_before = deps.git.base_sha().ok();
+    match deps.git.rebase(&job.worktree) {
+        Ok(files) if files.is_empty() => PreRebase::Ready(
+            base_before.filter(|before| deps.git.base_sha().ok().as_ref() == Some(before)),
+        ),
+        Ok(files) => PreRebase::Done(
+            conflict_resolution(deps, &job.task_id, files).map_err(|e| e.to_string()),
+        ),
+        Err(err) => PreRebase::Done(Err(err.to_string())),
+    }
+}
+
+fn run_solo_job(deps: &Deps, job: &GateJob, stats: &GateStats) -> Result<Resolution, String> {
+    let covered = match pre_gate_rebase(deps, job) {
+        PreRebase::Ready(covered) => covered,
+        PreRebase::Done(res) => return res,
+    };
+    stats.runs.fetch_add(1, Ordering::Relaxed);
+    let judged = Judged {
+        task_id: job.task_id.clone(),
+        verdict: gate_one(&*deps.gate, &job.worktree.path),
+        batch_group: None,
+    };
+    let mut round = Round::solo(stats);
+    settle(deps, job, judged, covered, &mut round).map_err(|e| e.to_string())
+}
+
 const MERGE_ATTEMPTS: u32 = 3;
 
 pub(crate) enum Resolution {
-    /// The task's state is final for this run (`Done`, `Review`, `Blocked`).
     Settled(TaskState),
-    /// Locked files changed and nothing approves them yet.
-    NeedsAudit {
-        lock_fp: String,
-    },
-    /// Gate passed `Clear`, but `[cross_audit]` policy requires a post-gate audit.
-    NeedsPostAudit {
-        receipt: Box<Receipt>,
-    },
+    NeedsAudit { lock_fp: String },
+    NeedsPostAudit { receipt: Box<Receipt> },
     Failed(Box<FailureSignal>),
-    /// Nothing failed; the task goes through the gate again.
     Retry,
 }
 
 /// State shared by the tasks of one gate round.
 pub(crate) struct Round<'a> {
-    /// The gated integration trees of this round. `Group::base` is the
-    /// group's covered base: the base tip on which the next member of that
-    /// group lands as a tree its own integration gate already judged. It
-    /// starts as the tip the integration tree was built on, moves forward
-    /// with every member of the same group that merges without a gate run
-    /// of its own, and is gone for good once the chain breaks.
-    ///
-    /// The rule: a task merges without its own gate run only when what
-    /// lands (the base at merge time, which then is the integration base
-    /// plus members of its own group and nothing else, plus the task) is
-    /// part of a tree that gated clear. Another group's merges, an outside
-    /// commit, a member that failed to merge or a member that had to be
-    /// gated again all leave the base somewhere no gate run of this group
-    /// covers.
+    /// Gated integration trees of this round. `Group::base` tracks the covered
+    /// base along a group's merge chain and clears once the chain breaks.
     pub groups: HashMap<u32, Group>,
     pub gate_runs: &'a AtomicU32,
-    /// Things `aaf run` should tell its caller that blocked no task.
+    /// Non-blocking warnings reported to `aaf run`.
     pub warnings: &'a Mutex<Vec<String>>,
+}
+
+impl<'a> Round<'a> {
+    fn solo(stats: &'a GateStats) -> Self {
+        Self {
+            groups: HashMap::new(),
+            gate_runs: &stats.runs,
+            warnings: &stats.warnings,
+        }
+    }
 }
 
 fn gate_payload(
@@ -182,16 +262,13 @@ fn gate_payload(
     receipt: &Receipt,
     batch_group: Option<u32>,
 ) -> serde_json::Value {
-    let static_warnings = receipt
-        .static_findings
-        .iter()
-        .filter(|f| f.severity == Severity::Warn)
-        .count();
-    let static_critical = receipt
-        .static_findings
-        .iter()
-        .filter(|f| f.severity == Severity::Critical)
-        .count();
+    let sev_count = |s: Severity| {
+        receipt
+            .static_findings
+            .iter()
+            .filter(|f| f.severity == s)
+            .count()
+    };
     let commands_passed = receipt.commands.iter().filter(|c| c.passed()).count();
     let proof_ok = post_audit::proof_verified(deps, worktree, receipt);
     let mechanical_score = compute_mechanical_score(receipt, proof_ok, false, false).score;
@@ -203,8 +280,8 @@ fn gate_payload(
         "gated_tree": receipt.repo_root,
         "batched": batch_group.is_some(),
         "batch_group": batch_group,
-        "static_warnings": static_warnings,
-        "static_critical": static_critical,
+        "static_warnings": sev_count(Severity::Warn),
+        "static_critical": sev_count(Severity::Critical),
         "store_status": receipt.store_compliance.status,
         "store_warnings": receipt.store_compliance.warnings,
         "store_critical": receipt.store_compliance.critical,
@@ -221,40 +298,38 @@ pub(crate) fn settle(
     deps: &Deps,
     job: &GateJob,
     judged: Judged,
+    covered_base: Option<String>,
     round: &mut Round<'_>,
 ) -> PortResult<Resolution> {
     let task = deps.store.get_task(&job.task_id)?;
     let blocked = |why: String| -> PortResult<Resolution> {
-        // Broken gate commands or unverified repo config must not count toward
-        // the global consecutive-failure freeze across unrelated repos.
         unblock::block_untried(deps, &task.id, &why)?;
         Ok(Resolution::Settled(TaskState::Blocked))
     };
+    let emit_gate = |receipt: &Receipt| {
+        deps.emit(
+            EventKind::GateResult,
+            &task.id,
+            gate_payload(deps, &job.worktree.path, receipt, judged.batch_group),
+        )
+    };
     match judged.verdict {
         Verdict::Clear(receipt) => {
-            deps.emit(
-                EventKind::GateResult,
-                &task.id,
-                gate_payload(deps, &job.worktree.path, &receipt, judged.batch_group),
-            )?;
+            emit_gate(&receipt)?;
             if post_audit::needs_post_gate_audit(deps, job, &receipt) {
                 return Ok(Resolution::NeedsPostAudit {
                     receipt: Box::new(receipt),
                 });
             }
             if deps.settings.auto_merge {
-                merge(deps, job, &task, judged.batch_group, round)
+                merge(deps, job, &task, judged.batch_group, covered_base, round)
             } else {
                 let gated_in = judged.batch_group.and_then(|id| round.groups.get(&id));
                 open_pr(deps, job, &task, &receipt, gated_in, round.warnings)
             }
         }
         Verdict::Red(receipt) => {
-            deps.emit(
-                EventKind::GateResult,
-                &task.id,
-                gate_payload(deps, &job.worktree.path, &receipt, judged.batch_group),
-            )?;
+            emit_gate(&receipt)?;
             let mut signal = FailureSignal::empty();
             signal.gate = Some(receipt);
             let digest = failure_digest(&signal);
@@ -264,22 +339,16 @@ pub(crate) fn settle(
             if rerun_eligible && let Some(receipt) = signal.gate.as_ref() {
                 match deps.gate.rerun_failed_test(&job.worktree.path, receipt) {
                     Ok(rerun) => signal.test_rerun = rerun,
-                    Err(err) => {
-                        if let Ok(mut warnings) = round.warnings.lock() {
-                            warnings
-                                .push(format!("flaky test rerun skipped for {}: {err}", task.id));
-                        }
-                    }
+                    Err(err) => push_warning(
+                        round.warnings,
+                        format!("flaky test rerun skipped for {}: {err}", task.id),
+                    ),
                 }
             }
             Ok(Resolution::Failed(Box::new(signal)))
         }
         Verdict::Unverified(receipt) => {
-            deps.emit(
-                EventKind::GateResult,
-                &task.id,
-                gate_payload(deps, &job.worktree.path, &receipt, judged.batch_group),
-            )?;
+            emit_gate(&receipt)?;
             if is_transient_oracle(&receipt)
                 && let Some(retry) = retry_transient(round, &task.id, &receipt.reasons.join("; "))
             {
@@ -299,47 +368,6 @@ pub(crate) fn settle(
             blocked(format!("the gate could not run: {error}"))
         }
     }
-}
-
-/// A gate failure of the moment (a git timeout under host load, an oracle
-/// run timed out or killed) is retried this often per task and `aaf run`
-/// (within `MAX_GATE_RETRIES`); the next blocks with its own error.
-const TRANSIENT_GATE_RETRIES: usize = 3;
-const TRANSIENT_NOTE: &str = "gate retried after a transient failure for ";
-
-/// `Retry` while retries are left; the run's warnings record and count them.
-fn retry_transient(round: &Round<'_>, task_id: &str, why: &str) -> Option<Resolution> {
-    let prefix = format!("{TRANSIENT_NOTE}{task_id}:");
-    let mut warnings = round.warnings.lock().ok()?;
-    let seen = warnings.iter().filter(|w| w.starts_with(&prefix)).count();
-    if seen >= TRANSIENT_GATE_RETRIES {
-        return None;
-    }
-    let why = unblock::one_line(why, 300);
-    warnings.push(format!(
-        "{prefix} {why} (retry {} of {TRANSIENT_GATE_RETRIES})",
-        seen + 1
-    ));
-    Some(Resolution::Retry)
-}
-
-/// A broken repository config fails the same way every time.
-fn is_config_error(error: &str) -> bool {
-    error
-        .strip_prefix("io: ")
-        .unwrap_or(error)
-        .starts_with("config:")
-}
-
-/// The oracle runs only on a clear gate and adds its reason last: a timed
-/// out or killed oracle run says nothing about the change.
-fn is_transient_oracle(receipt: &Receipt) -> bool {
-    receipt.reasons.last().is_some_and(|reason| {
-        matches!(
-            reason.as_str(),
-            "oracle: inconclusive (timed out)" | "oracle: inconclusive (killed by signal)"
-        )
-    })
 }
 
 /// What a pull request says above its receipt summary when the gate ran on
@@ -397,15 +425,12 @@ pub(crate) fn compose_task_pr_body(
 
 fn handover_note_from_composed(receipt: &Receipt, composed: &str) -> Option<String> {
     let base = crate::git::pr_body(receipt);
-    let without_receipt = if let Some(rest) = composed.strip_prefix(&base) {
-        rest.trim()
-    } else if let Some(head) = composed.strip_suffix(&base) {
-        head.trim()
-    } else if let Some((head, _)) = composed.split_once("\n## Gate receipt") {
-        head.trim()
-    } else {
-        composed.trim()
-    };
+    let without_receipt = composed
+        .strip_prefix(&base)
+        .or_else(|| composed.strip_suffix(&base))
+        .or_else(|| composed.split_once("\n## Gate receipt").map(|(h, _)| h))
+        .unwrap_or(composed)
+        .trim();
     let without_proof = without_receipt
         .split_once("\n## Verification Proof")
         .map_or(without_receipt, |(head, _)| head)
@@ -413,11 +438,7 @@ fn handover_note_from_composed(receipt: &Receipt, composed: &str) -> Option<Stri
     (!without_proof.is_empty()).then(|| without_proof.to_string())
 }
 
-/// Default merge point: a pull request. Without `gh` or a remote the branch
-/// and the signed receipt stay for a human, and the task still moves to
-/// Review. So does a pull request that cannot be opened (a remote that is
-/// not GitHub, `gh` not logged in, no network): the gate was clear and the
-/// work is on its branch, which is not a failure of the task.
+/// Default merge point: open a PR and move the task to Review (or skip PR with a warning).
 fn open_pr(
     deps: &Deps,
     job: &GateJob,
@@ -441,9 +462,7 @@ fn open_pr(
         .open_pr(&job.worktree, &task.title, receipt, note.as_deref())
         .unwrap_or_else(|err| {
             let reason = unblock::one_line(&err.to_string(), 300);
-            if let Ok(mut warnings) = warnings.lock() {
-                warnings.push(format!("{}: no pull request: {reason}", task.id));
-            }
+            push_warning(warnings, format!("{}: no pull request: {reason}", task.id));
             PrOutcome::Skipped { reason }
         });
     let why = match opened {
@@ -466,20 +485,24 @@ fn merge(
     job: &GateJob,
     task: &Task,
     batch_group: Option<u32>,
+    covered_base: Option<String>,
     round: &mut Round<'_>,
 ) -> PortResult<Resolution> {
     let last_receipt: Mutex<Option<Receipt>> = Mutex::new(None);
     // Taken, not copied: the group's chain is broken on every way out of
-    // this function except the one that puts a new covered base back. A
-    // task gated in its own worktree has no group: that gate ran on the
-    // base the worktree was cut from, not on the current one.
+    // this function except the one that puts a new covered base back. A solo
+    // job carries `covered_base` only when rebased onto a stable base before gating.
     let covered = batch_group
         .and_then(|group| round.groups.get_mut(&group))
-        .and_then(|group| group.base.take());
+        .and_then(|group| group.base.take())
+        .or(covered_base);
+    let skip_allowed = AtomicBool::new(covered.is_some());
     let gated_here = AtomicBool::new(false);
     let gate_runs = round.gate_runs;
     let regate = |tree: &Path, onto_sha: &str| -> Result<bool, String> {
-        if let Some(covered) = &covered {
+        if skip_allowed.load(Ordering::Relaxed)
+            && let Some(covered) = &covered
+        {
             let matches_covered = if !onto_sha.is_empty() {
                 onto_sha == *covered
             } else {
@@ -501,26 +524,17 @@ fn merge(
     for _ in 0..MERGE_ATTEMPTS {
         match deps.git.merge_with_onto(&job.worktree, &regate)? {
             MergeOutcome::Merged { new_base_sha } => {
-                // Move to Done before fetching or deleting the worktree/branch so
-                // a transient post-merge fetch failure or crash cannot block a
-                // task that already landed on the remote.
+                // Move to Done first so post-merge fetch/cleanup failures cannot block a landed task.
                 deps.move_to(&task.id, TaskState::Done, None, "merged into the base")?;
-                // After a merge through the remote the local view of the base is
-                // stale until fetched; a failed fetch does not undo the merge.
-                let fetch_error = deps.git.fetch_base().err().map(|e| e.to_string());
-                if let Some(ref err) = fetch_error
-                    && let Ok(mut warnings) = round.warnings.lock()
-                {
-                    warnings.push(format!("{}: post-merge fetch: {err}", task.id));
-                }
-                // Done tasks must not pile up worktrees on disk. A failed
-                // cleanup does not undo the merge; it is recorded with it.
-                let leftover = deps.git.cleanup(&task.id).err().map(|e| e.to_string());
-                if let Some(ref err) = leftover
-                    && let Ok(mut warnings) = round.warnings.lock()
-                {
-                    warnings.push(format!("{}: post-merge cleanup: {err}", task.id));
-                }
+                let warn_err = |res: PortResult<()>, label: &str| {
+                    let err = res.err().map(|e| e.to_string());
+                    if let Some(ref e) = err {
+                        push_warning(round.warnings, format!("{}: {label}: {e}", task.id));
+                    }
+                    err
+                };
+                let fetch_error = warn_err(deps.git.fetch_base(), "post-merge fetch");
+                let leftover = warn_err(deps.git.cleanup(&task.id), "post-merge cleanup");
                 deps.emit(
                     EventKind::MergeResult,
                     &task.id,
@@ -531,10 +545,6 @@ fn merge(
                         "fetch_error": fetch_error,
                     }),
                 )?;
-                // The batch verdict stays valid only along the chain of its
-                // own group's merges. A merge that needed its own gate run
-                // (the base had moved) leaves the chain broken: what follows
-                // was never gated on this base.
                 if !gated_here.load(Ordering::Relaxed)
                     && let Some(group) = batch_group.and_then(|g| round.groups.get_mut(&g))
                 {
@@ -545,14 +555,7 @@ fn merge(
                 return Ok(Resolution::Settled(TaskState::Done));
             }
             MergeOutcome::Conflict { files } => {
-                deps.emit(
-                    EventKind::MergeResult,
-                    &task.id,
-                    json!({ "merged": false, "conflict": files }),
-                )?;
-                let mut signal = FailureSignal::empty();
-                signal.merge_conflict_files = files;
-                return Ok(Resolution::Failed(Box::new(signal)));
+                return conflict_resolution(deps, &task.id, files);
             }
             MergeOutcome::GateFailed => {
                 let receipt = last_receipt.lock().ok().and_then(|mut slot| slot.take());
@@ -573,7 +576,9 @@ fn merge(
                 signal.gate = receipt;
                 return Ok(Resolution::Failed(Box::new(signal)));
             }
-            MergeOutcome::NotFastForward => {}
+            MergeOutcome::NotFastForward => {
+                skip_allowed.store(false, Ordering::Relaxed);
+            }
         }
     }
     Ok(Resolution::Retry)

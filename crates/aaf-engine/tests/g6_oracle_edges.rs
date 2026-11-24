@@ -252,13 +252,28 @@ fn oracle_populates_test_files_env_preserves_live_tree_and_cleans_scratch_worktr
     );
     assert_eq!(fs::read_to_string(&leak_flag).unwrap().trim(), "FLAG=");
 
-    // Scratch worktree must be removed: only the main worktree remains registered.
+    // No ephemeral scratch worktree may leak; only the main worktree and the
+    // reusable, clean persistent oracle warm slot (`slot-0`) may be registered.
     let wt_list = git_out(repo.path(), &["worktree", "list", "--porcelain"]);
-    let wt_count = wt_list
+    let wt_paths: Vec<&str> = wt_list
         .lines()
-        .filter(|l| l.starts_with("worktree "))
-        .count();
-    assert_eq!(wt_count, 1, "scratch worktree leaked:\n{wt_list}");
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .collect();
+    assert!(
+        wt_paths.len() <= 2,
+        "unexpected scratch worktrees leaked:\n{wt_list}"
+    );
+    for extra in wt_paths.iter().skip(1) {
+        assert!(
+            extra.contains("warm-slots") && extra.ends_with("slot-0"),
+            "unexpected non-warm-slot scratch worktree leaked: {extra}\n{wt_list}"
+        );
+        let status = git_out(Path::new(extra), &["status", "--porcelain"]);
+        assert!(
+            status.trim().is_empty(),
+            "persistent oracle warm slot was not wiped clean on drop: {status}"
+        );
+    }
 }
 
 #[test]

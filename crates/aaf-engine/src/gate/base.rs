@@ -16,6 +16,12 @@ pub struct GateRunOptions<'a> {
     pub policy: HiddenPolicy,
     pub base_ref_override: Option<&'a str>,
     pub require_independent_approval: bool,
+    /// Permit publishing a cross-worktree common receipt even if ignored files
+    /// exist; set `true` only by trusted clean merge verifiers (`aaf merge`).
+    pub allow_common_receipt_write: bool,
+    /// Strip compiler wrapper and shared cache env vars (`RUSTC_WRAPPER`,
+    /// `SCCACHE_DIR`, etc.) from gate commands; set `true` by `aaf merge`.
+    pub strip_compiler_wrappers: bool,
 }
 
 /// Trunks `auto` tries after `origin/HEAD`, as full ref names: a short

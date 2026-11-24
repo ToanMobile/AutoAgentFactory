@@ -183,18 +183,16 @@ fn a_clear_batch_merges_without_gating_each_member_again() {
     assert_eq!(
         world.gate.runs(),
         vec![
-            // t1 was gated in its own worktree, cut from an older base, so
-            // the merge queue gates the rebased tree.
-            strings(&["t1"]),
+            // t1 rebased before gating, so one gate run covers its merge.
             strings(&["t1"]),
             // t2 + t3 were gated together on the current base: one run
             // covers both merges.
             strings(&["t2", "t3"]),
-            strings(&["t4"]),
+            // t4 rebased before gating, so one gate run covers its merge.
             strings(&["t4"]),
         ]
     );
-    assert_eq!(summary.gate_runs, 5);
+    assert_eq!(summary.gate_runs, 3);
 }
 
 #[test]
@@ -215,16 +213,16 @@ fn a_batch_member_is_gated_again_when_the_base_moved_under_the_batch() {
     world.once_with_queued_batch(|| {});
 
     let runs = world.gate.runs();
-    assert_eq!(runs[2], strings(&["t2", "t3"]));
+    assert_eq!(runs[1], strings(&["t2", "t3"]));
     assert_eq!(
-        runs[3],
+        runs[2],
         strings(&["t2"]),
         "the stale batch verdict is not reused"
     );
     // t3 was only ever gated on the old base together with t2: once the
     // chain is broken it is gated on what it really lands on.
-    assert_eq!(runs[4], strings(&["t3"]));
-    assert_eq!(runs.len(), 7, "{runs:?}");
+    assert_eq!(runs[3], strings(&["t3"]));
+    assert_eq!(runs.len(), 5, "{runs:?}");
     assert_eq!(world.state("t2"), TaskState::Done);
     assert_eq!(world.state("t3"), TaskState::Done);
 }
@@ -245,7 +243,8 @@ fn a_merge_conflict_is_rebased_once_and_gated_again() {
     let summary = world.once();
 
     assert_eq!(summary.done, vec!["t1"]);
-    assert_eq!(world.git.0.lock().unwrap().rebases, vec!["t1"]);
+    // Pre-gate rebase (round 1), T2 unblocker rebase, pre-gate rebase (round 2).
+    assert_eq!(world.git.0.lock().unwrap().rebases, vec!["t1", "t1", "t1"]);
     let task = world.task("t1");
     assert_eq!(task.unblock_cycles, 1);
     assert!(

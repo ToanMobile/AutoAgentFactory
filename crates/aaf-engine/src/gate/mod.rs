@@ -170,10 +170,8 @@ pub fn run_gate_throttled(
     run_gate_reporting(data_dir, repo_root, cfg, mode, clock, throttle).map(|run| run.receipt)
 }
 
-/// Runs the gate with the given throttle and stores the signed receipt under
-/// `data_dir`. Static checks, head lock, the store scan and a light lint run
-/// at once; build and test commands, and a lint that starts a build tool,
-/// go through `throttle` ([`runner::is_heavy`]).
+/// Runs the gate with `throttle` and stores the signed receipt under `data_dir`.
+/// Heavy commands ([`runner::is_heavy`]) go through `throttle`.
 pub fn run_gate_reporting(
     data_dir: &Path,
     repo_root: &Path,
@@ -186,8 +184,7 @@ pub fn run_gate_reporting(
     run_gate_policy(data_dir, repo_root, cfg, mode, clock, throttle, policy)
 }
 
-/// [`run_gate_reporting`] with a say on files that are on disk and ignored
-/// only by a rule the fingerprint does not cover ([`HiddenPolicy`]).
+/// [`run_gate_reporting`] with an explicit [`HiddenPolicy`].
 pub fn run_gate_policy(
     data_dir: &Path,
     repo_root: &Path,
@@ -206,15 +203,12 @@ pub fn run_gate_policy(
         throttle,
         GateRunOptions {
             policy,
-            base_ref_override: None,
-            require_independent_approval: false,
+            ..GateRunOptions::default()
         },
     )
 }
 
-/// [`run_gate_reporting`] with explicit [`GateRunOptions`], keeping
-/// [`config_hash`] on the unmutated `cfg` while enforcing an optional base
-/// override or independent head-lock approval requirement.
+/// [`run_gate_reporting`] with explicit [`GateRunOptions`].
 pub fn run_gate_with_options(
     data_dir: &Path,
     repo_root: &Path,
@@ -229,10 +223,7 @@ pub fn run_gate_with_options(
     // Receipts, approvals and the signing key are nobody else's to read.
     private::create_dir(data_dir)?;
     let key = aaf_fp::load_or_create_key(data_dir)?;
-    // The fingerprint is `git add -A`: a file git was told to overlook
-    // (index flag, ignore rule from outside the tree) is on disk for every
-    // command and missing from what the receipt signs. First of all, so
-    // that what the policy removes is gone before anything is read.
+    // Inspect hidden files first so policy removals happen before fingerprinting.
     let release = mode == GateMode::Release;
     let base_ref = opts.base_ref_override.unwrap_or(&cfg.gate.base_ref);
     let (found, layout, fp_before, base) = match opts.policy {
@@ -399,6 +390,9 @@ pub fn run_gate_with_options(
             &cfg.gate.docs_fast_path_exclude_globs,
             GIT_TIMEOUT,
         )?;
+    // Snapshot ignored-file cleanliness BEFORE commands run to block self-deleting bypass files.
+    let clean_ignored_before =
+        opts.allow_common_receipt_write || reuse::worktree_has_no_ignored_files(repo_root);
     let commands = if take_docs_fast_path {
         notes.push(format!(
             "{}skipped lint and test_scoped for {} safe doc file(s)",
@@ -416,14 +410,22 @@ pub fn run_gate_with_options(
         };
         let diff_env = runner::DiffEnvFiles::write(mode, base.sha.as_deref(), &set.changes)?;
         let env_owned = diff_env.env_pairs();
-        let env_refs: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let run = runner::run_all_throttled_with_env(
+        let mut env_refs: Vec<(&str, &str)> =
+            env_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let env_remove: &[&str] = if opts.strip_compiler_wrappers {
+            env_refs.extend_from_slice(runner::COMPILER_WRAPPER_DISABLE_ENV);
+            runner::COMPILER_WRAPPER_ENV_VARS
+        } else {
+            &[]
+        };
+        let run = runner::run_all_throttled_with_options(
             repo_root,
             &cfg.commands,
             mode,
             timeout,
             &heavy,
             &env_refs,
+            env_remove,
         )?;
         notes = run.notes;
         Some(run.results)
@@ -433,9 +435,7 @@ pub fn run_gate_with_options(
     if (opts.policy == HiddenPolicy::Remove || release)
         && commands.as_ref().is_some_and(|c| !c.is_empty())
     {
-        // A command can leave a file that changes the next run (and a test
-        // runner leaves its cache every time): gone before the next gate.
-        // A release receipt is not signed beside one either.
+        // Re-check hidden files after commands so caches/artifacts cannot persist or poison releases.
         let after = hidden::inspect(repo_root, opts.policy, When::AfterCommands, release)?;
         hidden.extend(after.blocks);
         hidden_notes.extend(after.notes);
@@ -452,9 +452,7 @@ pub fn run_gate_with_options(
         commands.as_deref(),
         tree_fp != fp_before,
     );
-    // Waiting for the machine is not a failure: it is recorded, and the
-    // status stays what the evidence decided. The same goes for what the
-    // hidden-file policy let pass or removed.
+    // Record throttle and hidden-file notes without altering the evidence verdict.
     reasons.append(&mut notes);
     reasons.append(&mut hidden_notes);
     let (status, reasons) = if status == GateStatus::Clear
@@ -468,7 +466,16 @@ pub fn run_gate_with_options(
             clock,
             throttle,
         };
-        let v = oracle::evaluate(repo_root, base_sha, cfg, mode, &set.changes, &added, &heavy)?;
+        let v = oracle::evaluate_with_options(
+            repo_root,
+            base_sha,
+            cfg,
+            mode,
+            &set.changes,
+            &added,
+            &heavy,
+            opts.strip_compiler_wrappers,
+        )?;
         oracle::apply_verdict(status, reasons, v)
     } else {
         (status, reasons)
@@ -491,11 +498,14 @@ pub fn run_gate_with_options(
         store_compliance: store,
         created_at: clock.now(),
     };
+    let write_common = opts.allow_common_receipt_write
+        || (clean_ignored_before && reuse::worktree_has_no_ignored_files(repo_root));
     reuse::persist_receipt(
         data_dir,
         &key,
         &common_repo_id,
         cfg.proof.required,
+        write_common,
         &receipt,
     )?;
     Ok(GateRun {
@@ -504,8 +514,7 @@ pub fn run_gate_with_options(
     })
 }
 
-/// [`run_gate_with`] that also reports what the throttle is doing (waiting
-/// for a slot, for memory, for the load; pausing) so the caller can show it.
+/// [`run_gate_with`] that also reports throttle progress to the caller.
 pub fn run_gate_observed(
     data_dir: &Path,
     repo_root: &Path,
@@ -534,10 +543,7 @@ pub fn run_gate_observed_reporting(
     run_gate_reporting(data_dir, repo_root, cfg, mode, clock, &throttle)
 }
 
-/// [`run_gate_observed`] for a work tree an agent wrote: files ignored only
-/// by a rule the fingerprint does not cover are deleted before the commands
-/// run and again after ([`HiddenPolicy::Remove`]). Never for a developer's
-/// own checkout.
+/// [`run_gate_observed`] with [`HiddenPolicy::Remove`] for agent worktrees (never developer checkouts).
 pub fn run_gate_strict(
     data_dir: &Path,
     repo_root: &Path,
@@ -565,8 +571,7 @@ pub fn run_gate_with(
     run_gate_observed(data_dir, repo_root, cfg, mode, clock, machine, &|_| {})
 }
 
-/// Runs the gate with the default machine limits and stores the signed
-/// receipt under `data_dir`.
+/// Runs the gate with default machine limits and stores the signed receipt under `data_dir`.
 pub fn run_gate_in(
     data_dir: &Path,
     repo_root: &Path,
@@ -578,8 +583,7 @@ pub fn run_gate_in(
     run_gate_with(data_dir, repo_root, cfg, mode, clock, &machine)
 }
 
-/// Fixed entry point (docs/PLAN.md C.5); the data directory comes from the
-/// environment.
+/// Fixed entry point (docs/PLAN.md C.5); the data directory comes from the environment.
 pub fn run_gate(
     repo_root: &Path,
     cfg: &RepoConfig,

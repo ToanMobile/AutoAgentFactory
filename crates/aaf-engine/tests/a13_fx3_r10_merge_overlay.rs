@@ -132,6 +132,7 @@ fn run_merge(work: &Path, data: &Path, head: &str) -> (PrMergeOutcome, usize) {
             max_load_percent: 0,
             ..MachineConfig::default()
         },
+        global_config: None,
     };
     let gh = FakeGh {
         pr: PrInfo {

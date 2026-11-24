@@ -63,6 +63,18 @@ pub struct BatchOutcome {
     pub groups: HashMap<u32, Group>,
 }
 
+/// Runs the gate once on `tree` and maps the receipt/error to a [`Verdict`].
+pub(super) fn gate_one(gate: &dyn GateRunner, tree: &Path) -> Verdict {
+    match gate.run(tree) {
+        Ok(receipt) => match receipt.status {
+            GateStatus::Clear => Verdict::Clear(receipt),
+            GateStatus::Blocked => Verdict::Red(receipt),
+            GateStatus::Unverified => Verdict::Unverified(receipt),
+        },
+        Err(err) => Verdict::Error(err.to_string()),
+    }
+}
+
 /// Gates `members` with as few gate runs as possible.
 pub fn gate_batch(git: &dyn GitOps, gate: &dyn GateRunner, members: &[Member]) -> BatchOutcome {
     let mut batcher = Batcher {
@@ -94,14 +106,7 @@ impl Batcher<'_> {
 
     fn run(&mut self, tree: &Path) -> Verdict {
         self.out.gate_runs += 1;
-        match self.gate.run(tree) {
-            Ok(receipt) => match receipt.status {
-                GateStatus::Clear => Verdict::Clear(receipt),
-                GateStatus::Blocked => Verdict::Red(receipt),
-                GateStatus::Unverified => Verdict::Unverified(receipt),
-            },
-            Err(err) => Verdict::Error(err.to_string()),
-        }
+        gate_one(self.gate, tree)
     }
 
     fn solo(&mut self, member: &Member) -> bool {

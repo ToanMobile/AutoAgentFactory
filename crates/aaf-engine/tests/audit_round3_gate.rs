@@ -413,6 +413,7 @@ fn pr_merge_hits_common_receipt_cache_with_auto_base_and_rejects_same_account() 
         lock_timeout: Duration::from_secs(10),
         dry_run,
         machine: machine.clone(),
+        global_config: None,
     };
 
     // 1. Worktree gate with base_ref = "auto" populates common receipt -> merge hits cache!

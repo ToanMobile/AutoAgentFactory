@@ -1,4 +1,5 @@
-//! RAII guards and bounded deadline helpers for [`super::pr_merge`].
+//! RAII guards, in-memory merge pre-check, lock/CI helpers, and bounded
+//! deadline utilities for [`super::pr_merge`].
 
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
@@ -6,16 +7,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aaf_domain::config::RepoConfig;
+use aaf_domain::config::{GlobalConfig, RepoConfig};
 
-use super::cmd::{git, git_raw};
-use super::gh_client::PrInfo;
-use super::{GitError, check_branch_name, path_str};
+use super::cmd::{failure, git, git_raw};
+use super::gh_client::{GhClient, PrInfo};
+use super::warm_slot::{SlotKind, WarmSlot};
+use super::{GitError, check_branch_name};
 use crate::config::{self, REPO_CONFIG_REL};
+use crate::throttle::Progress;
 
 /// Maximum wait duration (24 hours) for lock or CI polling to prevent overflow
 /// when computing `Instant` deadlines.
 pub(super) const MAX_WAIT_SECS: u64 = 86_400;
+/// How often a waiter on the per-repo merge lock reports progress.
+const MERGE_LOCK_PROGRESS_SECS: u64 = 15;
 
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -26,36 +31,14 @@ pub(super) fn bounded_deadline(timeout: Duration) -> Instant {
     now.checked_add(clamped).unwrap_or(now)
 }
 
-/// Tier 2 from the immutable `<base_sha>` (`git show`: never the PR's or the
-/// checkout's copy), with the tighten-only tier-1, tier-3 (from `repo_root`)
-/// and `AAF_*` environment overlays layered on top exactly as for `aaf gate`.
-pub(super) fn load_trusted_base_config(
-    repo_root: &Path,
-    base_sha: &str,
-) -> Result<RepoConfig, GitError> {
-    let spec = format!("{base_sha}:{REPO_CONFIG_REL}");
-    let raw = git(repo_root, &["show", &spec]).map_err(|_| {
-        GitError::Gate(format!(
-            "missing or unreadable {REPO_CONFIG_REL} at base {base_sha}"
-        ))
-    })?;
-    let base: RepoConfig = toml::from_str(&raw).map_err(|e| {
-        GitError::Gate(format!("invalid {REPO_CONFIG_REL} at base {base_sha}: {e}"))
-    })?;
-    config::load_over_repo_from_env(repo_root, base, &spec)
-        .map(|effective| effective.repo)
-        .map_err(|e| GitError::Gate(format!("config over base {base_sha}: {e}")))
+pub(super) fn valid_sha40(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Isolated detached scratch worktree for verifying a merged PR tree; always
-/// removed and pruned on `Drop`. Holds an exclusive advisory lock on
-/// `<path>.lock` for its entire lifetime so `aaf gc` never deletes a live
-/// scratch worktree during optimistic pre-merge verification.
+/// Isolated detached worktree for verifying a merged PR tree, backed by a
+/// fixed-path persistent [`WarmSlot`] (with ephemeral fallback under contention).
 pub(super) struct ScratchWorktree {
-    repo_root: PathBuf,
-    pub(super) path: PathBuf,
-    lock_path: PathBuf,
-    lock_file: Option<File>,
+    slot: WarmSlot,
 }
 
 impl ScratchWorktree {
@@ -66,61 +49,269 @@ impl ScratchWorktree {
         pr_number: u64,
         base_sha: &str,
     ) -> Result<ScratchWorktree, GitError> {
-        let base_dir = data_dir.join("merge-scratch");
-        fs::create_dir_all(&base_dir)?;
-        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = base_dir.join(format!(
-            "{common_id}-pr{pr_number}-{}-{seq}",
-            std::process::id()
-        ));
-        let path_s = path_str(&path)?;
-        let mut lock_os = path.as_os_str().to_os_string();
-        lock_os.push(".lock");
-        let lock_path = PathBuf::from(lock_os);
-        let lock_file = crate::db::private::open_file(&lock_path)?;
-        match lock_file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(GitError::LockTimeout(lock_path)),
-            Err(TryLockError::Error(err)) => return Err(err.into()),
-        }
-        if let Err(err) = git(
+        let slot = WarmSlot::acquire(
             repo_root,
-            &[
-                "-c",
-                "core.hooksPath=/dev/null",
-                "worktree",
-                "add",
-                "--detach",
-                path_s,
-                base_sha,
-            ],
-        ) {
-            let _ = lock_file.unlock();
-            drop(lock_file);
-            let _ = fs::remove_file(&lock_path);
-            return Err(err);
-        }
-        Ok(ScratchWorktree {
-            repo_root: repo_root.to_path_buf(),
-            path,
-            lock_path,
-            lock_file: Some(lock_file),
-        })
+            data_dir,
+            common_id,
+            SlotKind::Merge,
+            base_sha,
+            &format!("pr{pr_number}"),
+        )?;
+        Ok(ScratchWorktree { slot })
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        self.slot.path()
     }
 }
 
-impl Drop for ScratchWorktree {
-    fn drop(&mut self) {
-        if let Some(p) = self.path.to_str() {
-            let _ = git_raw(&self.repo_root, &["worktree", "remove", "--force", p]);
+/// Outcome of an in-memory `git merge-tree --write-tree` pre-check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum InMemoryMerge {
+    Clean { tree_oid: String },
+    Conflict { detail: String },
+    Unsupported,
+}
+
+/// Computes the merged git tree OID in memory without creating or touching any
+/// working tree. Falls back to [`InMemoryMerge::Unsupported`] on older git
+/// versions lacking `--write-tree`.
+pub(super) fn in_memory_merge_tree(
+    repo_root: &Path,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<InMemoryMerge, GitError> {
+    let args = [
+        "merge-tree",
+        "--write-tree",
+        "--no-messages",
+        base_sha,
+        head_sha,
+    ];
+    let out = git_raw(repo_root, &args)?;
+    match out.code {
+        Some(0) => {
+            let first = out
+                .stdout
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("");
+            if valid_sha40(first) {
+                Ok(InMemoryMerge::Clean {
+                    tree_oid: first.to_string(),
+                })
+            } else {
+                Ok(InMemoryMerge::Unsupported)
+            }
         }
-        let _ = fs::remove_dir_all(&self.path);
-        let _ = git_raw(&self.repo_root, &["worktree", "prune"]);
-        if let Some(file) = self.lock_file.take() {
-            let _ = file.unlock();
-            drop(file);
+        Some(1) => {
+            let mut files: Vec<&str> = Vec::new();
+            for line in out.stdout.lines().skip(1) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let name = trimmed.split_once('\t').map_or(trimmed, |(_, path)| path);
+                if !files.contains(&name) {
+                    files.push(name);
+                }
+            }
+            let detail = if !files.is_empty() {
+                files.join(", ")
+            } else if !out.stderr.trim().is_empty() {
+                out.stderr.trim().to_string()
+            } else {
+                "merge conflict".to_string()
+            };
+            Ok(InMemoryMerge::Conflict { detail })
         }
-        let _ = fs::remove_file(&self.lock_path);
+        Some(129) => Ok(InMemoryMerge::Unsupported),
+        _ => {
+            if out.stderr.contains("unknown option") || out.stderr.contains("usage:") {
+                Ok(InMemoryMerge::Unsupported)
+            } else if out.stderr.contains("unrelated histories") {
+                Ok(InMemoryMerge::Conflict {
+                    detail: out.stderr.trim().to_string(),
+                })
+            } else {
+                Err(failure(&args, &out))
+            }
+        }
+    }
+}
+
+/// Lightweight `git ls-remote --heads <remote> refs/heads/<branch>` tip check.
+/// Returns `Ok(None)` when empty or non-zero so callers safely fall back to a
+/// full `fetch_base_and_pr`.
+pub(super) fn ls_remote_head(
+    repo_root: &Path,
+    remote: &str,
+    branch: &str,
+) -> Result<Option<String>, GitError> {
+    check_branch_name(repo_root, branch)?;
+    if remote.is_empty() || remote.starts_with('-') {
+        return Err(GitError::Invalid(format!("remote name {remote:?}")));
+    }
+    let target_ref = format!("refs/heads/{branch}");
+    let out = git_raw(repo_root, &["ls-remote", "--heads", remote, &target_ref])?;
+    if !out.success() {
+        return Ok(None);
+    }
+    for line in out.stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(sha) = parts.next() else { continue };
+        let Some(refname) = parts.next() else {
+            continue;
+        };
+        if refname == target_ref && valid_sha40(sha) {
+            return Ok(Some(sha.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Tier 2 from the immutable `<base_sha>` (`git show`: never the PR's or the
+/// checkout's copy), with the tighten-only tier-1, tier-3 (from `repo_root`)
+/// and `AAF_*` environment overlays layered on top exactly as for `aaf gate`
+/// (never loosening). Tier 1 is `global` when the caller already loaded it,
+/// else the global config file itself: a missing `global` never skips it.
+pub(super) fn load_trusted_base_config(
+    repo_root: &Path,
+    base_sha: &str,
+    global: Option<&GlobalConfig>,
+) -> Result<RepoConfig, GitError> {
+    let spec = format!("{base_sha}:{REPO_CONFIG_REL}");
+    let raw = git(repo_root, &["show", &spec]).map_err(|_| {
+        GitError::Gate(format!(
+            "missing or unreadable {REPO_CONFIG_REL} at base {base_sha}"
+        ))
+    })?;
+    let base: RepoConfig = toml::from_str(&raw).map_err(|e| {
+        GitError::Gate(format!("invalid {REPO_CONFIG_REL} at base {base_sha}: {e}"))
+    })?;
+    let tightened = match global {
+        Some(global) => config::tighten_trusted_base_from_env(base, global, Some(repo_root)),
+        None => config::load_over_repo_from_env(repo_root, base, &spec).map(|eff| eff.repo),
+    };
+    tightened.map_err(|e| GitError::Gate(format!("config over base {base_sha}: {e}")))
+}
+
+pub(super) fn check_ci(
+    gh: &dyn GhClient,
+    repo_root: &Path,
+    pr_number: u64,
+    wait_secs: u64,
+) -> Result<(Option<(String, String)>, bool), GitError> {
+    let deadline = bounded_deadline(Duration::from_secs(wait_secs.min(MAX_WAIT_SECS)));
+    let mut waited = false;
+    loop {
+        let checks = gh.pr_checks(repo_root, pr_number)?;
+        let failed: Vec<&str> = checks
+            .iter()
+            .filter(|c| matches!(c.bucket.as_str(), "fail" | "cancel"))
+            .map(|c| c.name.as_str())
+            .collect();
+        if !failed.is_empty() {
+            return Ok((
+                Some((
+                    "ci_failed".to_string(),
+                    format!("PR checks failed: {}", failed.join(", ")),
+                )),
+                waited,
+            ));
+        }
+        let pending: Vec<&str> = checks
+            .iter()
+            .filter(|c| c.bucket == "pending")
+            .map(|c| c.name.as_str())
+            .collect();
+        if pending.is_empty() {
+            return Ok((None, waited));
+        }
+        if Instant::now() >= deadline {
+            return Ok((
+                Some((
+                    "ci_pending".to_string(),
+                    format!("PR checks still pending: {}", pending.join(", ")),
+                )),
+                waited,
+            ));
+        }
+        waited = true;
+        let rem = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(rem.min(Duration::from_secs(3)));
+    }
+}
+
+/// Acquires the per-repo merge lock with private permissions, bounded deadline,
+/// and periodic `WaitingForMergeLock` progress reports. Returns `Ok(None)` on timeout.
+pub(super) fn acquire_merge_lock(
+    locks_dir: &Path,
+    common_id: &str,
+    pr_number: u64,
+    timeout: Duration,
+    progress: &dyn Fn(&Progress<'_>),
+) -> Result<Option<(MergeLockGuard, bool)>, GitError> {
+    crate::db::private::create_dir(locks_dir)?;
+    let lock_path = locks_dir.join(format!("{common_id}.merge.lock"));
+    drop(crate::db::private::open_file(&lock_path)?);
+    let started = Instant::now();
+    let deadline = bounded_deadline(timeout);
+    let mut last_report: Option<Instant> = None;
+    let mut waited = false;
+    loop {
+        match MergeLockGuard::acquire(locks_dir, common_id, Duration::ZERO) {
+            Ok(guard) => return Ok(Some((guard, waited))),
+            Err(GitError::LockTimeout(_)) if Instant::now() < deadline => {
+                waited = true;
+                let now = Instant::now();
+                let should_report = last_report.is_none_or(|prev| {
+                    now.saturating_duration_since(prev).as_secs() >= MERGE_LOCK_PROGRESS_SECS
+                });
+                if should_report {
+                    last_report = Some(now);
+                    progress(&Progress::WaitingForMergeLock {
+                        pr_number,
+                        waited_secs: now.saturating_duration_since(started).as_secs(),
+                        timeout_secs: timeout.as_secs(),
+                    });
+                }
+                let rem = deadline.saturating_duration_since(now);
+                thread::sleep(rem.min(Duration::from_millis(50)));
+            }
+            Err(GitError::LockTimeout(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+pub(super) fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str) -> String {
+    let refspec = format!("+refs/heads/{base_branch}:refs/remotes/{remote}/{base_branch}");
+    if git(repo_root, &["fetch", "--quiet", "--", remote, &refspec]).is_err() {
+        return format!("warning: could not fetch {remote}/{base_branch} after merge");
+    }
+    let current = git(repo_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
+    if current != base_branch {
+        return format!(
+            "local checkout is on `{current}` (not `{base_branch}`); skipped local fast-forward"
+        );
+    }
+    let dirty = git(repo_root, &["status", "--porcelain"]).unwrap_or_else(|_| "dirty".into());
+    if !dirty.is_empty() {
+        return format!(
+            "warning: local `{base_branch}` has uncommitted changes; skipped local fast-forward"
+        );
+    }
+    let target = format!("{remote}/{base_branch}");
+    match git_raw(
+        repo_root,
+        &["merge", "--ff-only", "--no-overwrite-ignore", &target],
+    ) {
+        Ok(st) if st.success() => format!("fast-forwarded local `{base_branch}` to `{target}`"),
+        _ => format!(
+            "warning: local `{base_branch}` could not fast-forward to `{target}` (diverged)"
+        ),
     }
 }
 

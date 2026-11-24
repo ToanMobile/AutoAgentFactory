@@ -106,6 +106,7 @@ impl Fixture {
             lock_timeout: Duration::from_secs(10),
             dry_run,
             machine: MachineConfig::default(),
+            global_config: None,
         }
     }
 }

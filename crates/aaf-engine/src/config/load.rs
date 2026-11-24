@@ -208,45 +208,12 @@ fn layer(
 
     let local_path = inputs.repo_root.join(LOCAL_CONFIG_REL);
     if let Some(local) = read_tier::<LocalFile>(&local_path, &mut sources)? {
-        let source = local_path.display().to_string();
-        let tier_two_only = [
-            ("commands", &local.commands, REPO_CONFIG_REL),
-            ("unblocker", &local.unblocker, REPO_CONFIG_REL),
-            ("safety", &local.safety, "the global config"),
-            ("accounts", &local.accounts, "the global config"),
-            ("notifications", &local.notifications, "the global config"),
-            ("telegram", &local.telegram, "the global config"),
-            ("proof", &local.proof, REPO_CONFIG_REL),
-            ("github", &local.github, REPO_CONFIG_REL),
-        ];
-        for (section, value, owner) in tier_two_only {
-            if value.is_some() {
-                warnings.push(format!(
-                    "{source}: [{section}] ignored: it is read from {owner} only"
-                ));
-            }
-        }
-        let overlay = ConfigOverlay {
-            project: local.project,
-            gate: local.gate,
-            run: local.run,
-        };
-        apply_overlay(
+        apply_local_file(
             &mut repo,
-            overlay,
-            &source,
-            OverlayOrigin::Ambient,
+            local,
+            &local_path.display().to_string(),
             &mut warnings,
         );
-        apply_cross_audit_overlay(
-            &mut repo.cross_audit,
-            local.cross_audit,
-            &source,
-            &mut warnings,
-        );
-        if let Some(pipeline) = local.pipeline {
-            apply_pipeline_overlay(&mut repo.pipeline, pipeline, &source, &mut warnings);
-        }
     }
 
     let env_overlay = env_overlay(inputs.env, &mut warnings)?;
@@ -265,13 +232,7 @@ fn layer(
         &mut warnings,
     );
 
-    // A misspelt profile would otherwise silently select no store-compliance rules.
-    let profile = &repo.project.profile;
-    if profile != "auto" && !PROFILES.contains(&profile.as_str()) {
-        return Err(ConfigError::InvalidProfile {
-            value: profile.clone(),
-        });
-    }
+    validate_profile(&repo)?;
 
     Ok(EffectiveConfig {
         global,
@@ -279,6 +240,104 @@ fn layer(
         sources,
         warnings,
     })
+}
+
+/// Applies Tier-1 (`global`), optional Tier-3 (`local_repo_root/.autofactory/config.local.toml`),
+/// and `AAF_*` environment tightenings on top of a trusted Tier-2 `RepoConfig`
+/// (e.g. read from `<base_sha>:.autofactory/config.toml` during `aaf merge`).
+/// Every overlay is strictly tighten-only: neither Tier-3 nor the environment
+/// can disable `proof.required`, remove `head_lock_globs`, or weaken
+/// `cross_audit`, `red_green_oracle`, or `store_compliance`.
+pub fn tighten_trusted_base(
+    mut repo: RepoConfig,
+    global: &GlobalConfig,
+    local_repo_root: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<RepoConfig, ConfigError> {
+    let mut sources = Vec::new();
+    let mut warnings = Vec::new();
+    merge_cross_audit(&global.cross_audit, &mut repo.cross_audit, &mut warnings);
+    merge_max_open_review(global.run.max_open_review, &mut repo.run.max_open_review);
+    clamp_pipeline(&mut repo.pipeline, REPO_CONFIG_REL, &mut warnings);
+
+    if let Some(root) = local_repo_root {
+        let local_path = root.join(LOCAL_CONFIG_REL);
+        if let Some(local) = read_tier::<LocalFile>(&local_path, &mut sources)? {
+            apply_local_file(
+                &mut repo,
+                local,
+                &local_path.display().to_string(),
+                &mut warnings,
+            );
+        }
+    }
+
+    let env_ov = env_overlay(env, &mut warnings)?;
+    apply_overlay(
+        &mut repo,
+        env_ov,
+        "environment",
+        OverlayOrigin::Ambient,
+        &mut warnings,
+    );
+
+    validate_profile(&repo)?;
+    Ok(repo)
+}
+
+/// [`tighten_trusted_base`] using the real process environment.
+pub fn tighten_trusted_base_from_env(
+    repo: RepoConfig,
+    global: &GlobalConfig,
+    local_repo_root: Option<&Path>,
+) -> Result<RepoConfig, ConfigError> {
+    tighten_trusted_base(repo, global, local_repo_root, &process_env)
+}
+
+fn apply_local_file(
+    repo: &mut RepoConfig,
+    local: LocalFile,
+    source: &str,
+    warnings: &mut Vec<String>,
+) {
+    let tier_two_only = [
+        ("commands", &local.commands, REPO_CONFIG_REL),
+        ("unblocker", &local.unblocker, REPO_CONFIG_REL),
+        ("safety", &local.safety, "the global config"),
+        ("accounts", &local.accounts, "the global config"),
+        ("notifications", &local.notifications, "the global config"),
+        ("telegram", &local.telegram, "the global config"),
+        ("proof", &local.proof, REPO_CONFIG_REL),
+        ("github", &local.github, REPO_CONFIG_REL),
+    ];
+    for (section, value, owner) in tier_two_only {
+        if value.is_some() {
+            warnings.push(format!(
+                "{source}: [{section}] ignored: it is read from {owner} only"
+            ));
+        }
+    }
+    let overlay = ConfigOverlay {
+        project: local.project,
+        gate: local.gate,
+        run: local.run,
+    };
+    apply_overlay(repo, overlay, source, OverlayOrigin::Ambient, warnings);
+    apply_cross_audit_overlay(&mut repo.cross_audit, local.cross_audit, source, warnings);
+    if let Some(pipeline) = local.pipeline {
+        apply_pipeline_overlay(&mut repo.pipeline, pipeline, source, warnings);
+    }
+}
+
+fn validate_profile(repo: &RepoConfig) -> Result<(), ConfigError> {
+    // A misspelt profile would otherwise silently select no store-compliance rules.
+    let profile = &repo.project.profile;
+    if profile != "auto" && !PROFILES.contains(&profile.as_str()) {
+        return Err(ConfigError::InvalidProfile {
+            value: profile.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// `Ok(None)` only when the file does not exist. A file that exists but

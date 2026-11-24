@@ -313,12 +313,26 @@ impl Throttle<'_> {
         job: &HeavyJob<'_>,
         extra_env: &[(&str, &str)],
     ) -> io::Result<HeavyRun> {
+        self.run_heavy_with_env_and_removals(data_dir, clock, job, extra_env, &[])
+    }
+
+    /// [`Throttle::run_heavy_with_env`] that also strips every environment
+    /// variable listed in `env_remove` (e.g. compiler wrapper and cache vars).
+    pub fn run_heavy_with_env_and_removals(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &HeavyJob<'_>,
+        extra_env: &[(&str, &str)],
+        env_remove: &[&str],
+    ) -> io::Result<HeavyRun> {
         self.run_heavy_with_all(
             data_dir,
             clock,
             job,
             &Inherited::from_process_env(),
             extra_env,
+            env_remove,
         )
     }
 
@@ -330,7 +344,7 @@ impl Throttle<'_> {
         job: &HeavyJob<'_>,
         inherited: &Inherited,
     ) -> io::Result<HeavyRun> {
-        self.run_heavy_with_all(data_dir, clock, job, inherited, &[])
+        self.run_heavy_with_all(data_dir, clock, job, inherited, &[], &[])
     }
 
     fn run_heavy_with_all(
@@ -340,6 +354,7 @@ impl Throttle<'_> {
         job: &HeavyJob<'_>,
         inherited: &Inherited,
         extra_env: &[(&str, &str)],
+        env_remove: &[&str],
     ) -> io::Result<HeavyRun> {
         let tool = heavy::heavy_tool(job.command);
         let cmd_family = if tool.is_none() {
@@ -375,6 +390,9 @@ impl Throttle<'_> {
         }
         for (k, v) in extra_env {
             command.env(k, v);
+        }
+        for var in env_remove {
+            command.env_remove(var);
         }
         let launch = Launch {
             ask,

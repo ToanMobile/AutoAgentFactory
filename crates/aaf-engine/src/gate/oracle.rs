@@ -21,7 +21,7 @@ use super::oracle_worktree::{
     ScratchWorktree, overlay_live_changes, revert_prod_files, split_inline_cfg_test,
 };
 use super::runner::HeavyContext;
-use super::{GateError, static_checks};
+use super::{GIT_TIMEOUT, GateError, static_checks};
 use crate::throttle::HeavyJob;
 
 /// Capture up to 64 KiB of combined test output for oracle classification.
@@ -210,12 +210,19 @@ fn inline_rust_test_files(repo_root: &Path, added: &[AddedLines]) -> BTreeSet<St
 /// production files reverted to `base_sha`.
 fn prepare_reverted_tree(
     repo_root: &Path,
+    head_sha: &str,
     base_sha: &str,
     prod_changes: &[&Change],
     inline_rust_tests: &BTreeSet<String>,
     heavy: &HeavyContext<'_>,
 ) -> Result<ScratchWorktree, GateError> {
-    let scratch = ScratchWorktree::create(repo_root, heavy.data_dir, heavy.stats_repo_id)?;
+    let scratch = ScratchWorktree::create(
+        repo_root,
+        heavy.data_dir,
+        heavy.stats_repo_id,
+        head_sha,
+        base_sha,
+    )?;
     overlay_live_changes(repo_root, scratch.path())?;
     revert_prod_files(
         repo_root,
@@ -330,6 +337,21 @@ pub fn evaluate(
     added: &[AddedLines],
     heavy: &HeavyContext<'_>,
 ) -> Result<OracleVerdict, GateError> {
+    evaluate_with_options(repo_root, base_sha, cfg, mode, changes, added, heavy, false)
+}
+
+/// [`evaluate`] with explicit compiler-wrapper neutralization for trusted verification.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_with_options(
+    repo_root: &Path,
+    base_sha: &str,
+    cfg: &RepoConfig,
+    mode: GateMode,
+    changes: &[Change],
+    added: &[AddedLines],
+    heavy: &HeavyContext<'_>,
+    strip_compiler_wrappers: bool,
+) -> Result<OracleVerdict, GateError> {
     let oracle_mode = cfg.gate.red_green_oracle;
     if oracle_mode == OracleMode::Off {
         return Ok(OracleVerdict::Skipped);
@@ -373,11 +395,16 @@ pub fn evaluate(
         return Ok(OracleVerdict::Skipped);
     };
 
+    // No committed HEAD is a broken repository, not an unbuildable tree.
+    let head_sha = super::base::head(repo_root, GIT_TIMEOUT)?.ok_or_else(|| {
+        GateError::Git("oracle requires a committed HEAD in repository".to_string())
+    })?;
     // A tree the oracle cannot build proves nothing either way: block mode
     // reports Unverified, warn mode a warning, never a gate error with no
     // receipt.
     let scratch = match prepare_reverted_tree(
         repo_root,
+        &head_sha,
         base_sha,
         &prod_changes,
         &inline_rust_tests,
@@ -401,11 +428,21 @@ pub fn evaluate(
         GateMode::Full => "full",
         GateMode::Release => "release",
     };
-    let extra_env = [
+    let mut extra_env = vec![
         ("AAF_GATE_MODE", mode_str),
         ("AAF_BASE_SHA", base_sha),
         ("AAF_TEST_FILES_FILE", test_files_path.as_str()),
     ];
+    let env_remove: Vec<&str> = if strip_compiler_wrappers {
+        extra_env.extend_from_slice(super::runner::COMPILER_WRAPPER_DISABLE_ENV);
+        super::runner::COMPILER_WRAPPER_ENV_VARS
+            .iter()
+            .copied()
+            .filter(|var| !extra_env.iter().any(|(k, _)| k == var))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let job = HeavyJob {
         repo_id: heavy.stats_repo_id,
         label: cmd_label,
@@ -414,9 +451,13 @@ pub fn evaluate(
         timeout: Duration::from_secs(cfg.gate.command_timeout_secs),
         log_tail_bytes: ORACLE_OUTPUT_CAP_BYTES,
     };
-    let run = heavy
-        .throttle
-        .run_heavy_with_env(heavy.data_dir, heavy.clock, &job, &extra_env)?;
+    let run = heavy.throttle.run_heavy_with_env_and_removals(
+        heavy.data_dir,
+        heavy.clock,
+        &job,
+        &extra_env,
+        &env_remove,
+    )?;
     let output = String::from_utf8_lossy(&run.output);
     Ok(map_outcome(
         oracle_mode,

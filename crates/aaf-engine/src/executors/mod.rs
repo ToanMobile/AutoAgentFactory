@@ -34,12 +34,10 @@ use self::sandbox::SandboxPaths;
 
 /// Tool caches under the home directory that builds write to. Each entry is
 /// one tool's own directory: a blanket `~/.cache` or `~/Library/Caches` would
-/// also open other tools' state, including the default task-worktree
-/// directory `~/.cache/autofactory/worktrees`.
-/// The last ten are what real builds of Kotlin Multiplatform, Unity and Xcode
-/// projects wrote on the machine this was first run on.
-/// ponytail: fixed list; make it a config key when a project needs another.
-const BUILD_CACHE_DIRS: [&str; 32] = [
+/// also open other tools' state, including `~/.cache/autofactory/worktrees`
+/// and `warm-slots`. `.cache/sccache` is intentionally omitted: unsandboxed
+/// `aaf gate`/`aaf merge` would otherwise inherit poisoned compiler artifacts.
+pub const BUILD_CACHE_DIRS: [&str; 31] = [
     ".cargo",
     ".rustup",
     ".gradle",
@@ -54,7 +52,6 @@ const BUILD_CACHE_DIRS: [&str; 32] = [
     ".cache/pip",
     ".cache/uv",
     ".cache/go-build",
-    ".cache/sccache",
     "Library/Caches/pip",
     "Library/Caches/Yarn",
     "Library/Caches/pnpm",
@@ -74,13 +71,8 @@ const BUILD_CACHE_DIRS: [&str; 32] = [
     "Library/org.swift.swiftpm",
 ];
 
-/// Inside the writable caches above, but not a cache: files a later build
-/// outside the sandbox executes (Gradle init scripts, cargo and pub
-/// binaries on the owner's PATH), obeys (tool configuration) or trusts
-/// (stored logins, the adb and debug signing keys). Relative to the home
-/// directory; a trailing `*` closes every path that starts like this.
-/// Reading them stays as it was. What no path rule can close is said in
-/// SECURITY.md: the caches themselves hold code that later builds run.
+/// Sensitive paths inside writable caches (scripts, PATH bins, configs, signing
+/// keys, credentials); a trailing `*` closes every matching prefix. See SECURITY.md.
 const CACHE_WRITE_DENIED: [&str; 13] = [
     ".gradle/init.d",
     ".gradle/gradle.properties",
@@ -103,8 +95,7 @@ const SDK_WRITE_DENIED: [&str; 1] = ["platform-tools"];
 const CARGO_WRITE_DENIED: [&str; 4] = ["bin", "env", "config*", "credentials*"];
 const GRADLE_WRITE_DENIED: [&str; 3] = ["init.d", "gradle.properties", "init.gradle*"];
 
-/// The parts of the process environment the executors depend on, passed in so
-/// tests never touch the real one.
+/// Process environment inputs for executors (injected so tests stay isolated).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecEnv {
     pub home: Option<String>,
@@ -112,29 +103,21 @@ pub struct ExecEnv {
     pub temp_dirs: Vec<String>,
     /// Absolute path of the `claude` binary, when one was found.
     pub claude_bin: Option<String>,
-    /// The aaf data directory (signing key, receipts, approvals): never
-    /// readable by a confined run, whatever the caller's policy lists.
+    /// The aaf data directory (signing key, receipts, approvals); always denied.
     pub data_dir: Option<String>,
-    /// Directory holding every task worktree. `None` means the default below
-    /// `home` ([`DEFAULT_WORKTREES_REL`]).
+    /// Directory holding task worktrees (`None` = `$HOME/{DEFAULT_WORKTREES_REL}`).
     pub worktrees_root: Option<String>,
-    /// Tool installations outside the home directory that builds write to:
-    /// the Android SDK of `ANDROID_HOME` / `ANDROID_SDK_ROOT`.
+    /// External writable SDK roots (`ANDROID_HOME` / `ANDROID_SDK_ROOT`).
     pub sdk_dirs: Vec<String>,
-    /// Custom toolchain home overrides (`CARGO_HOME`, `RUSTUP_HOME`,
-    /// `GRADLE_USER_HOME`), honored with the same write-denied guards as
-    /// `~/.cargo` and `~/.gradle`.
+    /// Custom toolchain home overrides (`CARGO_HOME`, `RUSTUP_HOME`, `GRADLE_USER_HOME`).
     pub cargo_home: Option<String>,
     pub rustup_home: Option<String>,
     pub gradle_user_home: Option<String>,
-    /// The environment of the process that starts the agent. Only the names
-    /// on the allow-list ([`agent_env`]) are handed on.
+    /// Parent process environment; filtered through [`agent_env`].
     pub parent_env: Vec<(String, String)>,
     /// `run.env_pass`: further names to hand on.
     pub env_pass: Vec<String>,
-    /// `run.env_pass` of the machine config (tier 1) only: these names may
-    /// also be credentials or `NODE_OPTIONS` ([`env::validate_machine_env_pass`]).
-    /// Whoever fills this vouches that the names come from that file.
+    /// Tier-1 machine `run.env_pass` ([`env::validate_machine_env_pass`]).
     pub machine_env_pass: Vec<String>,
 }
 
@@ -144,6 +127,8 @@ const SDK_DIR_ENV: [&str; 2] = ["ANDROID_HOME", "ANDROID_SDK_ROOT"];
 /// Default task-worktree directory, relative to the home directory
 /// (docs/PLAN.md C.1).
 pub const DEFAULT_WORKTREES_REL: &str = ".cache/autofactory/worktrees";
+/// Host-owned warm-slot cache directory; always read- and write-denied inside sandboxes.
+pub const DEFAULT_WARM_SLOTS_REL: &str = ".cache/autofactory/warm-slots";
 
 impl ExecEnv {
     /// Reads the real environment: `HOME`, `TMPDIR` and `PATH`.
@@ -268,11 +253,8 @@ fn open_queue(env: &ExecEnv) -> PortResult<(Vec<String>, Vec<String>)> {
     ))
 }
 
-/// Creates every writable root that does not exist yet and has something
-/// closed in it. The profile closes the entry of such a root (it cannot be
-/// renamed away and back with other content), and for a root that is not
-/// there the same rule would stop the first build from making it, while
-/// leaving it open would let a prepared directory be renamed into place.
+/// Creates every missing writable root that encloses a closed path, so Seatbelt
+/// can guard the root entry without preventing the first build from creating it.
 fn create_missing_roots<'a>(
     roots: &[String],
     closed: impl Iterator<Item = &'a String> + Clone,
@@ -386,9 +368,7 @@ pub(crate) fn run_confined_with_tail(
                 .into_iter()
                 .flatten()
             {
-                if !writable.contains(custom) {
-                    writable.push(custom.clone());
-                }
+                push_unique(&mut writable, custom.clone());
             }
         }
         writable.extend(account.writable);
@@ -406,8 +386,7 @@ pub(crate) fn run_confined_with_tail(
         for sdk in &env.sdk_dirs {
             write_denied.extend(SDK_WRITE_DENIED.iter().map(|dir| format!("{sdk}/{dir}")));
         }
-        // What aaf itself and the owner's shell look commands up in. The
-        // profile closes the entries that lie inside a writable root.
+        // PATH dirs inside writable roots are closed by the sandbox profile.
         let path_dirs: Vec<String> = env
             .parent_env
             .iter()
@@ -415,15 +394,6 @@ pub(crate) fn run_confined_with_tail(
             .flat_map(|(_, value)| std::env::split_paths(value).collect::<Vec<_>>())
             .map(|dir| dir.to_string_lossy().into_owned())
             .collect();
-        if cfg!(target_os = "macos") {
-            create_missing_roots(
-                &writable,
-                write_denied
-                    .iter()
-                    .chain(&write_denied_prefix)
-                    .chain(&path_dirs),
-            )?;
-        }
         if !read_only
             && cfg!(target_os = "macos")
             && let Some(vol_tmp) =
@@ -438,37 +408,68 @@ pub(crate) fn run_confined_with_tail(
         });
         if !read_only {
             for path in &request.sandbox.writable_paths {
-                if !writable.contains(path) {
-                    writable.push(path.clone());
-                }
+                push_unique(&mut writable, path.clone());
             }
         }
+        let worktree = (!read_only).then(|| request.cwd.clone());
         let mut read_denied: Vec<String> = env.data_dir.iter().cloned().collect();
-        for path in &request.sandbox.read_denied_paths {
-            if !read_denied.contains(path) {
-                read_denied.push(path.clone());
+        for (warm, explicit) in [
+            (
+                env.home
+                    .as_ref()
+                    .map(|h| format!("{h}/{DEFAULT_WARM_SLOTS_REL}")),
+                false,
+            ),
+            (
+                toolchain_home(None, &env.parent_env, "AAF_WARM_SLOTS_DIR"),
+                true,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(opt, explicit)| opt.map(|p| (p, explicit)))
+        {
+            let warm_path = Path::new(&warm);
+            let warm_canon = sandbox::canonical(&warm).ok();
+            let under_writable = writable.iter().chain(&worktree).any(|root| {
+                warm_path.starts_with(Path::new(root))
+                    || warm_canon
+                        .as_ref()
+                        .zip(sandbox::canonical(root).ok())
+                        .is_some_and(|(w, r)| w.starts_with(r))
+            });
+            if under_writable || (cfg!(target_os = "linux") && explicit) {
+                let _ = crate::db::private::create_dir(warm_path);
             }
+            push_unique(&mut write_denied, warm.clone());
+            push_unique(&mut read_denied, warm);
+        }
+        if cfg!(target_os = "macos") {
+            create_missing_roots(
+                &writable,
+                write_denied
+                    .iter()
+                    .chain(&write_denied_prefix)
+                    .chain(&path_dirs),
+            )?;
+        }
+        for path in &request.sandbox.read_denied_paths {
+            push_unique(&mut read_denied, path.clone());
         }
         let extra = SandboxPaths {
             writable,
             write_denied,
             write_denied_prefix,
-            // Not left to the caller's policy: the signing key lives here.
-            // `~/.claude` is deliberately not denied, account profiles
-            // symlink into it.
+            // Data dir + warm-slots stay closed (`~/.claude` stays open for account symlinks).
             read_denied,
             read_reopened: queue,
             write_reopened: queue_guest,
-            worktree: (!read_only).then(|| request.cwd.clone()),
+            worktree,
             git_dirs,
             worktrees_root,
             path_dirs,
             run_mark: marks.as_ref().map(|marks| marks.mark.clone()),
         };
-        if cfg!(target_os = "macos") {
-            let profile = sandbox::seatbelt_profile(&request.sandbox, &extra)?;
-            spec = sandbox::wrap(&spec, &profile)?;
-        } else if cfg!(target_os = "linux") {
+        if cfg!(target_os = "linux") {
             match linux_sandbox::detect_host_linux_isolation() {
                 linux_sandbox::LinuxIsolation::Bubblewrap { bwrap_bin } => {
                     spec = linux_sandbox::wrap(&bwrap_bin, &extra, &spec)?;
@@ -511,12 +512,7 @@ pub(crate) fn run_confined_with_tail(
     Ok(output)
 }
 
-/// Runs a short helper command (`ps`, `kill`) without a shell and returns its
-/// exit code and stdout. The child is killed when `timeout` passes.
-///
-/// The output ends with the child, not with the last copy of its stream
-/// ([`aaf_fp::output`]): read to the end of a pipe, a copy held by another
-/// process kept a finished `ps` waiting until the timeout.
+/// Runs a short helper (`ps`, `kill`) without a shell and returns `(exit_code, stdout)`.
 pub(crate) fn capture(
     program: &str,
     args: &[&str],
@@ -536,10 +532,13 @@ pub(crate) fn capture(
     }
 }
 
-/// On macOS secondary volumes (`/Volumes/<Vol>/...`), Foundation/Carbon checks
-/// volume writability via `/Volumes/<Vol>/.TemporaryItems/folders.<uid>`.
-/// Without allowing that narrow per-UID directory, Unity batch mode aborts
-/// immediately with "Project folder or disk is read only" under Seatbelt.
+fn push_unique(list: &mut Vec<String>, item: String) {
+    if !list.contains(&item) {
+        list.push(item);
+    }
+}
+
+/// Per-UID `.TemporaryItems` dir on macOS secondary volumes (required by Unity/Carbon).
 pub(crate) fn secondary_volume_temp_dir(worktree: &Path, home: Option<&str>) -> Option<PathBuf> {
     let canonical = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     let uid = owner_uid(worktree).or_else(|| home.and_then(|h| owner_uid(Path::new(h))));

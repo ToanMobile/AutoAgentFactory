@@ -1,8 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Round-10b (fixer 2): the red->green oracle's scratch worktree lives under
-//! `<data_dir>/oracle-scratch/<common_id>-<pid>-<seq>` (R10-E10-2) so `aaf gc`
-//! can sweep one an interrupted gate left behind; a block-mode compile-red
-//! oracle run blocks with guidance for the agent (O12-R10-7).
+//! the data dir, never `$TMPDIR` (R10-E10-2): today the warm slot
+//! `<warm-slots>/oracle/<common_id>/slot-0`, wiped after every run and
+//! reused, never accumulating worktrees; `aaf gc` still sweeps legacy
+//! `<data_dir>/oracle-scratch/<common_id>-<pid>-<seq>` dirs an interrupted
+//! gate left behind. A block-mode compile-red oracle run blocks with
+//! guidance for the agent (O12-R10-7).
 
 use std::fs;
 use std::path::Path;
@@ -15,6 +18,7 @@ use aaf_domain::ports::Clock;
 use aaf_engine::config::{ConfigInputs, ConfigOverlay, REPO_CONFIG_REL, load};
 use aaf_engine::gate::{run_gate_throttled, stats_repo_id};
 use aaf_engine::gc::{GcOptions, run_gc};
+use aaf_engine::git::warm_slots_root;
 use aaf_engine::throttle::{
     LoadProbe, Pressure, PriorityTools, SAMPLE_EVERY, SystemGroup, ThreadSleeper, Throttle,
 };
@@ -137,7 +141,7 @@ fn age(dir: &Path, by: Duration) {
 }
 
 #[test]
-fn oracle_scratch_is_created_under_the_data_dir_and_removed_after_the_run() {
+fn oracle_scratch_is_a_wiped_warm_slot_under_the_data_dir_and_never_accumulates() {
     let data = TempDir::new().unwrap();
     let data_root = fs::canonicalize(data.path()).unwrap();
     let marker = data_root.join("cwds.txt");
@@ -149,27 +153,32 @@ fn oracle_scratch_is_created_under_the_data_dir_and_removed_after_the_run() {
     fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
     fs::write(repo.path().join("tests/test_app.sh"), "echo ok\n").unwrap();
 
-    let r = run_gate(repo.path(), &data_root);
-    assert!(
-        r.reasons.iter().any(|m| m.contains("red_green=proven")),
-        "{:?}",
-        r.reasons
-    );
-    let cwds = fs::read_to_string(&marker).unwrap();
-    let scratch_base = data_root.join("oracle-scratch");
     let id = stats_repo_id(repo.path());
-    let pid = std::process::id();
-    let oracle_cwd = cwds
-        .lines()
-        .find(|l| Path::new(l).starts_with(&scratch_base))
-        .unwrap_or_else(|| panic!("oracle did not run under {scratch_base:?}: {cwds}"));
-    let name = Path::new(oracle_cwd).file_name().unwrap().to_str().unwrap();
-    assert!(
-        name.starts_with(&format!("{id}-{pid}-")),
-        "scratch name {name:?} is not <common_id>-<pid>-<seq>"
-    );
-    assert!(!Path::new(oracle_cwd).exists(), "scratch left behind");
-    assert_eq!(worktree_count(repo.path()), 1);
+    let slot_parent = warm_slots_root(&data_root).join("oracle").join(&id);
+    assert!(slot_parent.starts_with(&data_root), "{slot_parent:?}");
+    for round in 1..=2 {
+        let r = run_gate(repo.path(), &data_root);
+        assert!(
+            r.reasons.iter().any(|m| m.contains("red_green=proven")),
+            "round {round}: {:?}",
+            r.reasons
+        );
+        let cwds = fs::read_to_string(&marker).unwrap();
+        let oracle_cwd = cwds
+            .lines()
+            .rev()
+            .find(|l| Path::new(l).starts_with(&slot_parent))
+            .unwrap_or_else(|| panic!("oracle did not run under {slot_parent:?}: {cwds}"));
+        // The slot stays for reuse, wiped: the reverted production file and
+        // overlaid tests are gone again.
+        let left = git_out(
+            Path::new(oracle_cwd),
+            &["status", "--porcelain", "--ignored"],
+        );
+        assert!(left.is_empty(), "round {round}: slot not wiped: {left}");
+        // One reusable slot at most: worktrees never accumulate per run.
+        assert_eq!(worktree_count(repo.path()), 2, "round {round}");
+    }
 }
 
 #[test]
@@ -287,4 +296,49 @@ fn block_mode_compile_red_blocks_with_guidance_for_the_agent() {
         "{:?}",
         r.reasons
     );
+}
+
+/// The oracle's warm slot checks out the agent's HEAD: with a repo-relative
+/// `core.hooksPath` its `post-checkout` / `reference-transaction` hooks are
+/// files of that commit, and they must never run with the gate's trust.
+#[test]
+fn oracle_warm_slot_never_runs_agent_controlled_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = TempDir::new().unwrap();
+    let data_root = fs::canonicalize(data.path()).unwrap();
+    let marker = data_root.join("hook-ran");
+    let repo =
+        init_repo("if grep -q 'echo 0' src/app.sh; then echo 'FAIL: app'; exit 1; fi; echo ok");
+    let hooks = repo.path().join(".githooks");
+    fs::create_dir_all(&hooks).unwrap();
+    for hook in ["post-checkout", "reference-transaction"] {
+        let p = hooks.join(hook);
+        fs::write(
+            &p,
+            format!("#!/bin/sh\necho {hook} >> '{}'\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // Hooks in the base itself (a hooks edit on the branch is head-locked and
+    // would block before the oracle runs).
+    git_out(repo.path(), &["add", "-A"]);
+    git_out(repo.path(), &["commit", "-q", "-m", "hooks"]);
+    git_out(repo.path(), &["branch", "-f", "main", "HEAD"]);
+    fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
+    fs::write(repo.path().join("tests/test_app.sh"), "echo ok\n").unwrap();
+    git_out(repo.path(), &["config", "core.hooksPath", ".githooks"]);
+    // Only what the gate does from here counts.
+    let _ = fs::remove_file(&marker);
+
+    for round in 1..=2 {
+        let r = run_gate(repo.path(), &data_root);
+        assert!(
+            r.reasons.iter().any(|m| m.contains("red_green=proven")),
+            "round {round}: {:?}",
+            r.reasons
+        );
+        let ran = fs::read_to_string(&marker).unwrap_or_default();
+        assert!(ran.is_empty(), "round {round}: agent hook ran: {ran}");
+    }
 }

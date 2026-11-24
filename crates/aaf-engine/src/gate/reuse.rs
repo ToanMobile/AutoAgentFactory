@@ -242,18 +242,45 @@ pub(crate) fn probe_common_receipt(
     receipt_matches(&stored, &asked, false).then_some(stored)
 }
 
+/// Returns `true` only when `repo_root` has zero gitignored untracked files
+/// (such as build artifacts or agent-planted `.gitignore`d markers like
+/// `target/.aaf_pass`). Fails closed (`false`) on any git error or timeout.
+pub(crate) fn worktree_has_no_ignored_files(repo_root: &Path) -> bool {
+    matches!(
+        aaf_fp::git(
+            repo_root,
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            &[],
+            GIT_TIMEOUT,
+        ),
+        Ok(out) if out.is_empty()
+    )
+}
+
 /// Writes the local signed receipt and updates or evicts the cross-worktree
-/// common receipt cache.
+/// common receipt cache. A `common_receipt` is only published when
+/// `write_common` is `true` (trusted merge verifier or clean 0-ignored-file
+/// worktree).
 pub(crate) fn persist_receipt(
     data_dir: &Path,
     key: &[u8],
     common_repo_id: &str,
     proof_required: bool,
+    write_common: bool,
     receipt: &Receipt,
 ) -> Result<(), GateError> {
     aaf_fp::write_receipt(data_dir, key, receipt)?;
     if receipt.status == GateStatus::Clear && !proof_required && !has_work_tree_warning(receipt) {
-        let _ = aaf_fp::write_common_receipt(data_dir, key, common_repo_id, receipt);
+        if write_common {
+            let _ = aaf_fp::write_common_receipt(data_dir, key, common_repo_id, receipt);
+        }
     } else {
         aaf_fp::remove_common_receipt(data_dir, common_repo_id, &receipt.tree_fp);
     }

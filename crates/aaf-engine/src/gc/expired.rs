@@ -1,5 +1,5 @@
 //! Expiry sweep of `streams/`, `reports/`, terminal `sops/` checkpoints and
-//! dead merge scratch dirs under the data directory.
+//! dead merge scratch dirs under the data directory, plus expired warm slots.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -120,6 +120,14 @@ pub(super) fn clean_expired_artifacts(
             }
         }
     }
+    crate::git::warm_slot::sweep_expired(
+        data_dir,
+        max_age,
+        now,
+        opts.dry_run,
+        &mut report.removed_files,
+        &mut report.warnings,
+    );
 }
 
 /// Owner pid encoded in a merge-scratch dir name `<id>-pr<N>-<pid>-<seq>`.

@@ -58,7 +58,7 @@ pub struct PrCheck {
 }
 
 /// External GitHub CLI operations; faked in integration tests.
-pub trait GhClient {
+pub trait GhClient: Sync {
     fn view_pr(&self, repo_root: &Path, pr_number: u64) -> Result<PrInfo, GitError>;
     fn pr_checks(&self, repo_root: &Path, pr_number: u64) -> Result<Vec<PrCheck>, GitError>;
     fn merge_pr(
