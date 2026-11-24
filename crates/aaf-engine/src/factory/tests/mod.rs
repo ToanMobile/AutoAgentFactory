@@ -8,6 +8,7 @@ mod a13_fx2_r10b_gate_retry;
 mod adapters;
 mod audit_retry;
 mod auto_double_gate;
+mod base_ref;
 mod batch;
 mod commit_hooks;
 mod commit_lock;

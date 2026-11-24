@@ -172,7 +172,9 @@ impl GitOps for RealGit {
         }
         let wt = worktree::create(&self.repo_root, &self.worktrees_dir, task_id, &self.start())
             .map_err(err)?;
-        let base_sha = self.base_sha()?;
+        // Hydrate from the commit the tree was actually cut from, not a
+        // second lookup of the base that may have moved in between.
+        let base_sha = git(&wt.path, &["rev-parse", "--verify", "HEAD"]).map_err(err)?;
         crate::git::hydration::hydrate_fresh_worktree(&self.repo_root, &wt, &base_sha)
             .map_err(err)?;
         Ok(wt)
@@ -269,6 +271,9 @@ impl GitOps for RealGit {
             worktree::validate_task_id(task_id).map_err(err)?;
             let branch = format!("{BRANCH_PREFIX}{task_id}");
             let message = format!("aaf batch: {branch}");
+            // Full ref name, as in `is_merged`: a tag `aaf/<id>` must not
+            // stand in for the task branch.
+            let branch_ref = format!("refs/heads/{branch}");
             let merge = git_no_hooks(
                 &integration.tree.path,
                 &[
@@ -280,7 +285,7 @@ impl GitOps for RealGit {
                     "--no-verify",
                     "-m",
                     &message,
-                    &branch,
+                    &branch_ref,
                 ],
             )
             .map_err(err)?;

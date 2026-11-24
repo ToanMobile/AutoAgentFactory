@@ -144,19 +144,11 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // Hooks and config are run or obeyed by every later git command,
     // including the user's own outside the sandbox; the same files exist per
     // linked worktree under `worktrees/<name>/`.
-    let is_primary_checkout = |git_dir: &Path| {
-        worktree
-            .as_ref()
-            .is_some_and(|wt| wt.join(".git") == git_dir)
-    };
-    let mut submodules = Vec::new();
+    let (mut submodules, run_worktree) = (Vec::new(), worktree.as_deref());
     for git_dir in &git_dirs {
         let subs = git_dir::submodule_git_dirs(git_dir)?;
-        profile.push_str(&git_dir::rules(
-            git_dir,
-            &subs,
-            is_primary_checkout(git_dir),
-        )?);
+        profile.push_str(&git_dir::rules(git_dir, &subs)?);
+        profile.push_str(&git_dir::linked_worktree_rules(git_dir, run_worktree)?);
         submodules.extend(subs);
     }
     if let Some(worktree) = &worktree {
@@ -235,10 +227,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
         closed.extend(git_dir::OBEYED.iter().map(|name| root.join(name)));
     }
     for git_dir in &git_dirs {
-        closed.extend(git_dir::protected_closed_paths(
-            git_dir,
-            is_primary_checkout(git_dir),
-        ));
+        closed.extend(git_dir::protected_closed_paths(git_dir, run_worktree));
     }
     closed.extend(deny_keychain.clone());
     closed.extend(worktree.iter().map(|worktree| worktree.join(".git")));

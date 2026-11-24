@@ -20,13 +20,9 @@ const ALWAYS_PROTECTED_FILES: [&str; 4] = [
     "packed-refs.lock",
 ];
 
-/// Primary git-dir state & protected branch refs write-denied when running in
-/// a linked worktree (`worktrees/<name>/` and `refs/heads/aaf/*` stay writable).
-const LINKED_PROTECTED_FILES: [&str; 11] = [
-    "HEAD",
-    "HEAD.lock",
-    "index",
-    "index.lock",
+/// Protected branch refs write-denied when running in a linked worktree
+/// (`worktrees/<name>/` and `refs/heads/aaf/*` stay writable).
+const LINKED_PROTECTED_REFS: [&str; 7] = [
     "refs/heads/main",
     "refs/heads/main.lock",
     "refs/heads/master",
@@ -112,16 +108,14 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>, walked: &mut usize) 
 /// Closed paths under `git_dir` whose ancestor directory entries must be
 /// pinned against rename/deletion (without blocking sibling creation inside
 /// `refs/heads`, so `refs/heads/aaf/*` stays writable).
-pub(super) fn protected_closed_paths(git_dir: &Path, is_primary_checkout: bool) -> Vec<PathBuf> {
+pub(super) fn protected_closed_paths(git_dir: &Path, worktree: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = vec![
         git_dir.join("refs/aaf"),
         git_dir.join("info/exclude"),
         git_dir.join("packed-refs"),
     ];
-    if !is_primary_checkout {
+    if worktree.is_some_and(|wt| is_linked_worktree_of(wt, git_dir)) {
         for rel in [
-            "HEAD",
-            "index",
             "refs/heads/main",
             "refs/heads/master",
             "refs/heads/develop",
@@ -135,11 +129,7 @@ pub(super) fn protected_closed_paths(git_dir: &Path, is_primary_checkout: bool) 
 
 /// The deny rules for one git dir and its existing submodule git dirs
 /// `subs` (see [`submodule_git_dirs`]).
-pub(super) fn rules(
-    git_dir: &Path,
-    subs: &[PathBuf],
-    is_primary_checkout: bool,
-) -> PortResult<String> {
+pub(super) fn rules(git_dir: &Path, subs: &[PathBuf]) -> PortResult<String> {
     let mut out = String::new();
     for root in std::iter::once(git_dir).chain(subs.iter().map(PathBuf::as_path)) {
         out.push_str(&obeyed_rules(root, subs)?);
@@ -148,7 +138,11 @@ pub(super) fn rules(
     // Host-owned snapshot refs under `refs/aaf/` stay read-only to agents.
     let refs_aaf = sbpl_string(&git_dir.join("refs/aaf"))?;
     out.push_str(&format!("(deny file-write* (subpath {refs_aaf}))\n"));
-    out.push_str(&primary_state_rules(git_dir, is_primary_checkout)?);
+    let mut always = String::new();
+    for rel in ALWAYS_PROTECTED_FILES {
+        always.push_str(&format!(" (literal {})", sbpl_string(&git_dir.join(rel))?));
+    }
+    out.push_str(&format!("(deny file-write*{always})\n"));
     // The whole git dir moved into a writable place is no longer where the
     // rules above look.
     let own = sbpl_string(git_dir)?;
@@ -156,20 +150,63 @@ pub(super) fn rules(
     Ok(out)
 }
 
-fn primary_state_rules(git_dir: &Path, is_primary_checkout: bool) -> PortResult<String> {
-    let mut items = String::new();
-    for rel in ALWAYS_PROTECTED_FILES {
-        items.push_str(&format!(" (literal {})", sbpl_string(&git_dir.join(rel))?));
+/// When `worktree` is a linked worktree of `git_dir`, the deny rules for the
+/// state `git_dir` keeps for its own checkout (SEC-023) plus protected branch
+/// refs (`main`, `master`, `develop`, `release/*`): `HEAD`, `index` and the
+/// merge, rebase and bisect state next to them. A linked worktree keeps its
+/// own under `worktrees/<name>/` and writes only shared parts here.
+/// Direct children only: the entry of `git_dir` itself is closed, so none of
+/// them can be renamed away, changed and renamed back.
+pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> PortResult<String> {
+    if !worktree.is_some_and(|worktree| is_linked_worktree_of(worktree, git_dir)) {
+        return Ok(String::new());
     }
-    if !is_primary_checkout {
-        for rel in LINKED_PROTECTED_FILES {
-            items.push_str(&format!(" (literal {})", sbpl_string(&git_dir.join(rel))?));
-        }
-        for rel in LINKED_PROTECTED_SUBPATHS {
-            items.push_str(&format!(" (subpath {})", sbpl_string(&git_dir.join(rel))?));
-        }
+    let escaped = regex_escape(path_str(git_dir)?);
+    let mut out = String::new();
+    for pattern in [
+        "/([^/]*HEAD|index|AUTO_MERGE|MERGE_(MSG|MODE|RR|AUTOSTASH)|SQUASH_MSG|COMMIT_EDITMSG|BISECT_[^/]*|sharedindex\\.[^/]*)(\\.lock)?$",
+        "/(rebase-merge|rebase-apply|sequencer)(/|$)",
+    ] {
+        let regex = sbpl_regex(&format!("^{escaped}{pattern}"))?;
+        out.push_str(&format!("(deny file-write* (regex {regex}))\n"));
     }
-    Ok(format!("(deny file-write*{items})\n"))
+    let mut refs = String::new();
+    for rel in LINKED_PROTECTED_REFS {
+        refs.push_str(&format!(" (literal {})", sbpl_string(&git_dir.join(rel))?));
+    }
+    for rel in LINKED_PROTECTED_SUBPATHS {
+        refs.push_str(&format!(" (subpath {})", sbpl_string(&git_dir.join(rel))?));
+    }
+    out.push_str(&format!("(deny file-write*{refs})\n"));
+    Ok(out)
+}
+
+/// Whether the first `.git` met walking up from `worktree` is a plain file
+/// whose `gitdir:` leads below `<git_dir>/worktrees/`. A normal checkout (or
+/// a subdirectory of one), a submodule and a `--separate-git-dir` checkout
+/// own the `HEAD` and `index` in `git_dir`, so they are not linked.
+fn is_linked_worktree_of(worktree: &Path, git_dir: &Path) -> bool {
+    let mut dot_gits = worktree.ancestors().map(|dir| dir.join(".git"));
+    let Some(dot_git) = dot_gits.find(|dot_git| dot_git.symlink_metadata().is_ok()) else {
+        return false;
+    };
+    // A `.git` link to a gitfile is followed, as git follows it.
+    let text = match std::fs::metadata(&dot_git) {
+        Ok(meta) if meta.is_file() => std::fs::read_to_string(&dot_git).unwrap_or_default(),
+        _ => return false,
+    };
+    let Some(target) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+    else {
+        return false;
+    };
+    let base = dot_git.parent().unwrap_or(worktree);
+    let admins = git_dir.join("worktrees");
+    let admins = std::fs::canonicalize(&admins).unwrap_or(admins);
+    std::fs::canonicalize(base.join(target.trim()))
+        .is_ok_and(|target| target != admins && target.starts_with(&admins))
 }
 
 /// The linked worktrees of `root` (the git dir or one existing submodule
