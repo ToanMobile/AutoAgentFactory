@@ -16,16 +16,30 @@ pub(super) const DEFAULT_REMOTE: &str = "origin";
 pub struct BaseRef {
     /// `Some` when the base is a remote-tracking branch.
     pub remote: Option<String>,
-    /// Short branch name, e.g. `main`.
+    /// Short branch name, e.g. `main`; for an explicit base that is no
+    /// branch, the full commit SHA it was pinned to.
     pub branch: String,
 }
 
+fn is_full_oid(name: &str) -> bool {
+    matches!(name.len(), 40 | 64) && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl BaseRef {
-    /// What a new task branch is cut from: `origin/main` or `main`.
+    /// What a new task branch is cut from, as a full ref name
+    /// (`refs/remotes/origin/main`, `refs/heads/main`) so a tag called
+    /// `main` or `origin/main` cannot shadow it (`gitrevisions(7)`). A
+    /// pinned SHA, `HEAD` or a full ref is kept as is.
     pub fn start_point(&self) -> String {
         match &self.remote {
-            Some(remote) => format!("{remote}/{}", self.branch),
-            None => self.branch.clone(),
+            Some(remote) => format!("refs/remotes/{remote}/{}", self.branch),
+            None if self.branch.starts_with("refs/")
+                || self.branch == "HEAD"
+                || is_full_oid(&self.branch) =>
+            {
+                self.branch.clone()
+            }
+            None => format!("refs/heads/{}", self.branch),
         }
     }
 }
@@ -37,20 +51,77 @@ fn is_commit(repo: &Path, name: &str) -> PortResult<bool> {
         .success())
 }
 
+/// `full` is an existing ref, not a rev expression.
+fn ref_exists(repo: &Path, full: &str) -> PortResult<bool> {
+    Ok(git_raw(repo, &["show-ref", "--verify", "--quiet", full])
+        .map_err(err)?
+        .success())
+}
+
+/// `full` is an existing ref naming a commit.
+fn is_branch_ref(repo: &Path, full: &str) -> PortResult<bool> {
+    Ok(ref_exists(repo, full)? && is_commit(repo, full)?)
+}
+
+fn invalid(name: &str, why: &str) -> PortError {
+    PortError::Invalid(format!("gate.base_ref {name:?} {why}"))
+}
+
+fn branch_of(remote: Option<&str>, branch: &str) -> BaseRef {
+    BaseRef {
+        remote: remote.map(str::to_string),
+        branch: branch.to_string(),
+    }
+}
+
+/// Classifies an explicit `gate.base_ref` against the repository: a
+/// remote-tracking branch, a local branch, or else any other commit
+/// (`refs/tags/v1`, short SHA, `HEAD~1`) pinned to its full SHA. A short
+/// name never falls through to a tag: `<remote>/<b>` without its tracking
+/// ref, or a bare tag name, is refused rather than resolved via
+/// `refs/tags/` (`gitrevisions(7)` tries tags first).
 fn split(repo: &Path, name: &str) -> PortResult<BaseRef> {
+    if let Some((remote, branch)) = parse_remote_tracking_ref(name)
+        && has_remote(repo, remote).map_err(err)?
+        && is_branch_ref(repo, name)?
+    {
+        return Ok(branch_of(Some(remote), branch));
+    }
+    if let Some(branch) = name.strip_prefix("refs/heads/")
+        && is_branch_ref(repo, name)?
+    {
+        return Ok(branch_of(None, branch));
+    }
     if let Some((remote, branch)) = name.split_once('/')
+        && !remote.is_empty()
         && !remote.starts_with('-')
         && has_remote(repo, remote).map_err(err)?
     {
-        return Ok(BaseRef {
-            remote: Some(remote.to_string()),
-            branch: branch.to_string(),
-        });
+        if is_branch_ref(repo, &format!("refs/remotes/{remote}/{branch}"))? {
+            return Ok(branch_of(Some(remote), branch));
+        }
+        return Err(invalid(
+            name,
+            &format!("has no remote-tracking ref refs/remotes/{remote}/{branch}"),
+        ));
     }
-    Ok(BaseRef {
-        remote: None,
-        branch: name.to_string(),
-    })
+    if is_branch_ref(repo, &format!("refs/heads/{name}"))? {
+        return Ok(branch_of(None, name));
+    }
+    let explicit = name.starts_with("refs/") || name == "HEAD" || is_full_oid(name);
+    if !explicit && ref_exists(repo, &format!("refs/tags/{name}"))? {
+        return Err(invalid(
+            name,
+            &format!("names a tag; write refs/tags/{name} to pin it"),
+        ));
+    }
+    let spec = format!("{name}^{{commit}}");
+    let out = git_raw(repo, &["rev-parse", "--verify", "--quiet", &spec]).map_err(err)?;
+    let sha = out.stdout.trim();
+    if !out.success() || sha.is_empty() {
+        return Err(invalid(name, "does not resolve to a commit"));
+    }
+    Ok(branch_of(None, sha))
 }
 
 /// Resolves `gate.base_ref` to the base branch. `auto` follows the same
@@ -59,10 +130,10 @@ fn split(repo: &Path, name: &str) -> PortResult<BaseRef> {
 pub fn resolve_base(repo: &Path, base_ref: &str) -> PortResult<BaseRef> {
     let wanted = base_ref.trim();
     if !wanted.is_empty() && wanted != "auto" {
-        if wanted.starts_with('-') || !is_commit(repo, wanted)? {
-            return Err(PortError::Invalid(format!(
-                "gate.base_ref {wanted:?} does not resolve to a commit"
-            )));
+        // No short-name `is_commit` pre-check: a tag `main` naming a tree
+        // would refuse a valid `refs/heads/main`. `split` checks full refs.
+        if wanted.starts_with('-') {
+            return Err(invalid(wanted, "does not resolve to a commit"));
         }
         return split(repo, wanted);
     }

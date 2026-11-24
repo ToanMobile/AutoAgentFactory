@@ -151,7 +151,7 @@ fn the_base_is_the_local_trunk_or_the_remote_one_when_there_is_a_remote() {
         branch: "main".to_string(),
     };
     assert_eq!(*fx.ops.base(), local);
-    assert_eq!(local.start_point(), "main");
+    assert_eq!(local.start_point(), "refs/heads/main");
 
     let bare = fx.tmp.path().join("origin.git");
     git(fx.tmp.path(), &["init", "--quiet", "--bare", "origin.git"]);
@@ -162,7 +162,7 @@ fn the_base_is_the_local_trunk_or_the_remote_one_when_there_is_a_remote() {
     git(&fx.repo, &["push", "--quiet", "origin", "main"]);
     let remote = resolve_base(&fx.repo, "auto").unwrap();
     assert_eq!(remote.remote.as_deref(), Some("origin"));
-    assert_eq!(remote.start_point(), "origin/main");
+    assert_eq!(remote.start_point(), "refs/remotes/origin/main");
 
     assert_eq!(resolve_base(&fx.repo, "main").unwrap(), local);
     assert!(resolve_base(&fx.repo, "no-such-branch").is_err());
