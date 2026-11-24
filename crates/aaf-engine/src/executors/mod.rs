@@ -26,6 +26,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use aaf_domain::config::RunConfig;
+use aaf_domain::keychain::KeychainPolicy;
 use aaf_domain::ports::{AgentRequest, AgentRunner, PortError, PortResult};
 
 use self::agy::AgyRunner;
@@ -113,6 +114,8 @@ pub struct ExecEnv {
     pub machine_env_pass: Vec<String>,
     /// Tier-1 `machine.writable_caches` ([`env::validate_writable_caches`]).
     pub machine_writable_caches: Vec<String>,
+    /// Tier-1 `safety.deny_macos_keychain` policy for macOS Seatbelt runs.
+    pub keychain_policy: KeychainPolicy,
 }
 
 const DATA_DIR_ENV: &str = "AAF_DATA_DIR";
@@ -168,6 +171,27 @@ impl ExecEnv {
             env_pass: Vec::new(),
             machine_env_pass: Vec::new(),
             machine_writable_caches: Vec::new(),
+            keychain_policy: KeychainPolicy::Auto,
+        }
+    }
+}
+
+/// Returns whether macOS Seatbelt should deny Keychain read/IPC access for this run.
+pub fn should_deny_macos_keychain(
+    policy: KeychainPolicy,
+    executor: &str,
+    env_vars: &[(String, String)],
+) -> bool {
+    match policy {
+        KeychainPolicy::Always => true,
+        KeychainPolicy::Never => false,
+        KeychainPolicy::Auto => {
+            if !executor.trim().eq_ignore_ascii_case("claude") {
+                return true;
+            }
+            env_vars
+                .iter()
+                .any(|(k, v)| k == "ANTHROPIC_API_KEY" && !v.trim().is_empty())
         }
     }
 }
@@ -277,9 +301,18 @@ pub(crate) fn run_confined(
     request: &AgentRequest,
     env: &ExecEnv,
     account: AccountPaths,
+    executor: &str,
     on_line: Option<LineCallback>,
 ) -> PortResult<PtyOutput> {
-    run_confined_with_tail(spec, request, env, account, on_line, DEFAULT_TAIL_BYTES)
+    run_confined_with_tail(
+        spec,
+        request,
+        env,
+        account,
+        executor,
+        on_line,
+        DEFAULT_TAIL_BYTES,
+    )
 }
 
 /// [`run_confined`] with a caller-chosen bounded PTY output buffer cap.
@@ -288,6 +321,7 @@ pub(crate) fn run_confined_with_tail(
     request: &AgentRequest,
     env: &ExecEnv,
     account: AccountPaths,
+    executor: &str,
     on_line: Option<LineCallback>,
     tail_bytes: usize,
 ) -> PortResult<PtyOutput> {
@@ -334,6 +368,8 @@ pub(crate) fn run_confined_with_tail(
             request,
             env,
             account,
+            executor,
+            &spec.env,
             &extra_caches,
             marks.as_ref().map(|marks| marks.mark.clone()),
         )?;

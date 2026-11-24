@@ -17,8 +17,7 @@ use super::sandbox::SandboxPaths;
 pub enum LinuxIsolation {
     /// Per-run namespace and mount confinement via `bwrap` (Bubblewrap).
     Bubblewrap { bwrap_bin: PathBuf },
-    /// Running inside an OCI/container runtime (Docker, Podman, Kubernetes,
-    /// containerd, LXC) where the container boundary provides isolation.
+    /// Running inside an OCI/container runtime (Docker, Podman, Kubernetes, containerd, LXC).
     HardenedContainer { indicator: &'static str },
     /// Neither Bubblewrap nor a recognized container runtime was detected.
     None,
@@ -96,19 +95,20 @@ pub fn linux_sandbox_status(
 
 /// Probes the current host environment for Linux sandbox capabilities.
 pub fn detect_host_linux_isolation() -> LinuxIsolation {
-    let bwrap_bin = find_bwrap_binary();
-    let has_dockerenv = Path::new("/.dockerenv").exists();
     let cgroup_text = std::fs::read_to_string("/proc/1/cgroup")
         .or_else(|_| std::fs::read_to_string("/proc/self/cgroup"))
         .ok();
-    let container_env = Path::new("/run/.containerenv").exists();
     let env_container = std::env::var("container")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| container_env.then(|| "podman".to_string()));
+        .or_else(|| {
+            Path::new("/run/.containerenv")
+                .exists()
+                .then(|| "podman".into())
+        });
     linux_sandbox_status(
-        bwrap_bin,
-        has_dockerenv,
+        find_bwrap_binary(),
+        Path::new("/.dockerenv").exists(),
         cgroup_text.as_deref(),
         env_container.as_deref(),
     )
@@ -119,7 +119,7 @@ fn find_bwrap_binary() -> Option<PathBuf> {
         .and_then(|p| super::find_on_path(&p, "bwrap"))
         .or_else(|| {
             ["/usr/bin/bwrap", "/bin/bwrap"]
-                .into_iter()
+                .iter()
                 .map(PathBuf::from)
                 .find(|p| p.is_file())
         })
@@ -149,10 +149,6 @@ fn ro_cache_safe_subdirs(path: &Path, canon: &Path) -> Option<&'static [&'static
 }
 
 /// Builds a least-privilege Bubblewrap (`bwrap`) argv for `program` with `args`.
-/// Mount order: (1) namespace + `--ro-bind / /` + `/dev`/`/proc`/`--tmpfs /tmp`,
-/// (2) writable binds (keeping build-cache roots RO and binding only existing
-/// safe data subdirs), (3) RO overlays for sensitive subpaths, (4) mask
-/// `read_denied`, (5) reopen throttle/run_mark.
 pub fn build_bwrap_args(
     paths: &SandboxPaths,
     program: &str,
@@ -168,7 +164,6 @@ pub fn build_bwrap_args(
         .split_whitespace()
         .map(str::to_string)
         .collect();
-
     let worktrees_root = paths.worktrees_root.as_deref().map(Path::new);
     let worktrees_root_canon = worktrees_root.map(canonical_or_self);
     let read_denied_canon: Vec<PathBuf> = paths
@@ -177,7 +172,6 @@ pub fn build_bwrap_args(
         .map(|raw| canonical_or_self(Path::new(raw)))
         .collect();
     let mut bound_rw: BTreeSet<String> = BTreeSet::new();
-
     let tmp_canon = canonical_or_self(Path::new("/tmp"));
     let is_excluded = |canon: &Path| {
         worktrees_root_canon
@@ -208,15 +202,14 @@ pub fn build_bwrap_args(
         }
     }
 
-    // 2. Protect `worktrees_root` before opening a task worktree inside it, so
-    //    any writable ancestor cannot expose sibling task worktrees. A worktree
-    //    outside `worktrees_root` is bound first so it cannot re-open the root.
+    // 2. Protect `worktrees_root` before opening a task worktree inside it.
     let (mut bound_ro, mut pinned) = (BTreeSet::new(), BTreeSet::new());
-    let own_is_task_worktree = match (paths.worktree.as_deref(), worktrees_root_canon.as_ref()) {
-        (Some(wt), Some(root)) => {
-            let wt_canon = canonical_or_self(Path::new(wt));
-            wt_canon != *root && wt_canon.starts_with(root)
-        }
+    let worktree_canon = paths
+        .worktree
+        .as_deref()
+        .map(|wt| canonical_or_self(Path::new(wt)));
+    let own_is_task_worktree = match (worktree_canon.as_ref(), worktrees_root_canon.as_ref()) {
+        (Some(wt), Some(root)) => wt != root && wt.starts_with(root),
         _ => false,
     };
     if !own_is_task_worktree && let Some(worktree) = &paths.worktree {
@@ -242,7 +235,11 @@ pub fn build_bwrap_args(
 
     // 3. Read-only overlays for sensitive files/dirs inside writable subtrees.
     for git_dir in &paths.git_dirs {
-        ro.protect_git_dir(Path::new(git_dir))?;
+        let gd = Path::new(git_dir);
+        let is_primary = worktree_canon
+            .as_ref()
+            .is_some_and(|wt| canonical_or_self(&wt.join(".git")) == canonical_or_self(gd));
+        ro.protect_git_dir(gd, is_primary)?;
     }
     if let Some(worktree) = &paths.worktree {
         let wt = Path::new(worktree);
@@ -273,8 +270,7 @@ pub fn build_bwrap_args(
         }
     }
 
-    // 4. Mask `read_denied` (including `AAF_DATA_DIR`) so the agent can never
-    //    read `receipt.key` or forge receipts.
+    // 4. Mask `read_denied` (including `AAF_DATA_DIR`) to protect `receipt.key`.
     for denied in &paths.read_denied {
         ro.mask_read_denied(Path::new(denied))?;
     }
@@ -341,6 +337,7 @@ fn validate_sandbox_paths(paths: &SandboxPaths) -> Result<(), String> {
         (&paths.worktree, "worktree"),
         (&paths.worktrees_root, "worktrees_root"),
         (&paths.run_mark, "run_mark"),
+        (&paths.deny_keychain_dir, "deny_keychain_dir"),
     ] {
         if let Some(path) = opt {
             validate_abs_path(path, label)?;
@@ -416,18 +413,10 @@ struct RoOverlay<'a> {
 }
 
 fn deepest_enclosing(set: &BTreeSet<String>, target_canon: &Path) -> Option<PathBuf> {
-    let mut best: Option<PathBuf> = None;
-    for entry in set {
-        let candidate = canonical_or_self(Path::new(entry));
-        if target_canon.starts_with(&candidate)
-            && best
-                .as_ref()
-                .is_none_or(|cur| candidate.components().count() > cur.components().count())
-        {
-            best = Some(candidate);
-        }
-    }
-    best
+    set.iter()
+        .map(|entry| canonical_or_self(Path::new(entry)))
+        .filter(|cand| target_canon.starts_with(cand))
+        .max_by_key(|cand| cand.components().count())
 }
 
 fn contains_canon(set: &BTreeSet<String>, target_canon: &Path) -> bool {
@@ -438,10 +427,8 @@ fn contains_canon(set: &BTreeSet<String>, target_canon: &Path) -> bool {
 }
 
 impl RoOverlay<'_> {
-    /// Emits deduplicated self-binds (`--bind <dir> <dir>`) top-down for every
-    /// intermediate directory strictly between a writable bind root and
-    /// `path.parent()` (inclusive), so `mv` on parent directories fails with
-    /// `EBUSY` instead of bypassing read-only overlays on their children.
+    /// Self-binds intermediate dirs between a writable root and `path.parent()`
+    /// so `mv` fails with `EBUSY` instead of bypassing RO overlays below them.
     fn pin_ancestors(&mut self, path: &Path) -> Result<(), String> {
         let Some(parent) = path.parent() else {
             return Ok(());
@@ -522,9 +509,20 @@ impl RoOverlay<'_> {
         Ok(())
     }
 
-    fn protect_git_dir(&mut self, git_dir: &Path) -> Result<(), String> {
+    fn protect_git_dir(&mut self, git_dir: &Path, is_primary_checkout: bool) -> Result<(), String> {
         for rel in ["hooks", "refs/aaf", "config", "config.worktree"] {
             self.protect_existing(&git_dir.join(rel))?;
+        }
+        for rel in ["commondir", "info/exclude", "packed-refs"] {
+            self.protect_existing(&git_dir.join(rel))?;
+        }
+        if !is_primary_checkout {
+            for rel in ["HEAD", "index", "refs/heads/main", "refs/heads/master"] {
+                self.protect_existing(&git_dir.join(rel))?;
+            }
+            for rel in ["refs/heads/develop", "refs/heads/release"] {
+                self.protect_existing(&git_dir.join(rel))?;
+            }
         }
         let worktrees = git_dir.join("worktrees");
         if worktrees.is_dir() {

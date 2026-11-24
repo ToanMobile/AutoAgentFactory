@@ -1,18 +1,29 @@
-//! Multi-host hook payload adapters (Claude Code, Codex CLI, Gemini CLI).
+//! Multi-host hook payload adapters (Claude Code, Codex CLI, Gemini CLI,
+//! Antigravity, OpenCode).
 //!
-//! Normalizes tool-call payloads from all three supported coding-agent hosts
+//! Normalizes tool-call payloads from all supported coding-agent hosts
 //! into a single [`ToolAction`] so every host runs through the exact same
 //! guard suite, and renders the host-specific allow/deny JSON response.
+
+mod extra;
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
 
+pub use extra::extract_apply_patch_paths;
+use extra::{
+    extract_apply_patch, extract_cwd, extract_cwd_override, extract_file_path, extract_many_paths,
+    extract_shell_command, parse_antigravity_action, parse_opencode_action,
+};
+
 use crate::{Ctx, Decision, Denial, HookEnv, Outcome};
 
 const INPUT_RULE: &str = "hook_input";
-const INPUT_FIX: &str = "send a valid PreToolUse or BeforeTool JSON payload on stdin";
+const INPUT_FIX: &str =
+    "send a valid PreToolUse, BeforeTool, or tool.execute.before JSON payload on stdin";
+const VALID_HOSTS: &str = "auto, claude, codex, gemini, antigravity, opencode";
 
 /// Coding-agent host invoking `aaf-hook`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,16 +32,20 @@ pub enum HookHost {
     Claude,
     Codex,
     Gemini,
+    Antigravity,
+    Opencode,
 }
 
 impl HookHost {
-    /// Parses a `--host` flag value (`auto`, `claude`, `codex`, `gemini`).
+    /// Parses a `--host` flag value (`auto`, `claude`, `codex`, `gemini`, `antigravity`, `opencode`).
     pub fn parse_arg(value: &str) -> Option<HookHost> {
         match value.trim().to_ascii_lowercase().as_str() {
             "auto" => Some(HookHost::Auto),
             "claude" => Some(HookHost::Claude),
             "codex" => Some(HookHost::Codex),
             "gemini" => Some(HookHost::Gemini),
+            "antigravity" => Some(HookHost::Antigravity),
+            "opencode" => Some(HookHost::Opencode),
             _ => None,
         }
     }
@@ -41,6 +56,8 @@ impl HookHost {
             HookHost::Claude => "claude",
             HookHost::Codex => "codex",
             HookHost::Gemini => "gemini",
+            HookHost::Antigravity => "antigravity",
+            HookHost::Opencode => "opencode",
         }
     }
 }
@@ -71,219 +88,55 @@ fn bad_input(reason: impl Into<String>) -> Denial {
 /// Parses CLI arguments after `argv[0]` (e.g., `env::args().skip(1)`).
 ///
 /// Accepts no arguments (defaults to [`HookHost::Auto`]),
-/// `--host <auto|claude|codex|gemini>`, or `--host=<value>`.
+/// `--host <auto|claude|codex|gemini|antigravity|opencode>`, or `--host=<value>`.
 /// Fails closed on any unknown flag, missing value, or extra argument.
 pub fn parse_cli_host(args: &[String]) -> Result<HookHost, String> {
     match args {
         [] => Ok(HookHost::Auto),
         [flag, value] if flag == "--host" => HookHost::parse_arg(value).ok_or_else(|| {
-            format!("invalid --host value {value:?}; expected one of: auto, claude, codex, gemini")
+            format!("invalid --host value {value:?}; expected one of: {VALID_HOSTS}")
         }),
         [arg] if arg.starts_with("--host=") => {
             let value = arg.strip_prefix("--host=").unwrap_or("");
             HookHost::parse_arg(value).ok_or_else(|| {
-                format!(
-                    "invalid --host value {value:?}; expected one of: auto, claude, codex, gemini"
-                )
+                format!("invalid --host value {value:?}; expected one of: {VALID_HOSTS}")
             })
         }
-        [flag] if flag == "--host" => {
-            Err("missing value for --host; expected one of: auto, claude, codex, gemini".into())
-        }
+        [flag] if flag == "--host" => Err(format!(
+            "missing value for --host; expected one of: {VALID_HOSTS}"
+        )),
         _ => Err(format!(
-            "unexpected arguments {args:?}; only optional `--host <auto|claude|codex|gemini>` is supported"
+            "unexpected arguments {args:?}; only optional `--host <auto|claude|codex|gemini|antigravity|opencode>` is supported"
         )),
     }
-}
-
-/// Extracts every file path referenced by a Codex `apply_patch` document.
-///
-/// Recognizes `*** Update File:`, `*** Delete File:`, `*** Add File:`, and
-/// `*** Move to:` headers, preserving first-seen order without duplicates.
-pub fn extract_apply_patch_paths(patch: &str) -> Vec<String> {
-    const PREFIXES: &[&str] = &[
-        "*** Update File:",
-        "*** Delete File:",
-        "*** Add File:",
-        "*** Move to:",
-    ];
-    let mut paths = Vec::new();
-    for raw_line in patch.lines() {
-        let line = raw_line.trim_end_matches('\r');
-        for prefix in PREFIXES {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                let candidate = rest.trim();
-                if !candidate.is_empty() && !paths.iter().any(|existing| existing == candidate) {
-                    paths.push(candidate.to_string());
-                }
-                break;
-            }
-        }
-    }
-    paths
-}
-
-fn shell_quote_arg(arg: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
-    if !arg.is_empty() && arg.chars().all(plain) {
-        arg.to_string()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
-    }
-}
-
-fn extract_shell_command(
-    tool_input: Option<&Value>,
-    allow_cmd_alias: bool,
-    allow_array: bool,
-) -> Result<String, Denial> {
-    let Some(obj) = tool_input.and_then(Value::as_object) else {
-        return Err(bad_input("shell tool call without a tool_input object"));
-    };
-    let field = obj.get("command").or_else(|| {
-        if allow_cmd_alias {
-            obj.get("cmd").or_else(|| obj.get("CommandLine"))
-        } else {
-            None
-        }
-    });
-    let Some(value) = field else {
-        return Err(bad_input(if allow_cmd_alias {
-            "shell tool call without tool_input.command or tool_input.cmd"
-        } else {
-            "Bash call without tool_input.command"
-        }));
-    };
-    match value {
-        Value::String(cmd) => Ok(cmd.clone()),
-        Value::Array(items) if allow_array => {
-            if items.is_empty() {
-                return Err(bad_input("shell tool call with empty command array"));
-            }
-            let mut quoted = Vec::with_capacity(items.len());
-            for item in items {
-                let Some(part) = item.as_str() else {
-                    return Err(bad_input(
-                        "shell tool call command array contains non-string element",
-                    ));
-                };
-                quoted.push(shell_quote_arg(part));
-            }
-            Ok(quoted.join(" "))
-        }
-        _ => Err(bad_input("shell tool call command has unsupported type")),
-    }
-}
-
-fn extract_file_path(tool_input: Option<&Value>, allow_path_alias: bool) -> Result<String, Denial> {
-    let Some(obj) = tool_input.and_then(Value::as_object) else {
-        return Err(bad_input("file tool call without a tool_input object"));
-    };
-    let value = obj.get("file_path").and_then(Value::as_str).or_else(|| {
-        if allow_path_alias {
-            obj.get("path")
-                .or_else(|| obj.get("TargetFile"))
-                .or_else(|| obj.get("AbsolutePath"))
-                .and_then(Value::as_str)
-        } else {
-            None
-        }
-    });
-    match value {
-        Some(path) if !path.is_empty() => Ok(path.to_string()),
-        _ => Err(bad_input(if allow_path_alias {
-            "file tool call without tool_input.file_path or tool_input.path"
-        } else {
-            "file tool call without tool_input.file_path"
-        })),
-    }
-}
-
-fn extract_many_paths(tool_input: Option<&Value>) -> Result<Vec<String>, Denial> {
-    let Some(obj) = tool_input.and_then(Value::as_object) else {
-        return Err(bad_input(
-            "read_many_files call without a tool_input object",
-        ));
-    };
-    let Some(paths_val) = obj.get("paths") else {
-        return Err(bad_input("read_many_files call without tool_input.paths"));
-    };
-    let Some(items) = paths_val.as_array() else {
-        return Err(bad_input(
-            "read_many_files tool_input.paths is not an array",
-        ));
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        let Some(path) = item.as_str() else {
-            return Err(bad_input(
-                "read_many_files tool_input.paths contains a non-string entry",
-            ));
-        };
-        if !path.is_empty() {
-            out.push(path.to_string());
-        }
-    }
-    if let Some(include_val) = obj.get("include") {
-        let Some(include_items) = include_val.as_array() else {
-            return Err(bad_input(
-                "read_many_files tool_input.include is not an array",
-            ));
-        };
-        for item in include_items {
-            let Some(path) = item.as_str() else {
-                return Err(bad_input(
-                    "read_many_files tool_input.include contains a non-string entry",
-                ));
-            };
-            if !path.is_empty() {
-                out.push(path.to_string());
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn extract_apply_patch(tool_input: Option<&Value>) -> Result<Vec<String>, Denial> {
-    let patch_text = match tool_input {
-        Some(Value::String(raw)) => Some(raw.as_str()),
-        Some(Value::Object(obj)) => obj
-            .get("patch")
-            .and_then(Value::as_str)
-            .or_else(|| obj.get("input").and_then(Value::as_str)),
-        _ => None,
-    };
-    let Some(patch) = patch_text.filter(|text| !text.trim().is_empty()) else {
-        return Err(bad_input(
-            "apply_patch call without tool_input.patch or tool_input.input",
-        ));
-    };
-    let paths = extract_apply_patch_paths(patch);
-    if paths.is_empty() {
-        return Err(bad_input(
-            "apply_patch call contains no recognized target file paths",
-        ));
-    }
-    Ok(paths)
 }
 
 fn detect_host(payload: &Map<String, Value>, tool: &str) -> HookHost {
     let event = payload
         .get("hook_event_name")
+        .or_else(|| payload.get("event"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    let is_antigravity_tool = matches!(
+        tool,
+        "run_command" | "write_to_file" | "replace_file_content" | "multi_replace_file_content"
+    );
+    if event == "tool.execute.before"
+        || matches!(tool, "bash" | "edit" | "write" | "patch" | "read")
+        || (!payload.contains_key("tool_name")
+            && payload.contains_key("tool")
+            && payload.contains_key("args")
+            && !is_antigravity_tool)
+    {
+        return HookHost::Opencode;
+    }
+    if is_antigravity_tool {
+        return HookHost::Antigravity;
+    }
     if event == "BeforeTool"
         || matches!(
             tool,
-            "run_shell_command"
-                | "run_command"
-                | "write_file"
-                | "write_to_file"
-                | "replace"
-                | "replace_file_content"
-                | "multi_replace_file_content"
-                | "read_file"
-                | "read_many_files"
+            "run_shell_command" | "write_file" | "replace" | "read_file" | "read_many_files"
         )
     {
         return HookHost::Gemini;
@@ -302,40 +155,6 @@ fn detect_host(payload: &Map<String, Value>, tool: &str) -> HookHost {
         return HookHost::Codex;
     }
     HookHost::Claude
-}
-
-fn extract_cwd(payload: &Map<String, Value>) -> Option<String> {
-    payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.is_empty())
-        .or_else(|| {
-            payload
-                .get("workspace_root")
-                .and_then(Value::as_str)
-                .filter(|cwd| !cwd.is_empty())
-        })
-        .map(str::to_string)
-}
-
-fn extract_cwd_override(tool_input: Option<&Value>) -> Result<Option<String>, Denial> {
-    let Some(obj) = tool_input.and_then(Value::as_object) else {
-        return Ok(None);
-    };
-    let mut chosen = None;
-    for field in ["workdir", "directory", "dir_path"] {
-        if let Some(val) = obj.get(field) {
-            let Some(dir) = val.as_str() else {
-                return Err(bad_input(format!(
-                    "tool_input.{field} must be a JSON string"
-                )));
-            };
-            if chosen.is_none() && !dir.is_empty() {
-                chosen = Some(dir.to_string());
-            }
-        }
-    }
-    Ok(chosen)
 }
 
 fn parse_action(
@@ -384,6 +203,8 @@ fn parse_action(
             "read_many_files" => extract_many_paths(tool_input).map(ToolAction::FileReadMany),
             _ => Ok(ToolAction::Unknown),
         },
+        HookHost::Antigravity => parse_antigravity_action(tool, tool_input),
+        HookHost::Opencode => parse_opencode_action(tool, tool_input),
     }
 }
 
@@ -408,19 +229,24 @@ fn parse_payload_with_host(
     };
     let tool = payload
         .get("tool_name")
+        .or_else(|| payload.get("tool"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    let tool_input = payload
+        .get("tool_input")
+        .or_else(|| payload.get("args"))
+        .or_else(|| payload.get("arguments"));
     let resolved_host = if requested == HookHost::Auto {
         detect_host(payload, tool)
     } else {
         requested
     };
     let cwd = extract_cwd(payload);
-    let cwd_override = match extract_cwd_override(payload.get("tool_input")) {
+    let cwd_override = match extract_cwd_override(tool_input) {
         Ok(dir) => dir,
         Err(denial) => return (resolved_host, Err(denial)),
     };
-    let action = match parse_action(resolved_host, tool, payload.get("tool_input")) {
+    let action = match parse_action(resolved_host, tool, tool_input) {
         Ok(action) => action,
         Err(denial) => return (resolved_host, Err(denial)),
     };
@@ -462,6 +288,7 @@ fn check_write_path(raw: &str, ctx: &Ctx) -> Option<Denial> {
         crate::data_guard::check_file(raw, path, ctx)
             .or_else(|| crate::delete_guard::check_file(path, ctx))
             .or_else(|| crate::git_files::check_file(path))
+            .or_else(|| crate::main_branch_guard::check_file(path, ctx))
     };
     let path = ctx.expand(raw);
     check_one(&path).or_else(|| {
@@ -523,11 +350,20 @@ pub fn render_for_host(decision: &Decision, host: HookHost) -> Outcome {
         Decision::Deny(denial) => {
             let message = denial.message();
             let body = match host {
-                HookHost::Gemini => json!({
+                HookHost::Gemini | HookHost::Antigravity => json!({
                     "decision": "deny",
                     "reason": message,
                     "hookSpecificOutput": {
                         "hookEventName": "BeforeTool",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": message,
+                    }
+                }),
+                HookHost::Opencode => json!({
+                    "decision": "deny",
+                    "reason": message,
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
                         "permissionDecisionReason": message,
                     }

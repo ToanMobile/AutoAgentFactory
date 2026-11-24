@@ -384,6 +384,7 @@ impl AgentRunner for GenericRunner {
             request,
             &self.env,
             account,
+            &program,
             Some(Box::new(move |line| {
                 let mut guard = feed.lock().unwrap_or_else(PoisonError::into_inner);
                 record_generic_line(&mut guard, line);

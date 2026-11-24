@@ -168,6 +168,8 @@ pub struct SafetyConfig {
     /// GitHub logins whose issues and comments may become tasks.
     /// Empty means nobody is trusted.
     pub owner_github_allowlist: Vec<String>,
+    /// macOS Seatbelt Keychain read/IPC confinement (`auto`, `always`, `never`).
+    pub deny_macos_keychain: crate::keychain::KeychainPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

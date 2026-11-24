@@ -9,6 +9,7 @@ use super::env::{push_denied_entries, toolchain_home};
 use super::sandbox::{self, SandboxPaths, secondary_volume_temp_dir};
 use super::{
     AccountPaths, BUILD_CACHE_DIRS, DEFAULT_WARM_SLOTS_REL, DEFAULT_WORKTREES_REL, ExecEnv,
+    should_deny_macos_keychain,
 };
 
 /// Sensitive paths inside writable caches (scripts, PATH bins, configs, signing
@@ -84,6 +85,8 @@ pub(super) fn build_sandbox_paths(
     request: &AgentRequest,
     env: &ExecEnv,
     account: AccountPaths,
+    executor: &str,
+    passed_env: &[(String, String)],
     extra_caches: &[String],
     run_mark: Option<String>,
 ) -> PortResult<SandboxPaths> {
@@ -218,6 +221,16 @@ pub(super) fn build_sandbox_paths(
     for path in &request.sandbox.read_denied_paths {
         push_unique(&mut read_denied, path.clone());
     }
+    let deny_keychain_dir = if cfg!(target_os = "macos")
+        && should_deny_macos_keychain(env.keychain_policy, executor, passed_env)
+    {
+        env.home
+            .as_deref()
+            .filter(|h| !h.is_empty())
+            .map(|home| format!("{}/Library/Keychains", home.trim_end_matches('/')))
+    } else {
+        None
+    };
     Ok(SandboxPaths {
         writable,
         writable_regex: account.writable_regex,
@@ -232,5 +245,6 @@ pub(super) fn build_sandbox_paths(
         worktrees_root,
         path_dirs,
         run_mark,
+        deny_keychain_dir,
     })
 }

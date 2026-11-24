@@ -26,6 +26,14 @@ use crate::output::{CmdError, notice};
 
 const MOBILE_PROFILES: [&str; 5] = ["android", "ios", "flutter", "react-native", "expo"];
 
+fn executor_requires_hook(executor: &str, executor_cmd_empty: bool) -> bool {
+    match executor.trim().to_ascii_lowercase().as_str() {
+        "claude" => true,
+        "codex" | "gemini" | "antigravity" | "opencode" => executor_cmd_empty,
+        _ => false,
+    }
+}
+
 fn build_audit_backend(
     ctx: &Ctx,
     repo: &Path,
@@ -111,7 +119,7 @@ fn build_audit_backend(
         provider: audit_exec.to_string(),
         runner,
         accounts,
-        hook_required: is_native_claude || audit_exec.eq_ignore_ascii_case("claude"),
+        hook_required: executor_requires_hook(audit_exec, cross.executor_cmd.trim().is_empty()),
     }))
 }
 
@@ -177,6 +185,7 @@ pub(super) fn build_deps(
         // `run.env_pass` (tier 2) to `env_pass`.
         machine_env_pass: cfg.global.run.env_pass.clone(),
         machine_writable_caches: cfg.global.machine.writable_caches.clone(),
+        keychain_policy: cfg.global.safety.deny_macos_keychain,
         ..ExecEnv::from_process()
     };
     let runner: Arc<dyn AgentRunner> = Arc::from(
@@ -240,7 +249,10 @@ pub(super) fn build_deps(
             max_parallel: effective_max_parallel,
             auto_merge: cfg.repo.run.auto_merge,
             sandboxed,
-            hook_required: cfg.repo.run.executor == "claude",
+            hook_required: executor_requires_hook(
+                &cfg.repo.run.executor,
+                cfg.repo.run.executor_cmd.is_empty(),
+            ),
             // The executor hands the PATH of this process on to the agent.
             agent_path: ctx.path_var.clone(),
             mobile: MOBILE_PROFILES.contains(&profile.as_str()),

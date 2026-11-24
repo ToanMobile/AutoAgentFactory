@@ -40,7 +40,7 @@ pub struct InitArgs {
     /// Target host directory layout for `--with-skills` (`claude`, `agents`, or `all`).
     #[arg(long, value_enum, default_value_t = SkillHost::Claude)]
     pub host: SkillHost,
-    /// Agent hook hosts to register (`claude`, `codex`, `gemini`, or `all`).
+    /// Agent hook hosts to register (`claude`, `codex`, `gemini`, `antigravity`, `opencode`, or `all`).
     #[arg(long, default_value = "claude")]
     pub hook_host: String,
     /// Stage and commit only the AAF init files (handling ignored `.claude/` and unborn HEAD).
@@ -180,14 +180,27 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
 
     let mut host_merges = Vec::new();
     for target in hook_targets {
-        let merge = match target {
-            HookHostTarget::Claude => continue,
-            HookHostTarget::Codex => multi_host::merge_codex_hook,
-            HookHostTarget::Gemini => multi_host::merge_gemini_hook,
-        };
+        if target == HookHostTarget::Claude {
+            continue;
+        }
         let path = repo_root.join(target.settings_rel());
-        let (text, change) =
-            merge(read_optional(&path)?.as_deref(), &raw_hook_cmd).map_err(CmdError::new)?;
+        let existing = read_optional(&path)?;
+        let (text, change) = match target {
+            HookHostTarget::Claude => continue,
+            HookHostTarget::Codex => {
+                multi_host::merge_codex_hook(existing.as_deref(), &raw_hook_cmd)
+            }
+            HookHostTarget::Gemini => {
+                multi_host::merge_gemini_hook(existing.as_deref(), &raw_hook_cmd)
+            }
+            HookHostTarget::Antigravity => {
+                multi_host::merge_antigravity_hook(existing.as_deref(), &raw_hook_cmd)
+            }
+            HookHostTarget::Opencode => {
+                multi_host::merge_opencode_hook(existing.as_deref(), &raw_hook_cmd)
+            }
+        }
+        .map_err(CmdError::new)?;
         host_merges.push((target, path, text, change));
     }
 
@@ -229,7 +242,10 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
         if let Some(text) = text {
             write_file(path, text)?;
         }
-        commit_paths.push(target.settings_rel().to_string());
+        let rel = target.settings_rel().to_string();
+        if !commit_paths.contains(&rel) {
+            commit_paths.push(rel);
+        }
         extra_hooks.push((target.as_str(), target.settings_rel(), change.as_str()));
     }
 

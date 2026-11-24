@@ -1,8 +1,9 @@
-//! Multi-host hook registration and verification for Codex CLI and Gemini CLI.
+//! Multi-host hook registration and verification for Codex CLI, Gemini CLI,
+//! Antigravity, and OpenCode.
 //!
 //! Mirrors the Claude Code `.claude/settings.json` contract from
-//! `super` so `aaf init --host ...` and `aaf doctor` share one strict
-//! definition of "registered" across all three supported coding-agent hosts.
+//! `super` so `aaf init --hook-host ...`, `aaf doctor`, and `aaf run` share one
+//! strict definition of "registered" across all supported coding-agent hosts.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -14,154 +15,15 @@ use serde_json::{Value, json};
 
 static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+use super::multi_host_specs::{ANTIGRAVITY_SPEC, CODEX_SPEC, GEMINI_SPEC, HostSpec, OPENCODE_SPEC};
+pub use super::multi_host_specs::{
+    ANTIGRAVITY_TOOLS, CODEX_HOOKS_REL, CODEX_TOOLS, GEMINI_SETTINGS_REL, GEMINI_TOOLS,
+    HookHostTarget, HostHookStatus, OPENCODE_HOOKS_REL, OPENCODE_TOOLS, antigravity_matcher,
+    codex_matcher, gemini_matcher, opencode_matcher, parse_host_arg,
+};
 use super::{
-    HOOK_BINARY, HookChange, HookEntry, Registered, SETTINGS_REL, covering_hook, entry_matcher,
-    forbidden_env, hooks_switched_off, is_ours, parse, shell_quote,
-};
-
-/// Repo-relative path of the Codex CLI hooks configuration file.
-pub const CODEX_HOOKS_REL: &str = ".codex/hooks.json";
-
-/// Repo-relative path of the Gemini CLI settings file.
-pub const GEMINI_SETTINGS_REL: &str = ".gemini/settings.json";
-
-/// Codex CLI tools that must be covered by the `PreToolUse` matcher.
-pub const CODEX_TOOLS: [&str; 11] = [
-    "Bash",
-    "shell",
-    "shell_command",
-    "exec_command",
-    "apply_patch",
-    "write_file",
-    "edit_file",
-    "create_file",
-    "delete_file",
-    "read_file",
-    "view_file",
-];
-
-/// Gemini CLI tools that must be covered by the `BeforeTool` matcher.
-pub const GEMINI_TOOLS: [&str; 5] = [
-    "run_shell_command",
-    "write_file",
-    "replace",
-    "read_file",
-    "read_many_files",
-];
-
-/// Minimum allowed `timeout` for Codex CLI hooks (in seconds).
-const MIN_CODEX_TIMEOUT_SECS: u64 = 30;
-
-/// Minimum allowed `timeout` for Gemini CLI hooks (in milliseconds).
-const MIN_GEMINI_TIMEOUT_MS: u64 = 30_000;
-
-/// Supported coding-agent host targets for hook registration and diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookHostTarget {
-    Claude,
-    Codex,
-    Gemini,
-}
-
-impl HookHostTarget {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            HookHostTarget::Claude => "claude",
-            HookHostTarget::Codex => "codex",
-            HookHostTarget::Gemini => "gemini",
-        }
-    }
-
-    pub fn settings_rel(self) -> &'static str {
-        match self {
-            HookHostTarget::Claude => SETTINGS_REL,
-            HookHostTarget::Codex => CODEX_HOOKS_REL,
-            HookHostTarget::Gemini => GEMINI_SETTINGS_REL,
-        }
-    }
-}
-
-/// Diagnostic status of a single host's hook configuration (for `aaf doctor`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostHookStatus {
-    Registered(Registered),
-    NotConfigured,
-    Invalid(String),
-}
-
-/// Parses a `--host` argument value (`claude`, `codex`, `gemini`, `all`, or a
-/// comma-separated list of host names) into deduplicated [`HookHostTarget`]s.
-pub fn parse_host_arg(raw: &str) -> Result<Vec<HookHostTarget>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("empty host value; expected one of: claude, codex, gemini, all".to_string());
-    }
-    let mut out = Vec::new();
-    for part in trimmed.split(',') {
-        let token = part.trim().to_ascii_lowercase();
-        let targets: &[HookHostTarget] = match token.as_str() {
-            "claude" => &[HookHostTarget::Claude],
-            "codex" => &[HookHostTarget::Codex],
-            "gemini" => &[HookHostTarget::Gemini],
-            "all" => &[
-                HookHostTarget::Claude,
-                HookHostTarget::Codex,
-                HookHostTarget::Gemini,
-            ],
-            _ => {
-                return Err(format!(
-                    "unknown hook host {raw:?}; expected one of: claude, codex, gemini, all"
-                ));
-            }
-        };
-        for target in targets {
-            if !out.contains(target) {
-                out.push(*target);
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Canonical `PreToolUse` matcher string for Codex CLI.
-pub fn codex_matcher() -> String {
-    CODEX_TOOLS.join("|")
-}
-
-/// Canonical `BeforeTool` matcher string for Gemini CLI.
-pub fn gemini_matcher() -> String {
-    GEMINI_TOOLS.join("|")
-}
-
-#[derive(Clone, Copy)]
-struct HostSpec {
-    settings_rel: &'static str,
-    event_key: &'static str,
-    host_flag: &'static str,
-    tools: &'static [&'static str],
-    min_timeout: u64,
-    timeout_unit: &'static str,
-    check_gemini_hooks_config: bool,
-}
-
-const CODEX_SPEC: HostSpec = HostSpec {
-    settings_rel: CODEX_HOOKS_REL,
-    event_key: "PreToolUse",
-    host_flag: "codex",
-    tools: &CODEX_TOOLS,
-    min_timeout: MIN_CODEX_TIMEOUT_SECS,
-    timeout_unit: "seconds",
-    check_gemini_hooks_config: false,
-};
-
-const GEMINI_SPEC: HostSpec = HostSpec {
-    settings_rel: GEMINI_SETTINGS_REL,
-    event_key: "BeforeTool",
-    host_flag: "gemini",
-    tools: &GEMINI_TOOLS,
-    min_timeout: MIN_GEMINI_TIMEOUT_MS,
-    timeout_unit: "milliseconds",
-    check_gemini_hooks_config: true,
+    HOOK_BINARY, HookChange, HookEntry, Registered, covering_hook, entry_matcher, forbidden_env,
+    hooks_switched_off, is_ours, parse, shell_quote,
 };
 
 fn format_host_command(command_path: &str, host_flag: &str) -> Result<String, String> {
@@ -492,12 +354,28 @@ pub fn merge_codex_hook(
     merge_host_hook(existing, command_path, CODEX_SPEC)
 }
 
-/// Pure merge for `.gemini/settings.json`.
+/// Pure merge for `.gemini/settings.json` (`--host gemini`).
 pub fn merge_gemini_hook(
     existing: Option<&str>,
     command_path: &str,
 ) -> Result<(Option<String>, HookChange), String> {
     merge_host_hook(existing, command_path, GEMINI_SPEC)
+}
+
+/// Pure merge for `.gemini/settings.json` (`--host antigravity`).
+pub fn merge_antigravity_hook(
+    existing: Option<&str>,
+    command_path: &str,
+) -> Result<(Option<String>, HookChange), String> {
+    merge_host_hook(existing, command_path, ANTIGRAVITY_SPEC)
+}
+
+/// Pure merge for `.opencode/hooks.json` (`--host opencode`).
+pub fn merge_opencode_hook(
+    existing: Option<&str>,
+    command_path: &str,
+) -> Result<(Option<String>, HookChange), String> {
+    merge_host_hook(existing, command_path, OPENCODE_SPEC)
 }
 
 /// Validates the Codex CLI hook registration text in `.codex/hooks.json`.
@@ -510,18 +388,34 @@ pub fn covering_gemini_hook(text: &str) -> Result<Registered, String> {
     covering_host_hook(text, GEMINI_SPEC)
 }
 
+/// Validates the Antigravity hook registration text in `.gemini/settings.json`.
+pub fn covering_antigravity_hook(text: &str) -> Result<Registered, String> {
+    covering_host_hook(text, ANTIGRAVITY_SPEC)
+}
+
+/// Validates the OpenCode hook registration text in `.opencode/hooks.json`.
+pub fn covering_opencode_hook(text: &str) -> Result<Registered, String> {
+    covering_host_hook(text, OPENCODE_SPEC)
+}
+
 /// Registers (or updates) `aaf-hook --host codex` in `<repo_root>/.codex/hooks.json`.
-///
-/// Idempotent and preserves any unrelated user hooks and top-level keys.
 pub fn register_codex(repo_root: &Path, command_path: &str) -> Result<HookChange, String> {
     register_host(repo_root, command_path, CODEX_SPEC)
 }
 
 /// Registers (or updates) `aaf-hook --host gemini` in `<repo_root>/.gemini/settings.json`.
-///
-/// Idempotent and preserves any unrelated user hooks and top-level keys.
 pub fn register_gemini(repo_root: &Path, command_path: &str) -> Result<HookChange, String> {
     register_host(repo_root, command_path, GEMINI_SPEC)
+}
+
+/// Registers (or updates) `aaf-hook --host antigravity` in `<repo_root>/.gemini/settings.json`.
+pub fn register_antigravity(repo_root: &Path, command_path: &str) -> Result<HookChange, String> {
+    register_host(repo_root, command_path, ANTIGRAVITY_SPEC)
+}
+
+/// Registers (or updates) `aaf-hook --host opencode` in `<repo_root>/.opencode/hooks.json`.
+pub fn register_opencode(repo_root: &Path, command_path: &str) -> Result<HookChange, String> {
+    register_host(repo_root, command_path, OPENCODE_SPEC)
 }
 
 /// Verifies `<repo_root>/.codex/hooks.json` has an untampered `aaf-hook --host codex` entry.
@@ -534,11 +428,17 @@ pub fn check_gemini(repo_root: &Path) -> Result<Registered, String> {
     check_host(repo_root, GEMINI_SPEC)
 }
 
+/// Verifies `<repo_root>/.gemini/settings.json` has an untampered `aaf-hook --host antigravity` entry.
+pub fn check_antigravity(repo_root: &Path) -> Result<Registered, String> {
+    check_host(repo_root, ANTIGRAVITY_SPEC)
+}
+
+/// Verifies `<repo_root>/.opencode/hooks.json` has an untampered `aaf-hook --host opencode` entry.
+pub fn check_opencode(repo_root: &Path) -> Result<Registered, String> {
+    check_host(repo_root, OPENCODE_SPEC)
+}
+
 /// Checks a host's hook configuration if its settings file is present.
-///
-/// Intended for `aaf doctor` so unconfigured optional hosts report
-/// [`HostHookStatus::NotConfigured`] rather than an error, while tampered or
-/// invalid configs report [`HostHookStatus::Invalid`].
 pub fn check_host_if_present(repo_root: &Path, host: HookHostTarget) -> HostHookStatus {
     let path = repo_root.join(host.settings_rel());
     let text = match fs::read_to_string(&path) {
@@ -557,6 +457,8 @@ pub fn check_host_if_present(repo_root: &Path, host: HookHostTarget) -> HostHook
         HookHostTarget::Claude => covering_hook(&text),
         HookHostTarget::Codex => covering_codex_hook(&text),
         HookHostTarget::Gemini => covering_gemini_hook(&text),
+        HookHostTarget::Antigravity => covering_antigravity_hook(&text),
+        HookHostTarget::Opencode => covering_opencode_hook(&text),
     };
     match result {
         Ok(registered) => HostHookStatus::Registered(registered),

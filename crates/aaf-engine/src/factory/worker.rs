@@ -276,7 +276,13 @@ fn hook_problem_if(deps: &Deps, cwd: &Path, required: bool) -> Option<String> {
             Err(err) => return Some(format!("the base branch could not be read ({err})")),
         }
     };
-    hook_settings::check_worktree(cwd, &settings.agent_path, base.as_deref()).err()
+    hook_settings::check_worktree_for_executor(
+        cwd,
+        &settings.agent_path,
+        base.as_deref(),
+        &settings.repo.run.executor,
+    )
+    .err()
 }
 
 pub(super) struct OpenRun {

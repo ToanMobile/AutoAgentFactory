@@ -68,6 +68,9 @@ pub struct SandboxPaths {
     /// the run write its data and nothing else about it, so the kernel's
     /// answer for that file tells this run's sandbox from every other one.
     pub run_mark: Option<String>,
+    /// Optional macOS Keychain dir (e.g. `~/Library/Keychains`) to deny along
+    /// with `com.apple.SecurityServer` and `com.apple.securityd.xpc` IPC.
+    pub deny_keychain_dir: Option<String>,
 }
 
 /// Builds the SBPL profile for `policy` plus `extra`.
@@ -88,6 +91,11 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     let denied = canonical_paths(policy.read_denied_paths.iter().chain(&extra.read_denied))?;
     let worktree = extra.worktree.as_deref().map(canonical).transpose()?;
     let worktrees_root = extra.worktrees_root.as_deref().map(canonical).transpose()?;
+    let deny_keychain = extra
+        .deny_keychain_dir
+        .as_deref()
+        .map(canonical)
+        .transpose()?;
     if let Some(root) = &worktrees_root {
         // Another task's worktree is never writable, whoever listed it.
         writable.retain(|path| !path.starts_with(root));
@@ -136,10 +144,19 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // Hooks and config are run or obeyed by every later git command,
     // including the user's own outside the sandbox; the same files exist per
     // linked worktree under `worktrees/<name>/`.
+    let is_primary_checkout = |git_dir: &Path| {
+        worktree
+            .as_ref()
+            .is_some_and(|wt| wt.join(".git") == git_dir)
+    };
     let mut submodules = Vec::new();
     for git_dir in &git_dirs {
         let subs = git_dir::submodule_git_dirs(git_dir)?;
-        profile.push_str(&git_dir::rules(git_dir, &subs)?);
+        profile.push_str(&git_dir::rules(
+            git_dir,
+            &subs,
+            is_primary_checkout(git_dir),
+        )?);
         submodules.extend(subs);
     }
     if let Some(worktree) = &worktree {
@@ -217,7 +234,13 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     for root in git_dirs.iter().chain(&submodules) {
         closed.extend(git_dir::OBEYED.iter().map(|name| root.join(name)));
     }
-    closed.extend(git_dirs.iter().map(|git_dir| git_dir.join("refs/aaf")));
+    for git_dir in &git_dirs {
+        closed.extend(git_dir::protected_closed_paths(
+            git_dir,
+            is_primary_checkout(git_dir),
+        ));
+    }
+    closed.extend(deny_keychain.clone());
     closed.extend(worktree.iter().map(|worktree| worktree.join(".git")));
     let listed = extra.write_denied.iter().chain(&extra.write_denied_prefix);
     closed.extend(listed.map(PathBuf::from));
@@ -274,6 +297,15 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     for path in &denied {
         let path = sbpl_string(path)?;
         profile.push_str(&format!("(deny file-read* file-write* (subpath {path}))\n"));
+    }
+    if let Some(kc) = &deny_keychain {
+        let kc = sbpl_string(kc)?;
+        profile.push_str(&format!(
+            "(deny file-read* file-write* (subpath {kc}))\n\
+             (deny mach-lookup\n  \
+               (global-name \"com.apple.SecurityServer\")\n  \
+               (global-name \"com.apple.securityd.xpc\"))\n"
+        ));
     }
     // The one exception to "no allow after the denies": what is reopened
     // inside a denied directory has to come after the rule that closes it.

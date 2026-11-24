@@ -31,6 +31,7 @@ pub(crate) fn build_exec_env(ctx: &Ctx, cfg: &EffectiveConfig) -> ExecEnv {
         worktrees_root: Some(ctx.worktrees_dir.to_string_lossy().into_owned()),
         machine_env_pass: cfg.global.run.env_pass.clone(),
         machine_writable_caches: cfg.global.machine.writable_caches.clone(),
+        keychain_policy: cfg.global.safety.deny_macos_keychain,
         ..ExecEnv::from_process()
     }
 }

@@ -218,18 +218,15 @@ fn r6_h6_6_self_reassignment_is_bounded() {
     timed(&py(&body), ALLOW);
 }
 
-/// The joined `.git/info/exclude` is judged as the path it is, as the
-/// literal is.
+/// The joined `.git/info/exclude` is judged as the protected git-state path it
+/// is, matching direct literal writes (`SECURITY.md §9`).
 #[test]
-fn joined_info_exclude_is_allowed() {
+fn joined_info_exclude_is_denied() {
     let fx = fixture();
-    let allow = [
+    let deny = [
         "python3 -c \"open('.git/info/exclude','a').write('build/\\n')\"".to_string(),
         "python3 -c \"import os\nopen(os.path.join('.git','info','exclude'),'a').write('build/\\n')\"".to_string(),
         "python3 -c \"from pathlib import Path\n(Path('.git')/'info'/'exclude').write_text('build/\\n')\"".to_string(),
-    ];
-    run_corpus(&fx, &rows(&allow, ALLOW));
-    let deny = [
         "python3 -c \"import os\nopen(os.path.join('.git','info','attributes'),'a').write('x')\""
             .to_string(),
         "python3 -c \"import shutil\nshutil.rmtree('.git')\"".to_string(),

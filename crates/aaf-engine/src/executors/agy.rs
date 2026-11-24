@@ -251,8 +251,15 @@ impl AgentRunner for AgyRunner {
             .is_some_and(|s| !s.trim().is_empty());
         let mut log = open_stream_log(&self.env, request);
         log.write_start("antigravity", self.model.as_deref());
-        let out =
-            run_confined_with_tail(spec, request, &self.env, account, None, GENERIC_TAIL_BYTES)?;
+        let out = run_confined_with_tail(
+            spec,
+            request,
+            &self.env,
+            account,
+            "antigravity",
+            None,
+            GENERIC_TAIL_BYTES,
+        )?;
         let mut parsed = parse_agy_output(&out.tail, expect_structured);
         if out.exit_code != Some(0) && parsed.limit_hit.is_none() && parsed.infra.is_none() {
             let (limit, infra) = classify_text_failure(None, &strip_ansi(&out.tail));

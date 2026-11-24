@@ -24,6 +24,7 @@ pub mod heavy_guard;
 pub mod host;
 pub mod human_guard;
 pub mod interp_guard;
+pub mod main_branch_guard;
 pub mod paths;
 pub mod pr_merge_guard;
 pub mod secret_guard;
@@ -351,6 +352,7 @@ pub fn decide(input: &[u8], env: &HookEnv) -> Decision {
                         } else {
                             delete_guard::check_file(path, &ctx)
                                 .or_else(|| git_files::check_file(path))
+                                .or_else(|| main_branch_guard::check_file(path, &ctx))
                         }
                     })
                 };
@@ -405,6 +407,7 @@ fn judge_direct(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
         .or_else(|| git_guard::check(cmd, ctx))
         .or_else(|| git_persist::check(cmd, ctx))
         .or_else(|| git_files::check_cmd(cmd, ctx))
+        .or_else(|| main_branch_guard::check_cmd(cmd, ctx))
         .or_else(|| adb_guard::check(cmd, ctx))
         .or_else(|| check_delete_guard(cmd, ctx))
         .or_else(|| secret_guard::check_cmd(cmd, ctx))

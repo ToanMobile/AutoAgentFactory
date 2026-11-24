@@ -111,7 +111,7 @@ fn judge() -> Outcome {
                 &aaf_hook::Decision::Deny(aaf_hook::Denial::new(
                     "hook_input",
                     msg,
-                    "invoke `aaf-hook` with optional `--host <auto|claude|codex|gemini>`",
+                    "invoke `aaf-hook` with optional `--host <auto|claude|codex|gemini|antigravity|opencode>`",
                 )),
                 aaf_hook::host::HookHost::Claude,
             );

@@ -301,6 +301,38 @@ pub(crate) fn sweep_expired(
             }
         }
     }
+    for repo_snaps in read_dir_paths(&root.join("base-snaps")) {
+        if !is_real_dir(&repo_snaps) {
+            continue;
+        }
+        let Some(common_id) = repo_snaps.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let active = [SlotKind::Merge, SlotKind::Oracle].into_iter().any(|kind| {
+            let lp = root
+                .join(kind.dir_name())
+                .join(common_id)
+                .join("slot-0.lock");
+            match try_lock_existing(&lp) {
+                Some(Some(f)) => {
+                    let _ = f.unlock();
+                    false
+                }
+                Some(None) => false,
+                None => true,
+            }
+        });
+        if active {
+            continue;
+        }
+        for snap in read_dir_paths(&repo_snaps) {
+            if fs::symlink_metadata(&snap)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink() && older(&m))
+            {
+                rm_dir(&snap);
+            }
+        }
+    }
     if !dry_run {
         for common_dir in common_dirs {
             let _ = git_raw(&common_dir, &["worktree", "prune"]);

@@ -3,11 +3,12 @@
 use std::fs;
 
 use aaf_engine::hook_settings::multi_host::{
-    CODEX_HOOKS_REL, GEMINI_SETTINGS_REL, HookHostTarget, HostHookStatus, check_codex,
-    check_gemini, check_host_if_present, codex_matcher, covering_codex_hook, covering_gemini_hook,
-    gemini_matcher, parse_host_arg, register_codex, register_gemini,
+    CODEX_HOOKS_REL, GEMINI_SETTINGS_REL, HookHostTarget, HostHookStatus, OPENCODE_HOOKS_REL,
+    check_antigravity, check_codex, check_gemini, check_host_if_present, check_opencode,
+    codex_matcher, covering_codex_hook, covering_gemini_hook, gemini_matcher, parse_host_arg,
+    register_antigravity, register_codex, register_gemini, register_opencode,
 };
-use aaf_engine::hook_settings::{HookChange, SETTINGS_REL, merge_hook};
+use aaf_engine::hook_settings::{HookChange, SETTINGS_REL, merge_hook, validate_for_executor};
 use serde_json::{Value, json};
 
 fn codex_json(matcher: &str, command: &str) -> String {
@@ -40,11 +41,20 @@ fn parse_host_arg_valid_and_invalid() {
     assert_eq!(parse_host_arg("CODEX"), Ok(vec![HookHostTarget::Codex]));
     assert_eq!(parse_host_arg(" gemini "), Ok(vec![HookHostTarget::Gemini]));
     assert_eq!(
+        parse_host_arg("antigravity"),
+        Ok(vec![HookHostTarget::Antigravity])
+    );
+    assert_eq!(
+        parse_host_arg("opencode"),
+        Ok(vec![HookHostTarget::Opencode])
+    );
+    assert_eq!(
         parse_host_arg("all"),
         Ok(vec![
             HookHostTarget::Claude,
             HookHostTarget::Codex,
             HookHostTarget::Gemini,
+            HookHostTarget::Opencode,
         ])
     );
     assert_eq!(
@@ -55,9 +65,16 @@ fn parse_host_arg_valid_and_invalid() {
     assert_eq!(HookHostTarget::Claude.as_str(), "claude");
     assert_eq!(HookHostTarget::Codex.as_str(), "codex");
     assert_eq!(HookHostTarget::Gemini.as_str(), "gemini");
+    assert_eq!(HookHostTarget::Antigravity.as_str(), "antigravity");
+    assert_eq!(HookHostTarget::Opencode.as_str(), "opencode");
     assert_eq!(HookHostTarget::Claude.settings_rel(), SETTINGS_REL);
     assert_eq!(HookHostTarget::Codex.settings_rel(), CODEX_HOOKS_REL);
     assert_eq!(HookHostTarget::Gemini.settings_rel(), GEMINI_SETTINGS_REL);
+    assert_eq!(
+        HookHostTarget::Antigravity.settings_rel(),
+        GEMINI_SETTINGS_REL
+    );
+    assert_eq!(HookHostTarget::Opencode.settings_rel(), OPENCODE_HOOKS_REL);
 
     for bad in ["", "   ", "cursor", "claude,unknown"] {
         assert!(parse_host_arg(bad).is_err(), "expected Err for {bad:?}");
@@ -401,4 +418,45 @@ fn check_host_if_present_reports_not_configured_registered_and_invalid() {
             "expected Invalid for {host:?}"
         );
     }
+}
+
+#[test]
+fn antigravity_opencode_and_validate_for_executor() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    assert!(validate_for_executor(root, "custom").is_ok());
+    assert!(validate_for_executor(root, "claude").is_err());
+    assert!(validate_for_executor(root, "codex").is_err());
+    assert!(validate_for_executor(root, "gemini").is_err());
+    assert!(validate_for_executor(root, "antigravity").is_err());
+    assert!(validate_for_executor(root, "opencode").is_err());
+
+    let (claude_text, _) = merge_hook(None, "aaf-hook").unwrap();
+    let claude_path = root.join(SETTINGS_REL);
+    fs::create_dir_all(claude_path.parent().unwrap()).unwrap();
+    fs::write(&claude_path, claude_text.unwrap()).unwrap();
+    assert!(validate_for_executor(root, "claude").is_ok());
+
+    assert_eq!(register_codex(root, "aaf-hook").unwrap(), HookChange::Added);
+    assert!(validate_for_executor(root, "codex").is_ok());
+
+    assert_eq!(
+        register_antigravity(root, "aaf-hook").unwrap(),
+        HookChange::Added
+    );
+    assert!(check_antigravity(root).is_ok());
+    assert!(validate_for_executor(root, "antigravity").is_ok());
+    assert!(validate_for_executor(root, "gemini").is_ok());
+
+    assert_eq!(
+        register_opencode(root, "aaf-hook").unwrap(),
+        HookChange::Added
+    );
+    assert!(check_opencode(root).is_ok());
+    assert!(validate_for_executor(root, "opencode").is_ok());
+    assert_eq!(
+        register_opencode(root, "aaf-hook").unwrap(),
+        HookChange::Unchanged
+    );
 }

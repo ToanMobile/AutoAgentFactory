@@ -82,6 +82,21 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     })
 }
 
+/// Harmless OS metadata basenames tolerated in external ignore lists during
+/// store submission. Every other external-excluded file is refused.
+fn is_os_metadata_file(rel_path: &str) -> bool {
+    if rel_path.ends_with('/') {
+        return false;
+    }
+    let Some(base) = Path::new(rel_path).file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    base.eq_ignore_ascii_case(".ds_store")
+        || base.eq_ignore_ascii_case("thumbs.db")
+        || base.eq_ignore_ascii_case("desktop.ini")
+        || base.starts_with("._")
+}
+
 /// Every failure on this path refuses the submission.
 fn verify(ctx: &Ctx) -> Result<(), String> {
     let root = ctx
@@ -100,16 +115,21 @@ fn verify(ctx: &Ctx) -> Result<(), String> {
     // slot must not unlock a submission from here.
     aaf_fp::check_store_receipt_in(&root, &receipt, &current)?;
     // A tracked file marked skip-worktree or assume-unchanged can differ on
-    // disk from what was gated without moving the fingerprint. Files hidden
-    // by an ignore rule are the release gate's business, not refused here:
-    // every machine has some (`.DS_Store` under a global excludes file).
+    // disk from what was gated without moving the fingerprint, and any
+    // non-OS-metadata file hidden by an external ignore rule (e.g.
+    // `.git/info/exclude`) can alter the build silently (SECURITY.md §9).
     let hidden = aaf_fp::hidden_files(&root, aaf_fp::GIT_TIMEOUT).map_err(|e| e.to_string())?;
-    if hidden.flagged.is_empty() {
+    let disallowed_ignored: Vec<_> = hidden
+        .ignored
+        .into_iter()
+        .filter(|entry| !is_os_metadata_file(&entry.path))
+        .collect();
+    if hidden.flagged.is_empty() && disallowed_ignored.is_empty() {
         return Ok(());
     }
-    let flagged_only = aaf_fp::HiddenFiles {
+    let filtered = aaf_fp::HiddenFiles {
         flagged: hidden.flagged,
-        ignored: Vec::new(),
+        ignored: disallowed_ignored,
     };
-    Err(flagged_only.reasons().join("; "))
+    Err(filtered.reasons().join("; "))
 }

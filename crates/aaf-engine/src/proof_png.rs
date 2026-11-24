@@ -5,6 +5,11 @@ use super::ProofError;
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 const MIN_IDAT_DISTINCT_BYTES: usize = 16;
 const MAX_PNG_CHUNK_LEN: u32 = 0x7FFF_FFFF;
+const LARGE_FRAME_PIXELS: u64 = 100_000;
+const MIN_LARGE_FRAME_IDAT_BYTES: usize = 64;
+
+/// Error message returned when host proof capture produces a blank/solid frame.
+pub(crate) const BLANK_PNG_ERROR: &str = "captured proof PNG appears blank/solid color";
 
 const CRC32_TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
@@ -236,4 +241,106 @@ pub(crate) fn validate_png(
         )));
     }
     Ok((width, height))
+}
+
+/// Returns `true` when `bytes` is a structurally intact PNG whose `IDAT` stream
+/// indicates a degenerate blank/solid-color frame (tiny compressed `IDAT` for a
+/// large frame, fewer than 16 distinct `IDAT` byte values, or trivially
+/// repeating zlib/uncompressed byte distributions).
+///
+/// Structurally corrupt/non-PNG inputs return `false` so [`validate_png`]
+/// reports the underlying format error instead of misclassifying corruption.
+pub fn is_likely_blank_png(bytes: &[u8]) -> bool {
+    if bytes.len() < 33 || bytes[..8] != PNG_MAGIC {
+        return false;
+    }
+    let mut pos = 8usize;
+    let mut dims: Option<(u32, u32)> = None;
+    let mut idat_total = 0usize;
+    let mut counts = [0usize; 256];
+    let mut saw_iend = false;
+
+    while pos < bytes.len() {
+        if pos + 12 > bytes.len() {
+            return false;
+        }
+        let len_u32 =
+            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+        if len_u32 > MAX_PNG_CHUNK_LEN {
+            return false;
+        }
+        let len = len_u32 as usize;
+        let kind = &bytes[pos + 4..pos + 8];
+        let data_start = pos + 8;
+        let Some(data_end) = data_start.checked_add(len) else {
+            return false;
+        };
+        let Some(next_pos) = data_end.checked_add(4) else {
+            return false;
+        };
+        if next_pos > bytes.len() {
+            return false;
+        }
+        let data = &bytes[data_start..data_end];
+        let stored_crc = u32::from_be_bytes([
+            bytes[data_end],
+            bytes[data_end + 1],
+            bytes[data_end + 2],
+            bytes[data_end + 3],
+        ]);
+        if crc32(kind, data) != stored_crc {
+            return false;
+        }
+        if dims.is_none() {
+            if kind != b"IHDR" {
+                return false;
+            }
+            let Ok((w, h, _)) = parse_ihdr(data) else {
+                return false;
+            };
+            dims = Some((w, h));
+        } else if kind == b"IDAT" {
+            idat_total = idat_total.saturating_add(data.len());
+            for &b in data {
+                counts[usize::from(b)] = counts[usize::from(b)].saturating_add(1);
+            }
+        } else if kind == b"IEND" {
+            if !data.is_empty() {
+                return false;
+            }
+            saw_iend = true;
+            pos = next_pos;
+            break;
+        }
+        pos = next_pos;
+    }
+
+    let Some((width, height)) = dims else {
+        return false;
+    };
+    if !saw_iend || pos != bytes.len() || idat_total == 0 {
+        return false;
+    }
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels >= LARGE_FRAME_PIXELS && idat_total < MIN_LARGE_FRAME_IDAT_BYTES {
+        return true;
+    }
+    let distinct = counts.iter().filter(|&&c| c > 0).count();
+    if distinct < MIN_IDAT_DISTINCT_BYTES {
+        return true;
+    }
+    if idat_total >= MIN_LARGE_FRAME_IDAT_BYTES {
+        counts.sort_unstable_by(|a, b| b.cmp(a));
+        let top4: usize = counts.iter().take(4).copied().sum();
+        if top4.saturating_mul(100) / idat_total >= 90 {
+            return true;
+        }
+        if pixels >= LARGE_FRAME_PIXELS {
+            let top16: usize = counts.iter().take(16).copied().sum();
+            if top16.saturating_mul(100) / idat_total >= 95 {
+                return true;
+            }
+        }
+    }
+    false
 }

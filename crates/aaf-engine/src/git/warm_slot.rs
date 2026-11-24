@@ -63,6 +63,12 @@ pub fn warm_slots_root(data_dir: &Path) -> PathBuf {
     data_dir.join("warm-slots")
 }
 
+/// Shared base-only CoW artifact snapshots directory
+/// (`<warm_slots_root>/base-snaps/<common_id>`).
+pub fn base_snapshots_dir(data_dir: &Path, common_id: &str) -> PathBuf {
+    warm_slots_root(data_dir).join("base-snaps").join(common_id)
+}
+
 /// Exclusive handle to a detached worktree (`slot-0` or contended `ephemeral-*`).
 pub struct WarmSlot {
     repo_root: PathBuf,
@@ -359,6 +365,118 @@ pub fn promote_clean_base_snapshot(
         remove_path_any(&old);
     }
     Ok(())
+}
+
+/// Restores untracked build directories from `<snaps_dir>/<base_sha>/<rel>`
+/// into `dst_wt/<rel>` via copy-on-write.
+///
+/// Validates `base_sha` and every `rel`, refuses symlinks in both snapshot and
+/// destination prefix, skips entries that already exist in `dst_wt` or are
+/// git-tracked, and returns the count of restored directories.
+pub fn restore_clean_base_snapshot(
+    dst_wt: &Path,
+    snaps_dir: &Path,
+    base_sha: &str,
+    artifact_dirs: &[&str],
+) -> Result<usize, GitError> {
+    if !is_valid_sha(base_sha) {
+        return Err(GitError::Invalid(format!("invalid base_sha {base_sha:?}")));
+    }
+    let validated: Vec<PathBuf> = artifact_dirs
+        .iter()
+        .map(|&r| validate_artifact_rel(r))
+        .collect::<Result<_, GitError>>()?;
+    let snap_root = snaps_dir.join(base_sha);
+    if !is_real_dir(&snap_root) {
+        return Ok(0);
+    }
+    let Ok(canon_snap) = fs::canonicalize(&snap_root) else {
+        return Ok(0);
+    };
+    let Ok(canon_dst) = fs::canonicalize(dst_wt) else {
+        return Ok(0);
+    };
+    let mut restored = 0usize;
+    for rel_path in &validated {
+        let rel_s = path_str(rel_path)?;
+        let src = snap_root.join(rel_path);
+        if !is_real_dir(&src)
+            || has_symlink_prefix(&snap_root, rel_path)
+            || !fs::canonicalize(&src).is_ok_and(|c| c.starts_with(&canon_snap))
+            || path_contains_symlink(&src, 0)
+        {
+            continue;
+        }
+        let dst = dst_wt.join(rel_path);
+        if fs::symlink_metadata(&dst).is_ok()
+            || git_tracks_path(dst_wt, rel_s)
+            || dst_prefix_has_symlink(dst_wt, &canon_dst, rel_path)
+        {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        cow_copy(&src, &dst)?;
+        restored += 1;
+    }
+    Ok(restored)
+}
+
+/// Promotes build directories from a [`WarmSlot`] into [`base_snapshots_dir`]
+/// strictly after verifying `HEAD == base_sha` and a clean working tree (zero
+/// modified/staged/untracked files and no in-progress merge). Never promotes
+/// from a PR tree.
+pub fn promote_from_pure_base_slot(
+    slot: &WarmSlot,
+    data_dir: &Path,
+    common_id: &str,
+    base_sha: &str,
+    artifact_dirs: &[&str],
+) -> Result<(), GitError> {
+    if !is_safe_segment(common_id) || !is_valid_sha(base_sha) {
+        return Err(GitError::Invalid(format!(
+            "invalid warm-slot id {common_id:?} or base_sha {base_sha:?}"
+        )));
+    }
+    let head = git(slot.path(), &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if !head.eq_ignore_ascii_case(base_sha) {
+        return Err(GitError::Invalid(format!(
+            "refusing to promote base snapshot: slot HEAD {head} != base_sha {base_sha}"
+        )));
+    }
+    if git_raw(
+        slot.path(),
+        &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
+    )?
+    .success()
+    {
+        return Err(GitError::Dirty(slot.path().to_path_buf()));
+    }
+    let status = git(slot.path(), &["status", "--porcelain"])?;
+    if !status.is_empty() {
+        return Err(GitError::Dirty(slot.path().to_path_buf()));
+    }
+    let snaps_dir = base_snapshots_dir(data_dir, common_id);
+    promote_clean_base_snapshot(slot.path(), &snaps_dir, base_sha, artifact_dirs)
+}
+
+fn dst_prefix_has_symlink(dst_wt: &Path, canon_dst: &Path, rel: &Path) -> bool {
+    let mut cur = dst_wt.to_path_buf();
+    for comp in rel.components() {
+        cur.push(comp);
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => return true,
+            Ok(_) => {
+                if !fs::canonicalize(&cur).is_ok_and(|c| c.starts_with(canon_dst)) {
+                    return true;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 fn sorted_snapshot_dirs(snaps_dir: &Path, keep: Option<&Path>) -> Vec<PathBuf> {

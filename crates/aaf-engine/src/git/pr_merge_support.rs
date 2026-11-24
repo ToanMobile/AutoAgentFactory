@@ -11,7 +11,11 @@ use aaf_domain::config::{GlobalConfig, RepoConfig};
 
 use super::cmd::{failure, git, git_raw};
 use super::gh_client::{GhClient, PrInfo};
-use super::warm_slot::{SlotKind, WarmSlot};
+use super::hydration::load_base_worktree_config;
+use super::warm_slot::{
+    SlotKind, WarmSlot, base_snapshots_dir, promote_from_pure_base_slot,
+    restore_clean_base_snapshot,
+};
 use super::{GitError, check_branch_name};
 use crate::config::{self, REPO_CONFIG_REL};
 use crate::throttle::Progress;
@@ -57,11 +61,45 @@ impl ScratchWorktree {
             base_sha,
             &format!("pr{pr_number}"),
         )?;
-        Ok(ScratchWorktree { slot })
+        let scratch = ScratchWorktree { slot };
+        if let Ok(wt_cfg) = load_base_worktree_config(repo_root, base_sha)
+            && !wt_cfg.clone_dirs.is_empty()
+        {
+            let dirs: Vec<&str> = wt_cfg.clone_dirs.iter().map(String::as_str).collect();
+            scratch.seed_from_base_snapshot(data_dir, common_id, base_sha, &dirs);
+        }
+        Ok(scratch)
     }
 
     pub(super) fn path(&self) -> &Path {
         self.slot.path()
+    }
+
+    /// Best-effort CoW restore of pre-warmed base artifact directories into
+    /// this merge verification slot from the shared base snapshots directory.
+    pub(super) fn seed_from_base_snapshot(
+        &self,
+        data_dir: &Path,
+        common_id: &str,
+        base_sha: &str,
+        artifact_dirs: &[&str],
+    ) -> usize {
+        let snaps_dir = base_snapshots_dir(data_dir, common_id);
+        restore_clean_base_snapshot(self.slot.path(), &snaps_dir, base_sha, artifact_dirs)
+            .unwrap_or(0)
+    }
+
+    /// Promotes build artifact directories ONLY when the underlying slot is at
+    /// pure `base_sha` with a clean working tree (never from a merged PR tree).
+    #[allow(dead_code)]
+    pub(super) fn promote_base_artifacts(
+        &self,
+        data_dir: &Path,
+        common_id: &str,
+        base_sha: &str,
+        artifact_dirs: &[&str],
+    ) -> Result<(), GitError> {
+        promote_from_pure_base_slot(&self.slot, data_dir, common_id, base_sha, artifact_dirs)
     }
 }
 
