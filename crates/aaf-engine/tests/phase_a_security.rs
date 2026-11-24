@@ -504,8 +504,29 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
     let noop = |_: &Progress<'_>| {};
     let throttle = Throttle::system(&machine, &probe, &noop);
 
+    let probe_fp = || {
+        let layout = aaf_fp::probe_git_layout(repo.path(), aaf_fp::GIT_TIMEOUT).unwrap();
+        aaf_fp::tree_fp_with_layout(repo.path(), &layout, aaf_fp::GIT_TIMEOUT).unwrap()
+    };
+    let index_debug = || {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args([
+                "ls-files",
+                "--debug",
+                "-s",
+                "--others",
+                "--exclude-standard",
+            ])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
     let run_case = |ts, opts| {
         let data = TempDir::new().unwrap();
+        let fp_pre = probe_fp();
+        let index_pre = index_debug();
         let run = run_gate_with_options(
             data.path(),
             repo.path(),
@@ -532,8 +553,13 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
                 .unwrap_or_default();
             panic!(
-                "status {:?}, reasons: {:?}\nwork tree:\n{status}",
-                run.receipt.status, run.receipt.reasons
+                "status {:?}, reasons: {:?}\nwork tree:\n{status}\nfp before gate {fp_pre}\n\
+                 receipt tree_fp {}\nfp after gate {}\nindex before:\n{index_pre}\nindex after:\n{}",
+                run.receipt.status,
+                run.receipt.reasons,
+                run.receipt.tree_fp,
+                probe_fp(),
+                index_debug()
             );
         }
         assert!(
