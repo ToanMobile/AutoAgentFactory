@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use super::paths::{closed_dir, ensure_closed_dir, guest_dir, is_guest, open_guest_file};
-use super::probe::GroupState;
+use super::probe::{GroupState, Unreadable};
 use super::slot_file::unlock_all;
 use super::watchdog::GroupControl;
 use crate::db::private;
@@ -209,7 +209,21 @@ pub(super) fn orphan_in(
     text: &str,
     group_state: &dyn Fn(u32) -> Option<GroupState>,
 ) -> Option<u32> {
-    let pgid = super::slots::recorded_pgid(text)?;
+    orphan_reading(text, &|pgid| Ok(group_state(pgid))).unwrap_or(None)
+}
+
+/// [`orphan_in`] that tells a group that is gone (`Ok(None)`) from a process
+/// table that could not be read (`Err`). The caller decides nothing on the
+/// latter: taking it for "gone" overwrote the record of a command that
+/// still ran whenever `ps` went over its time under load.
+pub(super) fn orphan_reading(
+    text: &str,
+    read_group_state: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
+) -> Result<Option<u32>, Unreadable> {
+    let Some(pgid) = super::slots::recorded_pgid(text) else {
+        return Ok(None);
+    };
     let started = text.lines().find_map(|line| line.strip_prefix(STARTED_KEY));
-    is_the_recorded_group(started, group_state(pgid).as_ref()).then_some(pgid)
+    let state = read_group_state(pgid)?;
+    Ok(is_the_recorded_group(started, state.as_ref()).then_some(pgid))
 }

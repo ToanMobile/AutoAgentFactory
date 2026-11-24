@@ -13,9 +13,9 @@
 use std::fs::{self, File, TryLockError};
 use std::path::Path;
 
-use super::orphans::orphan_in;
+use super::orphans::{orphan_in, orphan_reading};
 use super::paths::{legacy_drain_path, legacy_slot_path};
-use super::probe::GroupState;
+use super::probe::{GroupState, Unreadable};
 use super::slot_file::{is_locked, unlock_all};
 use super::slots::names_token;
 use super::token::SlotToken;
@@ -41,11 +41,13 @@ pub(super) fn held_text(data_dir: &Path, index: usize) -> Option<String> {
     is_held(data_dir, index).then(|| text(data_dir, index))
 }
 
-/// Who occupies slot `index` through its old lock file, if anybody.
+/// Who occupies slot `index` through its old lock file, if anybody. A
+/// process table that cannot be read counts the slot as held and leaves its
+/// record as it is.
 pub(super) fn holder(
     data_dir: &Path,
     index: usize,
-    group_state: &dyn Fn(u32) -> Option<GroupState>,
+    read_group_state: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
 ) -> Option<Holder> {
     // No such file (the usual case), or no right to open it: no old holder
     // that this process could know of.
@@ -56,8 +58,8 @@ pub(super) fn holder(
     match file.try_lock() {
         Ok(()) => {
             let left = text(data_dir, index);
-            let orphan = orphan_in(&left, group_state);
-            if orphan.is_none() && !left.is_empty() {
+            let orphan = orphan_reading(&left, read_group_state);
+            if matches!(orphan, Ok(None)) && !left.is_empty() {
                 // Left by a holder that was killed and whose command is
                 // gone: emptied like the old version did, so that it is not
                 // looked up in the process table on every attempt. If that
@@ -65,7 +67,10 @@ pub(super) fn holder(
                 let _ = file.set_len(0);
             }
             unlock_all(std::slice::from_ref(&file));
-            orphan.map(Holder::Orphan)
+            match orphan {
+                Ok(orphan) => orphan.map(Holder::Orphan),
+                Err(Unreadable) => Some(Holder::Live),
+            }
         }
         Err(TryLockError::WouldBlock) => Some(Holder::Live),
         // Cannot be probed: not known to be held.
