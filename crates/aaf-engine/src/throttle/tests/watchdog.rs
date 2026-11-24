@@ -199,6 +199,46 @@ fn failed_signals_are_not_taken_for_done() {
 }
 
 #[test]
+fn helpers_are_continued_even_when_the_group_resume_fails() {
+    use super::super::probe::ProcId;
+    use super::super::watchdog::TreeSample;
+
+    let data = TempDir::new().unwrap();
+    let rig = Rig::calm();
+    let _first = slot(&data);
+    let helper = ProcId {
+        pid: 7,
+        started: "Tue Nov 24 12:00:01 2026".to_string(),
+    };
+    *rig.group.tree.lock().unwrap() = Some(TreeSample {
+        rss_bytes: 4096,
+        members: vec![helper.clone()],
+    });
+    pressures(
+        &rig,
+        &[Pressure::Critical, Pressure::Normal, Pressure::Normal],
+    );
+    let mut dog = dog(&rig, &data, slot(&data));
+    assert!(dog.tick(PGID, Duration::ZERO));
+
+    // The group's SIGCONT fails (e.g. ESRCH): still paused, no Resumed,
+    // but the helper stopped by pid is continued all the same.
+    *rig.group.refuse.lock().unwrap() = true;
+    assert!(dog.tick(PGID, STEP));
+    let sent: Vec<_> = rig.group.signalled.lock().unwrap().clone();
+    let cont = ("-CONT".to_string(), vec![helper.clone()]);
+    assert_eq!(sent, vec![("-STOP".to_string(), vec![helper]), cont]);
+    assert_eq!(
+        rig.events(),
+        vec!["Paused { label: \"test_full\", slot: 1 }"]
+    );
+
+    *rig.group.refuse.lock().unwrap() = false;
+    assert!(!dog.tick(PGID, STEP * 2));
+    assert_eq!(rig.events().len(), 2);
+}
+
+#[test]
 fn finish_continues_a_group_that_is_still_stopped() {
     let data = TempDir::new().unwrap();
     let rig = Rig::calm();
