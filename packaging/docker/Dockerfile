@@ -9,6 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
+COPY templates ./templates
 COPY crates ./crates
 
 RUN cargo build --release --locked -p aaf-cli -p aaf-hook
