@@ -136,10 +136,11 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // Hooks and config are run or obeyed by every later git command,
     // including the user's own outside the sandbox; the same files exist per
     // linked worktree under `worktrees/<name>/`.
-    let mut submodules = Vec::new();
+    let (mut submodules, run_worktree) = (Vec::new(), worktree.as_deref());
     for git_dir in &git_dirs {
         let subs = git_dir::submodule_git_dirs(git_dir)?;
         profile.push_str(&git_dir::rules(git_dir, &subs)?);
+        profile.push_str(&git_dir::linked_worktree_rules(git_dir, run_worktree)?);
         submodules.extend(subs);
     }
     if let Some(worktree) = &worktree {
