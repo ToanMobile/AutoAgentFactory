@@ -8,7 +8,7 @@ use aaf_domain::config::RepoConfig;
 use aaf_domain::telegram::TelegramConfig;
 use aaf_engine::config::EffectiveConfig;
 use aaf_engine::executors::linux_sandbox::{self, LinuxIsolation};
-use aaf_engine::factory::configured_audit_provider;
+use aaf_engine::factory::{configured_audit_provider, resolve_auto_audit_executor};
 use aaf_engine::github_board::has_trusted_login;
 use aaf_engine::hook_settings::multi_host::{
     HookHostTarget, HostHookStatus, check_host_if_present,
@@ -178,7 +178,16 @@ fn reports_tokens(executor: &str) -> bool {
 /// with a positive `unblocker.max_token_budget`.
 pub(super) fn executor_token_budget(repo: &RepoConfig) -> Result<String, String> {
     let run_exec = repo.run.executor.trim();
-    let audit_exec = configured_audit_provider(run_exec, &repo.cross_audit);
+    // `auto` (what `aaf init` writes) is resolved the way `aaf run` resolves
+    // it: to another installed CLI, else to `[run].executor`.
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    let audit_exec = resolve_auto_audit_executor(
+        run_exec,
+        configured_audit_provider(run_exec, &repo.cross_audit),
+        &std::env::var_os("PATH").unwrap_or_default(),
+        Path::new(&home),
+    );
+    let audit_exec = audit_exec.as_str();
     let mut generic = Vec::new();
     if !reports_tokens(run_exec) {
         generic.push(format!("run.executor={run_exec:?}"));

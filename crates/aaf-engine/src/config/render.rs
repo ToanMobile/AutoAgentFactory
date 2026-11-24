@@ -73,7 +73,8 @@ test_full = {test_full}
 lint = {lint}
 # Heavy project-wide lint run only in `--full` and `--release` modes.
 lint_full = {lint_full}
-# Reproduces a reported failure; a task is filed only when it fails twice in a row.
+# Reproduces a reported failure. Manual only (`aaf repro`, `aaf board add
+# --repro-cmd`); the gate and the factory never run it.
 repro = {repro}
 
 [gate]
@@ -126,6 +127,8 @@ executor = {executor}
 # Command template for non-Claude executors; {{prompt}} is substituted.
 executor_cmd = []
 # false = open a pull request with the gate receipt; true = merge when the gate is Clear.
+# Unattended preset (opt-in): auto_merge = true, and an independent auditor in
+# [cross_audit] below; head-locked changes still need a signed audit.
 auto_merge = {auto_merge}
 max_parallel = {max_parallel}
 run_timeout_secs = {run_timeout}
@@ -142,7 +145,12 @@ max_open_review = {max_open_review}
 
 # Optional separate provider/model for adversarial cross-audit of head-locked files.
 [cross_audit]
-# Empty = reuse [run].executor. One of: claude, codex, gemini, opencode, custom.
+# Empty = reuse [run].executor (a change to a file in head_lock_globs other than
+# a test then needs a person's `aaf approve`). For unattended runs set another
+# provider you are logged in to (claude, codex, gemini, opencode, custom), or
+# auto = the first of gemini, codex, claude, opencode that is installed with a
+# config dir, else [run].executor. auto does not check the login: an auditor
+# that cannot authenticate keeps the task waiting.
 executor = {ca_executor}
 # Command template when executor is custom (or override binary/args).
 executor_cmd = {ca_executor_cmd}
