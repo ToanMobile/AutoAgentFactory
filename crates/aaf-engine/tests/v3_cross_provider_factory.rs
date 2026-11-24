@@ -293,6 +293,7 @@ fn setup_factory(
             mobile: false,
             data_dir: tmp.path().to_path_buf(),
             home: tmp.path().to_path_buf(),
+            owner_github_allowlist: Vec::new(),
         },
     };
     (tmp, db, author_runner, deps, spec)

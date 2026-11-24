@@ -489,7 +489,6 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
             detail
         })
         .map_err(|err| err.message.clone());
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut checks = vec![
         advisory("version", Ok(env!("AAF_BUILD_VERSION").to_string())),
         required("git", git_res),
@@ -502,6 +501,7 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         required("receipt_key", receipt_key_check(&ctx.data_dir)),
         advisory("claude", on_path(ctx, "claude")),
         advisory("sandbox", sandbox_check()),
+        advisory("gate_confinement", hosts::gate_confinement_check()),
         advisory("accounts", accounts_check),
         advisory("machine", Ok(machine_detail(&effective.global.machine))),
         advisory(
@@ -522,15 +522,11 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         proof_readiness_check(root_opt, &effective, profile.as_deref()),
         github_board_check(root_opt, &effective),
         root_opt.map_or_else(
-            || not_applicable("multi_host_hooks"),
-            |root| advisory("multi_host_hooks", hosts::multi_host_hooks(root)),
-        ),
-        root_opt.map_or_else(
             || not_applicable("executor_token_budget"),
             |_| {
                 advisory(
                     "executor_token_budget",
-                    hosts::executor_token_budget(&effective.repo),
+                    hosts::executor_token_budget(ctx, &effective.repo),
                 )
             },
         ),
@@ -548,6 +544,7 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
             |r| advisory("mcp_hygiene", hosts::mcp_hygiene(r)),
         ),
     ];
+    checks.extend(hosts::repo_hook_checks(ctx, root_opt, &effective.repo));
     #[cfg(target_os = "macos")]
     checks.push(keychain_sandbox_exposure_check(
         effective.global.safety.deny_macos_keychain,

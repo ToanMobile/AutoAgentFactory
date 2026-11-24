@@ -449,6 +449,7 @@ impl TestWorld {
                 mobile: false,
                 data_dir: self.tmp.path().to_path_buf(),
                 home: PathBuf::from("/fake/home"),
+                owner_github_allowlist: Vec::new(),
             },
         }
     }

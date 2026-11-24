@@ -233,6 +233,7 @@ fn mk_deps(
             mobile: false,
             data_dir: dir.clone(),
             home: dir,
+            owner_github_allowlist: Vec::new(),
         },
     };
     (deps, stub)

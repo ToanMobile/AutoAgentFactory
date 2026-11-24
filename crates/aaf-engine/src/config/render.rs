@@ -110,7 +110,7 @@ command_timeout_secs = {command_timeout}
 # Skip lint/test_scoped in --scoped mode when only safe docs changed.
 docs_fast_path = {docs_fast_path}
 docs_fast_path_exclude_globs = []
-# Opt-in red->green & vacuity oracle: off, warn, or block.
+# Red->green & vacuity oracle: off, warn, or block (recommended: block).
 red_green_oracle = {red_green_oracle}
 
 # Limits on automatic unblocking of a stuck task.
@@ -239,6 +239,8 @@ cancelled = {col_cancelled}
 plan_stage = {pipe_plan_stage}
 require_plan_approval = {pipe_require_approval}
 max_audit_reworks = {pipe_max_audit_reworks}
+# Automatic rework rounds from PR CI failures or owner review threads (default 2, max 3, 0 = off).
+max_pr_rework_rounds = {pipe_max_pr_rework_rounds}
 ",
         gh_enabled = github.enabled,
         gh_repo = quoted(&github.repo),
@@ -255,6 +257,7 @@ max_audit_reworks = {pipe_max_audit_reworks}
         pipe_plan_stage = pipeline.plan_stage,
         pipe_require_approval = pipeline.require_plan_approval,
         pipe_max_audit_reworks = pipeline.max_audit_reworks,
+        pipe_max_pr_rework_rounds = pipeline.max_pr_rework_rounds,
     );
     out
 }

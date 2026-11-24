@@ -10,6 +10,8 @@
 mod history;
 pub mod private;
 mod queries;
+mod queries_notify;
+mod queries_pr;
 mod schema;
 pub mod snapshots;
 mod stores;

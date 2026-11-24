@@ -291,6 +291,7 @@ fn mk_deps(
             mobile: false,
             data_dir: tmp.path().join("data"),
             home: tmp.path().to_path_buf(),
+            owner_github_allowlist: Vec::new(),
         },
     }
 }

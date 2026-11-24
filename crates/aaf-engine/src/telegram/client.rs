@@ -414,6 +414,61 @@ pub fn send_alert_with(
     }
 }
 
+/// Per-chat delivery result returned by [`send_alert_each`] and [`send_alert_each_with`].
+pub type ChatSendResult = (i64, Result<(), TelegramError>);
+
+/// Sends a one-shot alert to each chat in `chat_ids` that is present in
+/// `cfg.allowed_chat_ids`, returning per-chat outcomes.
+///
+/// Configuration or client setup errors (`Disabled`, `EmptyAllowlist`, invalid
+/// base URL or token) fail fast at the outer `Result`.
+pub fn send_alert_each(
+    cfg: &TelegramConfig,
+    token: &str,
+    text: &str,
+    chat_ids: &[i64],
+) -> Result<Vec<ChatSendResult>, TelegramError> {
+    if !cfg.enabled {
+        return Err(TelegramError::Disabled);
+    }
+    if cfg.allowed_chat_ids.is_empty() {
+        return Err(TelegramError::EmptyAllowlist);
+    }
+    let api = HttpTelegramApi::new(&cfg.api_base_url, token)?;
+    let redacted = redact_bot_token(text, token);
+    send_alert_each_with(&api, cfg, &redacted, chat_ids)
+}
+
+/// Testable per-chat alert sender using an injected [`TelegramApi`].
+///
+/// Chat ids outside `cfg.allowed_chat_ids` are silently skipped, and duplicate
+/// ids in `chat_ids` are sent at most once.
+pub fn send_alert_each_with(
+    api: &dyn TelegramApi,
+    cfg: &TelegramConfig,
+    text: &str,
+    chat_ids: &[i64],
+) -> Result<Vec<ChatSendResult>, TelegramError> {
+    if !cfg.enabled {
+        return Err(TelegramError::Disabled);
+    }
+    if cfg.allowed_chat_ids.is_empty() {
+        return Err(TelegramError::EmptyAllowlist);
+    }
+    let allowed: HashSet<i64> = cfg.allowed_chat_ids.iter().copied().collect();
+    let sanitized = super::commands::sanitize_output(text);
+    let mut seen = HashSet::new();
+    let mut outcomes = Vec::new();
+    for &chat_id in chat_ids {
+        if !allowed.contains(&chat_id) || !seen.insert(chat_id) {
+            continue;
+        }
+        let outcome = api.send_message(chat_id, &sanitized);
+        outcomes.push((chat_id, outcome));
+    }
+    Ok(outcomes)
+}
+
 /// Own-words transport error description so `ureq` never leaks the URL/token.
 fn describe_ureq_error(error: &ureq::Error) -> String {
     match error {

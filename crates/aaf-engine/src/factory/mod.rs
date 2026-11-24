@@ -27,6 +27,8 @@ pub(crate) mod plan_job;
 mod plan_legacy;
 pub mod ports;
 mod post_audit;
+mod pr_feedback;
+mod pr_feedback_note;
 pub mod prompt;
 mod rework_filter;
 pub mod schedule_order;
@@ -121,6 +123,20 @@ pub trait Store:
         }
         self.append_context_note(parent_id, parent_note, now)
     }
+
+    /// Returns `true` when any recorded run in `repo_root` covers timestamp `at`
+    /// (`started_at <= at <= ended_at.unwrap_or(now)`).
+    fn has_overlapping_run(&self, repo_root: &str, at: i64, now: i64) -> PortResult<bool> {
+        for task in self.list_tasks(Some(repo_root), None)? {
+            for run in self.runs_for_task(&task.id)? {
+                let end = run.ended_at.unwrap_or(now);
+                if run.started_at <= at && at <= end {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl Store for crate::db::Db {
@@ -157,6 +173,10 @@ impl Store for crate::db::Db {
             now,
         )
     }
+
+    fn has_overlapping_run(&self, repo_root: &str, at: i64, now: i64) -> PortResult<bool> {
+        crate::db::Db::has_overlapping_run(self, repo_root, at, now)
+    }
 }
 
 /// What one `aaf run` was asked to do, already merged from config and flags.
@@ -181,6 +201,9 @@ pub struct Settings {
     pub mobile: bool,
     pub data_dir: PathBuf,
     pub home: PathBuf,
+    /// Trusted GitHub logins from Tier-1 `[safety].owner_github_allowlist`
+    /// allowed to trigger PR feedback rework via review threads.
+    pub owner_github_allowlist: Vec<String>,
 }
 
 impl Settings {

@@ -43,6 +43,7 @@ fn make_settings(repo: RepoConfig, data_dir: PathBuf, home: &Path, sandboxed: bo
         mobile: false,
         data_dir,
         home: home.to_path_buf(),
+        owner_github_allowlist: Vec::new(),
     }
 }
 

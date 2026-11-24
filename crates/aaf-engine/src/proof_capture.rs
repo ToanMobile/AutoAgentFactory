@@ -300,7 +300,10 @@ fn proof_retry_delay() -> Duration {
 
 fn is_retryable_capture_error(err: &ProofError) -> bool {
     match err {
-        ProofError::Invalid(msg) => !msg.contains("must be a regular non-symlink file"),
+        ProofError::Invalid(msg) => {
+            !msg.contains("must be a regular non-symlink file")
+                && !msg.contains("gate commands cannot be confined")
+        }
         ProofError::Io(_) => true,
         ProofError::DeniedDevice(_) | ProofError::Fingerprint(_) => false,
     }
@@ -313,8 +316,9 @@ fn run_capture_attempt(
     cfg: &ProofConfig,
 ) -> Result<(Vec<u8>, u32, u32), ProofError> {
     let temp_out = PrivateTempFile::create_outside(data_dir, canon_root)?;
-    let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(capture_cmd).current_dir(canon_root);
+    let (argv, _mode) = crate::gate::confine::shell_argv(capture_cmd, canon_root, Some(data_dir))?;
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(canon_root);
     for var in SCRUBBED_CAPTURE_ENV {
         cmd.env_remove(var);
     }

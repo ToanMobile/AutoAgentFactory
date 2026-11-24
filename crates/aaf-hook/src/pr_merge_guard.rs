@@ -36,7 +36,7 @@ fn takes_value(flag: &str) -> bool {
 /// Lowercased, query and fragment cut, `%XX` decoded, and `.`/`..`
 /// segments resolved the way an HTTP client or server does
 /// (`…/pulls/12/./merge`, `…/pulls/12/x/../merge`).
-fn normalize_endpoint(endpoint: &str) -> String {
+pub(crate) fn normalize_endpoint(endpoint: &str) -> String {
     let without_query = endpoint.split(['?', '#']).next().unwrap_or(endpoint);
     let decoded = percent_decode(without_query).to_ascii_lowercase();
     let mut segs: Vec<&str> = Vec::new();
@@ -127,7 +127,7 @@ const GH_BUILTINS: &[&str] = &[
 /// Programs that send HTTP requests named in their arguments, and the
 /// interpreters whose one-liners can (`requests.put('…/merge')`). Text that
 /// only mentions the URL (`echo`, `grep`) is no request.
-const HTTP_CLIENTS: &[&str] = &[
+pub(crate) const HTTP_CLIENTS: &[&str] = &[
     "curl",
     "wget",
     "wget2",
@@ -142,7 +142,7 @@ const HTTP_CLIENTS: &[&str] = &[
     "bun",
 ];
 
-fn is_gh(cmd: &shell::Cmd) -> bool {
+pub(crate) fn is_gh(cmd: &shell::Cmd) -> bool {
     let name = cmd.name();
     name == "gh" || name.ends_with("/gh")
 }
@@ -287,7 +287,7 @@ fn expansion_merges(text: &str) -> bool {
 }
 
 /// The here-string, piped text and heredocs `cmd` reads.
-fn stdin_texts(cmd: &shell::Cmd) -> Vec<String> {
+pub(crate) fn stdin_texts(cmd: &shell::Cmd) -> Vec<String> {
     let mut texts = shell::stdin_scripts(&cmd.redirects, cmd.feeder.as_deref());
     texts.extend(cmd.heredocs.iter().cloned());
     texts
@@ -295,7 +295,7 @@ fn stdin_texts(cmd: &shell::Cmd) -> Vec<String> {
 
 /// The URL-like pieces of `text`: split at characters a URL cannot hold
 /// unquoted, so one inside a script (`requests.put('…')`) is found too.
-fn urls(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn urls(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| c.is_whitespace() || "'\"`()[]{}<>,;\\".contains(c))
         .filter(|piece| piece.contains("://") || piece.contains("repos/"))
 }

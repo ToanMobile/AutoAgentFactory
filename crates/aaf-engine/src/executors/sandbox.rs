@@ -428,7 +428,7 @@ fn follow(raw: &str) -> PortResult<(PathBuf, Vec<PathBuf>)> {
 
 /// The link entries on the way to `raw` (see [`follow`]), each named by its
 /// resolved directory and its own name.
-fn links_to(raw: &str) -> PortResult<Vec<PathBuf>> {
+pub(crate) fn links_to(raw: &str) -> PortResult<Vec<PathBuf>> {
     let (_, links) = follow(raw)?;
     links
         .iter()
@@ -466,7 +466,7 @@ fn existing_ancestor_resolved(path: &Path, raw: &str) -> PortResult<PathBuf> {
 /// Canonical form of a directory entry: the directory is resolved, the last
 /// component is not. A rule about an entry that is a symlink has to name the
 /// link itself, or the link could be replaced.
-fn canonical_entry(raw: &str) -> PortResult<PathBuf> {
+pub(crate) fn canonical_entry(raw: &str) -> PortResult<PathBuf> {
     let path = Path::new(raw);
     match (path.parent().and_then(Path::to_str), path.file_name()) {
         (Some(parent), Some(name)) if path.is_absolute() => Ok(canonical(parent)?.join(name)),
@@ -479,7 +479,7 @@ fn canonical_entry(raw: &str) -> PortResult<PathBuf> {
 /// Every directory entry from below `/` down to `path`, `path` included:
 /// as written (a link on the way is an entry that could be replaced) and as
 /// resolved (the directories that link leads through).
-fn entries_to(path: &Path) -> PortResult<Vec<PathBuf>> {
+pub(crate) fn entries_to(path: &Path) -> PortResult<Vec<PathBuf>> {
     let mut entries = Vec::new();
     // A prefix that ends in `..` names no entry of its own; the resolved
     // form below covers where it leads.

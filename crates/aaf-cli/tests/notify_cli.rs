@@ -53,6 +53,13 @@ fn emit(fx: &Fixture, kind: EventKind, task: &str, payload: Value) {
     fx.db().emit(&event).unwrap();
 }
 
+fn seed_cursor(fx: &Fixture, scope: Option<&str>, key: &str) {
+    let max_id = fx.db().max_event_id(scope).unwrap();
+    let dir = fx.data.join("notify");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{key}.cursor")), max_id.to_string()).unwrap();
+}
+
 #[test]
 fn dry_run_lists_new_needs_you_moments_without_moving_the_cursor() {
     let fx = Fixture::new();
@@ -62,6 +69,11 @@ fn dry_run_lists_new_needs_you_moments_without_moving_the_cursor() {
     let first = fx.aaf(&["notify", "--once", "--dry-run"]);
     assert_eq!(first.code, 0, "{}", first.stderr);
     assert_eq!(first.json["alerts"], json!([]), "{}", first.stderr);
+    seed_cursor(
+        &fx,
+        Some(&fx.repo.to_string_lossy()),
+        &aaf_fp::repo_id(&fx.repo),
+    );
 
     assert_eq!(fx.aaf(&["run", "--unsandboxed"]).code, 0);
     emit(
@@ -166,6 +178,7 @@ fn a_real_run_posts_to_the_webhook_once_and_advances_the_cursor() {
         &id,
         json!({ "to": "blocked", "why": "already posted by the factory" }),
     );
+    emit(&fx, EventKind::WebhookSent, &id, json!({ "ok": true }));
 
     let out = fx.aaf(&["notify", "--once"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
@@ -192,6 +205,7 @@ fn all_scope_from_outside_any_repository_reports_a_real_block() {
     let first = notify(&fx);
     assert_eq!(first.code, 0, "{}", first.stderr);
     assert_eq!(first.json["alerts"], json!([]), "{}", first.stderr);
+    seed_cursor(&fx, None, "all");
 
     let run = fx.aaf(&["run", "--unsandboxed"]);
     assert_eq!(run.json["blocked"], json!([id]), "{}", run.stderr);

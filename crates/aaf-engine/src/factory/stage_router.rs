@@ -1,7 +1,7 @@
 //! Per-stage provider routing, provider-scoped account pools, Antigravity
 //! process-wide serialization, deterministic tiering, and auto-escalation (§D.3).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -154,6 +154,23 @@ impl StageTarget {
             runner,
             accounts,
         }
+    }
+
+    /// Same as [`Self::new`], but for code-writing stages (`default_implementer`,
+    /// `implementer`, `implementer_escalated`) where non-Claude built-in hooked
+    /// executors (`codex`, `gemini`, `antigravity`, `opencode`) also require
+    /// their host `aaf-hook` registration.
+    pub fn new_writer(
+        executor: impl Into<String>,
+        executor_cmd: impl Into<String>,
+        model: impl Into<String>,
+        effort: impl Into<String>,
+        runner: Arc<dyn AgentRunner>,
+        accounts: Arc<dyn AccountPool>,
+    ) -> Self {
+        let mut target = Self::new(executor, executor_cmd, model, effort, runner, accounts);
+        target.hook_required = writer_requires_hook(&target.executor, &target.executor_cmd);
+        target
     }
 }
 
@@ -375,6 +392,54 @@ fn validate_plan_pair(
 fn stage_uses_claude(executor: &str, executor_cmd: &str) -> bool {
     executor.trim().eq_ignore_ascii_case("claude")
         || (!executor_cmd.trim().is_empty() && audit_cmd_is_claude(executor_cmd))
+}
+
+fn is_hooked_non_claude_executor(executor: &str) -> bool {
+    matches!(
+        executor.trim().to_ascii_lowercase().as_str(),
+        "codex" | "gemini" | "antigravity" | "opencode"
+    )
+}
+
+/// True when a code-writing stage using `(executor, executor_cmd)` requires
+/// its host `aaf-hook` registration (Claude always; built-in non-Claude hooked
+/// hosts `codex`/`gemini`/`antigravity`/`opencode` when `executor_cmd` is empty).
+pub fn writer_requires_hook(executor: &str, executor_cmd: &str) -> bool {
+    stage_uses_claude(executor, executor_cmd)
+        || (executor_cmd.trim().is_empty() && is_hooked_non_claude_executor(executor))
+}
+
+/// Returns the set of lowercased non-Claude hooked executors required by any
+/// configured code-writing stage (`run`, `pipeline.implementer`,
+/// `pipeline.implementer_escalated`).
+///
+/// Must stay in sync with effective writer-stage resolution in
+/// `crates/aaf-cli/src/cmd/run/stage_wiring.rs` (`build_stage_router`).
+pub fn writer_hook_executors(cfg: &RepoConfig) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut record = |eff: &str, cmd: &str| {
+        if cmd.trim().is_empty() && is_hooked_non_claude_executor(eff) {
+            out.insert(eff.trim().to_ascii_lowercase());
+        }
+    };
+    let run_cmd = cfg.run.executor_cmd.join(" ");
+    record(&cfg.run.executor, &run_cmd);
+    for stage in [
+        &cfg.pipeline.implementer,
+        &cfg.pipeline.implementer_escalated,
+    ] {
+        if stage.is_empty() {
+            continue;
+        }
+        let (exec, cmd) = (stage.executor.trim(), stage.executor_cmd.trim());
+        let eff = match (exec, cmd) {
+            ("", "") => cfg.run.executor.trim(),
+            ("", _) => "custom",
+            (v, _) => v,
+        };
+        record(eff, cmd);
+    }
+    out
 }
 
 /// True if ANY configured stage invokes Claude Code (R3-SEC-3).

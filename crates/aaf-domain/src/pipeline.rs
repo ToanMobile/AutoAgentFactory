@@ -10,6 +10,10 @@ use crate::gate::GoldenScore;
 pub const MAX_PLAN_ROUNDS_CAP: u32 = 5;
 /// Default maximum Plan Debate rounds when `plan_debate = true`.
 pub const DEFAULT_MAX_PLAN_ROUNDS: u32 = 3;
+/// Hard upper bound on automatic PR feedback rework rounds.
+pub const MAX_PR_REWORK_ROUNDS_CAP: u32 = 3;
+/// Default maximum automatic PR feedback rework rounds (`0` disables PR feedback).
+pub const DEFAULT_MAX_PR_REWORK_ROUNDS: u32 = 2;
 /// Default rework threshold before escalating the implementer stage.
 pub const DEFAULT_ESCALATE_IMPLEMENTER_AFTER_REWORKS: u32 = 1;
 /// Hard byte cap on a serialized [`PlanContract`] JSON payload (32 KiB).
@@ -161,6 +165,7 @@ pub struct GlobalPipelineConfig {
     pub max_plan_rounds: Option<u32>,
     pub allow_tier_s_skip_debate: Option<bool>,
     pub max_audit_reworks: Option<u32>,
+    pub max_pr_rework_rounds: Option<u32>,
     pub escalate_implementer_after_reworks: Option<u32>,
     pub plan_author: Option<StageModelConfig>,
     pub plan_challenger: Option<StageModelConfig>,

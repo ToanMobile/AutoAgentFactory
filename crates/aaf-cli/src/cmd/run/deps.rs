@@ -1,5 +1,7 @@
 //! Dependency wiring (`Deps`, `SelectingPool`) for `aaf run`.
 
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,7 +14,9 @@ use aaf_engine::executors::{self, ExecEnv};
 use aaf_engine::factory::adapters::{
     RealGate, RouterPool, SystemClock, WebhookNotifier, provider_for,
 };
+use aaf_engine::factory::stage_router::writer_requires_hook;
 use aaf_engine::factory::{Deps, RealGit, SelectingPool, Settings, resolve_base};
+use aaf_engine::hook_settings;
 use aaf_engine::split::compute_auto_parallel;
 use aaf_engine::throttle::{LoadProbe, SystemProbe};
 
@@ -35,12 +39,23 @@ pub(crate) fn run_executor_is_claude(run: &RunConfig) -> bool {
 }
 
 fn executor_requires_hook(run: &RunConfig) -> bool {
-    run_executor_is_claude(run)
-        || (run.executor_cmd.is_empty()
-            && matches!(
-                run.executor.trim().to_ascii_lowercase().as_str(),
-                "codex" | "gemini" | "antigravity" | "opencode"
-            ))
+    run_executor_is_claude(run) || writer_requires_hook(&run.executor, &run.executor_cmd.join(" "))
+}
+
+pub(super) fn check_base_hooks(
+    repo: &Path,
+    base_sha: &str,
+    path_var: &OsStr,
+    needs_claude_hook: bool,
+    writer_execs: &BTreeSet<String>,
+) -> Result<(), String> {
+    if needs_claude_hook {
+        hook_settings::check_base(repo, base_sha, path_var)?;
+    }
+    for exec in writer_execs {
+        hook_settings::check_base_for_executor(repo, base_sha, path_var, exec)?;
+    }
+    Ok(())
 }
 
 pub(super) fn build_deps(
@@ -165,6 +180,7 @@ pub(super) fn build_deps(
             mobile: MOBILE_PROFILES.contains(&profile.as_str()),
             data_dir: ctx.data_dir.clone(),
             home: ctx.home.clone(),
+            owner_github_allowlist: cfg.global.safety.owner_github_allowlist.clone(),
         },
     };
     Ok((deps, pool))

@@ -66,7 +66,7 @@ impl Lexer<'_, '_> {
             }
             _ => {}
         }
-        self.word_mut().text.push(c);
+        self.word_mut().push_char(c);
     }
 
     pub(super) fn push_word(&mut self, tok: Tok) {
@@ -105,6 +105,7 @@ impl Lexer<'_, '_> {
                         dynamic: tok.dynamic,
                         quoted: tok.quoted || expanded,
                         braces: Vec::new(),
+                        cat_heredoc: None,
                     })
                     .collect()
             }

@@ -244,18 +244,71 @@ fn heredoc_data_sink(cmd: &Cmd) -> bool {
                     2 + call.globals.len(),
                     &["-F", "--file"],
                     &["-F-", "--file=-"],
+                    &[
+                        "-m",
+                        "--message",
+                        "-t",
+                        "--title",
+                        "-b",
+                        "--body",
+                        "-C",
+                        "-c",
+                    ],
                 )
         }
         Some("gh") => {
-            matches!(cmd.words.get(1).map(String::as_str), Some("pr" | "issue"))
-                && cmd.words.get(2).map(String::as_str) == Some("create")
-                && has_stdin_flag(cmd, 3, &["--body-file", "-F"], &["--body-file=-", "-F-"])
+            let valued: Option<&[&str]> = match (
+                cmd.words.get(1).map(String::as_str),
+                cmd.words.get(2).map(String::as_str),
+            ) {
+                (Some("pr" | "issue"), Some("create" | "comment" | "edit")) => Some(&[
+                    "-t",
+                    "--title",
+                    "-b",
+                    "--body",
+                    "-R",
+                    "--repo",
+                    "-B",
+                    "--base",
+                    "-H",
+                    "--head",
+                    "-l",
+                    "--label",
+                    "-a",
+                    "--assignee",
+                    "-r",
+                    "--reviewer",
+                    "-m",
+                    "--milestone",
+                    "-p",
+                    "--project",
+                    "-T",
+                    "--template",
+                ]),
+                (Some("pr"), Some("review")) => Some(&["-b", "--body", "-R", "--repo"]),
+                _ => None,
+            };
+            valued.is_some_and(|flags| {
+                has_stdin_flag(
+                    cmd,
+                    3,
+                    &["--body-file", "-F"],
+                    &["--body-file=-", "-F-"],
+                    flags,
+                )
+            })
         }
         _ => false,
     }
 }
 
-fn has_stdin_flag(cmd: &Cmd, start: usize, separate: &[&str], glued: &[&str]) -> bool {
+fn has_stdin_flag(
+    cmd: &Cmd,
+    start: usize,
+    separate: &[&str],
+    glued: &[&str],
+    valued: &[&str],
+) -> bool {
     let is_dyn = |i: usize| cmd.arg_dynamic.get(i).copied().unwrap_or(true);
     let mut i = start;
     while let Some(word) = cmd.words.get(i).map(String::as_str) {
@@ -268,10 +321,7 @@ fn has_stdin_flag(cmd: &Cmd, start: usize, separate: &[&str], glued: &[&str]) ->
         if !is_dyn(i) && separate.contains(&word) {
             return cmd.words.get(i + 1).map(String::as_str) == Some("-") && !is_dyn(i + 1);
         }
-        if matches!(
-            word,
-            "-m" | "--message" | "-t" | "--title" | "-b" | "--body" | "-C" | "-c"
-        ) {
+        if valued.contains(&word) {
             i += 2;
             continue;
         }

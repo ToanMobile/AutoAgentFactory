@@ -16,6 +16,7 @@ use super::git_real_base::{
 };
 use super::ports::{GitOps, Integration};
 use crate::git::cmd::{failure, git, git_raw, git_timed};
+use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef, fetch_pr_feedback};
 use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree};
@@ -535,5 +536,19 @@ impl GitOps for RealGit {
             now,
         )
         .map(Some)
+    }
+
+    fn pr_feedback(
+        &self,
+        repo_root: &Path,
+        pr: &PrRef,
+        expected_head_branch: &str,
+    ) -> PortResult<Option<PrFeedbackSnapshot>> {
+        let runner = SystemRunner {
+            timeout: GH_TIMEOUT,
+        };
+        fetch_pr_feedback(&runner, repo_root, pr, expected_head_branch)
+            .map(Some)
+            .map_err(err)
     }
 }

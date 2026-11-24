@@ -325,7 +325,8 @@ pub fn hydrate_for_agent(
     wt_root: &Path,
     cfg: &WorktreeConfig,
 ) -> Result<HydratedPaths, GitError> {
-    hydrate_for_agent_inner(repo_root, wt_root, cfg, None)
+    let data_dir = aaf_fp::data_dir().ok();
+    hydrate_for_agent_inner(repo_root, wt_root, cfg, None, data_dir.as_deref())
 }
 
 fn hydrate_for_agent_inner(
@@ -333,6 +334,7 @@ fn hydrate_for_agent_inner(
     wt_root: &Path,
     cfg: &WorktreeConfig,
     snap_fallback: Option<(&Path, &str)>,
+    data_dir: Option<&Path>,
 ) -> Result<HydratedPaths, GitError> {
     if cfg.is_empty() {
         return Ok(HydratedPaths::default());
@@ -399,7 +401,7 @@ fn hydrate_for_agent_inner(
         if !git(wt_root, &["status", "--porcelain"])?.is_empty() {
             return Err(GitError::Dirty(wt_root.to_path_buf()));
         }
-        run_setup_cmd(wt_root, setup_cmd)?;
+        run_setup_cmd(wt_root, setup_cmd, data_dir)?;
     }
     Ok(HydratedPaths { write_denied })
 }
@@ -426,6 +428,7 @@ pub fn hydrate_fresh_worktree_with_snaps(
             &worktree.path,
             &cfg,
             Some((&snaps_dir, resolved_sha.as_str())),
+            Some(data_dir),
         )
     });
     if result.is_err() {

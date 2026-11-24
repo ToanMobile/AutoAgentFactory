@@ -112,7 +112,7 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 |---|---|---|
 | **Board and factory** | A SQLite-backed task board (`aaf board`) and a factory loop (`aaf run`). Each task gets its own git worktree and its own agent run. Gate runs are batched, and a failing batch is split in halves until the culprit is found. A five-tier unblocker retries, adds context, splits a task or escalates it to you. | `main` |
 | **Sandbox** | Agents started by `aaf run` run inside a generated Seatbelt profile (`/usr/bin/sandbox-exec`) on macOS. On Linux `aaf run` does not wrap agents yet (bwrap integration pending) and needs `--unsandboxed`; the bubblewrap policy builder and container detection ship in `v3.4` but are not wired into `aaf run`. | `main` / **`v3.4`** |
-| **Hook guards** | `aaf-hook` is a multi-host guard hook (`--host <auto\|claude\|codex\|gemini>`) covering Claude Code `PreToolUse` (`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`), Codex CLI `PreToolUse` (including `apply_patch`), and Gemini CLI `BeforeTool` (`v3.4`). It has guards for git, protected files, the data directory, `adb`/`fastboot`, store submission, human-only actions and heavy commands. | `main` / **`v3.4`** |
+| **Hook guards** | `aaf-hook` is a multi-host guard hook (`--host <auto\|claude\|codex\|gemini\|antigravity\|opencode>`) covering Claude Code `PreToolUse` (`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`), Codex CLI `PreToolUse` (including `apply_patch`), Gemini CLI / Antigravity `BeforeTool`, and OpenCode `PreToolUse` (`v3.4`). It has guards for git, protected files, the data directory, `adb`/`fastboot`, store submission, human-only actions and heavy commands. | `main` / **`v3.4`** |
 | **Gate and receipts** | Scoped, full and release modes. Static checks run on added lines. Head lock, App Store / Google Play compliance scan, and HMAC-SHA256 receipts and approvals. | `main` |
 | **Throttle and `aaf slot`** | One queue for heavy commands, shared by the gate, agents, git hooks and CI runners on the same machine. | `main` |
 | **Accounts** | Discovers Claude Code profiles (`~/.claude`, `~/.claude-*`). Account selection is `pinned`, `sticky` or `least_used`; cooldowns are set by hand or after limits. | `main` |
@@ -128,7 +128,7 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | **7 Golden Standards and handover** | 3-tier monotonic `[cross_audit]`, `G1..G7` + `MechanicalScore` with non-deadlocking solo-dev badge, post-gate HMAC `"audit\0"` verdicts, `aaf handover` (read-only Markdown/CSP HTML/JSON, verified PNG `<= 4 MiB`), and sanitized PR body (`< 60 KB`). | **`v3.2`** |
 | **Live streams, snapshots and TTY cockpit** | Sanitized `2 MiB` live stream logs (`streams/<run_id>.jsonl`), protected pre-turn snapshots (`refs/aaf/snapshots/*` + `turn_snapshots`), `board undo`/`steer`, and synchronous interactive TTY `aaf cockpit` (0 ports, 0 new crates, ANSI/OSC sanitized). | **`v3.2`** |
 | **Remote Telegram companion (`aaf telegram`)** | Zero-port outbound Telegram Bot API long-polling (Tier-1 config only, fail-closed `allowed_chat_ids`, env-only token) for read-only `/status`, `/board`, `/show`, `/handover` and opt-in two-step `/confirm <code>` approvals/mutations. | **`v3.4`** |
-| **Multi-host hook adapters** | `aaf-hook --host <auto\|claude\|codex\|gemini>` and `aaf init --hook-host <claude\|codex\|gemini\|all>` extend the full guard suite to Codex CLI (including `apply_patch` path checks) and Gemini CLI (`BeforeTool`). | **`v3.4`** |
+| **Multi-host hook adapters** | `aaf-hook --host <auto\|claude\|codex\|gemini\|antigravity\|opencode>` and `aaf init --hook-host <claude\|codex\|gemini\|antigravity\|opencode\|all>` (`all` = claude, codex, gemini, opencode; `--hook-host antigravity` replaces the gemini entry in `.gemini/settings.json` and covers Gemini tools too) extend the full guard suite to Codex CLI (including `apply_patch` path checks), Gemini CLI / Antigravity (`BeforeTool`), and OpenCode (`PreToolUse`). | **`v3.4`** |
 | **Packaging, `[secret NAME]` masking & Linux `bwrap`** | Streaming chunk-boundary `[secret NAME]` masking, GitHub Release workflow + SHA-256 verified `scripts/install.sh` + Homebrew formula + hardened Docker runner, and the Linux bubblewrap (`bwrap`) policy builder / container detection (not yet used by `aaf run`; Linux needs `--unsandboxed`). | **`v3.4`** |
 | **Declarative SOP workflows (`aaf sop`)** | TOML SOP pipelines (`Agent`, `Script`, `Gate`, `HumanGate`) with DAG validation, bounded `on_fail_goto` rework edges, 5 built-in blueprints (`backend`, `frontend`, `mobile-android`, `unity-game`, `bugfix`), and crash-safe checkpoint resume (`approve`, `send-back`). | **`v3.5`** |
 | **10-CLI executor registry, roles & MCP audit (`aaf executors`)** | Unified descriptors and PATH inventory for 10 coding CLIs (`claude`, `codex`, `gemini`, `opencode`, `cursor`, `antigravity`, `codebuddy`, `kimi`, `pi`, `deepseek`), ordered fallback routing with audit trail, `.autofactory/roles/*.toml`, and read-only `.mcp.json` inline-secret scanning. | **`v3.5`** |
@@ -238,7 +238,7 @@ git add .claude/settings.json .autofactory/config.toml .gitignore && git commit 
 **4. Run the doctor inside the repo.**
 
 ```sh
-aaf doctor          # exit 2 if a required check fails (git, config, hook_registered, hook_binary, data_dir, receipt_key)
+aaf doctor          # exit 2 if a required check fails (git, config, hook_registered, hook_binary, executor_hooks, data_dir, receipt_key)
 ```
 
 **5. Run the gate yourself once.**
@@ -314,7 +314,7 @@ stateDiagram-v2
 *The moves the factory and the `aaf board` commands make. New tasks start in Ready; `aaf board unblock` and `aaf board rework` are the human's way back in. The domain also defines `backlog` and `cancelled`, and `aaf status` counts them, but no command on `main` moves a task into either state yet.*
 
 1. **Ready to Running.** `aaf run` picks Ready tasks by priority (P0 is most urgent), and only tasks whose `--blocked-by` dependencies are Done. Each task gets its own worktree under `AAF_WORKTREE_DIR` (default `~/.cache/autofactory/worktrees`), and an account chosen by your selection policy.
-2. **Agent.** With the `claude` executor, `aaf` first checks that the worktree's `.claude/settings.json` registers `aaf-hook` correctly. It then starts the agent inside the sandbox, with the allow-listed environment.
+2. **Agent.** Before starting a code-writing agent, `aaf` checks that the matching host hook registration is committed on the base branch and valid in the worktree (`.claude/settings.json` for `claude`; `.codex/hooks.json`, `.gemini/settings.json`, or `.opencode/hooks.json` for built-in `codex`/`gemini`/`antigravity`/`opencode` writers when `executor_cmd` is empty; read-only stages such as auditors are not enforced by `aaf run` yet). It then starts the agent inside the sandbox, with the allow-listed environment.
 3. **Gating.** When the agent's turn ends, the task moves to the gate queue. Waiting there does not hold an account. Tasks waiting together are merged into one integration tree and gated once. A red batch is split in halves until the failing task is alone.
 4. **Cross-audit.** If a task changed head-locked files, a second agent run in a fresh context answers a fixed yes/no checklist about the diff. The checklist covers test-only branches in production code, values hard-coded to pass tests, leaked secrets, removed assertions, CI changes, stubs and acceptance criteria. Only a clean PASS becomes a signed approval for that change. The auditor runs in a clean worktree of the base, not the author's worktree.
 5. **Review or Done.** By default a `CLEAR` task gets a pull request that carries its gate receipt, and moves to **Review**. With `--auto-merge`, it goes through the merge queue instead. The queue takes one merge at a time, rebases onto the base, runs the gate again on the rebased tree and fast-forwards, never forcing. The task then becomes **Done**.
@@ -416,6 +416,11 @@ base_ref = "auto"           # auto = origin/HEAD, origin/main, origin/master, ma
 store_compliance = "auto"   # off | auto (scan when the profile ships to a store) | always
 min_android_target_sdk = 36
 command_timeout_secs = 1800 # per gate command; the process group is killed when it expires
+# Red->green & vacuity oracle: off, warn, or block (recommended: block).
+# In block mode, proven red->green runs are re-run to catch flaky tests and
+# verified against a base control pass; compile-red on add-only new modules is
+# blocked (wire into a base entry point); skipped runs record `note: oracle skipped (...)`.
+red_green_oracle = "off"
 
 [unblocker]
 max_unblock_cycles = 5
@@ -509,6 +514,7 @@ max_open_review = 0            # v3.2: 0 = unlimited; > 0 pauses new dispatches 
 plan_stage = false             # true = run a strictly read-only planning turn before implementation
 require_plan_approval = false  # true = pause after plan_stage until `aaf board approve-plan <id>`
 max_audit_rework_cycles = 2    # bounded `audit_rework:` loop before human escalation
+max_pr_rework_rounds = 2       # bounded PR feedback loop from failing CI / owner review threads (max 3; 0 = off; tier 1/2 only)
 
 [cross_audit]                  # also allowed in tier 1 as machine-wide defaults
 executor = ""                  # empty = reuse [run].executor; claude, codex, gemini, opencode or custom
@@ -562,7 +568,7 @@ How `[cross_audit]` merges:
 
 | Command | Purpose | Useful flags |
 |---|---|---|
-| `aaf init` | Detect the stack, write tier 2 config, register the hook, update `.gitignore` | `--force`; **`v3`**: `--with-skills`, `--host <claude\|agents\|all>`; **`v3.4`**: `--hook-host <claude\|codex\|gemini\|all>` |
+| `aaf init` | Detect the stack, write tier 2 config, register the hook, update `.gitignore` | `--force`; **`v3`**: `--with-skills`, `--host <claude\|agents\|all>`; **`v3.4`**: `--hook-host <claude\|codex\|gemini\|antigravity\|opencode\|all>` (`all` = claude, codex, gemini, opencode; `antigravity` replaces the gemini entry in `.gemini/settings.json` and covers Gemini tools) |
 | `aaf doctor` | Read-only check of the machine and the repo | — |
 | `aaf gate` | Run the gate and write a signed receipt | `--scoped` (default), `--full`, `--release` (pick one) |
 | `aaf approve` | Sign an approval for the current head-lock fingerprint (**human only**) | `--reviewer <name>` (required) |
@@ -593,13 +599,13 @@ How `[cross_audit]` merges:
 | **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
 | **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
 | **`v3.4`** `aaf telegram` | Zero-port outbound Telegram companion for status, handover, and opt-in two-step `/confirm` approvals (**human only**) | `--once`, `--all`, `--repo <path>`, `--send-test` |
-| `aaf notify` | Push "needs you" moments (factory frozen, task blocked, ready for review) to the webhook / Telegram, once each | `--once`, `--all`, `--repo <path>`, `--interval <s>`, `--dry-run` |
+| `aaf notify` | Push "needs you" moments (factory frozen, factory halted, task blocked, ready for review) or a one-shot `--message` to webhook / Telegram (**human only**) | `--once`, `--all`, `--repo <path>`, `--interval <s>`, `--dry-run`, `--message <text>` |
 | **`v3.5`** `aaf sop` | Declarative TOML SOP workflows (list, show, init, validate, runs, run/resume, approve, send-back) | `list`, `show`, `init`, `validate`, `runs`, `run`, `approve`, `send-back` |
 | **`v3.5`** `aaf executors` | 10-CLI inventory, fallback resolution preview, reusable role profiles, and read-only `.mcp.json` secret audit | `list`, `resolve`, `roles`, `mcp` |
 | **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
 | **`v3.5`** `aaf upgrade` / `completions` | SHA-256 verified self-updater (**human only**) and shell completions (`bash`, `zsh`, `fish`, `powershell`) | `upgrade`: `--check`, `--version`, `--dry-run`; `completions <shell>` |
 
-`aaf-hook` is not a command you type. Your coding-agent host runs it (with optional `--host <auto|claude|codex|gemini>`, defaulting to `auto`): it reads the Claude Code / Codex CLI `PreToolUse` or Gemini CLI `BeforeTool` JSON payload on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.
+`aaf-hook` is not a command you type. Your coding-agent host runs it (with optional `--host <auto|claude|codex|gemini|antigravity|opencode>`, defaulting to `auto`): it reads the Claude Code / Codex CLI / OpenCode `PreToolUse` or Gemini CLI / Antigravity `BeforeTool` JSON payload on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.
 
 ### `aaf gate`
 
@@ -702,7 +708,7 @@ Each check is printed as `ok`, `FAIL`, `warn` or `n/a`. Only **required** checks
 
 | Required checks | Advisory checks (warnings only) |
 |---|---|
-| `git`, `repo_root`, `config`, `hook_registered`, `hook_binary`, `data_dir`, `receipt_key` | `hook_committed`, `claude`, `sandbox`, `accounts`, `machine`, `head_lock_agent_files`, `gradle_daemon`, `gradle_daemon_config`, `git_hooks_heavy`; **`v3`**: `keychain_sandbox_exposure` (macOS), `skills_sync`, `proof_readiness`, `github_board` |
+| `git`, `repo_root`, `config`, `hook_registered`, `hook_binary`, `executor_hooks`, `data_dir`, `receipt_key` | `hook_committed`, `multi_host_hooks`, `readonly_executor_hooks`, `claude`, `sandbox`, `accounts`, `machine`, `head_lock_agent_files`, `gradle_daemon`, `gradle_daemon_config`, `git_hooks_heavy`; **`v3`**: `keychain_sandbox_exposure` (macOS), `skills_sync`, `proof_readiness`, `github_board` |
 
 What some advisory checks look for:
 
@@ -904,7 +910,7 @@ Inside the factory, the only other source of an approval is a cross-audit run th
 - **Cache poisoning is not prevented.** Writable build caches (`~/.gradle/caches`, `~/.m2`, toolchains, npm packages) hold code that later builds run outside the sandbox.
 - **Gate commands run unsandboxed.** `[commands]` run with your full user rights and environment, so test code the agent just wrote is executed there.
 - **Plain pushes are not blocked.** The hook does not stop a non-forced `git push origin main`. Configure branch protection on your remote.
-- **Only `aaf run` agents are sandboxed.** Sessions you open yourself only have the hook when configured for that host (`aaf init --hook-host <claude|codex|gemini|all>` supports Claude Code, Codex CLI, and Gemini CLI). Other agent CLIs (Antigravity, OpenCode) have no native hook adapter.
+- **Only `aaf run` agents are sandboxed.** Sessions you open yourself only have the hook when configured for that host (`aaf init --hook-host <claude|codex|gemini|antigravity|opencode|all>` supports Claude Code, Codex CLI, Gemini CLI, Antigravity, and OpenCode; `all` registers claude/codex/gemini/opencode, while `--hook-host antigravity` replaces the gemini entry in `.gemini/settings.json` and covers Gemini tools too). The remaining built-in CLIs (`cursor`, `codebuddy`, `kimi`, `pi`, `deepseek`) have no native hook adapter.
 
 Read [`SECURITY.md`](SECURITY.md) for the full threat model, each guard's exact rules, the writable and blocked path lists, and every known bypass.
 
@@ -1046,9 +1052,9 @@ If `--timeout` expires while the command is still waiting, `aaf slot` exits **75
 - If no PR can be opened (no `gh`, a remote that is not GitHub, no network), the task still moves to Review. Its branch and signed receipt are kept for you.
 - With `--auto-merge`, the merge queue pushes a fast-forward to the remote when the repository has one. It never force-pushes.
 
-**Notifications (main).** Set `[notifications] webhook_url` in tier 1 to receive a JSON POST whenever a task moves to Blocked. `aaf notify` (keep it running, or `--once`) also pushes the other moments that need you: the factory froze, and a task is ready for review. It sends to the webhook and to Telegram when `[telegram]` is enabled (Telegram gets Blocked as well). It tails the event log from a cursor in `<data_dir>/notify/`, so each moment is sent once, history is never replayed, and a failed send is retried on the next pass. `--dry-run` prints what would be sent.
+**Notifications (main).** Set `[notifications] webhook_url` in tier 1 to receive a JSON POST whenever a task moves to Blocked. `aaf notify` (keep it running, or `--once`) also pushes the other moments that need you: the factory froze (visible across `--repo` scopes), the factory halted (`factory_halted`, deduplicated per task and normalized reason over 6 hours), a task is ready for review, and Blocked events when the factory did not record a successful `WebhookSent` (after a 120 s grace window). It sends per target (webhook and each allowlisted Telegram chat when `[telegram]` is enabled) from a cursor in `<data_dir>/notify/`, tracking partial delivery in `<key>.pending` so healthy channels never receive duplicates and permanently failing channels (or transient failures after 5 passes) are dropped instead of blocking later alerts. A per-scope advisory lock (`<key>.lock`) prevents duplicate `aaf notify` instances; `--once` exits non-zero (while still printing JSON) if any delivery failed or was dropped, and `--dry-run` prints what would be sent without writing the cursor or taking the lock. For one-shot operational alerts (such as from `scripts/aaf-supervise.sh`), `aaf notify --message "<text>"` reads global channels directly without touching the database, cursor, or lock, and is still refused inside an agent run (`AAF_RUN_ID`).
 
-**Running unattended (24/7).** `scripts/aaf-supervise.sh <repo>` keeps the factory running in auto mode for one repository. It restarts it after a crash, a halt or a reboot, with back-off. It waits out a frozen factory, polling until `aaf board unfreeze`, instead of restarting it in a loop. On macOS it keeps the machine awake with `caffeinate`. Templates to start it at login:
+**Running unattended (24/7).** `scripts/aaf-supervise.sh <repo>` keeps the factory running in auto mode for one repository. It restarts it after a crash, a halt or a reboot, with back-off, and sends a deduplicated `aaf notify --message` once per distinct failure when `aaf run` crashes, exits with `status: error`, halts without recording `factory_halted` (such as an auto-split halt), or is refused for a config/usage error (leaving `busy` and `agent_run` refusals quiet). It waits out a frozen factory, polling until `aaf board unfreeze`, instead of restarting it in a loop. On macOS it keeps the machine awake with `caffeinate`. Templates to start it at login:
 
 - macOS: `packaging/launchd/com.autofactory.run.plist` (one per repository) and `com.autofactory.notify.plist`.
 - Linux: `packaging/systemd/aaf-run@.service` and `aaf-notify.service`.

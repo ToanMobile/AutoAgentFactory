@@ -352,11 +352,20 @@ impl Lexer<'_, '_> {
                 self.emit(Vec::new(), sub, Vec::new(), None);
             }
         }
+        let dynamic_name = words.first().is_some_and(|tok| tok.dynamic);
+        let arg_dynamic = words.iter().map(|tok| tok.dynamic).collect();
+        let mut arg_cat_heredoc = Vec::with_capacity(words.len());
+        let mut text_words = Vec::with_capacity(words.len());
+        for tok in words {
+            arg_cat_heredoc.push(tok.cat_heredoc);
+            text_words.push(tok.text);
+        }
         self.out.cmds.push(Cmd {
             assigns,
-            dynamic_name: words.first().is_some_and(|tok| tok.dynamic),
-            arg_dynamic: words.iter().map(|tok| tok.dynamic).collect(),
-            words: words.into_iter().map(|tok| tok.text).collect(),
+            dynamic_name,
+            arg_dynamic,
+            arg_cat_heredoc,
+            words: text_words,
             redirects,
             heredocs: Vec::new(),
             wrapped,

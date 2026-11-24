@@ -169,6 +169,7 @@ impl Lab {
                 mobile: false,
                 data_dir: self.root.join("data"),
                 home: self.root.join("home"),
+                owner_github_allowlist: Vec::new(),
             },
         };
         let hooks = Hooks {

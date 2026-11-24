@@ -22,11 +22,11 @@ use aaf_domain::task::TaskState;
 use aaf_engine::config::{self, ConfigInputs, ConfigOverlay, EffectiveConfig, RunOverlay};
 use aaf_engine::db::{Db, private};
 use aaf_engine::executors;
+use aaf_engine::factory::stage_router::writer_hook_executors;
 use aaf_engine::factory::{
     self, BindingView, Deps, Hooks, Mode, RunSummary, any_stage_uses_claude,
     configured_audit_provider, resolve_auto_audit_executor, resolve_base, same_audit_provider,
 };
-use aaf_engine::hook_settings;
 use serde_json::{Value, json};
 
 use super::board::store::{err, open_db, refuse_inside_agent_run, repo_root};
@@ -312,11 +312,18 @@ fn has_work(deps: &Deps) -> Result<bool, CmdError> {
 
 pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf run") {
-        return Ok(refused);
+        let reason = refused.text.clone();
+        return Ok(refused
+            .field("refused_kind", json!("agent_run"))
+            .field("reason", json!(reason)));
     }
     let sandboxed = match sandbox_choice(args.unsandboxed, cfg!(target_os = "macos")) {
         Ok(sandboxed) => sandboxed,
-        Err(why) => return Ok(CmdOutput::policy("refused", why)),
+        Err(why) => {
+            return Ok(CmdOutput::policy("refused", why)
+                .field("refused_kind", json!("config"))
+                .field("reason", json!(why)));
+        }
     };
     let repo = repo_root(ctx)?;
     let mut cfg = load_config(args, ctx, &repo)?;
@@ -352,6 +359,7 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
              matches [run].executor ({run_exec}); configure a different [cross_audit].executor"
         );
         return Ok(CmdOutput::policy("refused", why.clone())
+            .field("refused_kind", json!("config"))
             .field("reason", json!(why))
             .field("frozen", json!(false)));
     }
@@ -362,7 +370,9 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     }
     let Some(lock) = run_lock(ctx, &repo)? else {
         let text = "another aaf run is already working on this repository";
-        return Ok(CmdOutput::policy("refused", text));
+        return Ok(CmdOutput::policy("refused", text)
+            .field("refused_kind", json!("busy"))
+            .field("reason", json!(text)));
     };
 
     let created_task_id = if let Some(raw_goal) = &args.goal {
@@ -382,16 +392,27 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     };
 
     if args.detach && !args.detached_child {
-        let needs_hook =
-            any_stage_uses_claude(&cfg.repo) || audit_exec.eq_ignore_ascii_case("claude");
-        if needs_hook && (created_task_id.is_some() || has_work_in_db(&db, &repo)?) {
+        let needs_claude_hook = run_executor_is_claude(&cfg.repo.run)
+            || any_stage_uses_claude(&cfg.repo)
+            || audit_exec.eq_ignore_ascii_case("claude");
+        let writer_execs = writer_hook_executors(&cfg.repo);
+        if (needs_claude_hook || !writer_execs.is_empty())
+            && (created_task_id.is_some() || has_work_in_db(&db, &repo)?)
+        {
             let base =
                 resolve_base(&repo, &cfg.repo.gate.base_ref).map_err(|e| err("base branch", e))?;
             let base_sha =
                 aaf_engine::git::cmd::git(&repo, &["rev-parse", "--verify", &base.start_point()])
                     .map_err(|e| err("base branch", e))?;
-            if let Err(problem) = hook_settings::check_base(&repo, &base_sha, &ctx.path_var) {
+            if let Err(problem) = deps::check_base_hooks(
+                &repo,
+                &base_sha,
+                &ctx.path_var,
+                needs_claude_hook,
+                &writer_execs,
+            ) {
                 return Ok(CmdOutput::policy("refused", problem.clone())
+                    .field("refused_kind", json!("config"))
                     .field("reason", json!(problem))
                     .field("frozen", json!(false)));
             }
@@ -427,10 +448,11 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         deps.accounts = Arc::clone(&router.default_implementer.accounts);
     }
     let audit = stage_wiring::build_native_audit_backend(ctx, &repo, &cfg, &db, Some(&router))?;
-    let needs_hook = deps.settings.hook_required
+    let needs_claude_hook = run_executor_is_claude(&cfg.repo.run)
         || any_stage_uses_claude(&cfg.repo)
         || audit.as_ref().is_some_and(|a| a.hook_required);
-    if needs_hook && has_work(&deps)? {
+    let writer_execs = writer_hook_executors(&cfg.repo);
+    if (needs_claude_hook || !writer_execs.is_empty()) && has_work(&deps)? {
         // Once, before any task is taken: a registration that is wrong on
         // the base is wrong for every task alike. Blocking them one by one
         // counted each as a failed root and froze the factory for every
@@ -438,8 +460,15 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         // there is nothing to refuse; a task that turns up later (`--auto`)
         // is still checked in its own worktree.
         let base = deps.git.base_sha().map_err(|e| err("base branch", e))?;
-        if let Err(problem) = hook_settings::check_base(&repo, &base, &ctx.path_var) {
+        if let Err(problem) = deps::check_base_hooks(
+            &repo,
+            &base,
+            &ctx.path_var,
+            needs_claude_hook,
+            &writer_execs,
+        ) {
             return Ok(CmdOutput::policy("refused", problem.clone())
+                .field("refused_kind", json!("config"))
                 .field("reason", json!(problem))
                 .field("frozen", json!(false)));
         }
@@ -500,6 +529,9 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     let mut out = report(&summary, &cfg.warnings, &binding)?
         .field("max_parallel", json!(deps.settings.max_parallel))
         .field("auto_split_count", json!(auto_split_count));
+    if summary.halted.is_some() {
+        out = out.field("halt_recorded", json!(true));
+    }
     if let Some(task_id) = &created_task_id {
         out = out.field("task_id", json!(task_id));
     }

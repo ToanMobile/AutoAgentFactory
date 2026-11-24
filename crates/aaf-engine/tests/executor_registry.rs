@@ -52,18 +52,29 @@ fn all_ten_builtin_executors_exist_with_unique_ids_and_hook_support() {
         HookSupport::GeminiBeforeTool
     );
     assert_eq!(
+        find_descriptor("antigravity").unwrap().hook_support,
+        HookSupport::AntigravityBeforeTool
+    );
+    assert_eq!(
+        find_descriptor("antigravity")
+            .unwrap()
+            .hook_support
+            .as_str(),
+        "antigravity_before_tool"
+    );
+    assert_eq!(
+        find_descriptor("opencode").unwrap().hook_support,
+        HookSupport::OpencodePreToolUse
+    );
+    assert_eq!(
+        find_descriptor("opencode").unwrap().hook_support.as_str(),
+        "opencode_pre_tool_use"
+    );
+    assert_eq!(
         find_descriptor("gemini").unwrap().headless_env,
         &[("GEMINI_CLI_TRUST_WORKSPACE", "true")]
     );
-    for id in [
-        "opencode",
-        "cursor",
-        "antigravity",
-        "codebuddy",
-        "kimi",
-        "pi",
-        "deepseek",
-    ] {
+    for id in ["cursor", "codebuddy", "kimi", "pi", "deepseek"] {
         assert_eq!(
             find_descriptor(id).unwrap().hook_support,
             HookSupport::SandboxOnly,

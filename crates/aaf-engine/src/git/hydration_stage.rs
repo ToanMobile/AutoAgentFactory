@@ -155,9 +155,14 @@ fn remove_partial_dst(dst: &Path) {
     }
 }
 
-pub(super) fn run_setup_cmd(wt_root: &Path, setup_cmd: &str) -> Result<(), GitError> {
-    let mut cmd = Command::new("/bin/sh");
-    cmd.args(["-c", setup_cmd]).current_dir(wt_root);
+pub(super) fn run_setup_cmd(
+    wt_root: &Path,
+    setup_cmd: &str,
+    data_dir: Option<&Path>,
+) -> Result<(), GitError> {
+    let (argv, _mode) = crate::gate::confine::shell_argv(setup_cmd, wt_root, data_dir)?;
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(wt_root);
     for var in SCRUBBED_GIT_ENV {
         cmd.env_remove(var);
     }

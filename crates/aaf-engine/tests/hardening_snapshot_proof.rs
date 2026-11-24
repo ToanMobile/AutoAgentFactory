@@ -345,7 +345,7 @@ fn merge_oracle_and_hydration_seed_from_shared_base_snapshot() {
     oracle_cfg.gate.red_green_oracle = OracleMode::Block;
     oracle_cfg.commands.test_scoped = format!(
         "test -f target/prewarmed.stamp && touch \"{}\" && \
-         (grep -q \"{{ 2 }}\" src/lib.rs || {{ echo \"test result: FAILED. 0 passed; 1 failed;\"; exit 1; }})",
+         (! grep -q \"updated test\" tests/basic.rs || grep -q \"{{ 2 }}\" src/lib.rs || {{ echo \"test result: FAILED. 0 passed; 1 failed;\"; exit 1; }})",
         oracle_marker.display()
     );
     let (machine, probe, clock) = (calm_machine(), SystemProbe::detect(), FixedClock(101));

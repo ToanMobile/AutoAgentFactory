@@ -11,7 +11,7 @@ impl Lexer<'_, '_> {
             match self.take() {
                 None => return self.fail(),
                 Some('\'') => return,
-                Some(c) => self.word_mut().text.push(c),
+                Some(c) => self.word_mut().push_char(c),
             }
         }
     }
@@ -30,11 +30,11 @@ impl Lexer<'_, '_> {
                     match self.take() {
                         None => return self.fail(),
                         Some('\n') => {}
-                        Some(c @ ('"' | '\\' | '$' | '`')) => self.word_mut().text.push(c),
+                        Some(c @ ('"' | '\\' | '$' | '`')) => self.word_mut().push_char(c),
                         Some(c) => {
                             let word = self.word_mut();
-                            word.text.push('\\');
-                            word.text.push(c);
+                            word.push_char('\\');
+                            word.push_char(c);
                         }
                     }
                 }
@@ -42,7 +42,7 @@ impl Lexer<'_, '_> {
                 Some('`') => self.backtick(),
                 Some(c) => {
                     self.pos += 1;
-                    self.word_mut().text.push(c);
+                    self.word_mut().push_char(c);
                 }
             }
         }
@@ -57,7 +57,7 @@ impl Lexer<'_, '_> {
                     Some(end) => {
                         let inner: String = self.chars[start..end].iter().collect();
                         self.pos = end + 1;
-                        self.substitute(&inner);
+                        self.substitute(&inner, true);
                     }
                     None => self.fail(),
                 }
@@ -73,10 +73,10 @@ impl Lexer<'_, '_> {
                 // `$VAR`, `${VAR}`: the value is unknown, keep the text.
                 let word = self.word_mut();
                 word.dynamic = true;
-                word.text.push('$');
+                word.push_char('$');
                 if next == Some('{') && !in_double {
                     self.pos += 1;
-                    self.word_mut().text.push('{');
+                    self.word_mut().push_char('{');
                     self.param_braces += 1;
                 }
             }
@@ -101,7 +101,7 @@ impl Lexer<'_, '_> {
                 Some(c) => inner.push(c),
             }
         }
-        self.substitute(&inner);
+        self.substitute(&inner, false);
     }
 
     /// `$'…'`: decoded so `$'\x67it'` is seen as `git`.
@@ -110,7 +110,7 @@ impl Lexer<'_, '_> {
         match decode_ansi_c(&self.chars, &mut self.pos) {
             Some((text, dynamic)) => {
                 let word = self.word_mut();
-                word.text.push_str(&text);
+                word.push_str(&text);
                 word.dynamic |= dynamic;
             }
             None => self.fail(),

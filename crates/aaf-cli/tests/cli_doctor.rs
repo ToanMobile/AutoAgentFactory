@@ -42,11 +42,13 @@ fn doctor_passes_after_init_and_every_check_has_the_three_keys() {
         "receipt_key",
         "claude",
         "sandbox",
+        "gate_confinement",
         "accounts",
         "machine",
     ] {
         check(&out, name);
     }
+    assert_eq!(check(&out, "gate_confinement")["required"], json!(false));
     for name in [
         "git",
         "repo_root",

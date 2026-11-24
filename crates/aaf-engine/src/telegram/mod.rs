@@ -5,6 +5,8 @@ pub mod client;
 pub mod commands;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_each;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -16,9 +18,10 @@ use regex::Regex;
 use crate::watch::sanitize_display;
 
 pub use client::{
-    Chat, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, HttpTelegramApi, MAX_MESSAGE_BYTES,
-    Message, TelegramApi, TelegramError, Update, User, redact_bot_token, send_alert,
-    send_alert_with, truncate_message, validate_base_url, validate_token,
+    Chat, ChatSendResult, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, HttpTelegramApi,
+    MAX_MESSAGE_BYTES, Message, TelegramApi, TelegramError, Update, User, redact_bot_token,
+    send_alert, send_alert_each, send_alert_each_with, send_alert_with, truncate_message,
+    validate_base_url, validate_token,
 };
 pub use commands::{
     ApprovePreview, CommandDispatcher, CommandHandler, LockedFileSummary, MAX_ARG_CHARS,

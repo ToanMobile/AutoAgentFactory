@@ -263,6 +263,7 @@ impl World {
             mobile: false,
             data_dir: dir.clone(),
             home: dir,
+            owner_github_allowlist: Vec::new(),
         };
         let deps = Deps {
             store: Arc::new(db.clone()),

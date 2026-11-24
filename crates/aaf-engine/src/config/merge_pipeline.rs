@@ -8,8 +8,8 @@ use aaf_domain::config::{
     RepoConfig, UnblockerConfig,
 };
 use aaf_domain::pipeline::{
-    GlobalPipelineConfig, GlobalUnblockerConfig, MAX_PLAN_ROUNDS_CAP, StageModelConfig,
-    distinct_real_reviewer_providers, validate_reviewers,
+    GlobalPipelineConfig, GlobalUnblockerConfig, MAX_PLAN_ROUNDS_CAP, MAX_PR_REWORK_ROUNDS_CAP,
+    StageModelConfig, distinct_real_reviewer_providers, validate_reviewers,
 };
 use serde::Deserialize;
 
@@ -21,6 +21,7 @@ pub(crate) struct RepoKeyPresence {
     pub allow_tier_s_skip_debate: bool,
     pub max_plan_rounds: bool,
     pub max_audit_reworks: bool,
+    pub max_pr_rework_rounds: bool,
     pub escalate_implementer_after_reworks: bool,
     pub cross_adjudicate: bool,
     pub max_token_budget: bool,
@@ -42,6 +43,7 @@ impl RepoKeyPresence {
             allow_tier_s_skip_debate: true,
             max_plan_rounds: true,
             max_audit_reworks: true,
+            max_pr_rework_rounds: true,
             escalate_implementer_after_reworks: true,
             cross_adjudicate: true,
             max_token_budget: true,
@@ -57,6 +59,7 @@ impl RepoKeyPresence {
             allow_tier_s_skip_debate: has_key(table, "pipeline", "allow_tier_s_skip_debate"),
             max_plan_rounds: has_key(table, "pipeline", "max_plan_rounds"),
             max_audit_reworks: has_key(table, "pipeline", "max_audit_reworks"),
+            max_pr_rework_rounds: has_key(table, "pipeline", "max_pr_rework_rounds"),
             escalate_implementer_after_reworks: has_key(
                 table,
                 "pipeline",
@@ -147,6 +150,7 @@ pub(crate) struct PipelineOverlay {
     pub allow_tier_s_skip_debate: Option<bool>,
     pub max_plan_rounds: Option<u32>,
     pub max_audit_reworks: Option<u32>,
+    pub max_pr_rework_rounds: Option<u32>,
     pub escalate_implementer_after_reworks: Option<u32>,
     pub plan_author: Option<StageModelConfig>,
     pub plan_challenger: Option<StageModelConfig>,
@@ -232,6 +236,18 @@ pub(crate) fn merge_pipeline(
             repo.max_audit_reworks
         ));
         repo.max_audit_reworks = MAX_AUDIT_REWORKS_CAP;
+    }
+    if !presence.max_pr_rework_rounds
+        && let Some(g) = global.max_pr_rework_rounds
+    {
+        repo.max_pr_rework_rounds = g;
+    }
+    if repo.max_pr_rework_rounds > MAX_PR_REWORK_ROUNDS_CAP {
+        warnings.push(format!(
+            "{source}: pipeline.max_pr_rework_rounds = {} clamped to {MAX_PR_REWORK_ROUNDS_CAP}",
+            repo.max_pr_rework_rounds
+        ));
+        repo.max_pr_rework_rounds = MAX_PR_REWORK_ROUNDS_CAP;
     }
     if !presence.escalate_implementer_after_reworks
         && let Some(g) = global.escalate_implementer_after_reworks
@@ -410,6 +426,11 @@ pub(crate) fn apply_pipeline_overlay(
             "max_audit_reworks",
             overlay.max_audit_reworks,
             current.max_audit_reworks,
+        ),
+        (
+            "max_pr_rework_rounds",
+            overlay.max_pr_rework_rounds,
+            current.max_pr_rework_rounds,
         ),
         (
             "escalate_implementer_after_reworks",

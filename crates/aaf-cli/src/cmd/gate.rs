@@ -275,22 +275,25 @@ pub fn run(args: &GateArgs, ctx: &Ctx) -> CmdResult {
                 .field("idle_blockers", json!(last_blockers)));
         }
     }
-    let GateRun { receipt, reused } =
-        call_gate(ctx, &repo_root, &cfg, args.mode()).map_err(|e| {
-            let mut message = format!("gate: {e}");
-            if let Some(run_id) = &ctx.run_id {
-                // The agent of an `aaf run`: in its sandbox the data
-                // directory (signing key, receipts, slot files) is closed,
-                // and a bare I/O error says nothing about why.
-                message.push_str(&format!(
-                    ". This is agent run {run_id}: the gate is run by the factory outside the \
+    let GateRun {
+        receipt,
+        reused,
+        unconfined,
+    } = call_gate(ctx, &repo_root, &cfg, args.mode()).map_err(|e| {
+        let mut message = format!("gate: {e}");
+        if let Some(run_id) = &ctx.run_id {
+            // The agent of an `aaf run`: in its sandbox the data
+            // directory (signing key, receipts, slot files) is closed,
+            // and a bare I/O error says nothing about why.
+            message.push_str(&format!(
+                ". This is agent run {run_id}: the gate is run by the factory outside the \
                      sandbox when the run ends, so do not run `aaf gate` here. Finish the \
                      change and end the run; a heavy build or test goes through \
                      `aaf slot -- <command>`"
-                ));
-            }
-            CmdError::new(message)
-        })?;
+            ));
+        }
+        CmdError::new(message)
+    })?;
 
     let status = match receipt.status {
         GateStatus::Clear => "CLEAR",
@@ -323,6 +326,9 @@ pub fn run(args: &GateArgs, ctx: &Ctx) -> CmdResult {
         .collect();
     for warning in &warnings {
         notice("gate", warning);
+    }
+    if let Some(reason) = &unconfined {
+        notice("gate", &format!("gate commands unconfined: {reason}"));
     }
     let docs_fast_path = receipt
         .reasons

@@ -15,6 +15,8 @@ pub enum HookSupport {
     ClaudePreToolUse,
     CodexPreToolUse,
     GeminiBeforeTool,
+    AntigravityBeforeTool,
+    OpencodePreToolUse,
     SandboxOnly,
 }
 
@@ -25,6 +27,8 @@ impl HookSupport {
             HookSupport::ClaudePreToolUse => "claude_pre_tool_use",
             HookSupport::CodexPreToolUse => "codex_pre_tool_use",
             HookSupport::GeminiBeforeTool => "gemini_before_tool",
+            HookSupport::AntigravityBeforeTool => "antigravity_before_tool",
+            HookSupport::OpencodePreToolUse => "opencode_pre_tool_use",
             HookSupport::SandboxOnly => "sandbox_only",
         }
     }
@@ -106,7 +110,7 @@ const BUILTIN_EXECUTORS: [CliDescriptor; 10] = [
         id: "opencode",
         display_name: "OpenCode",
         binaries: &["opencode"],
-        hook_support: HookSupport::SandboxOnly,
+        hook_support: HookSupport::OpencodePreToolUse,
         supports_model_flag: true,
         supports_effort_flag: false,
         supports_read_only_flag: false,
@@ -126,7 +130,7 @@ const BUILTIN_EXECUTORS: [CliDescriptor; 10] = [
         id: "antigravity",
         display_name: "Antigravity CLI",
         binaries: &["agy", "antigravity"],
-        hook_support: HookSupport::SandboxOnly,
+        hook_support: HookSupport::AntigravityBeforeTool,
         supports_model_flag: true,
         supports_effort_flag: true,
         supports_read_only_flag: true,

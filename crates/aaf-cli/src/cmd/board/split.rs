@@ -338,11 +338,17 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
         };
         let clean = deps.git.integrate(&[]).map_err(|e| err("auto-split", e))?;
         if deps.settings.hook_required {
+            let exec = if run_executor_is_claude(&deps.settings.repo.run) {
+                "claude"
+            } else {
+                deps.settings.repo.run.executor.as_str()
+            };
             let problem = match deps.git.base_sha() {
-                Ok(base_sha) => hook_settings::check_worktree(
+                Ok(base_sha) => hook_settings::check_worktree_for_executor(
                     &clean.tree.path,
                     &deps.settings.agent_path,
                     Some(&base_sha),
+                    exec,
                 )
                 .err(),
                 Err(e) => Some(format!("the base branch could not be read ({e})")),

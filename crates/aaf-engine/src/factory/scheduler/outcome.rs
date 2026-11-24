@@ -97,8 +97,8 @@ impl Scheduler<'_> {
             }
             Next::Halt(why) => {
                 let state = self.deps.store.get_task(&outcome.task_id)?.state;
+                self.record_halt(&outcome.task_id, why);
                 self.requeue_if_ready(outcome.task_id, state);
-                self.summary.halted.get_or_insert(why);
             }
             Next::Blocked => {
                 self.state.transient_retries.remove(&outcome.task_id);

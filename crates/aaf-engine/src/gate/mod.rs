@@ -4,11 +4,13 @@
 
 pub mod base;
 pub mod changes;
+pub mod confine;
 pub mod docs_fast;
 pub mod head_lock;
 pub mod hidden;
 pub mod oracle;
 pub mod oracle_classify;
+mod oracle_control;
 pub(crate) mod oracle_worktree;
 pub(crate) mod proc;
 pub(crate) mod reuse;
@@ -51,6 +53,8 @@ pub enum GateError {
     Git(String),
     #[error("config: {0}")]
     Config(String),
+    #[error(transparent)]
+    Confine(#[from] confine::ConfineError),
     #[error("no locked file is changed; there is nothing to approve")]
     NothingLocked,
     #[error("the locked diff changed since it was shown; nothing approved")]
@@ -64,6 +68,8 @@ pub struct GateRun {
     /// True when the receipt is a stored one that already proved what was
     /// asked: no check and no command ran in this call.
     pub reused: bool,
+    /// Set when gate commands ran unconfined (e.g. Linux without `bwrap`).
+    pub unconfined: Option<String>,
 }
 
 /// [`run_gate_reporting`] for callers that only want the receipt.
@@ -194,6 +200,7 @@ pub fn run_gate_with_options(
         return Ok(GateRun {
             receipt,
             reused: true,
+            unconfined: None,
         });
     }
     let head_sha = base.head_sha;
@@ -255,6 +262,7 @@ pub fn run_gate_with_options(
         return Ok(GateRun {
             receipt,
             reused: true,
+            unconfined: None,
         });
     }
     let has_base_capture = proof_needed
@@ -281,6 +289,7 @@ pub fn run_gate_with_options(
         })
     };
     let mut notes = Vec::new();
+    let mut unconfined = None;
     let test_command_missing = runner::test_command(&cfg.commands, mode).1.is_empty();
     // With no command result yet, `Blocked` means an earlier stage blocks.
     let unblocked =
@@ -331,6 +340,15 @@ pub fn run_gate_with_options(
         let _gate_secrets =
             crate::git::hydration::stage_for_gate_from_base(repo_root, base.sha.as_deref())
                 .map_err(|e| GateError::Git(e.to_string()))?;
+        if data_dir.is_dir()
+            && let Err(err) =
+                crate::throttle::slots::prepare_for_guests(data_dir, throttle.ceiling(), &|pgid| {
+                    throttle.control.group_state(pgid)
+                })
+            && err.kind() != std::io::ErrorKind::PermissionDenied
+        {
+            return Err(GateError::Io(err));
+        }
         let run = runner::run_all_throttled_with_options(
             repo_root,
             &cfg.commands,
@@ -341,6 +359,7 @@ pub fn run_gate_with_options(
             env_remove,
         )?;
         notes = run.notes;
+        unconfined = run.unconfined;
         Some(run.results)
     } else {
         None
@@ -385,28 +404,32 @@ pub fn run_gate_with_options(
     // Record throttle and hidden-file notes without altering the evidence verdict.
     reasons.append(&mut notes);
     reasons.append(&mut hidden_notes);
-    let (status, reasons) = if status == GateStatus::Clear
-        && !cfg.gate.red_green_oracle.is_off()
-        && !take_docs_fast_path
-        && let Some(base_sha) = base.sha.as_deref()
-    {
-        let heavy = runner::HeavyContext {
-            data_dir,
-            stats_repo_id: &common_repo_id,
-            clock,
-            throttle,
-        };
-        let v = oracle::evaluate_with_options(
-            repo_root,
-            base_sha,
-            cfg,
-            mode,
-            &set.changes,
-            &added,
-            &heavy,
-            opts.strip_compiler_wrappers,
-        )?;
-        oracle::apply_verdict(status, reasons, v)
+    let (status, reasons) = if status == GateStatus::Clear && !cfg.gate.red_green_oracle.is_off() {
+        if take_docs_fast_path {
+            reasons.push("note: oracle skipped (docs fast path)".to_string());
+            (status, reasons)
+        } else if let Some(base_sha) = base.sha.as_deref() {
+            let heavy = runner::HeavyContext {
+                data_dir,
+                stats_repo_id: &common_repo_id,
+                clock,
+                throttle,
+            };
+            let v = oracle::evaluate_with_options(
+                repo_root,
+                base_sha,
+                cfg,
+                mode,
+                &set.changes,
+                &added,
+                &heavy,
+                opts.strip_compiler_wrappers,
+            )?;
+            oracle::apply_verdict(status, reasons, v)
+        } else {
+            reasons.push("note: oracle skipped (no base commit)".to_string());
+            (status, reasons)
+        }
     } else {
         (status, reasons)
     };
@@ -441,6 +464,7 @@ pub fn run_gate_with_options(
     Ok(GateRun {
         receipt,
         reused: false,
+        unconfined,
     })
 }
 

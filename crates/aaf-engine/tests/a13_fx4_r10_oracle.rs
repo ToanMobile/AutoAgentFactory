@@ -188,13 +188,17 @@ fn updated_golden_fixture_is_test_side_and_never_reverted() {
 fn newly_added_snapshot_fixture_is_kept_in_the_reverted_tree() {
     // The test reads a fixture that only exists on the branch: reverting it
     // as production code would make the test fail for the wrong reason.
-    let cmd = "[ -f src/__snapshots__/app.snap ] || { echo 'missing fixture'; exit 3; }; [ \"$(sh src/app.sh)\" = \"$(cat src/__snapshots__/app.snap)\" ] || { echo 'FAIL: snapshot'; exit 1; }; echo ok";
+    let cmd = "for f in tests/test_*.sh; do [ -f \"$f\" ] || continue; sh \"$f\" || exit $?; done";
     let repo = init_repo("block", cmd);
     let data = TempDir::new().unwrap();
     fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
     fs::create_dir_all(repo.path().join("src/__snapshots__")).unwrap();
     fs::write(repo.path().join("src/__snapshots__/app.snap"), "42\n").unwrap();
-    fs::write(repo.path().join("tests/test_snap.sh"), "echo ok\n").unwrap();
+    fs::write(
+        repo.path().join("tests/test_snap.sh"),
+        "#!/bin/sh\n[ -f src/__snapshots__/app.snap ] || { echo 'missing fixture'; exit 3; }\n[ \"$(sh src/app.sh)\" = \"$(cat src/__snapshots__/app.snap)\" ] || { echo 'FAIL: snapshot'; exit 1; }\necho ok\n",
+    )
+    .unwrap();
     let r = run_gate(repo.path(), data.path());
     assert_eq!(r.status, GateStatus::Clear, "{:?}", r.reasons);
     assert!(has(&r, "oracle: red_green=proven"), "{:?}", r.reasons);
@@ -202,7 +206,7 @@ fn newly_added_snapshot_fixture_is_kept_in_the_reverted_tree() {
 
 #[test]
 fn gitlink_change_never_errors_the_gate() {
-    let cmd = "[ \"$(sh src/app.sh)\" = 42 ] || { echo 'FAIL: expected 42'; exit 1; }; echo ok";
+    let cmd = "for f in tests/test_*.sh; do [ -f \"$f\" ] || continue; sh \"$f\" || exit 1; done";
     let repo = init_repo("block", cmd);
     let data = TempDir::new().unwrap();
     let root = repo.path();
@@ -224,7 +228,11 @@ fn gitlink_change_never_errors_the_gate() {
         &["update-index", "--cacheinfo", &format!("160000,{sha2},sub")],
     );
     fs::write(root.join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
-    fs::write(root.join("tests/test_answer.sh"), "echo ok\n").unwrap();
+    fs::write(
+        root.join("tests/test_answer.sh"),
+        "#!/bin/sh\n[ \"$(sh src/app.sh)\" = 42 ] || { echo 'FAIL: expected 42'; exit 1; }\necho ok\n",
+    )
+    .unwrap();
     git_out(root, &["add", "src/app.sh", "tests/test_answer.sh"]);
     git_out(root, &["commit", "-q", "-m", "bump submodule"]);
 

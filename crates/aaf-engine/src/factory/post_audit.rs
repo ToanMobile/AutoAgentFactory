@@ -313,11 +313,11 @@ fn execute_post_gate_audit(
                 });
             }
             if let Some(infra) = infra {
-                return Ok(if fallback_grant_slot.is_some() || tier1_blocked_fallback {
-                    primary_infra_next(deps, &task.id, active_grant, &infra)
+                return if fallback_grant_slot.is_some() || tier1_blocked_fallback {
+                    Ok(primary_infra_next(deps, &task.id, active_grant, &infra))
                 } else {
                     audit_infra_next(deps, &task.id, grant, &infra)
-                });
+                };
             }
             (
                 audit_provider,

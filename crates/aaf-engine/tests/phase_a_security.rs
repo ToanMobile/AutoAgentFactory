@@ -485,7 +485,7 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
         \"${CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER:-}\" \
         \"${SCCACHE_DIR:-}\" \"${SCCACHE_CONF:-}\" \"${CCACHE_DIR:-}\"";
     let test_cmd = format!(
-        "if [ -n \"${{AAF_TEST_FILES_FILE:-}}\" ]; then {probe_cmd} > '{}'; echo 'FAIL: oracle red' >&2; exit 1; fi; {probe_cmd}",
+        "if [ -n \"${{AAF_TEST_FILES_FILE:-}}\" ] && grep -q 'tests/smoke.rs' \"$AAF_TEST_FILES_FILE\"; then {probe_cmd} > '{}'; echo 'FAIL: oracle red' >&2; exit 1; fi; {probe_cmd}",
         oracle_out.display()
     );
     assert!(!is_heavy("lint", probe_cmd), "lint must take light path");

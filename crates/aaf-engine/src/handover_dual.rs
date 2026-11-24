@@ -20,6 +20,7 @@ const INTERNAL_NOTE_PREFIXES: &[&str] = &[
     "post-gate cross-audit rejected",
     "cross-audit rejected",
     "audit_rework:",
+    "pr_feedback:",
     "plan_approved:",
     "unblock[",
     "gate failed:",

@@ -2,6 +2,7 @@
 //! that needs an account, and one gate thread for the repository.
 
 pub(super) mod dual_coord;
+mod halt;
 mod outcome;
 
 #[cfg(test)]
@@ -126,6 +127,7 @@ pub(super) struct LoopState {
     pub(super) task_wait_until: HashMap<String, i64>,
     pub(super) last_review_sweep: Option<Instant>,
     pub(super) last_review_sweep_now: Option<i64>,
+    pub(super) last_pr_feedback: HashMap<String, i64>,
     pre_audits: HashMap<String, Box<PreGateAudit>>,
     pub(super) dual_review_in_flight: HashMap<String, DualReviewCoord>,
 }

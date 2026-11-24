@@ -45,6 +45,7 @@ fn exhausted_switch_parks_with_deadline_and_unparks_while_busy() {
             mobile: false,
             data_dir,
             home: PathBuf::from("/fake/home"),
+            owner_github_allowlist: Vec::new(),
         },
     };
     let (msg_tx, msg_rx) = mpsc::channel();

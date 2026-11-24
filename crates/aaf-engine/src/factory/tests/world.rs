@@ -33,6 +33,7 @@ pub struct World {
     pub auto_merge: bool,
     pub max_parallel: u32,
     pub repo: RepoConfig,
+    pub owner_github_allowlist: Vec<String>,
 }
 
 impl World {
@@ -63,6 +64,7 @@ impl World {
             auto_merge: false,
             max_parallel: 1,
             repo: RepoConfig::default(),
+            owner_github_allowlist: Vec::new(),
         }
     }
 
@@ -92,6 +94,7 @@ impl World {
                 mobile: false,
                 data_dir: self.tmp.path().to_path_buf(),
                 home: PathBuf::from("/fake/home"),
+                owner_github_allowlist: self.owner_github_allowlist.clone(),
             },
         }
     }

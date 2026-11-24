@@ -4,8 +4,10 @@
 use std::path::Path;
 
 use aaf_domain::config::{AuditScope, CrossAuditConfig};
+use aaf_domain::event::EventKind;
 use aaf_domain::gate::{GateMode, GoldenScore, PostGateAuditRecord, Receipt, Severity};
 use aaf_domain::ports::{InfraFailure, InfraKind, PortResult};
+use serde_json::json;
 
 use crate::cross_audit::{AuditVerdict, Finding, MechanicalScoreReport, evaluate_score_gate};
 use crate::factory::audit_backend;
@@ -313,23 +315,82 @@ pub(super) fn primary_infra_next(
     }
 }
 
+const MAX_AUTH_WAITS: usize = 3;
+const AUTH_WAIT_HISTORY: u32 = 200;
+
+fn count_auth_waits(deps: &Deps, task_id: &str) -> PortResult<usize> {
+    let kinds = [
+        EventKind::CrossAudit,
+        EventKind::TaskStateChanged,
+        EventKind::ReworkRequested,
+    ];
+    let mut count = 0usize;
+    for event in deps
+        .store
+        .events_for_task_by_kinds(task_id, &kinds, AUTH_WAIT_HISTORY)?
+    {
+        if event.kind == EventKind::ReworkRequested {
+            break;
+        }
+        if event.kind == EventKind::TaskStateChanged {
+            let to = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                .ok()
+                .and_then(|p| p["to"].as_str().map(str::to_string));
+            if matches!(to.as_deref(), Some("blocked" | "done")) {
+                break;
+            }
+            continue;
+        }
+        if event.kind == EventKind::CrossAudit
+            && serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                .ok()
+                .is_some_and(|p| p["phase"].as_str() == Some("auth_wait"))
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Maps an auditor infrastructure failure to [`Next::RetryAfter`] for transient
-/// network faults, avoids halting when an optional secondary audit provider
-/// fails authentication (`!require_different_provider`), and returns
+/// network faults, bounds secondary audit provider auth waits to
+/// [`MAX_AUTH_WAITS`] before calling [`unblock::block_untried`], and returns
 /// [`Next::Halt`] for primary/required authentication failures.
 pub(crate) fn audit_infra_next(
     deps: &Deps,
     task_id: &str,
     grant: &Grant,
     infra: &InfraFailure,
-) -> Next {
+) -> PortResult<Next> {
     if infra.kind == InfraKind::Auth
         && !deps.settings.repo.cross_audit.require_different_provider
         && secondary_provider_configured(deps)
     {
-        return Next::Wait {
+        let provider = audit_backend::configured_audit_provider(
+            &deps.settings.repo.run.executor,
+            &deps.settings.repo.cross_audit,
+        );
+        deps.emit(
+            EventKind::CrossAudit,
+            task_id,
+            json!({
+                "phase": "auth_wait",
+                "verdict": "auth_wait",
+                "provider": provider,
+                "why": unblock::one_line(&infra.raw, 300),
+            }),
+        )?;
+        if count_auth_waits(deps, task_id)? >= MAX_AUTH_WAITS {
+            let (_, fix) = worker::infra_words(grant, infra);
+            let why = format!(
+                "auditor {provider} cannot log in: {fix}; then `aaf board unblock {task_id}`"
+            );
+            unblock::block_untried(deps, task_id, &why)?;
+            return Ok(Next::Blocked);
+        }
+        return Ok(Next::Wait {
             until: Some(deps.now() + 15),
-        };
+        });
     }
-    primary_infra_next(deps, task_id, grant, infra)
+    Ok(primary_infra_next(deps, task_id, grant, infra))
 }

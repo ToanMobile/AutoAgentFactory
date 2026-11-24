@@ -477,13 +477,13 @@ impl Scheduler<'_> {
     ) {
         match deferred {
             DeferredSiblingOutcome::Halt(why) => {
+                self.record_halt(&task_id, why);
                 if let Some(task) = self.try_dual(&task_id, self.deps.store.get_task(&task_id)) {
                     self.requeue_if_ready(task_id.clone(), task.state);
                     if task.state == TaskState::Blocked {
                         self.push_blocked_unique(task_id);
                     }
                 }
-                self.summary.halted.get_or_insert(why);
             }
             DeferredSiblingOutcome::Blocked => {
                 self.state.transient_retries.remove(&task_id);

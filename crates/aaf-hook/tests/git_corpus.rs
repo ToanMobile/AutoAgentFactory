@@ -194,7 +194,7 @@ fn heredoc_bodies_are_commands_unless_proven_data() {
             // Unparsable body next to git and a dangerous word.
             ("sh <<EOF\ngit push --force 'x\nEOF", OPAQUE),
             (
-                "gh pr create --body \"$(cat <<'EOF'\ndon't git push --force\nEOF\n)\"",
+                "gh pr create --body \"$(cat <<'EOF'\n🤖 aaf-bot: don't git push --force\nEOF\n)\"",
                 ALLOW,
             ),
         ],

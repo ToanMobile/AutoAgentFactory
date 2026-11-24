@@ -400,9 +400,7 @@ pub(crate) fn execute_audit(
         });
     }
     if let Some(infra) = infra {
-        return Ok(super::post_audit::audit_infra_next(
-            deps, &task.id, grant, &infra,
-        ));
+        return super::post_audit::audit_infra_next(deps, &task.id, grant, &infra);
     }
 
     let approval = if let Some(ref before) = fp_before {

@@ -162,7 +162,10 @@ pub(super) fn build_stage_router(
     };
     let mut pools = HashMap::from([(dkey, Arc::clone(&dpool))]);
     let (dc, dr) = (run.executor_cmd.join(" "), default_runner);
-    let def = StageTarget::new(&run.executor, dc, &run.model, &run.effort, dr, dpool);
+    // Keep writer-stage effective executor mapping in sync with
+    // `aaf_engine::factory::stage_router::writer_hook_executors`.
+    let mut def = StageTarget::new_writer(&run.executor, dc, &run.model, &run.effort, dr, dpool);
+    def.hook_required |= super::run_executor_is_claude(run);
     let mut mk = |sp: Spec<'_>, ro: bool| -> Result<StageTarget, CmdError> {
         let (exec, c, m, e) = (sp.0.trim(), sp.1.trim(), sp.2.trim(), sp.3.trim());
         let eff = match (exec, c) {
@@ -175,7 +178,12 @@ pub(super) fn build_stage_router(
         let p = pools
             .entry(key.clone())
             .or_insert_with(|| build_pool_for_provider(ctx, repo, cfg, db, &key));
-        Ok(StageTarget::new(eff, c, m, e, r, Arc::clone(p)))
+        let target = if ro {
+            StageTarget::new(eff, c, m, e, r, Arc::clone(p))
+        } else {
+            StageTarget::new_writer(eff, c, m, e, r, Arc::clone(p))
+        };
+        Ok(target)
     };
 
     let (p_i, p_e) = (&pipe.implementer, &pipe.implementer_escalated);

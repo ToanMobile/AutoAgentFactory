@@ -69,6 +69,7 @@ pub enum ToolAction {
     FileRead(String),
     FileReadMany(Vec<String>),
     FileWrite(Vec<String>),
+    Mcp { tool: String, input: Option<Value> },
     Unknown,
 }
 
@@ -162,6 +163,12 @@ fn parse_action(
     tool: &str,
     tool_input: Option<&Value>,
 ) -> Result<ToolAction, Denial> {
+    if crate::gh_bot_guard::is_github_mcp_tool(tool) {
+        return Ok(ToolAction::Mcp {
+            tool: tool.to_string(),
+            input: tool_input.cloned(),
+        });
+    }
     match host {
         HookHost::Claude | HookHost::Auto => match tool {
             "Bash" => extract_shell_command(tool_input, true, false).map(ToolAction::Shell),
@@ -307,6 +314,7 @@ pub fn evaluate(action: ToolAction, ctx: Ctx) -> Option<Denial> {
         ToolAction::FileRead(raw) => check_read_path(&raw, &ctx),
         ToolAction::FileReadMany(paths) => paths.iter().find_map(|raw| check_read_path(raw, &ctx)),
         ToolAction::FileWrite(paths) => paths.iter().find_map(|raw| check_write_path(raw, &ctx)),
+        ToolAction::Mcp { tool, input } => crate::gh_bot_guard::check_mcp(&tool, input.as_ref()),
         ToolAction::Unknown => None,
     }
 }

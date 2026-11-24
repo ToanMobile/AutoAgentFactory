@@ -48,8 +48,7 @@ pub enum OracleCompileRedPolicy {
     /// so post-gate cross-audit still inspects the new assertions).
     Warn,
     /// Map `CompileRed` to retryable `GateStatus::Blocked` (allowing T3 rework
-    /// instead of 0-retry `Unverified`), while still downgrading all-`Added`
-    /// new-module diffs to `Warn` + mandatory post-gate cross-audit.
+    /// instead of 0-retry `Unverified`), including all-`Added` new-module diffs.
     #[default]
     Blocked,
     /// Legacy fail-closed behavior: map `CompileRed` to `GateStatus::Unverified`.

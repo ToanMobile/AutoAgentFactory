@@ -376,6 +376,7 @@ fn make_deps(
             mobile: false,
             data_dir: tmp.path().to_path_buf(),
             home: tmp.path().to_path_buf(),
+            owner_github_allowlist: Vec::new(),
         },
     }
 }

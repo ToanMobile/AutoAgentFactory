@@ -27,10 +27,12 @@ pub enum EventKind {
     PlanConverged,
     DualReviewTurn,
     ImplementerEscalated,
+    FactoryHalted,
+    PrFeedback,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 22] = [
+    pub const ALL: [EventKind; 24] = [
         EventKind::TaskCreated,
         EventKind::TaskStateChanged,
         EventKind::RunStarted,
@@ -53,6 +55,8 @@ impl EventKind {
         EventKind::PlanConverged,
         EventKind::DualReviewTurn,
         EventKind::ImplementerEscalated,
+        EventKind::FactoryHalted,
+        EventKind::PrFeedback,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -79,6 +83,8 @@ impl EventKind {
             EventKind::PlanConverged => "plan_converged",
             EventKind::DualReviewTurn => "dual_review_turn",
             EventKind::ImplementerEscalated => "implementer_escalated",
+            EventKind::FactoryHalted => "factory_halted",
+            EventKind::PrFeedback => "pr_feedback",
         }
     }
 

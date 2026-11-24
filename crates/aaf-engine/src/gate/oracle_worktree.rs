@@ -133,7 +133,10 @@ fn checked_rel_components(rel_path: &str) -> Result<Vec<&std::ffi::OsStr>, GateE
 /// Prepares `scratch/<rel_path>` for writing: unlinks any symlinked intermediate
 /// directory or symlinked destination so writes never escape `scratch`, and
 /// verifies the canonical parent stays under `scratch`.
-fn prepare_safe_write_target(scratch: &Path, rel_path: &str) -> Result<PathBuf, GateError> {
+pub(super) fn prepare_safe_write_target(
+    scratch: &Path,
+    rel_path: &str,
+) -> Result<PathBuf, GateError> {
     let parts = checked_rel_components(rel_path)?;
     let (file_name, dirs) = parts
         .split_last()
@@ -166,7 +169,7 @@ fn prepare_safe_write_target(scratch: &Path, rel_path: &str) -> Result<PathBuf, 
 
 /// Safely removes `scratch/<rel_path>` without traversing through symlinked
 /// parent directories outside `scratch`.
-fn safe_remove(scratch: &Path, rel_path: &str) -> Result<(), GateError> {
+pub(super) fn safe_remove(scratch: &Path, rel_path: &str) -> Result<(), GateError> {
     let parts = checked_rel_components(rel_path)?;
     let (file_name, dirs) = parts
         .split_last()
@@ -234,7 +237,11 @@ pub(crate) fn overlay_live_changes(repo_root: &Path, scratch: &Path) -> Result<(
 /// Whether `rel_path` is a gitlink (mode 160000, a submodule pointer) in
 /// `base_sha`: `git show` cannot print one, since its commit lives in the
 /// submodule's repository.
-fn is_gitlink_at(repo_root: &Path, base_sha: &str, rel_path: &str) -> Result<bool, GateError> {
+pub(super) fn is_gitlink_at(
+    repo_root: &Path,
+    base_sha: &str,
+    rel_path: &str,
+) -> Result<bool, GateError> {
     let raw = git_bytes(
         repo_root,
         &[

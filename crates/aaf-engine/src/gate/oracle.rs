@@ -18,6 +18,7 @@ use aaf_domain::oracle_config::OracleCompileRedPolicy;
 
 use super::changes::{AddedLines, Change};
 use super::oracle_classify::{OracleOutcome, classify};
+use super::oracle_control::{ControlContext, verify_proven};
 use super::oracle_worktree::{
     ScratchWorktree, inline_cfg_test_spans, overlay_live_changes, revert_prod_files,
 };
@@ -67,7 +68,7 @@ const FIXTURE_DIRS: &[&str] = &[
 /// Result of running the opt-in red->green oracle after a `Clear` gate run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OracleVerdict {
-    Skipped,
+    Skipped(Option<String>),
     Applied {
         status: Option<GateStatus>,
         reason: String,
@@ -81,7 +82,12 @@ pub fn apply_verdict(
     verdict: OracleVerdict,
 ) -> (GateStatus, Vec<String>) {
     match verdict {
-        OracleVerdict::Skipped => (status, reasons),
+        OracleVerdict::Skipped(note) => {
+            if let Some(note) = note {
+                reasons.push(note);
+            }
+            (status, reasons)
+        }
         OracleVerdict::Applied {
             status: next,
             reason,
@@ -223,10 +229,10 @@ fn prepare_reverted_tree(
     Ok(scratch)
 }
 
-struct TestFilesEnv(PathBuf);
+pub(super) struct TestFilesEnv(PathBuf);
 
 impl TestFilesEnv {
-    fn write(files: &BTreeSet<String>) -> Result<Self, GateError> {
+    pub(super) fn write(files: &BTreeSet<String>) -> Result<Self, GateError> {
         let seq = ORACLE_ENV_SEQ.fetch_add(1, Ordering::Relaxed);
         let path =
             std::env::temp_dir().join(format!("aaf-oracle-tests-{}-{seq}.txt", std::process::id()));
@@ -242,6 +248,10 @@ impl TestFilesEnv {
             writeln!(file, "{entry}")?;
         }
         Ok(Self(path))
+    }
+
+    pub(super) fn path_string(&self) -> String {
+        self.0.to_string_lossy().into_owned()
     }
 }
 
@@ -276,16 +286,14 @@ fn select_test_command(cfg: &RepoConfig, mode: GateMode) -> Option<(&'static str
     }
 }
 
-fn map_outcome(
+pub(super) fn map_outcome(
     mode: OracleMode,
     compile_red_policy: OracleCompileRedPolicy,
-    all_prod_added: bool,
-    has_repro: bool,
     outcome: OracleOutcome,
 ) -> OracleVerdict {
     let applied = |status, reason| OracleVerdict::Applied { status, reason };
     match (mode, outcome) {
-        (OracleMode::Off, _) => OracleVerdict::Skipped,
+        (OracleMode::Off, _) => OracleVerdict::Skipped(None),
         (_, OracleOutcome::Proven) => applied(None, "oracle: red_green=proven".to_string()),
         (OracleMode::Block, OracleOutcome::Vacuous) => applied(
             Some(GateStatus::Blocked),
@@ -297,34 +305,28 @@ fn map_outcome(
             "warning: oracle: vacuous test — tests still pass after reverting production changes"
                 .to_string(),
         ),
-        (OracleMode::Block, OracleOutcome::CompileRed(msg)) => {
-            let downgrade_to_warn = match compile_red_policy {
-                OracleCompileRedPolicy::Warn => true,
-                OracleCompileRedPolicy::Blocked => all_prod_added && !has_repro,
-                OracleCompileRedPolicy::Unverified => false,
-            };
-            if downgrade_to_warn {
-                applied(
-                    None,
-                    format!("warning: oracle: compile_red ({msg}); behavioral_red_unproven"),
-                )
-            } else if compile_red_policy == OracleCompileRedPolicy::Blocked {
-                applied(
-                    Some(GateStatus::Blocked),
-                    format!(
-                        "oracle: compile_red ({msg}): the changed tests do not build against the \
-                         base version, so they cannot show the change fixes anything. Add a test \
-                         that compiles against the base API (call only code that exists before \
-                         your change) and fails there, then passes with your change"
-                    ),
-                )
-            } else {
-                applied(
-                    Some(GateStatus::Unverified),
-                    format!("oracle: inconclusive (compile_red: {msg})"),
-                )
-            }
-        }
+        (OracleMode::Block, OracleOutcome::CompileRed(msg)) => match compile_red_policy {
+            OracleCompileRedPolicy::Warn => applied(
+                None,
+                format!("warning: oracle: compile_red ({msg}); behavioral_red_unproven"),
+            ),
+            OracleCompileRedPolicy::Blocked => applied(
+                Some(GateStatus::Blocked),
+                format!(
+                    "oracle: compile_red ({msg}): the changed tests do not build against the \
+                     base version, so they cannot show the change fixes anything. Add a test \
+                     that compiles against the base API (call only code that exists before \
+                     your change) and fails there, then passes with your change. For a new \
+                     module, wire it into an existing entry point on base (CLI, public \
+                     function, route, etc.) and test through that entry point so the test \
+                     builds on base and fails there"
+                ),
+            ),
+            OracleCompileRedPolicy::Unverified => applied(
+                Some(GateStatus::Unverified),
+                format!("oracle: inconclusive (compile_red: {msg})"),
+            ),
+        },
         (OracleMode::Warn, OracleOutcome::CompileRed(msg)) => applied(
             None,
             format!("warning: oracle: compile_red ({msg}); behavioral_red_unproven"),
@@ -366,7 +368,7 @@ pub(crate) fn evaluate_with_options(
 ) -> Result<OracleVerdict, GateError> {
     let oracle_mode = cfg.gate.red_green_oracle;
     if oracle_mode == OracleMode::Off {
-        return Ok(OracleVerdict::Skipped);
+        return Ok(OracleVerdict::Skipped(None));
     }
     let mut prod_changes = Vec::new();
     let mut test_files = BTreeSet::new();
@@ -386,10 +388,10 @@ pub(crate) fn evaluate_with_options(
         }
     }
     if prod_changes.is_empty() {
-        return Ok(OracleVerdict::Skipped);
+        return Ok(OracleVerdict::Skipped(Some(
+            "note: oracle skipped (no production changes)".to_string(),
+        )));
     }
-    let all_prod_added = prod_changes.iter().all(|ch| ch.kind == ChangeKind::Added);
-    let has_repro = !cfg.commands.repro.trim().is_empty();
     let inline_rust_tests = inline_rust_test_files(repo_root, added);
     if test_files.is_empty() && inline_rust_tests.is_empty() {
         let msg = "oracle: no test changes detected for production diff";
@@ -402,11 +404,13 @@ pub(crate) fn evaluate_with_options(
                 status: None,
                 reason: format!("warning: {msg}"),
             },
-            OracleMode::Off => OracleVerdict::Skipped,
+            OracleMode::Off => OracleVerdict::Skipped(None),
         });
     }
     let Some((cmd_label, cmd_str)) = select_test_command(cfg, mode) else {
-        return Ok(OracleVerdict::Skipped);
+        return Ok(OracleVerdict::Skipped(Some(
+            "note: oracle skipped (no test_scoped/test_full command configured)".to_string(),
+        )));
     };
 
     // No committed HEAD is a broken repository, not an unbuildable tree.
@@ -429,17 +433,15 @@ pub(crate) fn evaluate_with_options(
             return Ok(map_outcome(
                 oracle_mode,
                 cfg.gate.oracle_compile_red_policy,
-                all_prod_added,
-                has_repro,
                 OracleOutcome::Inconclusive(format!("could not prepare reverted tree: {err}")),
             ));
         }
     };
 
     let mut env_files = test_files;
-    env_files.extend(inline_rust_tests);
+    env_files.extend(inline_rust_tests.iter().cloned());
     let test_files_env = TestFilesEnv::write(&env_files)?;
-    let test_files_path = test_files_env.0.to_string_lossy().into_owned();
+    let test_files_path = test_files_env.path_string();
     let mode_str = match mode {
         GateMode::Scoped => "scoped",
         GateMode::Full => "full",
@@ -468,19 +470,36 @@ pub(crate) fn evaluate_with_options(
         timeout: Duration::from_secs(cfg.gate.command_timeout_secs),
         log_tail_bytes: ORACLE_OUTPUT_CAP_BYTES,
     };
-    let run = heavy.throttle.run_heavy_with_env_and_removals(
-        heavy.data_dir,
-        heavy.clock,
-        &job,
-        &extra_env,
-        &env_remove,
-    )?;
+    let (run, _mode) = heavy
+        .throttle
+        .run_heavy_confined_with_env_and_removals(
+            heavy.data_dir,
+            heavy.clock,
+            &job,
+            &extra_env,
+            &env_remove,
+        )
+        .map_err(super::runner::map_throttle_err)?;
     let output = String::from_utf8_lossy(&run.output);
+    let initial = classify(run.exit_code, run.timed_out, &output);
+    if initial == OracleOutcome::Proven {
+        return verify_proven(&ControlContext {
+            repo_root,
+            scratch_path: scratch.path(),
+            base_sha,
+            oracle_mode,
+            compile_red_policy: cfg.gate.oracle_compile_red_policy,
+            changes,
+            inline_rust_tests: &inline_rust_tests,
+            heavy,
+            job: &job,
+            extra_env: &extra_env,
+            env_remove: &env_remove,
+        });
+    }
     Ok(map_outcome(
         oracle_mode,
         cfg.gate.oracle_compile_red_policy,
-        all_prod_added,
-        has_repro,
-        classify(run.exit_code, run.timed_out, &output),
+        initial,
     ))
 }

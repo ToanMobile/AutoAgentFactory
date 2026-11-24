@@ -47,7 +47,7 @@ fn run_list(ctx: &Ctx) -> CmdResult {
 
     let mut lines = Vec::with_capacity(inventory.len() + 2);
     lines.push(format!(
-        "{:<14} {:<18} {:<9} {:<20} {}",
+        "{:<14} {:<18} {:<9} {:<24} {}",
         "EXECUTOR", "NAME", "INSTALLED", "HOOK", "BINARY"
     ));
     for item in &inventory {
@@ -57,7 +57,7 @@ fn run_list(ctx: &Ctx) -> CmdResult {
             .as_ref()
             .map_or_else(|| "-".to_string(), |p| p.display().to_string());
         lines.push(format!(
-            "{:<14} {:<18} {:<9} {:<20} {}",
+            "{:<14} {:<18} {:<9} {:<24} {}",
             item.id,
             item.display_name,
             status,

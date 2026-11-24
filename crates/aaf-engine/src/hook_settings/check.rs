@@ -429,3 +429,76 @@ pub fn check_worktree_for_executor(
             )
         })
 }
+
+type HostTextCheck = fn(&str) -> Result<super::Registered, String>;
+
+fn host_base_spec(
+    normalized: &str,
+) -> Option<(&'static str, HostTextCheck, Option<HostTextCheck>)> {
+    use super::multi_host::{
+        CODEX_HOOKS_REL, GEMINI_SETTINGS_REL, OPENCODE_HOOKS_REL, covering_antigravity_hook,
+        covering_codex_hook, covering_gemini_hook, covering_opencode_hook,
+    };
+    match normalized {
+        "codex" => Some((CODEX_HOOKS_REL, covering_codex_hook, None)),
+        "gemini" => Some((
+            GEMINI_SETTINGS_REL,
+            covering_gemini_hook,
+            Some(covering_antigravity_hook),
+        )),
+        "antigravity" => Some((
+            GEMINI_SETTINGS_REL,
+            covering_antigravity_hook,
+            Some(covering_gemini_hook),
+        )),
+        "opencode" => Some((OPENCODE_HOOKS_REL, covering_opencode_hook, None)),
+        _ => None,
+    }
+}
+
+/// Verifies the matching host hook registration committed at `base` for
+/// `executor`, delegating `""` / `"claude"` to [`check_base`] and checking
+/// host-specific settings + `aaf-hook` binary resolution for `codex`, `gemini`,
+/// `antigravity`, and `opencode`. Unknown / `custom` executors return `Ok(())`.
+pub fn check_base_for_executor(
+    repo_root: &Path,
+    base: &str,
+    path_var: &OsStr,
+    executor: &str,
+) -> Result<(), String> {
+    let normalized = executor.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "claude" {
+        return check_base(repo_root, base, path_var);
+    }
+    let Some((settings_rel, primary, fallback)) = host_base_spec(&normalized) else {
+        return Ok(());
+    };
+    let register_err = |problem: &str| {
+        format!(
+            "the agents of this run would start without {HOOK_BINARY}: {settings_rel} for \
+             {normalized} on the base branch: {problem} — fix: run `aaf init --hook-host \
+             {normalized}` and commit the settings file on the base branch, then start `aaf run` \
+             again; no task was touched"
+        )
+    };
+    let spec = format!("{base}:{settings_rel}");
+    let text = aaf_fp::git(repo_root, &["show", &spec], &[], crate::gate::GIT_TIMEOUT)
+        .map_err(|_| register_err("the file is not committed there"))?;
+    let reg = primary(&text)
+        .or_else(|primary_err| match fallback {
+            Some(fb) => fb(&text).map_err(|_| primary_err),
+            None => Err(primary_err),
+        })
+        .map_err(|problem| register_err(&problem))?;
+    let program =
+        super::command_program(&reg.command).ok_or_else(|| register_err("empty hook command"))?;
+    resolve_program(&program, path_var, None)
+        .map(|_| ())
+        .map_err(|problem| {
+            format!(
+                "the agents of this run would start without {HOOK_BINARY}: {settings_rel} for \
+                 {normalized} on the base branch: {problem} — fix: start `aaf run` with \
+                 {HOOK_BINARY} on PATH; no task was touched"
+            )
+        })
+}

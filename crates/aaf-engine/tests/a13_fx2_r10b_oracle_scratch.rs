@@ -144,14 +144,19 @@ fn age(dir: &Path, by: Duration) {
 fn oracle_scratch_is_a_wiped_warm_slot_under_the_data_dir_and_never_accumulates() {
     let data = TempDir::new().unwrap();
     let data_root = fs::canonicalize(data.path()).unwrap();
-    let marker = data_root.join("cwds.txt");
+    let out = TempDir::new().unwrap();
+    let marker = fs::canonicalize(out.path()).unwrap().join("cwds.txt");
     let cmd = format!(
-        "pwd -P >> '{}'; if grep -q 'echo 0' src/app.sh; then echo 'FAIL: app'; exit 1; fi; echo ok",
+        "pwd -P >> '{}'; for f in tests/test_*.sh; do [ -f \"$f\" ] || continue; sh \"$f\" || exit 1; done",
         marker.display()
     );
     let repo = init_repo(&cmd);
     fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
-    fs::write(repo.path().join("tests/test_app.sh"), "echo ok\n").unwrap();
+    fs::write(
+        repo.path().join("tests/test_app.sh"),
+        "#!/bin/sh\nif grep -q 'echo 0' src/app.sh; then echo 'FAIL: app'; exit 1; fi\necho ok\n",
+    )
+    .unwrap();
 
     let id = stats_repo_id(repo.path());
     let slot_parent = warm_slots_root(&data_root).join("oracle").join(&id);
@@ -307,8 +312,9 @@ fn oracle_warm_slot_never_runs_agent_controlled_hooks() {
     let data = TempDir::new().unwrap();
     let data_root = fs::canonicalize(data.path()).unwrap();
     let marker = data_root.join("hook-ran");
-    let repo =
-        init_repo("if grep -q 'echo 0' src/app.sh; then echo 'FAIL: app'; exit 1; fi; echo ok");
+    let repo = init_repo(
+        "for f in tests/test_*.sh; do [ -f \"$f\" ] || continue; sh \"$f\" || exit 1; done",
+    );
     let hooks = repo.path().join(".githooks");
     fs::create_dir_all(&hooks).unwrap();
     for hook in ["post-checkout", "reference-transaction"] {
@@ -326,7 +332,11 @@ fn oracle_warm_slot_never_runs_agent_controlled_hooks() {
     git_out(repo.path(), &["commit", "-q", "-m", "hooks"]);
     git_out(repo.path(), &["branch", "-f", "main", "HEAD"]);
     fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
-    fs::write(repo.path().join("tests/test_app.sh"), "echo ok\n").unwrap();
+    fs::write(
+        repo.path().join("tests/test_app.sh"),
+        "#!/bin/sh\nif grep -q 'echo 0' src/app.sh; then echo 'FAIL: app'; exit 1; fi\necho ok\n",
+    )
+    .unwrap();
     git_out(repo.path(), &["config", "core.hooksPath", ".githooks"]);
     // Only what the gate does from here counts.
     let _ = fs::remove_file(&marker);

@@ -10,6 +10,7 @@ use aaf_domain::account::AccountProfile;
 use aaf_domain::gate::{HeadLockReport, Receipt};
 use aaf_domain::ports::{LimitHit, PortError, PortResult};
 
+use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef};
 use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::{GitError, MergeOutcome, PrOutcome, TaskWorktree};
 use crate::unblocker::{QuotaRoute, RerunResult};
@@ -164,6 +165,16 @@ pub trait GitOps: Send + Sync {
         _run_id: &str,
         _now: i64,
     ) -> Result<Option<(String, String)>, GitError> {
+        Ok(None)
+    }
+    /// Reads PR CI checks, failing logs, and review threads from GitHub.
+    /// Returns `Ok(None)` when unsupported (default for fakes).
+    fn pr_feedback(
+        &self,
+        _repo_root: &Path,
+        _pr: &PrRef,
+        _expected_head_branch: &str,
+    ) -> PortResult<Option<PrFeedbackSnapshot>> {
         Ok(None)
     }
 }

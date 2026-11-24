@@ -308,11 +308,11 @@ impl TestEnv {
                 mobile: false,
                 data_dir: self.tmp.path().to_path_buf(),
                 home: self.tmp.path().to_path_buf(),
+                owner_github_allowlist: Vec::new(),
             },
         }
     }
 }
-
 fn hooks_stop() -> Hooks<'static> {
     Hooks {
         idle: &|| false,

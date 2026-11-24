@@ -420,6 +420,7 @@ fn restarts_reset_after_healthy_turn_in_auto_mode_allows_future_switches() {
             mobile: false,
             data_dir,
             home: PathBuf::from("/fake/home"),
+            owner_github_allowlist: Vec::new(),
         },
     };
     let hooks = Hooks {
@@ -473,6 +474,7 @@ fn expire_waits_clears_restarts_when_cooldown_elapses() {
             mobile: false,
             data_dir,
             home: PathBuf::from("/fake/home"),
+            owner_github_allowlist: Vec::new(),
         },
     };
     let (msg_tx, msg_rx) = mpsc::channel();

@@ -174,7 +174,10 @@ fn scoped_docs_fast_path_skips_commands_but_still_blocks_secrets_and_runs_full()
 fn gate_passes_verified_changed_files_env_and_reuses_receipt_across_worktrees() {
     let repo = init_repo();
     let data = TempDir::new().unwrap();
-    let capture_file = data.path().join("captured_env.txt");
+    let out = TempDir::new().unwrap();
+    let capture_file = fs::canonicalize(out.path())
+        .unwrap()
+        .join("captured_env.txt");
     let wt_parent = TempDir::new().unwrap();
     let wt_path = wt_parent.path().join("sibling-wt");
 

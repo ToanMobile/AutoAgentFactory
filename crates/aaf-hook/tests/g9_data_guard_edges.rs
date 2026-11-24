@@ -19,12 +19,18 @@ fn g9_allowlisted_literal_messages_and_heredocs() {
     run_corpus(
         &Fixture::new(),
         &[
-            ("gh pr create --body 'mentions AAF_DATA_DIR'", ALLOW),
             (
-                "gh pr create -t 'fix AAF_DATA_DIR' -b 'see .local/share/autofactory'",
+                "gh pr create --body '🤖 aaf-bot: mentions AAF_DATA_DIR'",
                 ALLOW,
             ),
-            ("gh issue comment 1 --body='mentions AAF_DATA_DIR'", ALLOW),
+            (
+                "gh pr create -t 'fix AAF_DATA_DIR' -b '🤖 aaf-bot: see .local/share/autofactory'",
+                ALLOW,
+            ),
+            (
+                "gh issue comment 1 --body='🤖 aaf-bot: mentions AAF_DATA_DIR'",
+                ALLOW,
+            ),
             ("git commit -m'docs: explain AAF_DATA_DIR'", ALLOW),
             ("git commit --message='docs: explain AAF_DATA_DIR'", ALLOW),
             ("git commit -am 'docs: explain AAF_DATA_DIR'", ALLOW),
@@ -35,7 +41,7 @@ fn g9_allowlisted_literal_messages_and_heredocs() {
             ("git notes add -m 'mentions AAF_DATA_DIR'", ALLOW),
             ("git tag -F - <<'EOF'\nrelease AAF_DATA_DIR\nEOF\n", ALLOW),
             (
-                "gh pr create --body-file - <<'EOF'\ndocs AAF_DATA_DIR\nEOF\n",
+                "gh pr create --body-file - <<'EOF'\n🤖 aaf-bot: docs AAF_DATA_DIR\nEOF\n",
                 ALLOW,
             ),
             ("cat - >> note.md <<\"EOF\"\nAAF_DATA_DIR\nEOF\n", ALLOW),

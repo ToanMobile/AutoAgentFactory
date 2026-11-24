@@ -14,6 +14,7 @@ use aaf_domain::ports::Clock;
 
 use super::GateError;
 use super::changes::Change;
+use super::confine::{self, ConfineError, ConfineMode};
 use super::proc::capture;
 use crate::throttle::{HeavyJob, Throttle, heavy_tool};
 
@@ -241,10 +242,33 @@ pub fn run_command_with_env_and_removals(
     extra_env: &[(&str, &str)],
     env_remove: &[&str],
 ) -> Result<CommandResult, GateError> {
+    let fallback_data = aaf_fp::data_dir().ok();
+    run_command_confined(
+        repo_root,
+        name,
+        command,
+        timeout,
+        extra_env,
+        env_remove,
+        fallback_data.as_deref(),
+    )
+    .map(|(res, _)| res)
+}
+
+fn run_command_confined(
+    repo_root: &Path,
+    name: &str,
+    command: &str,
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+    env_remove: &[&str],
+    data_dir: Option<&Path>,
+) -> Result<(CommandResult, ConfineMode), GateError> {
     // By path: a bare `sh` is looked up in `PATH` at every spawn, where the
     // task can have put one of its own.
-    let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(command).current_dir(repo_root);
+    let (argv, mode) = confine::shell_argv(command, repo_root, data_dir)?;
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(repo_root);
     // When the gate itself runs inside a git hook these would point the
     // command's own git calls at the wrong repository. Strip ambient diff vars too.
     for var in [
@@ -266,14 +290,17 @@ pub fn run_command_with_env_and_removals(
         cmd.env(k, v);
     }
     let done = capture(cmd, timeout, Some(LOG_TAIL_BYTES), true)?;
-    Ok(CommandResult {
-        name: name.to_string(),
-        command: command.to_string(),
-        exit_code: if done.timed_out { None } else { done.exit_code },
-        timed_out: done.timed_out,
-        duration_ms: u64::try_from(done.duration.as_millis()).unwrap_or(u64::MAX),
-        log_tail: String::from_utf8_lossy(&done.output).into_owned(),
-    })
+    Ok((
+        CommandResult {
+            name: name.to_string(),
+            command: command.to_string(),
+            exit_code: if done.timed_out { None } else { done.exit_code },
+            timed_out: done.timed_out,
+            duration_ms: u64::try_from(done.duration.as_millis()).unwrap_or(u64::MAX),
+            log_tail: String::from_utf8_lossy(&done.output).into_owned(),
+        },
+        mode,
+    ))
 }
 
 /// Runs the plan in order and stops at the first command that does not pass:
@@ -323,6 +350,24 @@ pub struct ThrottledRun {
     /// What the throttle did (waits, degraded runs, pauses), for the
     /// receipt's `reasons`. Never changes the status.
     pub notes: Vec<String>,
+    /// Reason why gate commands ran unconfined on this host, if any.
+    pub unconfined: Option<String>,
+}
+
+pub(crate) fn map_throttle_err(err: std::io::Error) -> GateError {
+    match err.downcast::<ConfineError>() {
+        Ok(confine_err) => GateError::Confine(confine_err),
+        Err(io_err) => GateError::Io(io_err),
+    }
+}
+
+fn record_confine_mode(unconfined: &mut Option<String>, mode: ConfineMode) {
+    if let ConfineMode::Unconfined { reason } = mode
+        && reason != confine::REASON_NO_DATA_DIR
+        && unconfined.is_none()
+    {
+        *unconfined = Some(reason);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -339,7 +384,7 @@ fn run_heavy(
     heavy: &HeavyContext<'_>,
     env: CommandEnv<'_>,
     notes: &mut Vec<String>,
-) -> Result<CommandResult, GateError> {
+) -> Result<(CommandResult, ConfineMode), GateError> {
     let job = HeavyJob {
         repo_id: heavy.stats_repo_id,
         label: name,
@@ -354,13 +399,16 @@ fn run_heavy(
         .copied()
         .filter(|var| !env.extra.iter().any(|(k, _)| k == var))
         .collect();
-    let run = heavy.throttle.run_heavy_with_env_and_removals(
-        heavy.data_dir,
-        heavy.clock,
-        &job,
-        env.extra,
-        &filtered_remove,
-    )?;
+    let (run, mode) = heavy
+        .throttle
+        .run_heavy_confined_with_env_and_removals(
+            heavy.data_dir,
+            heavy.clock,
+            &job,
+            env.extra,
+            &filtered_remove,
+        )
+        .map_err(map_throttle_err)?;
     if run.waited_secs > 0 {
         notes.push(format!(
             "{THROTTLE_NOTE}{name} waited {}s for a heavy slot or a calmer machine",
@@ -396,14 +444,17 @@ fn run_heavy(
             daemon.kind, daemon.pid
         ));
     }
-    Ok(CommandResult {
-        name: name.to_string(),
-        command: command.to_string(),
-        exit_code: if run.timed_out { None } else { run.exit_code },
-        timed_out: run.timed_out,
-        duration_ms: u64::try_from(run.duration.as_millis()).unwrap_or(u64::MAX),
-        log_tail: String::from_utf8_lossy(&run.output).into_owned(),
-    })
+    Ok((
+        CommandResult {
+            name: name.to_string(),
+            command: command.to_string(),
+            exit_code: if run.timed_out { None } else { run.exit_code },
+            timed_out: run.timed_out,
+            duration_ms: u64::try_from(run.duration.as_millis()).unwrap_or(u64::MAX),
+            log_tail: String::from_utf8_lossy(&run.output).into_owned(),
+        },
+        mode,
+    ))
 }
 
 /// [`run_all`] with the heavy commands sent through the machine throttle.
@@ -443,13 +494,14 @@ pub fn run_all_throttled_with_options(
     let mut run = ThrottledRun {
         results: Vec::new(),
         notes: Vec::new(),
+        unconfined: None,
     };
     let env = CommandEnv {
         extra: extra_env,
         remove: env_remove,
     };
     for (name, command) in plan(commands, mode) {
-        let result = if is_heavy(name, &command) {
+        let (result, confine_mode) = if is_heavy(name, &command) {
             run_heavy(
                 repo_root,
                 name,
@@ -460,10 +512,17 @@ pub fn run_all_throttled_with_options(
                 &mut run.notes,
             )?
         } else {
-            run_command_with_env_and_removals(
-                repo_root, name, &command, timeout, extra_env, env_remove,
+            run_command_confined(
+                repo_root,
+                name,
+                &command,
+                timeout,
+                extra_env,
+                env_remove,
+                Some(heavy.data_dir),
             )?
         };
+        record_confine_mode(&mut run.unconfined, confine_mode);
         let passed = result.passed();
         run.results.push(result);
         if !passed {
@@ -487,7 +546,7 @@ pub fn run_one_heavy(
         extra: extra_env,
         remove: &[],
     };
-    run_heavy(repo_root, name, command, timeout, heavy, env, &mut notes)
+    run_heavy(repo_root, name, command, timeout, heavy, env, &mut notes).map(|(res, _)| res)
 }
 
 #[cfg(test)]

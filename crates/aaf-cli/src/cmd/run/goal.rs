@@ -74,7 +74,11 @@ pub(super) fn create_goal_task(
     let trimmed = raw_goal.trim();
     if trimmed.is_empty() {
         let msg = "goal is empty: pass a non-empty task description";
-        return Ok(GoalOutcome::Refused(CmdOutput::policy("refused", msg)));
+        return Ok(GoalOutcome::Refused(
+            CmdOutput::policy("refused", msg)
+                .field("refused_kind", json!("usage"))
+                .field("reason", json!(msg)),
+        ));
     }
     if !trimmed.contains(char::is_whitespace) {
         let lower = trimmed.to_ascii_lowercase();
@@ -83,14 +87,22 @@ pub(super) fn create_goal_task(
                 "refused ambiguous 1-word goal {trimmed:?}: did you mean `--{lower}` or \
                  `aaf {lower}`? Pass a full task description to create a task."
             );
-            return Ok(GoalOutcome::Refused(CmdOutput::policy("refused", msg)));
+            return Ok(GoalOutcome::Refused(
+                CmdOutput::policy("refused", msg.clone())
+                    .field("refused_kind", json!("usage"))
+                    .field("reason", json!(msg)),
+            ));
         }
     }
 
     let title = derive_title(trimmed);
     if title.is_empty() {
         let msg = "goal has no usable title line";
-        return Ok(GoalOutcome::Refused(CmdOutput::policy("refused", msg)));
+        return Ok(GoalOutcome::Refused(
+            CmdOutput::policy("refused", msg)
+                .field("refused_kind", json!("usage"))
+                .field("reason", json!(msg)),
+        ));
     }
     let acceptance: Vec<String> = accept
         .iter()

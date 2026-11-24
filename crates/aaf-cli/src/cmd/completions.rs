@@ -201,7 +201,7 @@ _aaf() {{
         args)
             case "${{words[1]}}" in
                 init)
-                    _arguments '--force' '--with-skills' '--hook-host[Hook host]:host:(claude codex gemini all)' '--json'
+                    _arguments '--force' '--with-skills' '--hook-host[Hook host]:host:(claude codex gemini antigravity opencode all)' '--json'
                     ;;
                 gate)
                     _arguments '--scoped' '--full' '--release' '--when-idle' '--idle-wait-secs[Idle wait seconds]:secs:' '--json' '--help'
@@ -276,7 +276,7 @@ fn render_fish() -> String {
     out.push_str(
         r#"complete -c aaf -n '__fish_seen_subcommand_from init' -l force -d 'Overwrite existing config'
 complete -c aaf -n '__fish_seen_subcommand_from init' -l with-skills -d 'Sync bundled skills'
-complete -c aaf -n '__fish_seen_subcommand_from init' -l hook-host -xa 'claude codex gemini all' -d 'Hook host adapter'
+complete -c aaf -n '__fish_seen_subcommand_from init' -l hook-host -xa 'claude codex gemini antigravity opencode all' -d 'Hook host adapter'
 complete -c aaf -n '__fish_seen_subcommand_from gate' -l scoped -d 'Run scoped gate'
 complete -c aaf -n '__fish_seen_subcommand_from gate' -l full -d 'Run full gate'
 complete -c aaf -n '__fish_seen_subcommand_from gate' -l release -d 'Run release gate'

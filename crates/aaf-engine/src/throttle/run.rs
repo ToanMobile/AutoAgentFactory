@@ -15,6 +15,7 @@ use super::{
     Ask, Budget, HeavyJob, HeavyRun, HeavySample, Progress, Throttle, orphans, stats, token,
     watchdog,
 };
+use crate::gate::confine::{self, ConfineMode};
 use crate::gate::proc;
 
 pub use super::token::SLOT_ENV;
@@ -336,6 +337,32 @@ impl Throttle<'_> {
         )
     }
 
+    /// [`Throttle::run_heavy_with_env_and_removals`] with gate-command
+    /// confinement around `/bin/sh -c` (keeping priority wrappers on the
+    /// outside). Note: `aaf sop` heavy commands intentionally stay on
+    /// [`Throttle::run_heavy`] because they execute owner-authored SOP scripts.
+    pub fn run_heavy_confined_with_env_and_removals(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &HeavyJob<'_>,
+        extra_env: &[(&str, &str)],
+        env_remove: &[&str],
+    ) -> io::Result<(HeavyRun, ConfineMode)> {
+        let (inner_argv, mode) = confine::shell_argv(job.command, job.cwd, Some(data_dir))?;
+        let argv = watchdog::priority_argv(&inner_argv, self.machine.low_priority, &self.tools);
+        let run = self.run_heavy_argv_with_all(
+            data_dir,
+            clock,
+            job,
+            &argv,
+            &Inherited::from_process_env(),
+            extra_env,
+            env_remove,
+        )?;
+        Ok((run, mode))
+    }
+
     #[cfg(test)]
     pub(crate) fn run_heavy_with(
         &self,
@@ -356,6 +383,23 @@ impl Throttle<'_> {
         extra_env: &[(&str, &str)],
         env_remove: &[&str],
     ) -> io::Result<HeavyRun> {
+        let argv = watchdog::heavy_argv(job.command, self.machine.low_priority, &self.tools);
+        self.run_heavy_argv_with_all(
+            data_dir, clock, job, &argv, inherited, extra_env, env_remove,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_heavy_argv_with_all(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &HeavyJob<'_>,
+        argv: &[OsString],
+        inherited: &Inherited,
+        extra_env: &[(&str, &str)],
+        env_remove: &[&str],
+    ) -> io::Result<HeavyRun> {
         let tool = heavy::heavy_tool(job.command);
         let cmd_family = if tool.is_none() {
             heavy::stats_command_family(job.command)
@@ -370,7 +414,6 @@ impl Throttle<'_> {
             exclusive: self.machine.exclusive_build_tools && tool.is_some(),
             wait_limit_secs: None,
         };
-        let argv = watchdog::heavy_argv(job.command, self.machine.low_priority, &self.tools);
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]).current_dir(job.cwd);
         // When the gate itself runs inside a git hook these would point the

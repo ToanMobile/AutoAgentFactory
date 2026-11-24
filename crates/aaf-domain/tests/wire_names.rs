@@ -143,6 +143,8 @@ fn event_kind() {
         (EventKind::PlanConverged, "plan_converged"),
         (EventKind::DualReviewTurn, "dual_review_turn"),
         (EventKind::ImplementerEscalated, "implementer_escalated"),
+        (EventKind::FactoryHalted, "factory_halted"),
+        (EventKind::PrFeedback, "pr_feedback"),
     ];
     assert_eq!(cases.len(), EventKind::ALL.len());
     for (kind, name) in cases {

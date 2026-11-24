@@ -16,6 +16,7 @@ mod cwd;
 pub mod data_guard;
 pub mod delete_guard;
 pub mod fallback;
+pub mod gh_bot_guard;
 pub mod git_alias;
 pub mod git_files;
 pub mod git_guard;
@@ -367,6 +368,9 @@ pub fn decide(input: &[u8], env: &HookEnv) -> Decision {
             }
             None => return bad_input("file tool call without tool_input.file_path"),
         },
+        _ if gh_bot_guard::is_github_mcp_tool(tool) => {
+            gh_bot_guard::check_mcp(tool, payload.get("tool_input"))
+        }
         _ => None,
     };
     denial.map_or(Decision::Allow, Decision::Deny)
@@ -414,6 +418,7 @@ fn judge_direct(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
         .or_else(|| interp_guard::check_cmd(cmd, ctx))
         .or_else(|| tool_exec::check_cmd(cmd, ctx))
         .or_else(|| pr_merge_guard::check(cmd))
+        .or_else(|| gh_bot_guard::check(cmd))
         .or_else(|| store_guard::check(cmd, ctx))
         .or_else(|| heavy_guard::check(cmd, ctx))
 }

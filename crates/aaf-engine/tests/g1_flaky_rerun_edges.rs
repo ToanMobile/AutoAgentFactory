@@ -338,6 +338,7 @@ fn run_once_with_gate(
             mobile: false,
             data_dir: tmp.path().to_path_buf(),
             home: tmp.path().to_path_buf(),
+            owner_github_allowlist: Vec::new(),
         },
     };
     let hooks = Hooks {

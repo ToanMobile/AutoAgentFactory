@@ -218,6 +218,8 @@ pub struct PipelineConfig {
     pub allow_tier_s_skip_debate: bool,
     /// Maximum automatic rework rounds after an explicit `AuditVerdict::Fail` (capped at 5).
     pub max_audit_reworks: u32,
+    /// Maximum automatic rework rounds from PR CI failures or owner reviews (capped at 3; 0 = off).
+    pub max_pr_rework_rounds: u32,
     /// Rework count threshold after which implementation escalates to `implementer_escalated`.
     pub escalate_implementer_after_reworks: u32,
     pub plan_author: StageModelConfig,
@@ -235,6 +237,7 @@ impl Default for PipelineConfig {
             max_plan_rounds: DEFAULT_MAX_PLAN_ROUNDS,
             allow_tier_s_skip_debate: false,
             max_audit_reworks: 3,
+            max_pr_rework_rounds: crate::pipeline::DEFAULT_MAX_PR_REWORK_ROUNDS,
             escalate_implementer_after_reworks: DEFAULT_ESCALATE_IMPLEMENTER_AFTER_REWORKS,
             plan_author: StageModelConfig::default(),
             plan_challenger: StageModelConfig::default(),

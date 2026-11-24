@@ -13,6 +13,7 @@ mod plain;
 mod quote;
 mod scan;
 mod stdin;
+mod subst;
 
 pub use command::{DECLARERS, NAME_SETTERS};
 pub(crate) use stdin::{shell_quote, stdin_scripts};
@@ -53,6 +54,8 @@ pub struct Cmd {
     pub dynamic_name: bool,
     /// Per-word dynamic flag parallel to `words` (`true` on `$VAR`, `$(…)`, backtick, or unquoted glob).
     pub arg_dynamic: Vec<bool>,
+    /// Literal body of a word that is solely `$(cat <<'D'\n...\nD\n)` (or `"D"`), parallel to `words`.
+    pub arg_cat_heredoc: Vec<Option<String>>,
     pub redirects: Vec<Redirect>,
     /// Raw heredoc bodies attached to this command (e.g. `python3 - <<'EOF'`).
     pub heredocs: Vec<String>,
@@ -176,6 +179,7 @@ pub fn parse_argv(words: &[String]) -> Script {
             dynamic: word.is_empty() || word.contains('$'),
             quoted: true,
             braces: Vec::new(),
+            cat_heredoc: None,
         })
         .collect();
     Lexer::new("", 0, &mut out, None).emit(Vec::new(), toks, Vec::new(), None);
@@ -190,6 +194,20 @@ struct Tok {
     quoted: bool,
     /// Char indices in `text` of the unquoted `{`, `,` and `}`.
     braces: Vec<usize>,
+    /// Literal body when this entire word is solely `$(cat <<'D'\n...\nD\n)` (or `"D"`).
+    cat_heredoc: Option<String>,
+}
+
+impl Tok {
+    pub(super) fn push_char(&mut self, c: char) {
+        self.cat_heredoc = None;
+        self.text.push(c);
+    }
+
+    pub(super) fn push_str(&mut self, s: &str) {
+        self.cat_heredoc = None;
+        self.text.push_str(s);
+    }
 }
 
 struct Heredoc {
@@ -405,7 +423,7 @@ impl Lexer<'_, '_> {
                         Some(ch) => {
                             let word = self.word_mut();
                             word.quoted = true;
-                            word.text.push(ch);
+                            word.push_char(ch);
                         }
                     }
                 }
@@ -423,7 +441,7 @@ impl Lexer<'_, '_> {
                     self.pos += 1;
                     let word = self.word_mut();
                     word.dynamic = true;
-                    word.text.push(c);
+                    word.push_char(c);
                 }
                 _ => {
                     self.pos += 1;
@@ -473,8 +491,14 @@ impl Lexer<'_, '_> {
         }
     }
 
-    fn substitute(&mut self, inner: &str) {
+    fn substitute(&mut self, inner: &str, from_dollar: bool) {
         self.chained = true;
+        let was_empty = self.word.as_ref().is_none_or(|w| w.text.is_empty());
+        let cat_heredoc = if from_dollar && was_empty {
+            subst::extract_quoted_cat_heredoc(inner)
+        } else {
+            None
+        };
         let mut deferred = Vec::new();
         self.out.enter_scope();
         lex(inner, self.depth + 1, self.out, Some(&mut deferred));
@@ -483,6 +507,7 @@ impl Lexer<'_, '_> {
         let word = self.word_mut();
         word.dynamic = true;
         word.text.push('$');
+        word.cat_heredoc = cat_heredoc;
     }
 
     fn redirect(&mut self) {

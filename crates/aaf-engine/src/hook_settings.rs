@@ -16,8 +16,8 @@ mod validate;
 use std::path::Path;
 
 pub use check::{
-    check_base, check_local, check_worktree, check_worktree_for_executor, resolve_program,
-    strip_empty_hooks_object, validate_for_executor,
+    check_base, check_base_for_executor, check_local, check_worktree, check_worktree_for_executor,
+    resolve_program, strip_empty_hooks_object, validate_for_executor,
 };
 use serde_json::{Map, Value, json};
 pub use validate::{command_program, sole_program};

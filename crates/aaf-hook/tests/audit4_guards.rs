@@ -121,7 +121,7 @@ fn c_git_control_files_and_everyday_commands() {
             ("git commit -m 'explain why .git/hooks is guarded'", ALLOW),
             ("git commit -m '.git/hooks is guarded'", ALLOW),
             (
-                "gh pr create --title x --body '.git/config stays guarded'",
+                "gh pr create --title x --body '🤖 aaf-bot: .git/config stays guarded'",
                 ALLOW,
             ),
             ("git status --short && git log --oneline -n 5", ALLOW),

@@ -305,6 +305,7 @@ fn factory_reruns_flaky_test_classifies_flaky_and_regates_to_review() {
             mobile: false,
             data_dir,
             home: tmp.path().to_path_buf(),
+            owner_github_allowlist: Vec::new(),
         },
     };
 

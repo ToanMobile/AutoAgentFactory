@@ -12,6 +12,7 @@ pub mod gh_client;
 pub mod hydration;
 pub mod merge_queue;
 pub mod pr;
+pub mod pr_feedback_gh;
 pub mod pr_merge;
 mod pr_merge_support;
 pub mod warm_slot;

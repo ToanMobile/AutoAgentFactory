@@ -300,7 +300,7 @@ impl<'a> Scheduler<'a> {
         let state = self.deps.store.get_task(&task_id)?.state;
         self.requeue_if_ready(task_id.clone(), state);
         if matches!(self.mode, Mode::Once | Mode::Drain) {
-            self.summary.halted.get_or_insert(detail);
+            self.record_halt(&task_id, detail);
             return Ok(());
         }
         let tries = self
@@ -451,7 +451,8 @@ impl<'a> Scheduler<'a> {
             self.clear_restarts_for_task(&task.id);
             self.summary.done.push(task.id);
         }
-        self.sweep_squash_merged(remaining)
+        self.sweep_squash_merged(remaining)?;
+        self.sweep_pr_feedback()
     }
 
     fn sweep_squash_merged(&mut self, remaining: Vec<Task>) -> PortResult<()> {

@@ -202,7 +202,7 @@ fn block_mode_marks_compile_red_and_zero_tests_as_unverified() {
         r_unv.reasons
     );
 
-    // 1c. All-Added new prod module under default Blocked policy -> Warn + behavioral_red_unproven.
+    // 1c. All-Added new prod module under default Blocked policy -> Blocked + compile_red.
     let new_mod_cmd = "if [ -f src/new_mod.sh ]; then exit 0; else echo \"error[E0425]: cannot find value new_mod\"; echo \"error: could not compile demo\"; exit 101; fi";
     let r_new = run_case(
         "",
@@ -210,9 +210,9 @@ fn block_mode_marks_compile_red_and_zero_tests_as_unverified() {
         ("src/new_mod.sh", "#!/bin/sh\necho 1\n"),
         ("tests/test_new_mod.sh", "echo test\n"),
     );
-    assert_eq!(r_new.status, GateStatus::Clear, "{:?}", r_new.reasons);
+    assert_eq!(r_new.status, GateStatus::Blocked, "{:?}", r_new.reasons);
     assert!(
-        has_reason(&r_new, "behavioral_red_unproven"),
+        has_reason(&r_new, "oracle: compile_red ("),
         "{:?}",
         r_new.reasons
     );
@@ -235,7 +235,7 @@ fn oracle_populates_test_files_env_preserves_live_tree_and_cleans_scratch_worktr
     let capture = out_dir.path().join("oracle_test_files.txt");
     let leak_flag = out_dir.path().join("oracle_flag.txt");
     let test_cmd = format!(
-        "if [ -n \"$AAF_TEST_FILES_FILE\" ]; then cp \"$AAF_TEST_FILES_FILE\" \"{}\" ; echo \"FLAG=$AAF_ORACLE_RUN\" > \"{}\" ; fi; val=$(sh src/app.sh); if [ \"$val\" != \"42\" ]; then echo \"FAIL: expected 42\"; exit 1; fi",
+        "if [ -n \"$AAF_TEST_FILES_FILE\" ]; then cat \"$AAF_TEST_FILES_FILE\" >> \"{}\" ; echo \"FLAG=$AAF_ORACLE_RUN\" > \"{}\" ; fi; for f in tests/test_*.sh; do [ -f \"$f\" ] || continue; sh \"$f\" || exit 1; done",
         capture.display(),
         leak_flag.display()
     );
@@ -245,7 +245,11 @@ fn oracle_populates_test_files_env_preserves_live_tree_and_cleans_scratch_worktr
     // Uncommitted prod edit + untracked test file + extra untracked prod file.
     fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
     fs::write(repo.path().join("src/extra_new.sh"), "#!/bin/sh\necho hi\n").unwrap();
-    fs::write(repo.path().join("tests/test_feature.sh"), "echo ok\n").unwrap();
+    fs::write(
+        repo.path().join("tests/test_feature.sh"),
+        "#!/bin/sh\nval=$(sh src/app.sh)\nif [ \"$val\" != \"42\" ]; then echo \"FAIL: expected 42\"; exit 1; fi\necho ok\n",
+    )
+    .unwrap();
 
     let fp_before = aaf_fp::tree_fp(repo.path(), Duration::from_secs(30)).unwrap();
     let receipt = run_gate(repo.path(), data.path());

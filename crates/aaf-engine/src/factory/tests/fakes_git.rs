@@ -8,6 +8,7 @@ use aaf_domain::gate::Receipt;
 use aaf_domain::ports::{PortError, PortResult};
 
 use crate::factory::ports::{GitOps, Integration};
+use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef};
 use crate::git::{MergeOutcome, PrOutcome, TaskWorktree};
 
 pub(super) fn task_of(path: &Path) -> String {
@@ -51,6 +52,10 @@ pub struct GitState {
     pub pr_notes: Vec<(String, Option<String>)>,
     /// Optional per-worktree diff override.
     pub diffs: HashMap<PathBuf, String>,
+    /// Optional PR feedback snapshot returned by `pr_feedback` (keyed by PR number).
+    pub pr_feedback: HashMap<u64, PortResult<Option<PrFeedbackSnapshot>>>,
+    /// Number of times `GitOps::pr_feedback` was called.
+    pub pr_feedback_calls: u32,
 }
 
 #[derive(Default)]
@@ -209,5 +214,19 @@ impl GitOps for FakeGit {
     fn cleanup(&self, task_id: &str) -> PortResult<()> {
         self.0.lock().unwrap().cleaned.push(task_id.to_string());
         Ok(())
+    }
+    fn pr_feedback(
+        &self,
+        _repo_root: &Path,
+        pr: &PrRef,
+        _expected_head_branch: &str,
+    ) -> PortResult<Option<PrFeedbackSnapshot>> {
+        let mut state = self.0.lock().unwrap();
+        state.pr_feedback_calls += 1;
+        match state.pr_feedback.get(&pr.number) {
+            Some(Ok(snap)) => Ok(snap.clone()),
+            Some(Err(err)) => Err(PortError::Io(err.to_string())),
+            None => Ok(None),
+        }
     }
 }
