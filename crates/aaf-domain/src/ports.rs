@@ -62,6 +62,21 @@ pub trait TaskStore: Send + Sync {
     /// All `(task_id, blocked_by)` dependency edges across the store.
     fn all_deps(&self) -> PortResult<Vec<(String, String)>>;
     fn children_of(&self, parent_id: &str) -> PortResult<Vec<Task>>;
+    /// Sets persisted retry scheduling for a transient `Blocked` task.
+    fn set_retry_schedule(
+        &self,
+        _id: &str,
+        _retry_after: Option<i64>,
+        _auto_recover_count: u32,
+        _now: i64,
+    ) -> PortResult<()> {
+        Ok(())
+    }
+    /// Transitions due transient `Blocked` tasks (`retry_after <= now`) back to
+    /// `Ready` without appending an `"unblocked:"` note or resetting ladder markers.
+    fn wake_due_blocked_tasks(&self, _repo_root: &str, _now: i64) -> PortResult<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 pub trait BudgetStore: Send + Sync {
@@ -100,6 +115,20 @@ pub trait EventSink: Send + Sync {
     fn emit(&self, event: &FactoryEvent) -> PortResult<i64>;
     /// Newest first.
     fn events_for_task(&self, task_id: &str, limit: u32) -> PortResult<Vec<FactoryEvent>>;
+    /// Newest first, filtered to `kinds`.
+    fn events_for_task_by_kinds(
+        &self,
+        task_id: &str,
+        kinds: &[crate::event::EventKind],
+        limit: u32,
+    ) -> PortResult<Vec<FactoryEvent>> {
+        let all = self.events_for_task(task_id, u32::MAX)?;
+        Ok(all
+            .into_iter()
+            .filter(|ev| kinds.contains(&ev.kind))
+            .take(limit as usize)
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +185,9 @@ pub struct AgentRequest {
     pub account: Option<AccountProfile>,
     pub timeout_secs: u64,
     pub sandbox: SandboxPolicy,
+    /// Optional inline JSON schema string for structured output enforcement.
+    #[serde(default)]
+    pub json_schema: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

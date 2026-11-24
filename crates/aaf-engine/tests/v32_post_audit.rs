@@ -456,5 +456,6 @@ fn post_gate_low_score_routes_to_audit_rework_without_writing_pass_verdict() {
         "{:?}",
         task.context_notes
     );
-    assert_eq!(db.get_budget("t1").unwrap().cycles_used, 1);
+    // Audit rework is decoupled from unblocker cycles (Plan v3).
+    assert_eq!(db.get_budget("t1").unwrap().cycles_used, 0);
 }

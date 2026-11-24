@@ -5,7 +5,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use aaf_domain::account::ProviderKind;
-use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
+use aaf_domain::ports::{
+    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, InfraKind, LimitHit, PortError,
+    PortResult,
+};
 use serde_json::Value;
 
 use super::pty::{CommandSpec, GENERIC_TAIL_BYTES};
@@ -13,28 +16,27 @@ use super::stream_log::StreamLog;
 use super::{AccountPaths, ExecEnv, open_stream_log, run_confined_with_tail};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
+const RAW_ERROR_CHARS: usize = 500;
 
-/// Entries of a Codex config directory that later runs execute or obey
-/// (matching `ClaudeCodeRunner::CONFIG_CLOSED`).
-const CODEX_CONFIG_CLOSED: [&str; 2] = ["config.toml", "hooks.json"];
+/// Entries of a Codex config directory that later runs execute or obey.
+const CODEX_CONFIG_CLOSED: [&str; 7] = [
+    "config.toml",
+    "hooks.json",
+    "AGENTS.md",
+    "instructions.md",
+    "rules",
+    "skills",
+    "plugins",
+];
 
-/// Entries of a Gemini / Antigravity config dir (`~/.gemini`) that later
-/// sessions, also unsandboxed ones, run or obey: settings with `hooks` and
-/// `mcpServers`, trusted hooks and folders, extensions and custom commands
-/// (`!{...}` runs shell), and the binaries, MCP servers and plugins the
-/// Antigravity apps keep there. Session state (`oauth_creds.json`, `tmp`,
-/// `history`, `projects.json`, `state.json`, `installation_id`) stays
-/// writable. `config/config.json` is rewritten by the app itself and, like
-/// Claude's `.claude.json`, has not been tried read-only with a real session.
-const GEMINI_CONFIG_CLOSED: [&str; 16] = [
-    "settings.json",
-    "trusted_hooks.json",
-    "trustedFolders.json",
+/// Extra Gemini / Antigravity config entries closed on top of [`super::agy::GEMINI_CONFIG_CLOSED`].
+const GEMINI_EXTRA_CLOSED: [&str; 14] = [
+    "settings.local.json",
+    "hooks",
     "extensions",
+    "policies",
     "commands",
-    "antigravity/bin",
-    "antigravity/mcp",
-    "antigravity/lib",
+    "antigravity",
     "antigravity-cli/bin",
     "antigravity-cli/mcp",
     "antigravity-cli/settings.json",
@@ -45,10 +47,8 @@ const GEMINI_CONFIG_CLOSED: [&str; 16] = [
     "config/node_modules",
 ];
 
-/// Entries of an OpenCode config dir (`~/.config/opencode`) that later
-/// sessions load: the config (MCP servers, commands) and plugin / custom
-/// tool code.
-const OPENCODE_CONFIG_CLOSED: [&str; 9] = [
+/// Entries of an OpenCode config/state directory that later runs execute or obey.
+const OPENCODE_CONFIG_CLOSED: [&str; 13] = [
     "opencode.json",
     "opencode.jsonc",
     "config.json",
@@ -56,8 +56,12 @@ const OPENCODE_CONFIG_CLOSED: [&str; 9] = [
     "plugins",
     "tool",
     "tools",
+    "agent",
+    "agents",
     "command",
     "commands",
+    "skill",
+    "skills",
 ];
 
 #[derive(Debug)]
@@ -104,38 +108,167 @@ impl GenericRunner {
             // ~/.cache/autofactory/worktrees unless workspace trust is enabled.
             env.push(("GEMINI_CLI_TRUST_WORKSPACE".to_string(), "true".to_string()));
         }
+        let mut args: Vec<String> = self.template[1..]
+            .iter()
+            .map(|arg| arg.replace(PROMPT_PLACEHOLDER, &request.prompt))
+            .collect();
+        apply_sandbox_cli_flags(program_name, &self.template[1..], &mut args, request);
         CommandSpec {
             program: self.template[0].clone(),
-            args: self.template[1..]
-                .iter()
-                .map(|arg| arg.replace(PROMPT_PLACEHOLDER, &request.prompt))
-                .collect(),
+            args,
             cwd: None,
             env,
             env_clear: false,
         }
     }
+
+    /// Builds confined account/state paths for this runner (including default
+    /// `~/.codex`, `~/.gemini`, or `~/.local/share/opencode` fallback when
+    /// `request.account` is `None`).
+    pub fn account_paths(&self, request: &AgentRequest) -> AccountPaths {
+        let program_name = Path::new(&self.template[0])
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or(&self.template[0]);
+        account_paths_for(request, program_name, self.env.home.as_deref())
+    }
 }
 
-fn account_paths(request: &AgentRequest) -> AccountPaths {
-    let Some(account) = &request.account else {
+fn apply_sandbox_cli_flags(
+    program_name: &str,
+    template_args: &[String],
+    args: &mut Vec<String>,
+    request: &AgentRequest,
+) {
+    match program_name {
+        "codex" => {
+            let has_sandbox = template_args
+                .iter()
+                .any(|a| a == "--sandbox" || a == "-s" || a.starts_with("--sandbox="));
+            let has_auto = template_args
+                .iter()
+                .any(|a| a == "--full-auto" || a == "--dangerously-bypass-approvals-and-sandbox");
+            let idx = if args.first().map(String::as_str) == Some("exec") {
+                1
+            } else {
+                args.iter().position(|a| a == "--").unwrap_or(0)
+            };
+            if request.sandbox.read_only && !has_sandbox {
+                args.splice(idx..idx, ["--sandbox".to_string(), "read-only".to_string()]);
+            } else if !request.sandbox.read_only
+                && request.sandbox.enabled
+                && !has_sandbox
+                && !has_auto
+            {
+                args.insert(idx, "--full-auto".to_string());
+            }
+        }
+        "gemini" => {
+            let has_approval = template_args.iter().any(|a| {
+                a == "--approval-mode"
+                    || a.starts_with("--approval-mode=")
+                    || a == "--yolo"
+                    || a == "-y"
+            });
+            if !has_approval {
+                if request.sandbox.read_only {
+                    args.splice(0..0, ["--approval-mode".to_string(), "plan".to_string()]);
+                } else if request.sandbox.enabled {
+                    args.splice(0..0, ["--approval-mode".to_string(), "yolo".to_string()]);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn denied_under(root: &str, entries: &[&str]) -> Vec<String> {
+    let base = root.trim_end_matches('/');
+    entries
+        .iter()
+        .map(|name| format!("{base}/{name}"))
+        .collect()
+}
+
+fn codex_account_paths(config_dir: &str) -> AccountPaths {
+    AccountPaths {
+        writable: vec![config_dir.to_string()],
+        write_denied: denied_under(config_dir, &CODEX_CONFIG_CLOSED),
+        writable_regex: Vec::new(),
+    }
+}
+
+fn gemini_account_paths(config_dir: &str, sandbox_enabled: bool) -> AccountPaths {
+    let mut writable = Vec::with_capacity(2);
+    for sub in ["tmp", "history"] {
+        let dir = Path::new(config_dir).join(sub);
+        if sandbox_enabled {
+            let _ = std::fs::create_dir_all(&dir);
+        }
+        writable.push(dir.to_string_lossy().into_owned());
+    }
+    let mut write_denied = super::agy::closed_entries(config_dir);
+    for extra in denied_under(config_dir, &GEMINI_EXTRA_CLOSED) {
+        if !write_denied.contains(&extra) {
+            write_denied.push(extra);
+        }
+    }
+    AccountPaths {
+        writable,
+        write_denied,
+        writable_regex: Vec::new(),
+    }
+}
+
+fn opencode_account_paths(config_dir: &str) -> AccountPaths {
+    AccountPaths {
+        writable: vec![config_dir.to_string()],
+        write_denied: denied_under(config_dir, &OPENCODE_CONFIG_CLOSED),
+        writable_regex: Vec::new(),
+    }
+}
+
+/// Builds the confined account paths for a generic CLI run from `request.account`,
+/// or falls back to default home state dirs (`~/.codex`, `~/.gemini`,
+/// `~/.local/share/opencode`) based on `program_name` when `request.account` is `None`.
+pub fn account_paths_for(
+    request: &AgentRequest,
+    program_name: &str,
+    home: Option<&str>,
+) -> AccountPaths {
+    if let Some(account) = &request.account {
+        return match account.provider {
+            ProviderKind::Codex => codex_account_paths(&account.config_dir),
+            ProviderKind::Antigravity => {
+                gemini_account_paths(&account.config_dir, request.sandbox.enabled)
+            }
+            ProviderKind::OpenCode => opencode_account_paths(&account.config_dir),
+            _ => AccountPaths {
+                writable: vec![account.config_dir.clone()],
+                write_denied: Vec::new(),
+                writable_regex: Vec::new(),
+            },
+        };
+    }
+    let Some(home) = home
+        .filter(|h| !h.is_empty())
+        .map(|h| h.trim_end_matches('/'))
+    else {
         return AccountPaths::default();
     };
-    let closed: &[&str] = match account.provider {
-        ProviderKind::Codex => &CODEX_CONFIG_CLOSED,
-        ProviderKind::Antigravity => &GEMINI_CONFIG_CLOSED,
-        ProviderKind::OpenCode => &OPENCODE_CONFIG_CLOSED,
-        // Claude accounts run through `ClaudeCodeRunner`, which closes its own.
-        ProviderKind::ClaudeCode => &[],
-    };
-    let write_denied = closed
-        .iter()
-        .map(|name| format!("{}/{name}", account.config_dir))
-        .collect();
-    AccountPaths {
-        writable: vec![account.config_dir.clone()],
-        write_denied,
+    match program_name {
+        "codex" => codex_account_paths(&format!("{home}/.codex")),
+        "gemini" | "agy" | "antigravity" => {
+            gemini_account_paths(&format!("{home}/.gemini"), request.sandbox.enabled)
+        }
+        "opencode" => opencode_account_paths(&format!("{home}/.local/share/opencode")),
+        _ => AccountPaths::default(),
     }
+}
+
+/// Builds the confined account paths for a generic CLI run with an explicit account.
+pub fn account_paths(request: &AgentRequest) -> AccountPaths {
+    account_paths_for(request, "", None)
 }
 
 fn extract_target_hint(val: &Value) -> Option<String> {
@@ -235,7 +368,7 @@ fn record_generic_line(log: &mut StreamLog, line: &str) {
 
 impl AgentRunner for GenericRunner {
     fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome> {
-        let account = account_paths(request);
+        let account = self.account_paths(request);
         let spec = self.command(request);
         let program = Path::new(&spec.program)
             .file_name()
@@ -259,6 +392,8 @@ impl AgentRunner for GenericRunner {
         )?;
         let mut guard = log.lock().unwrap_or_else(PoisonError::into_inner);
         guard.write_generic_finish(&program, output.exit_code, output.timed_out, &output.tail);
+        let (limit_hit, infra) =
+            classify_generic_failure(output.exit_code, output.timed_out, &output.tail);
         Ok(AgentOutcome {
             exit_code: output.exit_code,
             timed_out: output.timed_out,
@@ -266,10 +401,8 @@ impl AgentRunner for GenericRunner {
             final_text: strip_aaf_notices(&output.tail),
             tokens_in: 0,
             tokens_out: 0,
-            limit_hit: None,
-            // An arbitrary CLI has no error vocabulary aaf knows; its
-            // failures count against the task as they always did.
-            infra: None,
+            limit_hit,
+            infra,
             log_tail: output.tail,
         })
     }
@@ -277,6 +410,173 @@ impl AgentRunner for GenericRunner {
     fn reports_tokens(&self) -> bool {
         false
     }
+}
+
+const LIMIT_NEEDLES: [&str; 15] = [
+    "http 429",
+    "status 429",
+    "status: 429",
+    "error 429",
+    "429 too many requests",
+    "too many requests",
+    "rate_limit_exceeded",
+    "rate limit exceeded",
+    "rate_limit",
+    "rate limit",
+    "resource_exhausted",
+    "quota exceeded",
+    "insufficient_quota",
+    "usage limit reached",
+    "exceeded your current quota",
+];
+
+const AUTH_NEEDLES: [&str; 19] = [
+    "http 401",
+    "status 401",
+    "status: 401",
+    "error 401",
+    "401 unauthorized",
+    "http 403",
+    "status 403",
+    "status: 403",
+    "403 forbidden",
+    "unauthenticated",
+    "unauthorized",
+    "authentication_error",
+    "authentication failed",
+    "invalid_api_key",
+    "invalid api key",
+    "invalid credentials",
+    "invalid_grant",
+    "not logged in",
+    "login required",
+];
+
+const NET_NEEDLES: [&str; 22] = [
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "status 500",
+    "status 502",
+    "status 503",
+    "status 504",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "overloaded_error",
+    "server_error",
+    "connection refused",
+    "connection reset",
+    "econnrefused",
+    "econnreset",
+    "could not resolve host",
+    "network unreachable",
+];
+
+/// Classifies a failed generic CLI run's output tail into a quota/rate-limit
+/// hit or an auth/network infrastructure failure. Returns `(None, None)` for
+/// successful or timed-out runs.
+pub fn classify_generic_failure(
+    exit_code: Option<i32>,
+    timed_out: bool,
+    tail: &str,
+) -> (Option<LimitHit>, Option<InfraFailure>) {
+    if timed_out || exit_code == Some(0) {
+        return (None, None);
+    }
+    let cleaned = strip_aaf_notices(&strip_ansi_basic(tail));
+    let raw: String = cleaned.chars().take(RAW_ERROR_CHARS).collect();
+    let json_status = extract_json_error_status(&cleaned);
+    let lower = cleaned.to_ascii_lowercase();
+    if json_status == Some(429) || LIMIT_NEEDLES.iter().any(|n| lower.contains(n)) {
+        return (
+            Some(LimitHit {
+                reset_at: None,
+                raw,
+            }),
+            None,
+        );
+    }
+    if matches!(json_status, Some(401 | 403)) || AUTH_NEEDLES.iter().any(|n| lower.contains(n)) {
+        return (
+            None,
+            Some(InfraFailure {
+                kind: InfraKind::Auth,
+                raw,
+            }),
+        );
+    }
+    if matches!(json_status, Some(500..=599)) || NET_NEEDLES.iter().any(|n| lower.contains(n)) {
+        return (
+            None,
+            Some(InfraFailure {
+                kind: InfraKind::Network,
+                raw,
+            }),
+        );
+    }
+    (None, None)
+}
+
+fn extract_json_error_status(text: &str) -> Option<i64> {
+    for line in text.lines().rev() {
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let status = obj
+            .get("status_code")
+            .or_else(|| obj.get("status"))
+            .or_else(|| obj.get("code"))
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                obj.get("error")
+                    .and_then(Value::as_object)
+                    .and_then(|e| {
+                        e.get("status_code")
+                            .or_else(|| e.get("status"))
+                            .or_else(|| e.get("code"))
+                    })
+                    .and_then(Value::as_i64)
+            });
+        if status.is_some() {
+            return status;
+        }
+    }
+    None
+}
+
+fn strip_ansi_basic(input: &str) -> String {
+    if !input.contains('\x1b') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    let _ = chars.by_ref().find(|n| ('@'..='~').contains(n));
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' || (n == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if c != '\r' {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Drops trailing `[aaf] ...` diagnostic lines appended after the child exited.
@@ -295,105 +595,4 @@ fn strip_aaf_notices(tail: &str) -> String {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use aaf_domain::ports::SandboxPolicy;
-
-    use super::*;
-
-    fn paths_for(provider: ProviderKind, dir: &str) -> AccountPaths {
-        account_paths(&AgentRequest {
-            run_id: "r1".to_string(),
-            cwd: "/tmp".to_string(),
-            prompt: "audit".to_string(),
-            account: Some(aaf_domain::account::AccountProfile {
-                id: "acct".to_string(),
-                provider,
-                config_dir: dir.to_string(),
-                name: "acct".to_string(),
-            }),
-            timeout_secs: 60,
-            sandbox: SandboxPolicy::default(),
-        })
-    }
-
-    /// R10-L7-1: what a later unsandboxed Gemini / Antigravity session runs
-    /// or trusts stays closed; its session state stays writable.
-    #[test]
-    fn antigravity_account_closes_hooks_settings_and_executables() {
-        let paths = paths_for(ProviderKind::Antigravity, "/h/.gemini");
-        assert_eq!(paths.writable, vec!["/h/.gemini".to_string()]);
-        for name in [
-            "settings.json",
-            "trusted_hooks.json",
-            "trustedFolders.json",
-            "extensions",
-            "commands",
-            "antigravity/bin",
-            "antigravity/mcp",
-            "antigravity-cli/bin",
-            "antigravity-cli/mcp",
-            "antigravity-cli/settings.json",
-            "config/hooks.json",
-            "config/mcp_config.json",
-        ] {
-            let entry = format!("/h/.gemini/{name}");
-            assert!(
-                paths.write_denied.contains(&entry),
-                "{entry} not closed: {:?}",
-                paths.write_denied
-            );
-        }
-        for name in [
-            "oauth_creds.json",
-            "tmp",
-            "history",
-            "projects.json",
-            "state.json",
-            "installation_id",
-        ] {
-            let entry = format!("/h/.gemini/{name}");
-            assert!(!paths.write_denied.contains(&entry), "{entry} closed");
-        }
-    }
-
-    #[test]
-    fn opencode_account_closes_config_and_plugins() {
-        let paths = paths_for(ProviderKind::OpenCode, "/h/.config/opencode");
-        for name in ["opencode.json", "opencode.jsonc", "plugin", "plugins"] {
-            let entry = format!("/h/.config/opencode/{name}");
-            assert!(
-                paths.write_denied.contains(&entry),
-                "{entry} not closed: {:?}",
-                paths.write_denied
-            );
-        }
-    }
-
-    #[test]
-    fn gemini_command_sets_headless_workspace_trust_env() {
-        let req = AgentRequest {
-            run_id: "r1".to_string(),
-            cwd: "/tmp".to_string(),
-            prompt: "audit".to_string(),
-            account: None,
-            timeout_secs: 60,
-            sandbox: SandboxPolicy::default(),
-        };
-        let runner = GenericRunner::new(
-            vec![
-                "gemini".to_string(),
-                "-p".to_string(),
-                "{prompt}".to_string(),
-            ],
-            ExecEnv::default(),
-        )
-        .unwrap();
-        let spec = runner.command(&req);
-        assert!(
-            spec.env
-                .contains(&("GEMINI_CLI_TRUST_WORKSPACE".to_string(), "true".to_string())),
-            "{:?}",
-            spec.env
-        );
-    }
-}
+mod tests;

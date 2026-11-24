@@ -19,7 +19,9 @@ mod base_ref;
 pub mod batch;
 mod commit_lock;
 mod finish;
+mod finish_land;
 mod git_real;
+mod git_real_base;
 pub mod ports;
 mod post_audit;
 pub mod prompt;
@@ -51,7 +53,8 @@ use serde::Serialize;
 
 pub use audit_backend::{
     AuditBackend, audit_cmd_is_claude, build_audit_command, configured_audit_provider,
-    effective_audit_provider, resolve_audit_policy, same_audit_provider,
+    effective_audit_provider, resolve_audit_policy, resolve_auto_audit_executor,
+    same_audit_provider,
 };
 pub use base_ref::{BaseRef, resolve_base};
 pub use git_real::RealGit;
@@ -172,6 +175,24 @@ pub struct Settings {
     pub home: PathBuf,
 }
 
+impl Settings {
+    /// Effective landing strategy derived from `repo.run.land` and `auto_merge`.
+    pub fn effective_land(&self) -> aaf_domain::config::LandMode {
+        use aaf_domain::config::LandMode;
+        if self.auto_merge {
+            if self.repo.run.land.auto_lands() {
+                self.repo.run.land
+            } else {
+                LandMode::Auto
+            }
+        } else if self.repo.run.auto_merge {
+            LandMode::Pr
+        } else {
+            self.repo.run.land
+        }
+    }
+}
+
 pub struct Deps {
     pub store: Arc<dyn Store>,
     pub clock: Arc<dyn Clock>,
@@ -187,6 +208,9 @@ pub struct Deps {
 pub enum Mode {
     /// Every task gets at most one agent run, then the loop returns.
     Once,
+    /// Drains runnable work (retries, audits, newly unblocked dependents) until
+    /// no task can make forward progress right now, then returns immediately.
+    Drain,
     /// Keeps looking for Ready tasks until `Hooks::idle` says stop or the
     /// factory freezes.
     Auto,

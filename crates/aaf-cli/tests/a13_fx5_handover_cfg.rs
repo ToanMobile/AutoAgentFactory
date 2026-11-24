@@ -103,10 +103,12 @@ fn insert_review_task(ctx: &Ctx, id: &str, repo_root: &Path) {
 
 fn handover_missing(ctx: &Ctx, id: &str) -> Vec<String> {
     let args = HandoverArgs {
-        task_id: id.to_string(),
+        task_id: Some(id.to_string()),
         format: Some(HandoverFormat::Json),
         out: None,
         open: false,
+        since: None,
+        summary: false,
     };
     let cli = cmd::handover::run(&args, ctx).unwrap();
     cli.fields["handover"]["missing"]

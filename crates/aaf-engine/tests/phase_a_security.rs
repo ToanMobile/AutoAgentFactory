@@ -413,6 +413,7 @@ fn sandbox_denies_sccache_writes_and_warm_slots_read_write() {
                 enabled: true,
                 ..SandboxPolicy::default()
             },
+            json_schema: None,
         })
         .unwrap();
     for expected in [

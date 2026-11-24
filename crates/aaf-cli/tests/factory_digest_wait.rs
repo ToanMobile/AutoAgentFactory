@@ -52,7 +52,7 @@ fn a_gate_failure_that_waited_for_a_slot_once_is_the_same_failure_the_next_time(
     let other = File::create(&slot).unwrap();
     other.try_lock().unwrap();
     let mut child = fx
-        .command(&fx.repo, &["run", "--unsandboxed"])
+        .command(&fx.repo, &["run", "--once", "--unsandboxed"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -93,7 +93,7 @@ fn a_gate_failure_that_waited_for_a_slot_once_is_the_same_failure_the_next_time(
     assert!(note.starts_with("unblock[T3] digest="), "{note}");
 
     // Second run: no wait, the same failure. The ladder sees the repeat.
-    let out = fx.aaf(&["run", "--unsandboxed"]);
+    let out = fx.aaf(&["run", "--once", "--unsandboxed"]);
     assert_eq!(out.json["blocked"], json!([bad]), "{}", out.stderr);
     assert_eq!(
         fx.show(&bad)["task"]["blocked_reason"]["kind"],

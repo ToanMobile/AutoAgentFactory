@@ -118,7 +118,15 @@ fn build_headless_argv_builds_valid_args_for_all_ten_clis() {
         )
         .unwrap_or_else(|e| panic!("failed for {}: {e}", desc.id));
         assert_eq!(argv[0], bin, "{}", desc.id);
-        assert_eq!(argv.last().map(String::as_str), Some("implement feature"));
+        assert!(
+            matches!(
+                argv.last().map(String::as_str),
+                Some("implement feature") | Some("-p=implement feature")
+            ),
+            "{}: unexpected prompt arg {:?}",
+            desc.id,
+            argv.last()
+        );
         assert!(argv.contains(&"--model".to_string()), "{}", desc.id);
         assert!(argv.contains(&"model-v1".to_string()), "{}", desc.id);
     }

@@ -1,6 +1,6 @@
-//! `aaf handover <task_id> [--format md|html|json] [--out <path>] [--open]`:
-//! generate a read-only acceptance handover report from the database and
-//! verified signed artifacts.
+//! `aaf handover <task_id> | --since <hours> | --summary [--format md|html|json] [--out <path>] [--open]`:
+//! generate a read-only acceptance handover report or multi-task overnight digest
+//! from the database and verified signed artifacts.
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
@@ -18,6 +18,9 @@ use serde_json::json;
 use super::board::store::{err, open_db_read_only, refuse_inside_agent_run};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
+
+#[path = "handover_summary.rs"]
+mod summary;
 
 static TEMP_OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -40,8 +43,14 @@ impl HandoverFormat {
 
 #[derive(Debug, clap::Args)]
 pub struct HandoverArgs {
-    /// Task id (`[A-Za-z0-9_-]{1,64}`) to summarize.
-    pub task_id: String,
+    /// Task id (`[A-Za-z0-9_-]{1,64}`) to summarize (omit with --since or --summary).
+    pub task_id: Option<String>,
+    /// Multi-task overnight digest for tasks updated within the last N hours.
+    #[arg(long, value_name = "HOURS")]
+    pub since: Option<u64>,
+    /// Multi-task digest across all tasks without requiring a single task_id.
+    #[arg(long)]
+    pub summary: bool,
     /// Output format: md (default), html, or json.
     #[arg(long, value_enum)]
     pub format: Option<HandoverFormat>,
@@ -59,16 +68,32 @@ enum OutError {
 }
 
 pub fn run(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
-    if let Err(e) = validate_task_id(&args.task_id) {
-        return Ok(CmdOutput::policy(
-            "refused",
-            format!("invalid task id: {e}"),
-        ));
-    }
     if (args.out.is_some() || args.open)
         && let Some(refused) = refuse_inside_agent_run(ctx, "aaf handover --out/--open")
     {
         return Ok(refused);
+    }
+    let digest_mode = args.since.is_some() || args.summary;
+    if digest_mode && args.task_id.is_some() {
+        return Ok(CmdOutput::policy(
+            "refused",
+            "pass either <task_id> or --since/--summary, not both",
+        ));
+    }
+    if digest_mode {
+        return summary::run_digest(args, ctx);
+    }
+    let Some(task_id) = args.task_id.as_deref() else {
+        return Ok(CmdOutput::policy(
+            "refused",
+            "missing <task_id> (or pass --since <hours> / --summary for a multi-task digest)",
+        ));
+    };
+    if let Err(e) = validate_task_id(task_id) {
+        return Ok(CmdOutput::policy(
+            "refused",
+            format!("invalid task id: {e}"),
+        ));
     }
 
     let format = match resolve_format(args, ctx) {
@@ -78,20 +103,19 @@ pub fn run(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
 
     let Some(db) = open_db_read_only(ctx)? else {
         return Err(CmdError::new(format!(
-            "task {} not found (no database at {})",
-            args.task_id,
+            "task {task_id} not found (no database at {})",
             ctx.data_dir.display()
         )));
     };
-    let task = match db.get_task(&args.task_id) {
+    let task = match db.get_task(task_id) {
         Ok(task) => task,
         Err(PortError::NotFound(_)) => {
-            return Err(CmdError::new(format!("task {} not found", args.task_id)));
+            return Err(CmdError::new(format!("task {task_id} not found")));
         }
         Err(e) => return Err(err("task", e)),
     };
     let repo_cfg = load_repo_config(ctx, Path::new(&task.repo_root));
-    let data = load_handover(&db, &ctx.data_dir, &args.task_id, &repo_cfg)
+    let data = load_handover(&db, &ctx.data_dir, task_id, &repo_cfg)
         .map_err(|e| CmdError::new(format!("handover: {e}")))?;
 
     let handover_json = render_json(&data);
@@ -103,31 +127,12 @@ pub fn run(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
         }
     };
 
-    let written_path = if let Some(raw_out) = &args.out {
-        let resolved = if raw_out.is_absolute() {
-            raw_out.clone()
-        } else {
-            ctx.cwd.join(raw_out)
-        };
-        match write_checked_output(&resolved, &ctx.data_dir, rendered.as_bytes()) {
-            Ok(path) => Some(path),
-            Err(OutError::Policy(why)) => return Ok(CmdOutput::policy("refused", why)),
-            Err(OutError::Runtime(e)) => return Err(e),
-        }
-    } else if args.open {
-        let default_html = ctx
-            .data_dir
-            .join("reports")
-            .join(format!("handover-{}.html", args.task_id));
-        match write_checked_output(&default_html, &ctx.data_dir, rendered.as_bytes()) {
-            Ok(path) => Some(path),
-            Err(OutError::Policy(why)) => return Ok(CmdOutput::policy("refused", why)),
-            Err(OutError::Runtime(e)) => return Err(e),
-        }
-    } else {
-        None
+    let written_path = match emit_output(args, ctx, &format!("handover-{task_id}.html"), &rendered)
+    {
+        Ok(path) => path,
+        Err(OutError::Policy(why)) => return Ok(CmdOutput::policy("refused", why)),
+        Err(OutError::Runtime(e)) => return Err(e),
     };
-
     if args.open
         && let Some(ref html_path) = written_path
     {
@@ -148,6 +153,27 @@ pub fn run(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
         out = out.field("out", json!(path.to_string_lossy().into_owned()));
     }
     Ok(out)
+}
+
+fn emit_output(
+    args: &HandoverArgs,
+    ctx: &Ctx,
+    default_name: &str,
+    rendered: &str,
+) -> Result<Option<PathBuf>, OutError> {
+    if let Some(raw_out) = &args.out {
+        let resolved = if raw_out.is_absolute() {
+            raw_out.clone()
+        } else {
+            ctx.cwd.join(raw_out)
+        };
+        write_checked_output(&resolved, &ctx.data_dir, rendered.as_bytes()).map(Some)
+    } else if args.open {
+        let default_html = ctx.data_dir.join("reports").join(default_name);
+        write_checked_output(&default_html, &ctx.data_dir, rendered.as_bytes()).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 fn resolve_format(args: &HandoverArgs, ctx: &Ctx) -> Result<HandoverFormat, String> {
@@ -214,8 +240,7 @@ fn canonicalize_best_effort(path: &Path) -> Result<PathBuf, OutError> {
     if let Ok(canon) = fs::canonicalize(path) {
         return Ok(canon);
     }
-    let mut tail: Vec<&OsStr> = Vec::new();
-    let mut cur = path;
+    let (mut tail, mut cur) = (Vec::new(), path);
     while !cur.exists() {
         let Some(name) = cur.file_name() else {
             return Err(OutError::Policy(format!(
@@ -241,10 +266,7 @@ fn canonicalize_best_effort(path: &Path) -> Result<PathBuf, OutError> {
 }
 
 fn has_git_component(path: &Path) -> bool {
-    path.components().any(|c| match c {
-        Component::Normal(seg) => seg.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git")),
-        _ => false,
-    })
+    path.components().any(|c| matches!(c, Component::Normal(seg) if seg.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git"))))
 }
 
 fn is_protected_output_path(path: &Path) -> bool {
@@ -260,7 +282,7 @@ fn is_protected_output_path(path: &Path) -> bool {
         return true;
     };
     let lower = name.to_ascii_lowercase();
-    if matches!(
+    matches!(
         lower.as_str(),
         "claude.md"
             | ".mcp.json"
@@ -268,12 +290,9 @@ fn is_protected_output_path(path: &Path) -> bool {
             | "google-services.json"
             | "googleservice-info.plist"
     ) || lower.starts_with(".env")
-    {
-        return true;
-    }
-    path.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("keystore") || ext.eq_ignore_ascii_case("jks"))
+        || path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("keystore") || ext.eq_ignore_ascii_case("jks")
+        })
 }
 
 fn check_existing_not_symlink(path: &Path) -> Result<(), OutError> {
@@ -319,8 +338,6 @@ fn write_checked_output(
 
     let canon_data = canonicalize_best_effort(data_dir)?;
     let allowed_reports = canon_data.join("reports");
-
-    // Allow auto-creating `<data_dir>/reports` (and safe subdirs under it) if missing.
     if !parent.exists() {
         let candidate_parent = canonicalize_best_effort(parent)?;
         let inside_reports =
@@ -352,7 +369,6 @@ fn write_checked_output(
     let canon_parent = fs::canonicalize(parent)
         .map_err(|e| OutError::Runtime(err(&parent.display().to_string(), e)))?;
     let canon_target = canon_parent.join(file_name);
-
     if has_git_component(&canon_target) {
         return Err(OutError::Policy(format!(
             "refusing to write inside .git directory: {}",

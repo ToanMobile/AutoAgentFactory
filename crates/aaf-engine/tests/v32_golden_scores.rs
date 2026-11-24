@@ -79,6 +79,7 @@ fn request_template() -> AgentRequest {
             writable_paths: vec![],
             read_denied_paths: vec!["/data".to_string()],
         },
+        json_schema: None,
     }
 }
 

@@ -26,6 +26,9 @@ pub struct ClaudeCodeRunner {
     env: ExecEnv,
     model: String,
     effort: String,
+    /// Non-persistent CLI opt-in permitting `--permission-mode bypassPermissions`
+    /// when `request.sandbox.enabled == false`. Always defaults to `false`.
+    allow_unsandboxed_bypass: bool,
 }
 
 /// A value for `--model` or `--effort` from the repo config: one word that
@@ -47,15 +50,23 @@ impl ClaudeCodeRunner {
             env,
             model: String::new(),
             effort: String::new(),
+            allow_unsandboxed_bypass: false,
         }
     }
 
-    /// `run.model` and `run.effort`: passed as `--model` and `--effort`
-    /// (both in `claude --help` of 2.1.330). Empty leaves the flag out.
+    /// `run.model` and `run.effort`: passed as `--model` and `--effort`. Empty leaves the flag out.
     #[must_use]
     pub fn with_model_and_effort(mut self, model: &str, effort: &str) -> Self {
         self.model = model.to_string();
         self.effort = effort.to_string();
+        self
+    }
+
+    /// Explicit non-persistent opt-in allowing `--permission-mode bypassPermissions`
+    /// on unsandboxed write runs. Defaults to `false`.
+    #[must_use]
+    pub fn with_allow_unsandboxed_bypass(mut self, allow: bool) -> Self {
+        self.allow_unsandboxed_bypass = allow;
         self
     }
 
@@ -65,27 +76,16 @@ impl ClaudeCodeRunner {
             return Err(PortError::Invalid("empty prompt".to_string()));
         }
         let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
-            .iter()
-            .map(|s| (*s).to_string())
+            .into_iter()
+            .map(String::from)
             .collect();
-        // Nobody can answer a permission prompt in an unattended run, so the
-        // choice is between granting up front and denying automatically
-        // (`claude --help`, 2.1.330):
-        // - Read-only (`sandbox.read_only`): `--permission-mode plan` keeps
-        //   Claude Code strictly in read-only planning mode, paired with a
-        //   read-only Seatbelt profile when sandboxed.
-        // - Sandboxed: `--permission-mode bypassPermissions`. The agent must
-        //   edit files and run the project's build and test commands, which no
-        //   static allow-list can enumerate; the Seatbelt profile and the
-        //   aaf-hook guard are what confine it.
-        // - Unsandboxed (explicit opt-in): `acceptEdits` lets it edit files,
-        //   and `--permission-prompts none` turns everything that would still
-        //   prompt (shell commands outside the user's own allow rules) into
-        //   an automatic denial instead of a hang. Bypassing all checks with
-        //   no OS confinement behind it is never chosen here.
+        // Permission mode selection (`claude --help`, 2.1.330):
+        // - Read-only: `--permission-mode plan`.
+        // - Sandboxed (or explicit non-persistent CLI opt-in): `bypassPermissions`.
+        // - Default unsandboxed: `acceptEdits` + `--permission-prompts none`.
         if request.sandbox.read_only {
             args.extend(["--permission-mode", "plan"].map(String::from));
-        } else if request.sandbox.enabled {
+        } else if request.sandbox.enabled || self.allow_unsandboxed_bypass {
             args.extend(["--permission-mode", "bypassPermissions"].map(String::from));
         } else {
             args.extend(
@@ -106,6 +106,13 @@ impl ClaudeCodeRunner {
                 flag_value(key, value)?;
                 args.extend([flag.to_string(), value.clone()]);
             }
+        }
+        if let Some(schema) = request
+            .json_schema
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            args.extend(["--json-schema".to_string(), schema.to_string()]);
         }
         // After `--` so a prompt that starts with a dash is still the prompt.
         args.push("--".to_string());
@@ -189,10 +196,12 @@ impl AgentRunner for ClaudeCodeRunner {
             (Some(account), _) => AccountPaths {
                 writable: account_state_paths(&account.config_dir),
                 write_denied: closed_entries(&account.config_dir),
+                writable_regex: Vec::new(),
             },
             (None, Some(home)) => AccountPaths {
                 writable: vec![format!("{home}/.claude"), format!("{home}/.claude.json")],
                 write_denied: closed_entries(&format!("{home}/.claude")),
+                writable_regex: Vec::new(),
             },
             (None, None) => AccountPaths::default(),
         };
@@ -323,18 +332,25 @@ impl StreamParser {
                 }
             }
             Some("result") => {
-                let text = event
+                let raw_result = event
                     .get("result")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let infra = structured_infra(&event, &text);
+                    .unwrap_or_default();
+                let text = event
+                    .get("structured_output")
+                    .filter(|v| !v.is_null())
+                    .and_then(|v| serde_json::to_string(v).ok())
+                    .unwrap_or_else(|| raw_result.to_string());
+                let subtype = event.get("subtype").and_then(Value::as_str);
+                let is_error = event
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || subtype == Some("error_max_structured_output_retries");
+                let infra = structured_infra(&event, raw_result);
                 self.result = Some(ResultEvent {
                     text,
-                    is_error: event
-                        .get("is_error")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
+                    is_error,
                     api_error_status: event
                         .get("api_error_status")
                         .or_else(|| event.get("status_code"))

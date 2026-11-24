@@ -75,8 +75,8 @@ fn the_retry_is_once_per_fingerprint_and_never_a_pass() {
 
     let first = run_once(&world, &auditor);
 
-    // Two audit jobs of two turns each, then back to the implementer.
-    assert_eq!(*auditor.1.lock().unwrap(), 4);
+    // Two audit jobs of three turns each (initial + up to 2 inconclusive retries), then back to the implementer.
+    assert_eq!(*auditor.1.lock().unwrap(), 6);
     assert_eq!(first.requeued, vec!["t1"], "{first:?}");
     assert_eq!(world.state("t1"), TaskState::Ready);
     assert!(
@@ -90,7 +90,7 @@ fn the_retry_is_once_per_fingerprint_and_never_a_pass() {
 
     // Same locked changes again: no second retry for this fingerprint.
     let second = run_once(&world, &auditor);
-    assert_eq!(*auditor.1.lock().unwrap(), 6, "{second:?}");
+    assert_eq!(*auditor.1.lock().unwrap(), 9, "{second:?}");
     assert_ne!(world.state("t1"), TaskState::Review);
 }
 

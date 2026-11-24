@@ -181,7 +181,7 @@ fn private_dir(dir: &Path) -> io::Result<()> {
 /// read: the file is 0600 and every directory from the data dir down to it
 /// is 0700, whatever the umask says and whatever was there before. (This
 /// crate cannot use the helper of `aaf-engine`, which depends on it.)
-fn write_signed<T: Serialize>(
+pub(crate) fn write_signed<T: Serialize>(
     data_dir: &Path,
     path: &Path,
     key: &[u8],
@@ -231,7 +231,7 @@ fn write_signed<T: Serialize>(
     Ok(())
 }
 
-fn read_signed<T: for<'de> Deserialize<'de>>(
+pub(crate) fn read_signed<T: for<'de> Deserialize<'de>>(
     path: &Path,
     key: &[u8],
     domain: &str,
@@ -453,3 +453,8 @@ pub fn read_audit_verdict(
     }
     Ok(Some(rec))
 }
+
+pub use crate::signed_audit::{
+    AUDIT_PARTIAL_DOMAIN, PartialAuditKey, PartialAuditRecord, clear_audits_for_repo,
+    partial_audit_path, read_partial_audit, write_partial_audit,
+};

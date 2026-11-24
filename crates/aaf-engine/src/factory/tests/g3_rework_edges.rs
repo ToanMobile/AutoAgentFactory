@@ -94,7 +94,8 @@ fn mixed_findings_keep_file_line_variants_and_record_dropped_reason() {
 
     assert!(next.is_some());
     assert_eq!(world.state("t1"), TaskState::Ready);
-    assert_eq!(world.db.get_budget("t1").unwrap().cycles_used, 1);
+    // Audit rework rounds are decoupled from RootBudget.cycles_used.
+    assert_eq!(world.db.get_budget("t1").unwrap().cycles_used, 0);
 
     let note = world
         .task("t1")
@@ -333,6 +334,7 @@ fn fallback_rejection_note_never_leaks_unverified_findings() {
         notes.iter().any(|n| {
             n.contains("unverified findings dropped")
                 || n.contains("lack concrete file:line evidence")
+                || n.contains("(inconclusive:")
         }),
         "{notes:?}"
     );

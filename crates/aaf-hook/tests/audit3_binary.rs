@@ -15,6 +15,7 @@ fn exit_code(base: &Path, payload: &Value) -> Option<i32> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_aaf-hook"))
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("AAF_RUN_ID", "test-run")
         .env("AAF_DATA_DIR", base.join("data"))
         .env("AAF_CONFIG_DIR", base.join("config"))
         .env("HOME", base.join("home"))
@@ -41,6 +42,11 @@ fn every_round_3_input_exits_2_and_its_neighbour_exits_0() {
         fs::create_dir(base.join(sub)).unwrap();
     }
     let work = base.join("work");
+    fs::write(
+        work.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/aaf-cli\"]\n",
+    )
+    .unwrap();
     fs::write(base.join("config/adb-allowlist"), "OK1\n").unwrap();
 
     let cases: &[(&str, &str, i32)] = &[

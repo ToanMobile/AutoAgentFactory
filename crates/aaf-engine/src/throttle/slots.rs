@@ -1,30 +1,22 @@
 //! Machine-wide slots for heavy commands: advisory file locks under
 //! `<data_dir>/throttle`, shared by every repo and every `aaf` process of
-//! this user. The kernel drops a lock when its holder dies, so a crashed
-//! gate never leaves a slot taken.
+//! this user. The kernel drops a lock when its holder dies.
 //!
-//! The lock is the only sign that a slot is taken. The content of the lock
-//! file is the holder's reservation (how much memory its command is expected
-//! to reach, and its process group once started); the holder's token (what
-//! its command and the processes below it carry to prove where they run,
-//! see [`super::token`]) stands in a file beside it that no agent reads.
-//! Both mean something only while somebody holds the lock, are readable by
-//! their owner only, and are emptied whenever the lock changes hands. A
-//! holder inside an agent's sandbox can lock the file and not write it: its
-//! record stands in a file of its own ([`super::slot_file`]).
+//! The lock file holds the holder's reservation and process group; its token
+//! lives beside it in the closed dir ([`super::token`]). A sandboxed guest
+//! writes its record in `guest/` ([`super::slot_file`]).
 //!
-//! One case keeps the content alive past its holder: an `aaf` that is killed
-//! leaves its command running (the command has its own process group, and
-//! without `unsafe` there is no signal handler to take it along), while the
-//! kernel frees the lock at once. The lock file still names that group, so
-//! whoever locks the file next looks at it first: while the group has
-//! members the slot counts as taken ([`Busy::Orphaned`]) and the file is
-//! left as it is. Nothing is killed: the slot comes back when the command
-//! ends or somebody ends it.
+//! If `aaf` is killed while its command's process group still runs, the next
+//! probe sees the leftover lock content ([`Busy::Orphaned`]) until the group
+//! ends or the bounded orphan-wait timeout reaps the stale lock file.
+
+mod orphan_reap;
 
 use std::fs::TryLockError;
 use std::io;
 use std::path::Path;
+
+pub use orphan_reap::{reap_orphaned_slots, reap_stale_orphans};
 
 use super::drain::draining;
 pub use super::drain::{DrainGuard, try_drain};
@@ -113,21 +105,13 @@ pub fn holds_token_in(
         return true;
     }
     if !is_locked(&slot_path(data_dir, index)) {
-        // Only what no agent can write counts here: the lock file's text
-        // and the closed token file. A record in `guest/` can be written by
-        // any agent; believed without a lock behind it, it would let an
-        // agent declare itself the command of a killed holder and walk past
-        // the queue.
+        // Trust only owner-written files; read twice around the group check so
+        // a concurrent takeover invalidates the earlier token.
         let written = || names_token(&owner_token_text(data_dir, index), token);
-        // Read twice around the look at the group: a new holder that takes
-        // the slot in between empties the files, and the second read fails.
         let text = lock_text(data_dir, index);
         return written() && orphan_in(&text, group_state).is_some() && written();
     }
-    // Held first, read second: the record is emptied before the lock is
-    // given up and rewritten by the next holder, so a token read after the
-    // slot was seen held is never one of an earlier holder that this check
-    // would pin on the present one.
+    // Held first, read second: emptied on release and rewritten on acquire.
     names_token(&holder_token_text(data_dir, index), token)
 }
 
@@ -290,12 +274,7 @@ fn unlock_slots(files: &[SlotFile]) {
 /// Gives back slots that carry this process's token and reservation.
 fn release_all(files: &[SlotFile]) {
     for file in files {
-        // Emptied while still locked, so the next holder's reservation is
-        // never mistaken for this one, and the token of this run opens
-        // nothing once the slot is taken again. A record that could not be
-        // removed belongs to nobody once the lock is gone: no reader trusts
-        // the record of a slot that is not held, and the next holder writes
-        // its own over it.
+        // Empty while still locked so the next holder never inherits our token/reservation.
         let _ = file.clear_record();
     }
     unlock_slots(files);

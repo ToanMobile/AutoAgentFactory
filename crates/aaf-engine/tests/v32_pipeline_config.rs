@@ -132,7 +132,7 @@ fn render_repo_config_round_trips_pipeline_and_max_open_review() {
         "[pipeline]",
         "plan_stage = false",
         "require_plan_approval = false",
-        "max_audit_reworks = 2",
+        "max_audit_reworks = 3",
     ] {
         assert!(text.contains(needle), "missing {needle} in:\n{text}");
     }

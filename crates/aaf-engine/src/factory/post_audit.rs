@@ -3,320 +3,35 @@
 
 use std::path::Path;
 
-use aaf_domain::config::{AuditScope, CrossAuditConfig};
 use aaf_domain::event::EventKind;
-use aaf_domain::gate::{PostGateAuditRecord, Receipt, Severity};
-use aaf_domain::ports::{InfraFailure, InfraKind, PortError, PortResult};
+use aaf_domain::gate::{PostGateAuditRecord, Receipt};
+use aaf_domain::ports::{InfraKind, PortError, PortResult};
 use serde_json::json;
+
+#[path = "post_audit_helpers.rs"]
+mod helpers;
+
+pub use helpers::is_large_diff;
+pub(crate) use helpers::{
+    audit_infra_next, collect_rework_findings, has_behavioral_red_unproven, is_large_worktree_diff,
+    load_verified_audit_verdict, needs_post_gate_audit, proof_verified,
+};
+use helpers::{collect_mechanical_findings, primary_infra_next, reject_post_audit};
 
 use super::audit_backend::{self, AuditBackend};
 use super::audit_turn::short_circuit_audit_reason;
-use super::ports::{AccountPool, Grant};
+use super::ports::{AccountPool, Grant, Purpose};
 use super::rework_filter;
 use super::worker::{self, GateJob, Job, Next, Outcome, PreGateAudit};
 use super::{Deps, unblock};
 use crate::cross_audit::{
-    AuditInput, AuditVerdict, Finding, GOLDEN_IDS, MechanicalScoreReport, compute_mechanical_score,
+    AuditInput, AuditVerdict, GOLDEN_IDS, MechanicalScoreReport, compute_mechanical_score,
     evaluate_score_gate,
 };
-use crate::git::TaskWorktree;
 
-const LARGE_DIFF_MIN_FILES: usize = 3;
-const LARGE_DIFF_MAX_PROD_LOC: usize = 200;
-
-fn diff_header_path(line: &str) -> &str {
-    if let Some((_, rhs)) = line.rsplit_once(" b/") {
-        rhs.trim_matches('"')
-    } else if let Some((_, rhs)) = line.rsplit_once(" \"b/") {
-        rhs.trim_matches('"')
-    } else {
-        line.split_whitespace()
-            .last()
-            .unwrap_or("")
-            .trim_matches('"')
-            .trim_start_matches("b/")
-    }
-}
-
-fn is_test_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    for component in normalized.split('/') {
-        if matches!(component, "tests" | "test" | "__tests__" | "androidTest") {
-            return true;
-        }
-    }
-    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
-    if file_name.starts_with("test_")
-        || file_name.contains(".test.")
-        || file_name.contains(".spec.")
-    {
-        return true;
-    }
-    if let Some((stem, _ext)) = file_name.rsplit_once('.')
-        && (stem.ends_with("_test") || stem.ends_with("Test") || stem.ends_with("Tests"))
-    {
-        return true;
-    }
-    false
-}
-
-/// Returns `true` when `diff` crosses the `AuditScope::Large` threshold:
-/// truncated diff, `>= 3` changed files, or `> 200` changed production LOC
-/// (excluding obvious test paths such as `tests/`, `*_test.*`, `*Test.*`).
-pub fn is_large_diff(diff: &str, diff_truncated: bool) -> bool {
-    if diff_truncated {
-        return true;
-    }
-    let mut changed_files: usize = 0;
-    let mut prod_loc_changed: usize = 0;
-    let mut current_is_test = false;
-
-    for line in diff.lines() {
-        if line.starts_with("diff --git ") {
-            changed_files += 1;
-            current_is_test = is_test_path(diff_header_path(line));
-            continue;
-        }
-        if line.starts_with("+++ ") || line.starts_with("--- ") {
-            continue;
-        }
-        if (line.starts_with('+') || line.starts_with('-')) && !current_is_test {
-            prod_loc_changed += 1;
-        }
-    }
-
-    changed_files >= LARGE_DIFF_MIN_FILES || prod_loc_changed > LARGE_DIFF_MAX_PROD_LOC
-}
-
-/// Inspects a worktree's diff against the base to decide `AuditScope::Large`.
-/// Fails closed (`true`) if the diff cannot be computed.
-pub(crate) fn is_large_worktree_diff(deps: &Deps, worktree: &TaskWorktree) -> bool {
-    let Ok(diff) = deps.git.diff(worktree) else {
-        return true;
-    };
-    let (_, truncated) = crate::cross_audit::prompt::truncate_diff(&diff);
-    is_large_diff(&diff, truncated)
-}
-
-/// True when proof is not required or the signed proof for `(worktree, tree_fp)` verifies.
-pub(crate) fn proof_verified(deps: &Deps, worktree: &Path, receipt: &Receipt) -> bool {
-    if !deps.settings.repo.proof.required {
-        return true;
-    }
-    crate::proof::verify_proof(
-        worktree,
-        &deps.settings.data_dir,
-        &deps.settings.repo.proof,
-        Some(&receipt.tree_fp),
-    )
-    .is_ok()
-}
-
-fn same_repo_root(a: &Path, b: &Path) -> bool {
-    let ca = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-    let cb = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
-    ca == cb
-}
-
-/// Loads and verifies the signed `"audit\0"` record bound to `(repo_root, tree_fp, config_hash)`.
-pub(crate) fn load_verified_audit_verdict(
-    deps: &Deps,
-    repo_root: &Path,
-    receipt: &Receipt,
-) -> Option<PostGateAuditRecord> {
-    let key = aaf_fp::load_key(&deps.settings.data_dir).ok()?;
-    let record = aaf_fp::read_audit_verdict(
-        &deps.settings.data_dir,
-        &key,
-        repo_root,
-        &receipt.tree_fp,
-        &receipt.config_hash,
-    )
-    .ok()
-    .flatten()?;
-    if !same_repo_root(Path::new(&record.repo_root), repo_root) {
-        return None;
-    }
-    Some(record)
-}
-
-fn audit_satisfies_policy(record: &PostGateAuditRecord, cfg: &CrossAuditConfig) -> bool {
-    if record.verdict != "PASS" {
-        return false;
-    }
-    if !cfg.score_gate {
-        return true;
-    }
-    let mech = MechanicalScoreReport {
-        score: record.mechanical_score,
-        reasons: Vec::new(),
-        same_account_warning: false,
-    };
-    let eval = evaluate_score_gate(
-        &mech,
-        &record.scores,
-        cfg.min_average_score,
-        cfg.min_criterion_score,
-    );
-    eval.passed
-        && record.effective_score >= cfg.min_average_score
-        && record.llm_average == eval.llm_average
-}
-
-/// True when a `Verdict::Clear` task still requires a post-gate cross-audit
-/// under `[cross_audit]` policy and does not yet have a signed `"PASS"` verdict
-/// covering `(repo_root, tree_fp, config_hash)`.
-pub(crate) fn needs_post_gate_audit(deps: &Deps, job: &GateJob, receipt: &Receipt) -> bool {
-    let cfg = &deps.settings.repo.cross_audit;
-    if cfg.audit_scope == AuditScope::HeadLock && !cfg.score_gate {
-        return false;
-    }
-    if let Some(record) = load_verified_audit_verdict(deps, &job.worktree.path, receipt)
-        && audit_satisfies_policy(&record, cfg)
-    {
-        return false;
-    }
-    cfg.audit_scope == AuditScope::Always
-        || cfg.score_gate
-        || is_large_worktree_diff(deps, &job.worktree)
-}
-
-pub(crate) fn collect_rework_findings(
-    verdict: &AuditVerdict,
-    scores: &[aaf_domain::gate::GoldenScore],
-    reasons: &[String],
-    effective_score: u8,
-    cfg: &CrossAuditConfig,
-) -> Vec<Finding> {
-    let mut actionable = match verdict {
-        AuditVerdict::Fail { findings, .. } => findings.clone(),
-        _ => Vec::new(),
-    };
-    if cfg.score_gate {
-        let low_average = effective_score < cfg.min_average_score;
-        for s in scores {
-            if s.score < cfg.min_criterion_score
-                || (low_average && s.score < 100 && !s.deduction_reason.trim().is_empty())
-            {
-                actionable.push(Finding {
-                    id: s.id.clone(),
-                    question: format!(
-                        "score {}/100 (min criterion {})",
-                        s.score, cfg.min_criterion_score
-                    ),
-                    evidence: s.deduction_reason.clone(),
-                });
-            }
-        }
-        if actionable.is_empty() {
-            for reason in reasons {
-                actionable.push(Finding {
-                    id: "score_gate".to_string(),
-                    question: format!(
-                        "effective score {effective_score}/100 (min average {})",
-                        cfg.min_average_score
-                    ),
-                    evidence: reason.clone(),
-                });
-            }
-        }
-    }
-    actionable
-}
-
-fn collect_mechanical_findings(
-    receipt: &Receipt,
-    mech: &MechanicalScoreReport,
-    min_average: u8,
-) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    for item in &receipt.static_findings {
-        if !matches!(item.severity, Severity::Warn | Severity::Critical) {
-            continue;
-        }
-        let loc = match item.line {
-            Some(line) => format!("{}:{line}", item.file),
-            None => item.file.clone(),
-        };
-        let evidence = if item.fix.trim().is_empty() {
-            loc
-        } else {
-            format!("{loc}; fix: {}", item.fix)
-        };
-        findings.push(Finding {
-            id: item.rule.clone(),
-            question: item.message.clone(),
-            evidence,
-        });
-    }
-    for unresolved in &receipt.store_compliance.unresolved {
-        findings.push(Finding {
-            id: "score_gate".to_string(),
-            question: "unresolved store compliance item".to_string(),
-            evidence: unresolved.clone(),
-        });
-    }
-    for reason in &mech.reasons {
-        findings.push(Finding {
-            id: "score_gate".to_string(),
-            question: format!(
-                "mechanical score {}/100 (min average {min_average})",
-                mech.score
-            ),
-            evidence: reason.clone(),
-        });
-    }
-    if findings.is_empty() {
-        findings.push(Finding {
-            id: "score_gate".to_string(),
-            question: format!(
-                "mechanical score {}/100 (min average {min_average})",
-                mech.score
-            ),
-            evidence: "mechanical score below configured threshold".to_string(),
-        });
-    }
-    findings
-}
-
-fn reject_post_audit(
-    deps: &Deps,
-    task_id: String,
-    worktree: TaskWorktree,
-    reason: &str,
-) -> PortResult<Next> {
-    let note = format!("post-gate cross-audit rejected the changes ({reason})");
-    deps.store
-        .append_context_note(&task_id, &unblock::one_line(&note, 400), deps.now())?;
-    let signal =
-        audit_backend::audit_rejection_signal("post-gate cross-audit rejected the changes");
-    Ok(Next::Unblock {
-        task_id,
-        worktree,
-        signal: Box::new(signal),
-    })
-}
-
-/// Maps an auditor infrastructure failure to [`Next::RetryAfter`] for transient
-/// network faults and [`Next::Halt`] for authentication failures.
-pub(crate) fn audit_infra_next(
-    deps: &Deps,
-    task_id: &str,
-    grant: &Grant,
-    infra: &InfraFailure,
-) -> Next {
-    let (what, fix) = worker::infra_words(grant, infra);
-    let detail = worker::halt_message(task_id, what, infra, &fix);
-    if infra.kind == InfraKind::Network {
-        Next::RetryAfter {
-            until: deps.now(),
-            attempt: 1,
-            detail,
-        }
-    } else {
-        Next::Halt(detail)
-    }
-}
+const BEHAVIORAL_RED_UNPROVEN_CHECKLIST_NOTE: &str = "Oracle behavioral_red_unproven: verify that the \
+     new module's tests contain non-vacuous behavioral assertions exercising real production logic \
+     and edge cases";
 
 /// Runs the post-gate cross-audit worker job and maps any infrastructure error
 /// to [`worker::block_infra`].
@@ -341,8 +56,23 @@ pub(crate) fn run_post_gate_audit(
 
 fn mech_score(deps: &Deps, tree: &Path, receipt: &Receipt, same: bool) -> MechanicalScoreReport {
     let cfg = &deps.settings.repo.cross_audit;
-    let proof_ok = proof_verified(deps, tree, receipt);
-    compute_mechanical_score(receipt, proof_ok, cfg.require_different_provider, same)
+    compute_mechanical_score(
+        receipt,
+        proof_verified(deps, tree, receipt),
+        cfg.require_different_provider,
+        same,
+    )
+}
+
+fn acquire_primary_fallback_grant(deps: &Deps, task_id: &str) -> PortResult<Option<Grant>> {
+    if let Some(grant) = deps.accounts.acquire_for(task_id, Purpose::Audit)? {
+        return Ok(Some(grant));
+    }
+    Ok(deps
+        .accounts
+        .profiles()?
+        .is_empty()
+        .then(|| Grant::new(None, None)))
 }
 
 fn execute_post_gate_audit(
@@ -355,12 +85,16 @@ fn execute_post_gate_audit(
 ) -> PortResult<Next> {
     let task = deps.store.get_task(&job.task_id)?;
     let cfg = &deps.settings.repo.cross_audit;
-    let reusable = pre_audit.filter(|pre| {
-        !pre.tree_fp.is_empty()
-            && pre.tree_fp == receipt.tree_fp
-            && pre.base_sha == receipt.base_sha
-            && (!cfg.score_gate || pre.scores.len() == GOLDEN_IDS.len())
-    });
+    let forced_behavioral = has_behavioral_red_unproven(&receipt);
+    let reusable = (!forced_behavioral)
+        .then_some(pre_audit)
+        .flatten()
+        .filter(|pre| {
+            !pre.tree_fp.is_empty()
+                && pre.tree_fp == receipt.tree_fp
+                && pre.base_sha == receipt.base_sha
+                && (!cfg.score_gate || pre.scores.len() == GOLDEN_IDS.len())
+        });
 
     let (audit_provider, reviewer, same_account, pre_mech, verdict, diff_truncated, scores) =
         if let Some(pre) = reusable {
@@ -374,38 +108,38 @@ fn execute_post_gate_audit(
                 pre.scores,
             )
         } else {
-            let ctx =
-                audit_backend::resolve_task_audit_context(deps, audit_backend, &task.id, grant)?;
-            let (audit_provider, reviewer, same_account) = match ctx {
-                Ok(ctx) => ctx,
-                Err(why) => {
-                    unblock::block_untried(deps, &task.id, &why)?;
-                    return Ok(Next::Blocked);
-                }
-            };
+            let (mut audit_provider, mut reviewer, mut same_account) =
+                match audit_backend::resolve_task_audit_context(
+                    deps,
+                    audit_backend,
+                    &task.id,
+                    grant,
+                )? {
+                    Ok(ctx) => ctx,
+                    Err(why) => {
+                        unblock::block_untried(deps, &task.id, &why)?;
+                        return Ok(Next::Blocked);
+                    }
+                };
+            let mut spec = task.spec.clone();
+            if forced_behavioral {
+                spec.acceptance
+                    .push(BEHAVIORAL_RED_UNPROVEN_CHECKLIST_NOTE.to_string());
+            }
             let input = AuditInput {
-                spec: task.spec.clone(),
+                spec,
                 diff: deps.git.diff(&job.worktree)?,
                 mobile: deps.settings.mobile,
             };
             if let Some(reason) = short_circuit_audit_reason(&input.diff) {
-                deps.emit(
-                    EventKind::CrossAudit,
-                    &task.id,
-                    json!({
-                        "phase": "post_gate",
-                        "verdict": reason,
-                        "provider": audit_provider,
-                        "reviewer": reviewer,
-                        "same_account": same_account,
-                        "tree_fp": receipt.tree_fp,
-                        "config_hash": receipt.config_hash,
-                        "short_circuited": true,
-                    }),
-                )?;
+                deps.emit(EventKind::CrossAudit, &task.id, json!({
+                    "phase": "post_gate", "verdict": reason, "provider": audit_provider,
+                    "reviewer": reviewer, "same_account": same_account,
+                    "tree_fp": receipt.tree_fp, "config_hash": receipt.config_hash, "short_circuited": true,
+                }))?;
                 return reject_post_audit(deps, task.id, job.worktree, &reason);
             }
-            let pre_mech = cfg
+            let mut pre_mech = cfg
                 .score_gate
                 .then(|| mech_score(deps, &job.worktree.path, &receipt, same_account));
             if let Some(ref mech) = pre_mech
@@ -417,25 +151,13 @@ fn execute_post_gate_audit(
                     mech.score, cfg.min_average_score
                 ));
                 let event_verdict = format!("fail: {}", reasons.join("; "));
-                deps.emit(
-                    EventKind::CrossAudit,
-                    &task.id,
-                    json!({
-                        "phase": "post_gate",
-                        "verdict": event_verdict,
-                        "provider": audit_provider,
-                        "reviewer": reviewer,
-                        "same_account": same_account,
-                        "mechanical_score": mech.score,
-                        "llm_average": Option::<u8>::None,
-                        "effective_score": mech.score,
-                        "scores": serde_json::Value::Array(Vec::new()),
-                        "reasons": reasons,
-                        "tree_fp": receipt.tree_fp,
-                        "config_hash": receipt.config_hash,
-                        "short_circuited": true,
-                    }),
-                )?;
+                deps.emit(EventKind::CrossAudit, &task.id, json!({
+                    "phase": "post_gate", "verdict": event_verdict, "provider": audit_provider,
+                    "reviewer": reviewer, "same_account": same_account, "mechanical_score": mech.score,
+                    "llm_average": Option::<u8>::None, "effective_score": mech.score,
+                    "scores": serde_json::Value::Array(Vec::new()), "reasons": reasons,
+                    "tree_fp": receipt.tree_fp, "config_hash": receipt.config_hash, "short_circuited": true,
+                }))?;
                 let findings = collect_mechanical_findings(&receipt, mech, cfg.min_average_score);
                 if let Some(next) = unblock::handle_audit_failure(deps, &task, &findings)? {
                     return Ok(next);
@@ -452,20 +174,85 @@ fn execute_post_gate_audit(
                 grant,
                 cfg.score_gate,
             );
-            let _ = deps.git.discard(&clean);
-            let (report, infra, limit_hit) = audited?;
+            let (mut report, mut infra, mut limit_hit) = match audited {
+                Ok(res) => res,
+                Err(err) => {
+                    let _ = deps.git.discard(&clean);
+                    return Err(err);
+                }
+            };
+            let mut active_accounts: &dyn AccountPool =
+                audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
+            let mut fallback_grant_slot: Option<Grant> = None;
+            let mut tier1_blocked_fallback = false;
+            if audit_backend.is_some()
+                && !cfg.require_different_provider
+                && infra.as_ref().is_some_and(|i| i.kind == InfraKind::Auth)
+                && let Some(fb_grant) = acquire_primary_fallback_grant(deps, &task.id)?
+            {
+                let fb_ctx =
+                    audit_backend::resolve_task_audit_context(deps, None, &task.id, &fb_grant)?;
+                if let Ok((fb_provider, fb_reviewer, fb_same)) = fb_ctx {
+                    if receipt.head_lock.has_hard_lock() && fb_same {
+                        tier1_blocked_fallback = true;
+                        let _ = deps.git.discard(&clean);
+                    } else {
+                        let prev_provider = audit_provider.clone();
+                        (audit_provider, reviewer, same_account) =
+                            (fb_provider, fb_reviewer, fb_same);
+                        pre_mech = cfg
+                            .score_gate
+                            .then(|| mech_score(deps, &job.worktree.path, &receipt, same_account));
+                        deps.emit(
+                            EventKind::CrossAudit,
+                            &task.id,
+                            json!({
+                                "phase": "post_gate", "verdict": "auth_fallback",
+                                "fallback_from": prev_provider, "provider": audit_provider,
+                                "reviewer": reviewer, "same_account": same_account,
+                            }),
+                        )?;
+                        let fb_res = audit_backend::run_auditor_turn(
+                            deps,
+                            None,
+                            &task,
+                            &input,
+                            &clean.tree,
+                            &fb_grant,
+                            cfg.score_gate,
+                        );
+                        let _ = deps.git.discard(&clean);
+                        (report, infra, limit_hit) = fb_res?;
+                        active_accounts = &*deps.accounts;
+                        fallback_grant_slot = Some(fb_grant);
+                    }
+                } else {
+                    let _ = deps.git.discard(&clean);
+                }
+            } else {
+                let _ = deps.git.discard(&clean);
+            }
+            let active_grant = fallback_grant_slot.as_ref().unwrap_or(grant);
             if let Some(hit) = limit_hit {
-                let accounts: &dyn AccountPool =
-                    audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
-                audit_backend::report_audit_limit(deps, accounts, &task.id, grant, &hit)?;
-                let next = audit_backend::route_audit_limit(accounts, grant, &hit)?;
+                audit_backend::report_audit_limit(
+                    deps,
+                    active_accounts,
+                    &task.id,
+                    active_grant,
+                    &hit,
+                )?;
+                let next = audit_backend::route_audit_limit(active_accounts, active_grant, &hit)?;
                 return Ok(match next {
                     Next::Switch => Next::SwitchJob(Job::fresh_post_audit(job, receipt)),
                     other => other,
                 });
             }
             if let Some(infra) = infra {
-                return Ok(audit_infra_next(deps, &task.id, grant, &infra));
+                return Ok(if fallback_grant_slot.is_some() || tier1_blocked_fallback {
+                    primary_infra_next(deps, &task.id, active_grant, &infra)
+                } else {
+                    audit_infra_next(deps, &task.id, grant, &infra)
+                });
             }
             (
                 audit_provider,
@@ -503,7 +290,6 @@ fn execute_post_gate_audit(
     if let Some(ref e) = eval {
         reasons.extend(e.reasons.iter().cloned());
     }
-
     let passed = verdict.is_pass() && !diff_truncated && eval.as_ref().is_none_or(|e| e.passed);
     let score_gate_failed = verdict.is_pass()
         && !diff_truncated
@@ -559,6 +345,9 @@ fn execute_post_gate_audit(
             llm_average,
             effective_score,
             scores,
+            adjudicated: false,
+            dual_consensus: false,
+            reviewers: Vec::new(),
             created_at: deps.now(),
         };
         let io = |err: aaf_fp::FpError| PortError::Io(err.to_string());
@@ -588,7 +377,6 @@ fn execute_post_gate_audit(
             return Ok(next);
         }
     }
-
     let summary = rework_filter::fallback_verdict_summary(&verdict, &event_verdict);
     reject_post_audit(deps, task.id, job.worktree, &summary)
 }

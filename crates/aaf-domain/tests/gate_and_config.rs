@@ -3,8 +3,8 @@
 
 use aaf_domain::account::{AccountProfile, AccountState, ProviderKind};
 use aaf_domain::config::{
-    AccountsConfig, DEFAULT_MIN_ANDROID_TARGET_SDK, GateConfig, GlobalConfig, RepoConfig,
-    RunConfig, StoreMode, UnblockerConfig,
+    AccountsConfig, DEFAULT_MIN_ANDROID_TARGET_SDK, GateConfig, GlobalConfig, PipelineConfig,
+    RepoConfig, RunConfig, StoreMode, UnblockerConfig,
 };
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::gate::{
@@ -224,11 +224,12 @@ fn default_head_lock_globs_have_no_bare_substring_test_pattern() {
 #[test]
 fn unblocker_and_run_defaults_are_conservative() {
     let unblocker = UnblockerConfig::default();
-    assert_eq!(unblocker.max_unblock_cycles, 5);
+    assert_eq!(unblocker.max_unblock_cycles, 10);
     assert_eq!(unblocker.max_subtask_depth, 1);
-    assert_eq!(unblocker.max_token_budget, 500_000);
-    assert_eq!(unblocker.max_wall_clock_secs, 3600);
+    assert_eq!(unblocker.max_token_budget, 2_000_000);
+    assert_eq!(unblocker.max_wall_clock_secs, 10_800);
     assert_eq!(unblocker.global_freeze_consecutive_fails, 3);
+    assert_eq!(PipelineConfig::default().max_audit_reworks, 3);
 
     let run = RunConfig::default();
     assert_eq!(run.executor, "claude");
@@ -328,11 +329,11 @@ fn account_profile_without_a_name_field_still_parses() {
 }
 
 #[test]
-fn account_selection_defaults_to_pinned_and_has_three_wire_names() {
+fn account_selection_defaults_to_sticky_and_has_three_wire_names() {
     use aaf_domain::config::AccountSelection;
     assert_eq!(
         GlobalConfig::default().accounts.selection,
-        AccountSelection::Pinned
+        AccountSelection::Sticky
     );
     for (wire, mode) in [
         ("pinned", AccountSelection::Pinned),

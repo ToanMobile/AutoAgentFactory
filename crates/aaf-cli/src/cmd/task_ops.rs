@@ -9,6 +9,7 @@
 //! `aaf cockpit`.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,7 +23,7 @@ use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::Db;
 use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
 use aaf_engine::gate::{GIT_TIMEOUT, GateError, base, head_lock};
-use aaf_engine::git::worktree::worktree_path;
+use aaf_engine::git::worktree::{self, worktree_path};
 use serde_json::{Value, json};
 
 use crate::ctx::{Ctx, SystemClock};
@@ -71,6 +72,29 @@ pub(crate) struct UnblockOutcome {
 pub(crate) struct ReworkOutcome {
     pub(crate) target: TaskState,
     pub(crate) budget_reset: bool,
+}
+
+pub(crate) struct ApproveOutcome {
+    pub(crate) approval: Approval,
+    pub(crate) tree: PathBuf,
+    pub(crate) transitioned_to: Option<TaskState>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ApproveOpError {
+    Gate(GateError),
+    Port(PortError),
+    Config(String),
+}
+
+impl fmt::Display for ApproveOpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gate(err) => write!(f, "{err}"),
+            Self::Port(err) => write!(f, "{err}"),
+            Self::Config(msg) => write!(f, "{msg}"),
+        }
+    }
 }
 
 /// Parses an optional leading `--rerun` flag from a free-text rework reason.
@@ -438,6 +462,91 @@ pub(crate) fn compute_critical_path(topo: &[String], edges: &[(String, String)])
     }
     path.reverse();
     path
+}
+
+/// Signs a human head-lock approval for `task_id` and, when the task is
+/// `Blocked` and its registered worktree directory exists on disk
+/// ([`worktree::existing_registered`]), resets any exhausted root budget,
+/// appends `"unblocked: head-lock approved"`, and transitions
+/// `Blocked -> Gating`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn approve_and_regate(
+    db: &Db,
+    ctx: &Ctx,
+    task_id: &str,
+    reviewer: &str,
+    expected_lock_fp: Option<&str>,
+    why: &str,
+    by: &str,
+    now: i64,
+) -> Result<ApproveOutcome, ApproveOpError> {
+    let task = db.get_task(task_id).map_err(ApproveOpError::Port)?;
+    let main_root = Path::new(&task.repo_root);
+    let registered_wt = worktree::existing_registered(main_root, &ctx.worktrees_dir, &task.id)
+        .ok()
+        .flatten()
+        .map(|(wt, _)| wt.path);
+    let target_tree = match &registered_wt {
+        Some(wt) => wt.clone(),
+        None => resolve_task_tree(db, &task, ctx),
+    };
+    let approval = match expected_lock_fp {
+        Some(fp) => {
+            approve_if_unchanged(ctx, &target_tree, fp, reviewer).map_err(|err| match err {
+                ApproveRefusal::Eval(HeadLockEvalError::Config(msg)) => ApproveOpError::Config(msg),
+                ApproveRefusal::Eval(
+                    HeadLockEvalError::Base(msg) | HeadLockEvalError::Task(msg),
+                ) => ApproveOpError::Gate(GateError::Git(msg)),
+                ApproveRefusal::NothingLocked => ApproveOpError::Gate(GateError::NothingLocked),
+                ApproveRefusal::FpChanged => ApproveOpError::Gate(GateError::LockFpChanged),
+                ApproveRefusal::Sign(e) => ApproveOpError::Gate(e),
+            })?
+        }
+        None => {
+            let eff = ctx
+                .load_config(&target_tree)
+                .map_err(|e| ApproveOpError::Config(e.message))?;
+            head_lock::approve(
+                &ctx.data_dir,
+                &target_tree,
+                &eff.repo,
+                reviewer,
+                false,
+                &SystemClock,
+            )
+            .map_err(ApproveOpError::Gate)?
+        }
+    };
+
+    let mut transitioned_to = None;
+    if task.state == TaskState::Blocked && registered_wt.is_some() {
+        let budget_reset =
+            reset_exhausted_budget(db, &task.root_id).map_err(ApproveOpError::Port)?;
+        db.append_context_note(&task.id, "unblocked: head-lock approved", now)
+            .map_err(ApproveOpError::Port)?;
+        db.set_state(&task.id, TaskState::Gating, None, now)
+            .map_err(ApproveOpError::Port)?;
+        let payload = json!({
+            "from": TaskState::Blocked.as_str(),
+            "to": TaskState::Gating.as_str(),
+            "why": why,
+            "by": by,
+            "lock_fp": approval.lock_fp,
+            "budget_reset": budget_reset,
+        });
+        db.emit(
+            &FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now)
+                .for_task(&task.id),
+        )
+        .map_err(ApproveOpError::Port)?;
+        transitioned_to = Some(TaskState::Gating);
+    }
+
+    Ok(ApproveOutcome {
+        approval,
+        tree: target_tree,
+        transitioned_to,
+    })
 }
 
 #[cfg(test)]

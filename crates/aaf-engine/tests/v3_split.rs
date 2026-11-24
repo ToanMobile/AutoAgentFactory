@@ -69,6 +69,7 @@ fn base_request() -> AgentRequest {
         account: None,
         timeout_secs: 120,
         sandbox: SandboxPolicy::default(),
+        json_schema: None,
     }
 }
 

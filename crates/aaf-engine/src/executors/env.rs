@@ -2,11 +2,11 @@
 //! `aaf run` was started in, plus the names `run.env_pass` adds, minus the
 //! names nobody may add.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use aaf_domain::ports::{PortError, PortResult};
 
-use super::ExecEnv;
+use super::{DEFAULT_WORKTREES_REL, ExecEnv, sandbox};
 
 /// What an agent needs of the environment `aaf run` was started in: where
 /// things are, the locale, the toolchain homes builds look for, and how this
@@ -15,7 +15,7 @@ use super::ExecEnv;
 /// Anything else (tokens, `CLAUDE_CODE_*`, `ANTHROPIC_API_KEY`,
 /// `SSH_AUTH_SOCK`, `AAF_*` state of the caller) stays behind unless
 /// `run.env_pass` names it.
-const ENV_ALLOW: [&str; 25] = [
+const ENV_ALLOW: [&str; 32] = [
     "PATH",
     "HOME",
     "USER",
@@ -30,6 +30,13 @@ const ENV_ALLOW: [&str; 25] = [
     "GRADLE_USER_HOME",
     "CARGO_HOME",
     "RUSTUP_HOME",
+    "GOPATH",
+    "GOMODCACHE",
+    "PNPM_HOME",
+    "BUN_INSTALL",
+    "PUB_CACHE",
+    "FLUTTER_ROOT",
+    "XDG_CACHE_HOME",
     "UNITY_PATH",
     "DEVELOPER_DIR",
     "HTTPS_PROXY",
@@ -43,6 +50,16 @@ const ENV_ALLOW: [&str; 25] = [
     "SSL_CERT_DIR",
 ];
 const ENV_ALLOW_PREFIX: &str = "LC_";
+
+/// Non-interactive defaults injected into confined PTY runs unless overridden
+/// by `run.env_pass` / `machine_env_pass`.
+pub const NON_INTERACTIVE_ENV: [(&str, &str); 5] = [
+    ("CI", "true"),
+    ("NONINTERACTIVE", "1"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("DEBIAN_FRONTEND", "noninteractive"),
+    ("NO_UPDATE_NOTIFIER", "1"),
+];
 
 /// Allowed names whose value is a URL that may carry a login
 /// (`http://user:password@proxy:3128`).
@@ -309,4 +326,185 @@ pub(super) fn push_denied_entries(
             target.push(path);
         }
     }
+}
+
+/// Injects [`NON_INTERACTIVE_ENV`] defaults into `spec_env` unless already set
+/// there or explicitly forwarded via `env_pass`/`machine_env_pass` from `parent_env`.
+pub(super) fn inject_non_interactive_env(env: &ExecEnv, spec_env: &mut Vec<(String, String)>) {
+    for (key, val) in NON_INTERACTIVE_ENV {
+        let overridden_by_pass = named(env, key) && env.parent_env.iter().any(|(k, _)| k == key);
+        let already_set = spec_env.iter().any(|(k, _)| k == key);
+        if !overridden_by_pass && !already_set {
+            spec_env.push((key.to_string(), val.to_string()));
+        }
+    }
+}
+
+const SENSITIVE_HOME_DIRS: [&str; 6] = [
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".kube",
+    ".config/autofactory",
+    ".local/share/opencode",
+];
+const SENSITIVE_HOME_PREFIXES: [&str; 3] = [".claude", ".codex", ".gemini"];
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn expand_tilde(raw: &str, home: Option<&str>) -> PortResult<String> {
+    if raw == "~" || raw.starts_with("~/") {
+        let Some(h) = home.filter(|s| !s.is_empty()) else {
+            return Err(PortError::Invalid(format!(
+                "machine.writable_caches entry {raw:?} requires HOME to be set"
+            )));
+        };
+        let rest = raw.strip_prefix("~/").unwrap_or("");
+        return Ok(if rest.is_empty() {
+            h.to_string()
+        } else {
+            format!("{}/{rest}", h.trim_end_matches('/'))
+        });
+    }
+    Ok(raw.to_string())
+}
+
+fn raw_and_canon(raw: &str) -> Vec<PathBuf> {
+    let lex = lexical_normalize(Path::new(raw));
+    let mut out = vec![lex.clone()];
+    if let Ok(canon) = sandbox::canonical(raw)
+        && canon != lex
+    {
+        out.push(canon);
+    }
+    out
+}
+
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a == b || a.starts_with(b) || b.starts_with(a)
+}
+
+fn is_sensitive_home_prefix(cand: &Path, home: &Path) -> bool {
+    let Ok(rel) = cand.strip_prefix(home) else {
+        return false;
+    };
+    let Some(Component::Normal(first)) = rel.components().next() else {
+        return false;
+    };
+    first
+        .to_str()
+        .is_some_and(|name| SENSITIVE_HOME_PREFIXES.iter().any(|p| name.starts_with(p)))
+}
+
+/// Validates Tier-1 `machine.writable_caches` entries and returns their
+/// expanded absolute paths.
+///
+/// Rejects any entry whose raw or canonical path equals or is an ancestor of
+/// `/`, `HOME`, `AAF_DATA_DIR`, `worktrees_root`, any `PATH` directory, or
+/// sensitive directories (`.ssh`, `.gnupg`, `.aws`, `.kube`,
+/// `.config/autofactory`, `.claude*`, `.codex*`, `.gemini*`,
+/// `.local/share/opencode`), as well as any path inside those sensitive roots.
+pub fn validate_writable_caches(caches: &[String], env: &ExecEnv) -> PortResult<Vec<String>> {
+    let home_forms: Vec<PathBuf> = env
+        .home
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .map(raw_and_canon)
+        .unwrap_or_default();
+    let mut forbidden_overlap: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(data) = env.data_dir.as_deref().filter(|s| !s.is_empty()) {
+        for p in raw_and_canon(data) {
+            forbidden_overlap.push(("AAF_DATA_DIR".to_string(), p));
+        }
+    }
+    let wt_root = env.worktrees_root.clone().or_else(|| {
+        env.home
+            .as_deref()
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("{}/{DEFAULT_WORKTREES_REL}", h.trim_end_matches('/')))
+    });
+    if let Some(wt) = wt_root.as_deref().filter(|s| !s.is_empty()) {
+        for p in raw_and_canon(wt) {
+            forbidden_overlap.push(("worktrees_root".to_string(), p));
+        }
+    }
+    for (_, value) in env.parent_env.iter().filter(|(k, _)| k == "PATH") {
+        for dir in std::env::split_paths(value).filter(|d| d.is_absolute()) {
+            let text = dir.to_string_lossy();
+            for p in raw_and_canon(&text) {
+                forbidden_overlap.push((format!("PATH dir {}", dir.display()), p));
+            }
+        }
+    }
+    for home in &home_forms {
+        for rel in SENSITIVE_HOME_DIRS {
+            let joined = home.join(rel);
+            let joined_str = joined.to_string_lossy();
+            for p in raw_and_canon(&joined_str) {
+                forbidden_overlap.push((format!("sensitive dir {rel}"), p));
+            }
+        }
+    }
+
+    let mut resolved = Vec::with_capacity(caches.len());
+    for raw in caches {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.as_bytes().contains(&0) {
+            return Err(PortError::Invalid(format!(
+                "machine.writable_caches: invalid empty or NUL path {raw:?}"
+            )));
+        }
+        let expanded = expand_tilde(trimmed, env.home.as_deref())?;
+        let exp_path = Path::new(&expanded);
+        if !exp_path.is_absolute()
+            || exp_path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(PortError::Invalid(format!(
+                "machine.writable_caches: {raw:?} must be a clean absolute path without '..'"
+            )));
+        }
+        let canon = sandbox::canonical(&expanded)?;
+        let lex = lexical_normalize(exp_path);
+        for cand in [&lex, &canon] {
+            if cand.as_path() == Path::new("/") {
+                return Err(PortError::Invalid(format!(
+                    "machine.writable_caches: {raw:?} cannot open root '/'"
+                )));
+            }
+            for home in &home_forms {
+                if cand == home || home.starts_with(cand) {
+                    return Err(PortError::Invalid(format!(
+                        "machine.writable_caches: {raw:?} equals or is an ancestor of HOME"
+                    )));
+                }
+                if is_sensitive_home_prefix(cand, home) {
+                    return Err(PortError::Invalid(format!(
+                        "machine.writable_caches: {raw:?} targets a sensitive agent config dir"
+                    )));
+                }
+            }
+            for (label, protected) in &forbidden_overlap {
+                if overlaps(cand, protected) {
+                    return Err(PortError::Invalid(format!(
+                        "machine.writable_caches: {raw:?} overlaps protected {label}"
+                    )));
+                }
+            }
+        }
+        if !resolved.contains(&expanded) {
+            resolved.push(expanded);
+        }
+    }
+    Ok(resolved)
 }

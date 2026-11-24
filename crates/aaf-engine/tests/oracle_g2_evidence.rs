@@ -62,6 +62,7 @@ fn template() -> AgentRequest {
             writable_paths: vec![],
             read_denied_paths: vec![],
         },
+        json_schema: None,
     }
 }
 

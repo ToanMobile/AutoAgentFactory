@@ -423,7 +423,13 @@ fn a_tracked_real_binary_is_skipped_while_text_lines_still_reach_the_scan() {
         "{files:?}"
     );
 
-    let receipt = repo.gate(&passing_cfg(), GateMode::Scoped);
+    // `.gitattributes` is Tier-1 head-locked by default; exclude it here so this
+    // unit test isolates binary-diff scanning from head-lock policy.
+    let mut cfg = passing_cfg();
+    cfg.gate
+        .head_lock_globs
+        .retain(|g| !g.contains("gitattributes"));
+    let receipt = repo.gate(&cfg, GateMode::Scoped);
     assert_eq!(receipt.status, GateStatus::Clear, "{:?}", receipt.reasons);
     assert!(
         receipt.static_findings.is_empty(),

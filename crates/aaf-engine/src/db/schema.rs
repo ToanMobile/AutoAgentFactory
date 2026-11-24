@@ -124,6 +124,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_turn_snapshots_task
         ON turn_snapshots(task_id, id);
     ",
+    // v5: persisted transient retry scheduling and auto-recovery counters.
+    "
+    ALTER TABLE tasks ADD COLUMN retry_after INTEGER;
+    ALTER TABLE tasks ADD COLUMN auto_recover_count INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_tasks_blocked_retry
+        ON tasks(repo_root, state, retry_after)
+        WHERE state = 'blocked' AND retry_after IS NOT NULL;
+    ",
 ];
 
 /// Schema version this build reads and writes.

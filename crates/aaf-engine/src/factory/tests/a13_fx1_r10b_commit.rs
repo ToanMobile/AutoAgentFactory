@@ -8,8 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aaf_domain::blocked::BlockedReason;
-use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
+use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortResult};
 use aaf_domain::task::TaskState;
 
 use super::fakes::ok_outcome;
@@ -76,11 +75,11 @@ fn once(deps: &Deps) -> crate::factory::RunSummary {
     crate::factory::run(deps, crate::factory::Mode::Once, &hooks).unwrap()
 }
 
-/// O12-R10-3: a pre-commit hook that refuses the agent's change is feedback
-/// for the agent, not a task for a person: the hook's words go into the next
-/// run's notes, and the fixed change lands.
+/// Plan v3 V2-SEC-03: headless `commit_all` bypasses developer pre-commit hooks
+/// (`-c core.hooksPath=/dev/null --no-verify`) so `aaf gate` is the single gate
+/// and unattended tasks reach Review cleanly in one round.
 #[test]
-fn a_pre_commit_hook_refusal_goes_back_to_the_agent_and_the_fix_reaches_review() {
+fn a_pre_commit_hook_is_bypassed_so_unattended_task_reaches_review() {
     let fx = Fixture::new();
     let hooks = fx.tmp.path().join("hooks");
     fs::create_dir_all(&hooks).unwrap();
@@ -93,40 +92,20 @@ fn a_pre_commit_hook_refusal_goes_back_to_the_agent_and_the_fix_reaches_review()
         &fx.repo,
         &["config", "core.hooksPath", hooks.to_str().unwrap()],
     );
-    let (world, deps, writer) = real_world(&fx, vec!["BAD\n", "good\n"]);
+    let (world, deps, writer) = real_world(&fx, vec!["BAD\n"]);
 
     let first = once(&deps);
 
-    let task = world.task("t1");
-    assert_eq!(
-        task.state,
-        TaskState::Ready,
-        "{first:?} {:?}",
-        task.blocked_reason
-    );
-    assert!(first.blocked.is_empty(), "{first:?}");
-    let note = task
-        .context_notes
-        .iter()
-        .find(|n| n.contains("write good"))
-        .unwrap_or_else(|| panic!("no hook note: {:?}", task.context_notes));
-    assert!(note.contains("<untrusted-data"), "{note}");
-
-    let second = once(&deps);
-
-    assert_eq!(second.review, vec!["t1"], "{second:?}");
+    assert_eq!(first.review, vec!["t1"], "{first:?}");
     assert_eq!(world.state("t1"), TaskState::Review);
-    let prompts = writer.prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].contains("write good"), "{}", prompts[1]);
-    let landed = git(&fx.repo, &["show", "aaf/t1:feature.txt"]);
-    assert_eq!(landed, "good");
+    assert_eq!(writer.prompts.lock().unwrap().len(), 1);
+    assert_eq!(git(&fx.repo, &["show", "aaf/t1:feature.txt"]), "BAD");
 }
 
-/// O12-R10-3 (e): a commit that cannot be signed waits (twice for the same
-/// failure) before a person is asked; it never hangs or blocks at once.
+/// Plan v3 V2-SEC-03: `commit_all` passes `-c commit.gpgsign=false`, so a broken
+/// or interactive GPG pinentry setup never blocks unattended tasks.
 #[test]
-fn a_commit_that_cannot_be_signed_waits_twice_then_asks_a_person() {
+fn a_broken_gpg_signing_config_is_bypassed_so_task_reaches_review() {
     let fx = Fixture::new();
     let gpg = fx.tmp.path().join("gpg-fails.sh");
     script(
@@ -137,26 +116,16 @@ fn a_commit_that_cannot_be_signed_waits_twice_then_asks_a_person() {
     git(&fx.repo, &["config", "gpg.program", gpg.to_str().unwrap()]);
     let (world, deps, writer) = real_world(&fx, vec!["x\n"]);
 
-    for round in 0..2 {
-        let summary = once(&deps);
-        let task = world.task("t1");
-        assert_eq!(task.state, TaskState::Ready, "round {round}: {summary:?}");
-        assert!(summary.blocked.is_empty(), "round {round}: {summary:?}");
-    }
-    let third = once(&deps);
+    let summary = once(&deps);
 
-    assert_eq!(third.blocked, vec!["t1"], "{third:?}");
-    let task = world.task("t1");
-    assert!(
-        matches!(task.blocked_reason, Some(BlockedReason::NeedsHuman { .. })),
-        "{:?}",
-        task.blocked_reason
-    );
+    assert_eq!(summary.review, vec!["t1"], "{summary:?}");
+    assert_eq!(world.state("t1"), TaskState::Review);
+    assert!(summary.blocked.is_empty(), "{summary:?}");
     assert_eq!(writer.runs.load(Ordering::SeqCst), 1, "one agent run only");
 }
 
 #[test]
-fn a_signing_failure_is_reported_as_a_deferred_commit() {
+fn commit_all_bypasses_failing_gpg_program() {
     let fx = Fixture::new();
     let gpg = fx.tmp.path().join("gpg-fails.sh");
     script(&gpg, "#!/bin/sh\nexit 2\n");
@@ -165,13 +134,9 @@ fn a_signing_failure_is_reported_as_a_deferred_commit() {
     let tree = fx.ops.task_worktree("t1").unwrap();
     fs::write(tree.path.join("app.txt"), "two\n").unwrap();
 
-    let error = fx.ops.commit_all(&tree, "aaf: t1").unwrap_err();
+    fx.ops.commit_all(&tree, "aaf: t1").unwrap();
 
-    assert!(
-        matches!(&error, PortError::Io(m) if m.starts_with("commit deferred")),
-        "{error}"
-    );
-    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "0");
+    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "1");
 }
 
 /// LEAD C: hooks that live inside the task's own worktree and that the task
@@ -195,10 +160,10 @@ fn an_agent_written_in_tree_hook_does_not_run_at_commit() {
     assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "1");
 }
 
-/// The same in-tree hooks, committed on the base and untouched by the task,
-/// are the repository's: they run.
+/// Plan v3 V2-SEC-03: even base-committed in-tree hooks are bypassed during
+/// headless factory commits (`-c core.hooksPath=/dev/null --no-verify`).
 #[test]
-fn an_unchanged_in_tree_hook_of_the_base_still_runs() {
+fn an_unchanged_in_tree_hook_of_the_base_is_bypassed_at_commit() {
     let fx = Fixture::new();
     let marker = fx.tmp.path().join("repo-hook-ran");
     fs::create_dir_all(fx.repo.join(".githooks")).unwrap();
@@ -214,5 +179,6 @@ fn an_unchanged_in_tree_hook_of_the_base_still_runs() {
 
     fx.ops.commit_all(&tree, "aaf: t1").unwrap();
 
-    assert!(marker.exists(), "the repository's own hook did not run");
+    assert!(!marker.exists(), "headless commit must bypass repo hooks");
+    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "1");
 }

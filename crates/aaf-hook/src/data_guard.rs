@@ -6,6 +6,9 @@ use std::path::{Component, Path};
 use crate::shell::Cmd;
 use crate::{Ctx, Denial, paths};
 
+mod search;
+use search::search_needle_exempt_mask;
+
 const RULE: &str = "data_dir_guard";
 /// The reader is an agent. Inside a factory run `aaf gate` cannot work (the
 /// factory runs the gate outside the sandbox) and `aaf doctor` cannot read
@@ -37,13 +40,15 @@ fn contains_path(text: &str, dir: &str) -> bool {
     })
 }
 
+fn mentions_data_dir(text: &str, ctx: &Ctx) -> bool {
+    ctx.data_dirs
+        .iter()
+        .any(|dir| contains_path(text, &dir.to_string_lossy()))
+}
+
 /// Text-level check, used for words and for unparsable input.
 pub fn mentions(text: &str, ctx: &Ctx) -> bool {
-    NEEDLES.iter().any(|needle| text.contains(needle))
-        || ctx
-            .data_dirs
-            .iter()
-            .any(|dir| contains_path(text, &dir.to_string_lossy()))
+    NEEDLES.iter().any(|needle| text.contains(needle)) || mentions_data_dir(text, ctx)
 }
 
 /// Text a program reads as code (an interpreter's heredoc or `-c` script)
@@ -300,6 +305,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let literal = cmd.words.first().is_some_and(|word| word == "aaf") && !cmd.dynamic_name;
     let is_aaf = literal && !cmd.aaf_untrusted;
     let exempt = msg_exempt_mask(cmd);
+    let needle_exempt = search_needle_exempt_mask(cmd);
     let assigns = cmd
         .assigns
         .iter()
@@ -315,13 +321,28 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                 .map(|(_, word)| word.as_str()),
         )
     };
+    let word_hits = !is_aaf
+        && (cmd
+            .wrapped
+            .iter()
+            .any(|text| mentions(text, ctx) || points_inside(text, ctx))
+            || cmd.words.iter().enumerate().any(|(i, word)| {
+                if exempt.as_ref().is_some_and(|m| m[i]) {
+                    return false;
+                }
+                if needle_exempt.as_ref().is_some_and(|m| m[i]) {
+                    mentions_data_dir(word, ctx) || points_inside(word, ctx)
+                } else {
+                    mentions(word, ctx) || points_inside(word, ctx)
+                }
+            }));
     // Redirects are opened by the shell, whoever the command is.
     let redirects = cmd.redirects.iter().map(|r| r.target.as_str());
-    let named = argv()
-        .chain(assigns)
-        .filter(|_| !is_aaf)
-        .chain(redirects)
-        .any(|text| mentions(text, ctx) || points_inside(text, ctx));
+    let named = word_hits
+        || assigns
+            .filter(|_| !is_aaf)
+            .chain(redirects)
+            .any(|text| mentions(text, ctx) || points_inside(text, ctx));
     // Interpreter commands execute their quoted heredoc / piped-heredoc bodies
     // without shell lexing (so `interp_guard` inspects them); check those bodies
     // here too so `python3 - <<'EOF'` cannot reference `AAF_DATA_DIR`.

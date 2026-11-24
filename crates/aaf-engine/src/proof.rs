@@ -1,7 +1,15 @@
 //! Mobile MCP device proof validation and HMAC-signed proof persistence.
 
+#[path = "proof_capture.rs"]
+mod capture;
 #[path = "proof_png.rs"]
 mod png;
+
+pub(crate) use capture::{GateProofCheck, finalize_gate_proof, load_gate_base_capture_cmd};
+pub use capture::{
+    HOST_CAPTURE_DEVICE, HOST_CAPTURE_TOOL, capture_and_record_proof, captured_proof_image_path,
+    load_base_proof_capture_cmd, proof_triggered,
+};
 
 use std::env;
 use std::fs::{self, File};
@@ -145,7 +153,12 @@ fn verify_proof_inner(
             "proof does not match repository or tree fingerprint".to_string(),
         ));
     }
-    validate_tool_and_device(policy_root, cfg, &record.source_tool, &record.device_serial)?;
+    let is_host_capture = record.source_tool == HOST_CAPTURE_TOOL;
+    if is_host_capture {
+        validate_host_capture_device(policy_root, cfg, &record.device_serial)?;
+    } else {
+        validate_tool_and_device(policy_root, cfg, &record.source_tool, &record.device_serial)?;
+    }
     if record.byte_len < cfg.min_bytes
         || record.width < cfg.min_width
         || record.height < cfg.min_height
@@ -156,7 +169,17 @@ fn verify_proof_inner(
     }
 
     let img_path = Path::new(&record.image_path);
-    let (_, file, live_len) = open_regular_image(img_path, cfg.min_bytes)?;
+    let (canon_img, file, live_len) = open_regular_image(img_path, cfg.min_bytes)?;
+    if is_host_capture {
+        let proofs_dir = fs::canonicalize(data_dir.join("proofs")).map_err(|err| {
+            ProofError::Invalid(format!("cannot resolve host proof directory: {err}"))
+        })?;
+        if !canon_img.starts_with(&proofs_dir) {
+            return Err(ProofError::Invalid(
+                "host-captured proof image must reside under AAF_DATA_DIR/proofs".to_string(),
+            ));
+        }
+    }
     if live_len != record.byte_len {
         return Err(ProofError::Invalid(
             "screenshot bytes changed after proof was recorded".to_string(),
@@ -233,6 +256,33 @@ fn validate_tool_and_device(
     }
     check_repo_allowlist(canon_root, serial)?;
     check_global_allowlist(serial)?;
+    Ok(())
+}
+
+fn validate_host_capture_device(
+    canon_root: &Path,
+    cfg: &ProofConfig,
+    device_serial: &str,
+) -> Result<(), ProofError> {
+    let serial = device_serial.trim();
+    if serial.is_empty() {
+        return Err(ProofError::Invalid("device_serial is empty".to_string()));
+    }
+    if is_denylisted(canon_root, &cfg.denylist_file, serial)? {
+        return Err(ProofError::DeniedDevice(format!(
+            "serial {serial:?} is listed in {}",
+            cfg.denylist_file
+        )));
+    }
+    if is_global_denylisted(serial)? {
+        return Err(ProofError::DeniedDevice(format!(
+            "serial {serial:?} is listed in global adb-denylist"
+        )));
+    }
+    if serial != HOST_CAPTURE_DEVICE {
+        check_repo_allowlist(canon_root, serial)?;
+        check_global_allowlist(serial)?;
+    }
     Ok(())
 }
 

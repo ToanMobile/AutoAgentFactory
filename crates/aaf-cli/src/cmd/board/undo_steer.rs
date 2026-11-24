@@ -12,6 +12,22 @@ use super::store::{err, open_db, refuse_inside_agent_run, repo_root};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
+#[derive(Debug, clap::Args)]
+pub struct UndoArgs {
+    /// Task id whose worktree should be rolled back to its latest pre-turn snapshot.
+    pub id: String,
+    /// Skip the interactive `[y/N]` confirmation prompt (still refused inside agent runs).
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+pub fn undo_args(ctx: &Ctx, args: &UndoArgs) -> CmdResult {
+    if args.yes {
+        return undo_confirmed(ctx, &args.id);
+    }
+    undo(ctx, &args.id)
+}
+
 pub fn undo(ctx: &Ctx, id: &str) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf board undo") {
         return Ok(refused);
@@ -19,7 +35,7 @@ pub fn undo(ctx: &Ctx, id: &str) -> CmdResult {
     if !ctx.stdin_is_tty {
         return Ok(CmdOutput::policy(
             "refused",
-            "refused: stdin is not a terminal: undo must be confirmed by a person",
+            "refused: stdin is not a terminal: undo must be confirmed by a person (or pass --yes)",
         )
         .field("task_id", json!(id))
         .field("undone", json!(false)));
@@ -27,6 +43,31 @@ pub fn undo(ctx: &Ctx, id: &str) -> CmdResult {
     let stdin = std::io::stdin();
     let mut stderr = std::io::stderr();
     run_undo_with_io(ctx, id, &mut stdin.lock(), &mut stderr)
+}
+
+fn undo_confirmed(ctx: &Ctx, task_id: &str) -> CmdResult {
+    if let Some(refused) = refuse_inside_agent_run(ctx, "aaf board undo") {
+        return Ok(refused);
+    }
+    let repo = repo_root(ctx)?;
+    let db = open_db(ctx)?;
+    let _preview = preview_latest_undo(&db, &repo, task_id).map_err(CmdError::new)?;
+    let now = SystemClock.now();
+    let snap = undo_latest_turn(&db, &ctx.data_dir, &repo, &ctx.worktrees_dir, task_id, now)
+        .map_err(CmdError::new)?;
+
+    Ok(CmdOutput::ok(
+        "ok",
+        format!(
+            "{task_id} undone to {} (ref {}); state is ready",
+            snap.commit_oid, snap.ref_name
+        ),
+    )
+    .field("task_id", json!(task_id))
+    .field("undone", json!(true))
+    .field("commit_oid", json!(snap.commit_oid))
+    .field("ref_name", json!(snap.ref_name))
+    .field("state", json!("ready")))
 }
 
 pub fn run_undo_with_io<R: BufRead, W: Write>(

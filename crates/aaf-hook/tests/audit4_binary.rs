@@ -66,6 +66,7 @@ impl Bench {
         let mut child = Command::new(env!("CARGO_BIN_EXE_aaf-hook"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("AAF_RUN_ID", "test-run")
             .env("AAF_DATA_DIR", self.base.join("data"))
             .env("AAF_CONFIG_DIR", self.base.join("config"))
             .env("HOME", self.base.join("home"))

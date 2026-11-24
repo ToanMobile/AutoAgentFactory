@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
-use aaf_domain::config::{CommandsConfig, CrossAuditConfig};
+use aaf_domain::config::CrossAuditConfig;
 use aaf_domain::ports::{AccountStore, Clock};
 use aaf_engine::config::{
     ConfigError, ConfigInputs, ConfigOverlay, EffectiveConfig, LOCAL_CONFIG_REL, REPO_CONFIG_REL,
@@ -218,6 +218,8 @@ fn build_audit_command_supports_builtin_and_custom_executors() {
         vec![
             "codex",
             "exec",
+            "--sandbox",
+            "read-only",
             "-m",
             "o3",
             "-c",
@@ -234,7 +236,15 @@ fn build_audit_command_supports_builtin_and_custom_executors() {
     .unwrap();
     assert_eq!(
         gemini,
-        vec!["gemini", "-m", "gemini-2.5-pro", "-p", "{prompt}"]
+        vec![
+            "gemini",
+            "--approval-mode",
+            "plan",
+            "-m",
+            "gemini-2.5-pro",
+            "-p",
+            "{prompt}"
+        ]
     );
 
     let opencode = build_audit_command(&CrossAuditConfig {
@@ -313,7 +323,10 @@ fn conservative_detect_flutter_and_web_rules() {
     fs::write(web_dir.path().join("pnpm-lock.yaml"), "").unwrap();
     let d_web = detect_stack(web_dir.path());
     assert_eq!(d_web.profile, "web");
-    assert_eq!(d_web.commands, CommandsConfig::default());
+    assert_eq!(d_web.commands.test_scoped, "pnpm test");
+    assert_eq!(d_web.commands.test_full, "pnpm test");
+    assert_eq!(d_web.commands.build, "pnpm build");
+    assert_eq!(d_web.commands.lint, "pnpm lint");
 }
 
 struct ZeroClock;
@@ -410,7 +423,18 @@ fn audit_policy_canonicalizes_gemini_antigravity_and_hardens_custom_and_cli_flag
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(ag, vec!["gemini", "-m", "gemini-2.5-pro", "-p", "{prompt}"]);
+    assert_eq!(
+        ag,
+        vec![
+            "gemini",
+            "--approval-mode",
+            "plan",
+            "-m",
+            "gemini-2.5-pro",
+            "-p",
+            "{prompt}"
+        ]
+    );
 
     for bad_model in ["--exec=evil", "gpt 4", "bad\nmodel"] {
         assert!(

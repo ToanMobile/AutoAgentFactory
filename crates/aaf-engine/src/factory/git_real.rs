@@ -10,12 +10,18 @@ use aaf_domain::gate::Receipt;
 use aaf_domain::ports::{PortError, PortResult};
 
 use super::base_ref::{BaseRef, DEFAULT_REMOTE};
+use super::commit_lock::{self, CommitLock};
+use super::git_real_base::{
+    NO_HOOKS, abort_rebase, git_no_hooks, merge_pr_real, refuse_nested_repositories,
+};
 use super::ports::{GitOps, Integration};
-use crate::git::cmd::{Output, git, git_raw};
+use crate::git::cmd::{failure, git, git_raw, git_timed};
+use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree};
 use crate::process::{CommandRunner, SystemRunner};
 
+#[allow(dead_code)]
 mod commit;
 mod pr_note;
 pub(crate) use commit::COMMIT_DEFERRED;
@@ -39,7 +45,6 @@ pub(super) const COMMIT_TIMEOUT: Duration = Duration::from_secs(2400);
 /// repository; a holder runs at most two commits, each bounded by
 /// [`COMMIT_TIMEOUT`].
 pub(super) const COMMIT_LOCK_TIMEOUT: Duration = Duration::from_secs(2 * COMMIT_TIMEOUT.as_secs());
-const NO_HOOKS: &str = "core.hooksPath=/dev/null";
 
 pub(super) fn err(error: GitError) -> PortError {
     PortError::Io(error.to_string())
@@ -159,46 +164,73 @@ impl RealGit {
     }
 }
 
-/// Aborts the rebase in progress in `tree` and returns the files it stopped
-/// on. Empty when it stopped for another reason.
-fn abort_rebase(tree: &Path) -> Result<Vec<String>, GitError> {
-    let unmerged = git_raw(tree, &["diff", "--name-only", "--diff-filter=U", "-z"])?;
-    let files = unmerged
-        .stdout
-        .split('\0')
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect();
-    git(tree, &["-c", NO_HOOKS, "rebase", "--abort"])?;
-    Ok(files)
-}
-
-/// F4-A: git in `tree` running no hook; a repo-relative hooks path is agent-written.
-fn git_no_hooks(tree: &Path, args: &[&str]) -> Result<Output, GitError> {
-    git_raw(tree, &[&["-c", NO_HOOKS][..], args].concat())
-}
-
 impl GitOps for RealGit {
     fn task_worktree(&self, task_id: &str) -> PortResult<TaskWorktree> {
         let _admin = self.admin();
         if let Some(existing) = self.existing(task_id)? {
             return Ok(existing);
         }
-        worktree::create(&self.repo_root, &self.worktrees_dir, task_id, &self.start()).map_err(err)
+        let wt = worktree::create(&self.repo_root, &self.worktrees_dir, task_id, &self.start())
+            .map_err(err)?;
+        let base_sha = self.base_sha()?;
+        crate::git::hydration::hydrate_fresh_worktree(&self.repo_root, &wt, &base_sha)
+            .map_err(err)?;
+        Ok(wt)
     }
 
     fn cleanup(&self, task_id: &str) -> PortResult<()> {
         let _admin = self.admin();
         match self.existing(task_id)? {
-            // Not forced: the worktree layer refuses a dirty tree and a
-            // branch no other ref contains.
+            // Not forced: refuses a dirty tree and an unmerged branch.
             Some(tree) => worktree::remove(&self.repo_root, &tree, true, false).map_err(err),
             None => Ok(()),
         }
     }
 
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()> {
-        self.commit_tree(&worktree.path, message)
+        let tree = worktree.path.as_path();
+        git(tree, &["add", "-A"]).map_err(err)?;
+        if git(tree, &["status", "--porcelain"])
+            .map_err(err)?
+            .is_empty()
+        {
+            return Ok(());
+        }
+        refuse_nested_repositories(tree)?;
+        // Serialize commits per repository; bypass untrusted commit hooks
+        // (`-c core.hooksPath=/dev/null` + `--no-verify`) and interactive GPG
+        // prompts (`commit.gpgsign=false`) before `head_lock` has inspected
+        // the tree (Plan v3 V2-SEC-03).
+        let _queue = self.commit.lock().unwrap_or_else(PoisonError::into_inner);
+        let lock = commit_lock::lock_path(&self.locks_dir, &self.repo_root);
+        let _lock = CommitLock::acquire(&lock, self.commit_lock_timeout).map_err(|e| match e {
+            PortError::Io(why) if why.contains("still committing") => {
+                PortError::Io(format!("{COMMIT_DEFERRED}: {why}"))
+            }
+            other => other,
+        })?;
+        let args = [
+            "-c",
+            NO_HOOKS,
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            message,
+        ];
+        let out = git_timed(tree, &args, self.commit_timeout).map_err(|error| match error {
+            GitError::Timeout { command } => PortError::Io(format!(
+                "{COMMIT_DEFERRED}: `{command}` timed out after {} s",
+                self.commit_timeout.as_secs()
+            )),
+            other => err(other),
+        })?;
+        if !out.success() {
+            return Err(err(failure(&args, &out)));
+        }
+        Ok(())
     }
 
     fn has_changes(&self, worktree: &TaskWorktree) -> PortResult<bool> {
@@ -239,7 +271,17 @@ impl GitOps for RealGit {
             let message = format!("aaf batch: {branch}");
             let merge = git_no_hooks(
                 &integration.tree.path,
-                &["merge", "--no-ff", "--no-edit", "-m", &message, &branch],
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "merge",
+                    "--no-ff",
+                    "--no-edit",
+                    "--no-verify",
+                    "-m",
+                    &message,
+                    &branch,
+                ],
             )
             .map_err(err)?;
             if !merge.success() {
@@ -275,7 +317,14 @@ impl GitOps for RealGit {
         let _admin = self.admin();
         let tree = worktree.path.as_path();
         let start = self.start();
-        let out = git_no_hooks(tree, &["rebase", start.as_str()]).map_err(err)?;
+        let args = [
+            "-c",
+            "commit.gpgsign=false",
+            "rebase",
+            "--rebase-merges",
+            start.as_str(),
+        ];
+        let out = git_no_hooks(tree, &args).map_err(err)?;
         if out.success() {
             // The gate reads the working tree; what lands is the commit.
             worktree::ensure_clean(tree).map_err(err)?;
@@ -312,7 +361,7 @@ impl GitOps for RealGit {
             repo_root: self.repo_root.clone(),
             worktree: worktree.clone(),
             base: self.base.branch.clone(),
-            remote: self.remote().to_string(),
+            remote: self.base.remote.clone(),
             locks_dir: self.locks_dir.clone(),
             lock_timeout: self.merge_lock_timeout,
         };
@@ -352,8 +401,6 @@ impl GitOps for RealGit {
             title: title.to_string(),
             receipt: receipt.clone(),
         };
-        // `open_pr_with_proof` pushes the validated `aaf/*` task branch, falling
-        // back to `--force-with-lease` only after a non-fast-forward rework.
         let runner = SystemRunner {
             timeout: GH_TIMEOUT,
         };
@@ -361,6 +408,32 @@ impl GitOps for RealGit {
             crate::proof::show_proof(&worktree.path, data_dir, Some(&receipt.tree_fp)).ok()
         });
         open_pr_noted_with_proof(&request, proof.as_ref(), &runner, note).map_err(err)
+    }
+
+    fn merge_pr(
+        &self,
+        worktree: &TaskWorktree,
+        pr_url: &str,
+        head_sha: &str,
+    ) -> PortResult<PrMergeOutcome> {
+        merge_pr_real(
+            &self.repo_root,
+            &self.locks_dir,
+            self.remote(),
+            MERGE_LOCK_TIMEOUT,
+            worktree,
+            pr_url,
+            head_sha,
+        )
+    }
+
+    fn sync_local_base(&self) -> PortResult<Option<String>> {
+        let Some(remote) = self.base.remote.as_deref() else {
+            return Ok(None);
+        };
+        let note =
+            crate::git::pr_merge::sync_local_base(&self.repo_root, remote, &self.base.branch);
+        Ok(Some(note))
     }
 
     fn fetch_base(&self) -> PortResult<()> {
@@ -377,8 +450,6 @@ impl GitOps for RealGit {
         worktree::validate_task_id(task_id).map_err(err)?;
         let branch = format!("refs/heads/{BRANCH_PREFIX}{task_id}");
         let args = ["merge-base", "--is-ancestor", &branch, &self.start()];
-        // Exit 1 is "not an ancestor"; a missing branch (128) is not merged
-        // as far as this repository can tell.
         Ok(git_raw(&self.repo_root, &args).map_err(err)?.code == Some(0))
     }
 

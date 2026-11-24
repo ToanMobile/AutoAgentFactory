@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,89 @@ fn dir_var(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn is_in_temp_dir(path: &Path) -> bool {
+    let norm = aaf_hook::paths::normalize(path);
+    let check = |p: &Path| {
+        p == Path::new("/tmp")
+            || p.starts_with("/tmp")
+            || p == Path::new("/private/tmp")
+            || p.starts_with("/private/tmp")
+    };
+    if check(&norm) {
+        return true;
+    }
+    if let Some(tmpdir) = dir_var("TMPDIR") {
+        let tmp_norm = aaf_hook::paths::normalize(&tmpdir);
+        let tmp_real = aaf_hook::paths::real(&tmp_norm);
+        if norm == tmp_norm
+            || norm.starts_with(&tmp_norm)
+            || norm == tmp_real
+            || norm.starts_with(&tmp_real)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Discovers trusted absolute paths for the sibling `aaf` CLI installed next to
+/// this `aaf-hook` binary. Never trusts paths inside `/tmp` or `$TMPDIR`.
+fn discover_trusted_aaf_bins() -> Vec<PathBuf> {
+    let Ok(exe) = env::current_exe() else {
+        return Vec::new();
+    };
+    let bin_name = if cfg!(windows) { "aaf.exe" } else { "aaf" };
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if path.is_absolute() && !is_in_temp_dir(&path) && !out.contains(&path) {
+            out.push(path);
+        }
+    };
+
+    let raw_sibling = exe.parent().map(|dir| dir.join(bin_name));
+    let canon_exe_sibling = fs::canonicalize(&exe)
+        .ok()
+        .and_then(|c| c.parent().map(|dir| dir.join(bin_name)));
+    let canon_sibling = raw_sibling
+        .as_deref()
+        .and_then(|p| fs::canonicalize(p).ok())
+        .or_else(|| {
+            canon_exe_sibling
+                .as_deref()
+                .and_then(|p| fs::canonicalize(p).ok())
+        });
+
+    if let Some(canon) = &canon_sibling {
+        if is_in_temp_dir(canon) {
+            return Vec::new();
+        }
+        if let Some(raw) = raw_sibling {
+            push_unique(aaf_hook::paths::normalize(&raw));
+            push_unique(raw);
+        }
+        if let Some(exe_sib) = canon_exe_sibling {
+            push_unique(exe_sib);
+        }
+        push_unique(canon.clone());
+        if let Some(path_var) = env::var_os("PATH") {
+            for dir in env::split_paths(&path_var) {
+                let cand = dir.join(bin_name);
+                if cand.is_absolute()
+                    && !is_in_temp_dir(&cand)
+                    && fs::canonicalize(&cand).ok().as_deref() == Some(canon.as_path())
+                {
+                    push_unique(aaf_hook::paths::normalize(&cand));
+                    push_unique(cand);
+                }
+            }
+        }
+    } else if let Some(raw) = raw_sibling {
+        push_unique(aaf_hook::paths::normalize(&raw));
+        push_unique(raw);
+    }
+    out
 }
 
 fn judge() -> Outcome {
@@ -73,6 +157,8 @@ fn judge() -> Outcome {
             .or_else(|| home.as_ref().map(|h| h.join(".config/autofactory"))),
         home,
         cwd: env::current_dir().ok(),
+        in_factory_run: env::var_os("AAF_RUN_ID").is_some_and(|v| !v.is_empty()),
+        trusted_aaf_bins: discover_trusted_aaf_bins(),
     };
     aaf_hook::host::run_for_host(&input, &hook_env, host)
 }

@@ -107,6 +107,8 @@ impl Project {
             config_dir: None,
             home: Some(self.home.clone()),
             cwd: None,
+            in_factory_run: false,
+            trusted_aaf_bins: Vec::new(),
         };
         match decide(self.payload(command, cwd).as_bytes(), &env) {
             Decision::Allow => Ok(()),

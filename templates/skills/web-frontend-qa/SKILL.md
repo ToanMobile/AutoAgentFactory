@@ -14,4 +14,8 @@ description: Web frontend TypeScript strictness, WCAG AA accessibility, Core Web
    - Protect LCP by sizing hero media, avoiding render-blocking bloat, and checking console/network errors to zero.
 
 3. **Verification**
-   - Run the repo's lint, typecheck, unit, and end-to-end suite via `aaf gate` before handoff.
+   - Run the repo's lint, typecheck, unit, and end-to-end suite (and `aaf gate` in operator sessions) before handoff.
+
+## Headless / `AAF_RUN_ID` Mode
+
+When `AAF_RUN_ID` is set, never stop to ask questions or wait for confirmation, and never invoke blocked host commands (`aaf gate`, `aaf approve`). Run the repo's lint, typecheck, unit, and end-to-end commands directly (wrapping heavy builds via `aaf slot -- <cmd>`), fix every finding autonomously, and finish cleanly on the task branch so the factory executes `aaf gate` and cross-audit automatically.

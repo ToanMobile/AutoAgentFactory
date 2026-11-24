@@ -250,6 +250,7 @@ fn request_with(
             grant.account.as_ref(),
             &accounts.profiles()?,
         ),
+        json_schema: None,
     })
 }
 

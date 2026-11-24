@@ -116,7 +116,7 @@ fn a_task_that_breaks_the_gate_goes_back_with_a_note_and_the_others_pass() {
     let bad = fx.add("BREAK the build");
     let also_good = fx.add("another good one");
 
-    let out = fx.aaf(&["run", "--unsandboxed", "--max-parallel", "3"]);
+    let out = fx.aaf(&["run", "--once", "--unsandboxed", "--max-parallel", "3"]);
 
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(out.json["requeued"], json!([bad]), "{}", out.stderr);
@@ -136,7 +136,7 @@ fn a_task_that_breaks_the_gate_goes_back_with_a_note_and_the_others_pass() {
 
     // The retry runs in the same worktree and fails the same way. The
     // "agent" proposes no split, so the ladder ends with a human.
-    let out = fx.aaf(&["run", "--unsandboxed"]);
+    let out = fx.aaf(&["run", "--once", "--unsandboxed"]);
     assert_eq!(out.json["agent_runs"], json!(1), "{}", out.stderr);
     assert_eq!(out.json["errors"], json!([]), "{}", out.stderr);
     assert_eq!(out.json["blocked"], json!([bad]), "{}", out.stderr);

@@ -18,6 +18,8 @@ fn judges_each_distinct_path_once() {
         config_dir: None,
         home: None,
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let ctx = Ctx::new(&env, root);
     let mut code = String::from("p = 'build/out.txt'\n");

@@ -1,9 +1,11 @@
 //! Overrides from tier 3 and above, and the rules for applying them.
 
 use aaf_domain::config::{
-    AuditScope, CrossAuditConfig, GlobalCrossAuditConfig, MAX_AUDIT_REWORKS_CAP, OracleMode,
-    PipelineConfig, RepoConfig, StoreMode,
+    AuditScope, CrossAuditConfig, GlobalCrossAuditConfig, LandMode, OracleMode, RepoConfig,
+    StoreMode,
 };
+use aaf_domain::oracle_config::OracleCompileRedPolicy;
+use aaf_domain::pipeline::ReviewerConfig;
 use serde::Deserialize;
 
 /// A partial configuration from the local file, the environment or the
@@ -37,6 +39,7 @@ pub struct GateOverlay {
     pub docs_fast_path: Option<bool>,
     pub docs_fast_path_exclude_globs: Option<Vec<String>>,
     pub red_green_oracle: Option<OracleMode>,
+    pub oracle_compile_red_policy: Option<OracleCompileRedPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -45,6 +48,7 @@ pub struct RunOverlay {
     pub executor: Option<String>,
     pub executor_cmd: Option<Vec<String>>,
     pub auto_merge: Option<bool>,
+    pub land: Option<LandMode>,
     pub max_parallel: Option<u32>,
     pub run_timeout_secs: Option<u64>,
     pub model: Option<String>,
@@ -55,20 +59,11 @@ pub struct RunOverlay {
     pub max_open_review: Option<u32>,
 }
 
-/// Tier 3 partial `[pipeline]` section: booleans are tighten-only
-/// (`false -> true`); `max_audit_reworks` is always ignored with a warning.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct PipelineOverlay {
-    pub plan_stage: Option<bool>,
-    pub require_plan_approval: Option<bool>,
-    pub max_audit_reworks: Option<u32>,
-}
-
 /// Tier 3 partial `[cross_audit]` section: tighten-only on
 /// `require_different_provider`, `audit_scope`, `score_gate`,
-/// `min_average_score`, and `min_criterion_score`. Provider fields are
-/// accepted solely so they can be reported as ignored with a warning.
+/// `min_average_score`, `min_criterion_score`, `dual_review` (`false -> true`),
+/// and `cross_adjudicate` (`true -> false`). Provider fields and `reviewers`
+/// are accepted solely so they can be reported as ignored with a warning.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct CrossAuditOverlay {
@@ -81,6 +76,9 @@ pub(crate) struct CrossAuditOverlay {
     pub score_gate: Option<bool>,
     pub min_average_score: Option<u8>,
     pub min_criterion_score: Option<u8>,
+    pub dual_review: Option<bool>,
+    pub cross_adjudicate: Option<bool>,
+    pub reviewers: Option<Vec<ReviewerConfig>>,
 }
 
 fn clamp_score(value: u8, label: &str, warnings: &mut Vec<String>) -> u8 {
@@ -249,6 +247,29 @@ pub(crate) fn apply_cross_audit_overlay(
             ));
         }
     }
+    match overlay.dual_review {
+        Some(true) => current.dual_review = true,
+        Some(false) if current.dual_review => {
+            warnings.push(format!(
+                "{source}: cross_audit.dual_review = false ignored: it may only be raised (kept true)"
+            ));
+        }
+        Some(false) | None => {}
+    }
+    match overlay.cross_adjudicate {
+        Some(false) => current.cross_adjudicate = false,
+        Some(true) if !current.cross_adjudicate => {
+            warnings.push(format!(
+                "{source}: cross_audit.cross_adjudicate = true ignored: false is stricter (kept false)"
+            ));
+        }
+        Some(true) | None => {}
+    }
+    if overlay.reviewers.is_some() {
+        warnings.push(format!(
+            "{source}: cross_audit.reviewers ignored: {TRUSTED_ONLY}"
+        ));
+    }
 }
 
 /// Merges tier 1 `[run].max_open_review` into tier 2. A positive tier-1 cap
@@ -258,55 +279,6 @@ pub(crate) fn merge_max_open_review(global: Option<u32>, repo: &mut u32) {
         && cap > 0
     {
         *repo = if *repo > 0 { cap.min(*repo) } else { cap };
-    }
-}
-
-/// Enforces the hard ceiling [`MAX_AUDIT_REWORKS_CAP`] on tier-2 `[pipeline]`.
-pub(crate) fn clamp_pipeline(
-    pipeline: &mut PipelineConfig,
-    source: &str,
-    warnings: &mut Vec<String>,
-) {
-    if pipeline.max_audit_reworks > MAX_AUDIT_REWORKS_CAP {
-        warnings.push(format!(
-            "{source}: pipeline.max_audit_reworks = {} clamped to {MAX_AUDIT_REWORKS_CAP}",
-            pipeline.max_audit_reworks
-        ));
-        pipeline.max_audit_reworks = MAX_AUDIT_REWORKS_CAP;
-    }
-}
-
-/// Applies tier 3 `[pipeline]` overlay: booleans may only be tightened
-/// (`false -> true`), and `max_audit_reworks` is always ignored with a warning.
-pub(crate) fn apply_pipeline_overlay(
-    current: &mut PipelineConfig,
-    overlay: PipelineOverlay,
-    source: &str,
-    warnings: &mut Vec<String>,
-) {
-    match overlay.plan_stage {
-        Some(true) => current.plan_stage = true,
-        Some(false) if current.plan_stage => {
-            warnings.push(format!(
-                "{source}: pipeline.plan_stage = false ignored: it may only be raised (kept true)"
-            ));
-        }
-        Some(false) | None => {}
-    }
-    match overlay.require_plan_approval {
-        Some(true) => current.require_plan_approval = true,
-        Some(false) if current.require_plan_approval => {
-            warnings.push(format!(
-                "{source}: pipeline.require_plan_approval = false ignored: it may only be raised (kept true)"
-            ));
-        }
-        Some(false) | None => {}
-    }
-    if let Some(reworks) = overlay.max_audit_reworks {
-        warnings.push(format!(
-            "{source}: pipeline.max_audit_reworks = {reworks} ignored: only .autofactory/config.toml may set it (kept {})",
-            current.max_audit_reworks
-        ));
     }
 }
 
@@ -377,9 +349,38 @@ pub(crate) fn apply_overlay(
             "{source}: run.executor_cmd ignored: {TIER_TWO_ONLY}"
         ));
     }
+    // Reconcile Tier-2 legacy `auto_merge = true` with default `land = Pr`
+    // (and `land.auto_lands()` with `auto_merge = false`).
+    if repo.run.auto_merge && !repo.run.land.auto_lands() {
+        repo.run.land = LandMode::Auto;
+    } else if repo.run.land.auto_lands() && !repo.run.auto_merge {
+        repo.run.auto_merge = true;
+    }
+    if let Some(requested) = run.land {
+        if origin == OverlayOrigin::CommandLine || requested < repo.run.land {
+            repo.run.land = requested;
+            repo.run.auto_merge = requested.auto_lands();
+        } else if requested > repo.run.land {
+            warnings.push(format!(
+                "{source}: run.land = {} ignored: it may only be lowered by local or environment config (kept {})",
+                requested.as_str(),
+                repo.run.land.as_str()
+            ));
+        }
+    }
     match run.auto_merge {
-        Some(false) => repo.run.auto_merge = false,
-        Some(true) if origin == OverlayOrigin::CommandLine => repo.run.auto_merge = true,
+        Some(false) => {
+            if repo.run.land.auto_lands() {
+                repo.run.land = LandMode::Pr;
+            }
+            repo.run.auto_merge = false;
+        }
+        Some(true) if origin == OverlayOrigin::CommandLine => {
+            if !repo.run.land.auto_lands() {
+                repo.run.land = LandMode::Auto;
+            }
+            repo.run.auto_merge = true;
+        }
         Some(true) if !repo.run.auto_merge => warnings.push(format!(
             "{source}: run.auto_merge = true ignored: it is turned on only in .autofactory/config.toml or by the command-line flag"
         )),
@@ -391,11 +392,31 @@ pub(crate) fn apply_overlay(
     if let Some(run_timeout_secs) = run.run_timeout_secs {
         repo.run.run_timeout_secs = run_timeout_secs;
     }
+    let lock_model_effort = origin == OverlayOrigin::Ambient
+        && (repo.pipeline.plan_debate || repo.cross_audit.dual_review);
     if let Some(model) = run.model {
-        repo.run.model = model;
+        if lock_model_effort {
+            if model != repo.run.model {
+                warnings.push(format!(
+                    "{source}: run.model = {model:?} ignored while plan_debate or dual_review is active (kept {:?})",
+                    repo.run.model
+                ));
+            }
+        } else {
+            repo.run.model = model;
+        }
     }
     if let Some(effort) = run.effort {
-        repo.run.effort = effort;
+        if lock_model_effort {
+            if effort != repo.run.effort {
+                warnings.push(format!(
+                    "{source}: run.effort = {effort:?} ignored while plan_debate or dual_review is active (kept {:?})",
+                    repo.run.effort
+                ));
+            }
+        } else {
+            repo.run.effort = effort;
+        }
     }
     if let Some(env_pass) = run.env_pass
         && env_pass != repo.run.env_pass
@@ -484,6 +505,17 @@ pub(crate) fn apply_overlay(
                 "{source}: gate.red_green_oracle = {} ignored: it may only be raised (kept {})",
                 mode.as_str(),
                 current.red_green_oracle.as_str()
+            ));
+        }
+    }
+    if let Some(policy) = gate.oracle_compile_red_policy {
+        if policy > current.oracle_compile_red_policy {
+            current.oracle_compile_red_policy = policy;
+        } else if policy < current.oracle_compile_red_policy {
+            warnings.push(format!(
+                "{source}: gate.oracle_compile_red_policy = {} ignored: it may only be raised (kept {})",
+                policy.as_str(),
+                current.oracle_compile_red_policy.as_str()
             ));
         }
     }

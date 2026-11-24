@@ -8,6 +8,7 @@
 //! hook) are reported as not applicable and decide nothing.
 
 mod accounts;
+mod dual;
 mod head_lock;
 mod heavy;
 mod hosts;
@@ -290,14 +291,14 @@ fn skills_sync_check(repo_root: Option<&Path>, profile: Option<&str>) -> Check {
     let (Some(root), Some(profile)) = (repo_root, profile) else {
         return not_applicable("skills_sync");
     };
-    let present: Vec<&str> = [".claude/skills", ".agents/skills"]
+    let present: Vec<&str> = [".claude/skills", ".agents/skills", ".agent/skills"]
         .into_iter()
         .filter(|rel| root.join(rel).is_dir())
         .collect();
     if present.is_empty() {
         return advisory(
             "skills_sync",
-            Ok("no .claude/skills or .agents/skills directory; run aaf skills sync".to_string()),
+            Ok("no .claude/skills, .agents/skills, or .agent/skills directory; run aaf skills sync".to_string()),
         );
     }
     let (mut ok_parts, mut warnings) = (Vec::new(), Vec::new());
@@ -527,6 +528,10 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
             hosts::telegram_status(&effective.global.telegram),
         ),
         advisory("executors", hosts::executors_summary(&ctx.path_var)),
+        advisory(
+            "dual_frontier",
+            dual::dual_frontier_check(ctx, &effective.repo),
+        ),
         root_opt.map_or_else(
             || not_applicable("mcp_hygiene"),
             |r| advisory("mcp_hygiene", hosts::mcp_hygiene(r)),

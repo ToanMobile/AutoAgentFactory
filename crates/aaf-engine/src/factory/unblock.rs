@@ -107,7 +107,7 @@ fn is_human_unblock_event(event: &FactoryEvent) -> bool {
                 p["to"].as_str() == Some("ready")
                     && p["why"]
                         .as_str()
-                        .is_some_and(|why| why == "unblocked" || why.ends_with(" unblock"))
+                        .is_some_and(|w| w == "unblocked" || w.ends_with(" unblock"))
             })
 }
 
@@ -123,7 +123,7 @@ fn prior_same(deps: &Deps, task_id: &str, digest: &str) -> PortResult<u32> {
         }
         let same = serde_json::from_str::<serde_json::Value>(&event.payload_json)
             .ok()
-            .is_some_and(|payload| payload["digest"].as_str() == Some(digest));
+            .is_some_and(|p| p["digest"].as_str() == Some(digest));
         if !same {
             break;
         }
@@ -410,10 +410,8 @@ pub(crate) fn root_succeeded(deps: &Deps, task: &Task) -> PortResult<()> {
 /// untrusted audit findings cannot escape their wrapper block.
 pub(super) fn sanitize_untrusted_close_tag(text: &str) -> String {
     const NEEDLE: &[u8] = b"</untrusted-data";
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut copied = 0;
-    let mut at = 0;
+    let (bytes, mut out, mut copied, mut at) =
+        (text.as_bytes(), String::with_capacity(text.len()), 0, 0);
     while at + NEEDLE.len() <= bytes.len() {
         if bytes[at..at + NEEDLE.len()].eq_ignore_ascii_case(NEEDLE) {
             out.push_str(&text[copied..at]);
@@ -429,10 +427,11 @@ pub(super) fn sanitize_untrusted_close_tag(text: &str) -> String {
 }
 
 /// Counts explicit failing `CrossAudit` events for `task_id` since the latest
-/// `ReworkRequested` or human unblock (`Blocked -> Ready`).
-fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<u32> {
-    let mut count = 0;
-    for event in deps.store.events_for_task(task_id, HISTORY_EVENTS)? {
+/// `ReworkRequested` or human unblock (`Blocked -> Ready`) using an unbounded
+/// reverse scan so counts are never dropped past 50 events.
+pub(crate) fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<u32> {
+    let mut count: u32 = 0;
+    for event in deps.store.events_for_task(task_id, u32::MAX)? {
         if event.kind == EventKind::ReworkRequested || is_human_unblock_event(&event) {
             break;
         }
@@ -445,15 +444,15 @@ fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<u32> {
                         .is_some_and(|v| v == "fail" || v.starts_with("fail:"))
                 })
         {
-            count += 1;
+            count = count.saturating_add(1);
         }
     }
     Ok(count)
 }
 
 /// Automatic audit-rework routing on explicit `AuditVerdict::Fail` (never
-/// `Inconclusive` or truncated diffs). Returns `Ok(Some(Next::Ready))` when
-/// routed back to the implementer, or `Ok(None)` to fall through to escalation.
+/// `Inconclusive` or truncated diffs). Bounded by `max_audit_reworks` and
+/// token/wall-clock budget without consuming `RootBudget.cycles_used`.
 pub(crate) fn handle_audit_failure(
     deps: &Deps,
     task: &Task,
@@ -483,22 +482,22 @@ pub(crate) fn handle_audit_failure(
                 json!({ "id": f.id, "reason": reason })
             })
             .collect();
-        let payload = json!({
-            "source": "audit_rework_filter",
-            "dropped_count": items.len(),
-            "dropped": items,
-        });
-        deps.emit(EventKind::DetectorHit, &task.id, payload)?;
+        deps.emit(
+            EventKind::DetectorHit,
+            &task.id,
+            json!({ "source": "audit_rework_filter", "dropped_count": items.len(), "dropped": items }),
+        )?;
     }
     if valid.is_empty() {
         return Ok(None);
     }
-    let mut projected = ensure_budget(deps, &task.root_id)?;
-    projected.add_usage(0, 0, 1);
-    if projected.check() != BudgetCheck::Ok {
+    let budget = ensure_budget(deps, &task.root_id)?;
+    if matches!(
+        budget.check(),
+        BudgetCheck::Frozen | BudgetCheck::TokensExceeded | BudgetCheck::WallClockExceeded
+    ) {
         return Ok(None);
     }
-    deps.store.add_usage(&task.root_id, 0, 0, 1)?;
     let raw = valid
         .iter()
         .map(|f| format!("{}: {} ({})", f.id, f.question, f.evidence.trim()))

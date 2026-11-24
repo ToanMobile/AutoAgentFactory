@@ -11,9 +11,9 @@ description: Capture real Android/iOS device UI screenshots strictly via mobile-
 - Check `.adb-denylist` in the repo root before any capture; list **both** AVD names (e.g. `PhoneConnect`) and device serials/UDIDs (`emulator-5556`) because `mobile-mcp` often passes AVD names as device identifiers. Never target a denylisted device.
 - Save verification PNGs strictly via `mobile_save_screenshot` (`saveTo`: `<repo>/reports/proof.png`). Other capture tools are rejected by default `[proof].allowed_tools`.
 
-## 2. Inside `aaf run` (Sandboxed Agent) vs. Operator Session
+## 2. Headless / `AAF_RUN_ID` Mode vs. Operator Session
 
-- **Inside `aaf run` (`AAF_RUN_ID` set)**: if `mobile-mcp` is available in your session, capture the verified screenshot file (e.g. `reports/proof.png`) and record the exact device id and path in your summary. Do **not** invoke `aaf proof record`, `aaf gate`, `aaf board rework`, or `aaf skills sync` — those are host/operator commands blocked inside `AAF_RUN_ID` / Seatbelt because `receipt.key` is outside the sandbox.
+- **Headless / `AAF_RUN_ID` mode (Inside `aaf run`)**: never stop to ask questions or wait for confirmation. If `mobile-mcp` is available in your session, capture the verified screenshot file (e.g. `reports/proof.png`) and record the exact device id and path in your summary; if no device or `mobile-mcp` tool is available inside the sandbox, finish code and automated tests cleanly without blocking and note the proof capture requirement for host verification. Do **not** invoke `aaf proof record`, `aaf gate`, `aaf approve`, `aaf board rework`, or `aaf skills sync` — those are host/operator commands blocked inside `AAF_RUN_ID` / sandbox because `receipt.key` is outside the sandbox; the host/factory handles proof signing and gating automatically.
 - **Operator / interactive session**: sign and verify the captured PNG against the current `tree_fp` before gating or opening a PR:
   ```sh
   aaf proof record --image reports/proof.png --tool mobile-mcp:mobile_save_screenshot --device <device_id> --task-id <task_id>

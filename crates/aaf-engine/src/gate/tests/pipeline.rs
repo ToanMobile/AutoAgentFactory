@@ -218,6 +218,7 @@ fn an_added_agent_config_file_is_locked_and_other_added_files_are_not() {
             [LockedChange {
                 path: path.to_string(),
                 change: ChangeKind::Added,
+                tier: aaf_domain::gate::LockTier::Hard,
             }],
             "{path}"
         );

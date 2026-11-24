@@ -362,6 +362,7 @@ fn claude_runner_clears_limit_hit_when_run_times_out() {
             account: None,
             timeout_secs: 1,
             sandbox: SandboxPolicy::default(),
+            json_schema: None,
         })
         .unwrap();
 

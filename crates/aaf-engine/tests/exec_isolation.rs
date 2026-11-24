@@ -206,6 +206,7 @@ mod real {
                     enabled: true,
                     ..SandboxPolicy::default()
                 },
+                json_schema: None,
             })
             .unwrap();
         assert!(!outcome.timed_out, "{}", outcome.log_tail);

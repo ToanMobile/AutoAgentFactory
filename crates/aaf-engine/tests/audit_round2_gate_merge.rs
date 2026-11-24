@@ -128,6 +128,7 @@ fn head_lock_blocks_git_mv_into_agent_config_and_falls_through_on_same_account_l
         vec![LockedChange {
             path: "CLAUDE.md".to_string(),
             change: ChangeKind::Renamed,
+            tier: aaf_domain::gate::LockTier::Hard,
         }]
     );
 

@@ -103,6 +103,8 @@ fn expand_real_dotdot_wrappers_cd_git_file_tools_data_and_secret() {
         config_dir: Some(fx.config.clone()),
         home: Some(fx.home.clone()),
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let codex_workdir = json!({
         "tool_name": "shell_command",

@@ -39,6 +39,7 @@ pub struct ApprovePreview {
 pub enum MutatingAction {
     Approve { task_id: String, lock_fp: String },
     Unblock { task_id: String },
+    UnblockAll,
     Rework { task_id: String, reason: String },
     Steer { task_id: String, note: String },
     Unfreeze,
@@ -58,6 +59,9 @@ pub trait CommandHandler {
         user_id: i64,
     ) -> Result<String, String>;
     fn unblock(&mut self, task_id: &str, user_id: i64) -> Result<String, String>;
+    fn unblock_all(&mut self, _user_id: i64) -> Result<String, String> {
+        Err("unblock all is not implemented by this handler".to_string())
+    }
     fn rework(&mut self, task_id: &str, reason: &str, user_id: i64) -> Result<String, String>;
     fn steer(&mut self, task_id: &str, note: &str, user_id: i64) -> Result<String, String>;
     fn unfreeze(&mut self, user_id: i64) -> Result<String, String>;
@@ -72,6 +76,7 @@ pub enum ParsedCommand {
     Handover { task_id: String },
     Approve { task_id: String },
     Unblock { task_id: String },
+    UnblockAll,
     Rework { task_id: String, reason: String },
     Steer { task_id: String, note: String },
     Unfreeze,
@@ -251,15 +256,17 @@ impl CommandDispatcher {
             ParsedCommand::Approve { task_id } => {
                 self.prepare_approve(chat_id, user_id, &task_id, handler, clock)
             }
-            ParsedCommand::Unblock { task_id } => self.prepare_mutating(
-                chat_id,
+            ParsedCommand::Unblock { task_id } => self.run_safe_recovery(
                 user_id,
                 Some(&task_id),
-                MutatingAction::Unblock {
-                    task_id: task_id.clone(),
-                },
-                format!("unblock task {task_id} (move blocked -> ready)"),
-                clock,
+                |h, u| format_result("unblock", h.unblock(&task_id, u)),
+                handler,
+            ),
+            ParsedCommand::UnblockAll => self.run_safe_recovery(
+                user_id,
+                None,
+                |h, u| format_result("unblock", h.unblock_all(u)),
+                handler,
             ),
             ParsedCommand::Rework { task_id, reason } => self.prepare_mutating(
                 chat_id,
@@ -283,13 +290,11 @@ impl CommandDispatcher {
                 format!("steer task {task_id}: {note}"),
                 clock,
             ),
-            ParsedCommand::Unfreeze => self.prepare_mutating(
-                chat_id,
+            ParsedCommand::Unfreeze => self.run_safe_recovery(
                 user_id,
                 None,
-                MutatingAction::Unfreeze,
-                "unfreeze factory".to_string(),
-                clock,
+                |h, u| format_result("unfreeze", h.unfreeze(u)),
+                handler,
             ),
             ParsedCommand::Confirm { code } => {
                 self.execute_confirm(chat_id, user_id, &code, handler, clock)
@@ -351,6 +356,40 @@ impl CommandDispatcher {
         out
     }
 
+    fn check_mutating(&self, user_id: Option<i64>, task_id: Option<&str>) -> Result<i64, String> {
+        if !self.cfg.allow_mutating {
+            return Err(
+                "refused: mutating commands are disabled in Tier-1 config (telegram.allow_mutating = false)"
+                    .to_string(),
+            );
+        }
+        let Some(uid) = user_id else {
+            return Err(
+                "refused: mutating commands require an identifiable Telegram user".to_string(),
+            );
+        };
+        if let Some(id) = task_id
+            && let Err(e) = validate_task_id(id)
+        {
+            return Err(format!("invalid task id: {e}"));
+        }
+        Ok(uid)
+    }
+
+    fn run_safe_recovery(
+        &self,
+        user_id: Option<i64>,
+        task_id: Option<&str>,
+        exec: impl FnOnce(&mut dyn CommandHandler, i64) -> String,
+        handler: &mut dyn CommandHandler,
+    ) -> String {
+        match self.check_mutating(user_id, task_id) {
+            Ok(uid) if !self.cfg.allowed_chat_ids.is_empty() => exec(handler, uid),
+            Ok(_) => "refused: telegram allowed_chat_ids is empty".to_string(),
+            Err(msg) => msg,
+        }
+    }
+
     fn prepare_mutating(
         &mut self,
         chat_id: i64,
@@ -360,18 +399,10 @@ impl CommandDispatcher {
         summary: String,
         clock: &dyn Clock,
     ) -> String {
-        if !self.cfg.allow_mutating {
-            return "refused: mutating commands are disabled in Tier-1 config (telegram.allow_mutating = false)"
-                .to_string();
-        }
-        let Some(uid) = user_id else {
-            return "refused: mutating commands require an identifiable Telegram user".to_string();
+        let uid = match self.check_mutating(user_id, task_id) {
+            Ok(uid) => uid,
+            Err(msg) => return msg,
         };
-        if let Some(id) = task_id
-            && let Err(e) = validate_task_id(id)
-        {
-            return format!("invalid task id: {e}");
-        }
         let code = self
             .pending
             .issue(chat_id, uid, action, clock.now(), self.cfg.confirm_ttl_secs);
@@ -411,6 +442,7 @@ impl CommandDispatcher {
             MutatingAction::Unblock { task_id } => {
                 format_result("unblock", handler.unblock(&task_id, uid))
             }
+            MutatingAction::UnblockAll => format_result("unblock", handler.unblock_all(uid)),
             MutatingAction::Rework { task_id, reason } => {
                 format_result("rework", handler.rework(&task_id, &reason, uid))
             }
@@ -456,7 +488,8 @@ pub fn parse_command(raw: &str) -> Option<ParsedCommand> {
         "/approve" => single_arg(rest, "/approve <task_id>", |task_id| {
             ParsedCommand::Approve { task_id }
         }),
-        "/unblock" => single_arg(rest, "/unblock <task_id>", |task_id| {
+        "/unblock" if rest.eq_ignore_ascii_case("all") => ParsedCommand::UnblockAll,
+        "/unblock" => single_arg(rest, "/unblock <task_id|all>", |task_id| {
             ParsedCommand::Unblock { task_id }
         }),
         "/rework" => id_and_text(rest, "/rework <task_id> <reason>", |task_id, reason| {
@@ -528,12 +561,12 @@ fn help_text(cfg: &TelegramConfig) -> String {
          /board [state] - list tasks\n\
          /show <task_id> - task details\n\
          /handover <task_id> - compact handover summary\n\n\
-         Two-step mutating (allow_approve={}, allow_mutating={}, ttl={}s):\n\
-         /approve <task_id> - preview locked diff & issue confirm code\n\
-         /unblock <task_id> - unblock task\n\
-         /rework <task_id> <reason> - send review task back\n\
-         /steer <task_id> <note> - append human steering note\n\
-         /unfreeze - clear factory freeze\n\
+         Mutating (allow_approve={}, allow_mutating={}, ttl={}s):\n\
+         /approve <task_id> - preview locked diff & issue /confirm code\n\
+         /unblock <task_id|all> - unblock task(s) (1-step for allowlisted chats)\n\
+         /unfreeze - clear factory freeze (1-step for allowlisted chats)\n\
+         /rework <task_id> <reason> - send review task back (2-step)\n\
+         /steer <task_id> <note> - append human steering note (2-step)\n\
          /confirm <code> - confirm pending action",
         cfg.allow_approve, cfg.allow_mutating, cfg.confirm_ttl_secs
     )

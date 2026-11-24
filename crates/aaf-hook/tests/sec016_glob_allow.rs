@@ -45,6 +45,8 @@ fn gemini_read_many(fx: &Fixture, paths: &[&str]) -> Option<&'static str> {
         config_dir: Some(fx.config.clone()),
         home: Some(fx.home.clone()),
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let payload: Value = json!({
         "hook_event_name": "BeforeTool",

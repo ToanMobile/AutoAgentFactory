@@ -94,6 +94,7 @@ fn run_with_path(world: &World, path: &str, script: &str) -> String {
                 enabled: true,
                 ..SandboxPolicy::default()
             },
+            json_schema: None,
         })
         .unwrap()
         .log_tail

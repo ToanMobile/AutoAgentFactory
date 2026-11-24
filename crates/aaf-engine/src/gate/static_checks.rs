@@ -35,7 +35,8 @@ struct Spec {
     only_tests: bool,
     extensions: Option<&'static [&'static str]>,
     /// Skip comment-only lines and documentation files (true for code-syntax
-    /// rules like `ERR-001` and `LOG-001`; false for secrets and TODO stubs).
+    /// rules like `ERR-001`, `LOG-001`, and `LAZY-001` code stubs; false for
+    /// secrets and prose placeholders).
     skip_comments_and_docs: bool,
     message: &'static str,
     fix: &'static str,
@@ -108,9 +109,21 @@ const SPECS: &[Spec] = &[
         fix: "write the implementation or remove the stub",
         patterns: &[
             &[r"(?i)\.{3}\s*existing", r" code\s*\.{3}"],
+            &[r"(?i)\bTODO:?\s+impl", "ement"],
+        ],
+    },
+    Spec {
+        id: "LAZY-001",
+        severity: Severity::Critical,
+        skip_tests: false,
+        only_tests: false,
+        extensions: None,
+        skip_comments_and_docs: true,
+        message: "placeholder left where real code is expected",
+        fix: "write the implementation or remove the stub",
+        patterns: &[
             &[r"\bto", r"do!\s*\("],
             &[r"\bunimpl", r"emented!\s*\("],
-            &[r"(?i)\bTODO:?\s+impl", "ement"],
             &[r"\bNotImplemented", r"Error\b"],
         ],
     },
@@ -205,8 +218,18 @@ const SPECS: &[Spec] = &[
     test_skip(true, &["swift"], &[&[r"\bXCTSk", r"ip(?:If|Unless)?\s*\("]]),
 ];
 
+/// Index of the code-syntax `LAZY-001` rule in [`SPECS`].
+const LAZY_CODE_RULE: usize = 3;
+/// Pattern index inside [`LAZY_CODE_RULE`] for the unimplemented-exception stub.
+const LAZY_NOT_IMPL_PATTERN: usize = 2;
 /// Index of the swallowed-error rule in [`SPECS`], for the two-line form.
-const ERR_RULE: usize = 3;
+const ERR_RULE: usize = 4;
+/// Test-assertion wrappers that legitimately name the unimplemented exception.
+const TEST_NOT_IMPL_ASSERT: &[&str] = &[
+    r"\b(?:pytest\.raises|assertRaises(?:Regex|Regexp)?|unittest\.TestCase\.assertRaises)\s*\(\s*\(?\s*",
+    r"NotImplemented",
+    r"Error\b",
+];
 /// (opener on one added line, closer on the next) for an empty handler.
 const TWO_LINE: &[(&[&str], &[&str])] = &[
     (&[r"\bcatch\s*(?:\([^)]*\))?", r"\s*\{\s*$"], &[r"^\s*\}"]),
@@ -241,6 +264,7 @@ struct Rules {
     rules: Vec<Vec<Regex>>,
     two_line: Vec<(Regex, Regex)>,
     allow: Regex,
+    test_not_impl_assert: Regex,
 }
 
 fn compile(parts: &[&str]) -> Result<Regex, String> {
@@ -261,6 +285,7 @@ fn rules() -> Result<&'static Rules, GateError> {
                     .map(|(open, close)| Ok((compile(open)?, compile(close)?)))
                     .collect::<Result<_, String>>()?,
                 allow: compile(ALLOW)?,
+                test_not_impl_assert: compile(TEST_NOT_IMPL_ASSERT)?,
             })
         })
         .as_ref()
@@ -329,82 +354,85 @@ fn is_pure_c_comment(mut s: &str) -> bool {
     }
 }
 
+const HASH_COMMENT_FILES: &[&str] = &[
+    "makefile",
+    "gnumakefile",
+    "dockerfile",
+    "containerfile",
+    "gemfile",
+    "rakefile",
+    "podfile",
+    "fastfile",
+    "justfile",
+    ".gitignore",
+    ".gitattributes",
+    ".dockerignore",
+    ".env",
+    ".bashrc",
+    ".zshrc",
+    ".profile",
+];
+const HASH_COMMENT_EXTS: &[&str] = &[
+    "py",
+    "pyi",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "rb",
+    "pl",
+    "pm",
+    "yml",
+    "yaml",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
+    "mk",
+    "r",
+    "tf",
+    "tfvars",
+    "hcl",
+    "nix",
+    "ps1",
+    "cmake",
+    "awk",
+    "sed",
+    "properties",
+];
+const DASH_COMMENT_EXTS: &[&str] = &[
+    "sql",
+    "lua",
+    "hs",
+    "lhs",
+    "elm",
+    "ada",
+    "adb",
+    "ads",
+    "vhd",
+    "vhdl",
+    "applescript",
+];
+
 fn is_hash_comment_file(path: &str) -> bool {
     let lower = file_name(path).to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "makefile"
-            | "gnumakefile"
-            | "dockerfile"
-            | "containerfile"
-            | "gemfile"
-            | "rakefile"
-            | "podfile"
-            | "fastfile"
-            | "justfile"
-            | ".gitignore"
-            | ".gitattributes"
-            | ".dockerignore"
-            | ".env"
-            | ".bashrc"
-            | ".zshrc"
-            | ".profile"
-    ) || lower.starts_with("dockerfile.")
+    if HASH_COMMENT_FILES.contains(&lower.as_str())
+        || lower.starts_with("dockerfile.")
         || lower.starts_with("makefile.")
         || lower.starts_with(".env.")
     {
         return true;
     }
-    lower.rsplit_once('.').is_some_and(|(_, ext)| {
-        matches!(
-            ext,
-            "py" | "pyi"
-                | "sh"
-                | "bash"
-                | "zsh"
-                | "fish"
-                | "rb"
-                | "pl"
-                | "pm"
-                | "yml"
-                | "yaml"
-                | "toml"
-                | "ini"
-                | "cfg"
-                | "conf"
-                | "mk"
-                | "r"
-                | "tf"
-                | "tfvars"
-                | "hcl"
-                | "nix"
-                | "ps1"
-                | "cmake"
-                | "awk"
-                | "sed"
-                | "properties"
-        )
-    })
+    lower
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| HASH_COMMENT_EXTS.contains(&ext))
 }
 
 fn is_dash_comment_file(path: &str) -> bool {
     let lower = file_name(path).to_ascii_lowercase();
-    lower.rsplit_once('.').is_some_and(|(_, ext)| {
-        matches!(
-            ext,
-            "sql"
-                | "lua"
-                | "hs"
-                | "lhs"
-                | "elm"
-                | "ada"
-                | "adb"
-                | "ads"
-                | "vhd"
-                | "vhdl"
-                | "applescript"
-        )
-    })
+    lower
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| DASH_COMMENT_EXTS.contains(&ext))
 }
 
 fn is_comment_line(path: &str, text: &str) -> bool {
@@ -433,12 +461,38 @@ fn is_comment_line(path: &str, text: &str) -> bool {
 
 fn is_doc_path(path: &str) -> bool {
     let name = file_name(path);
-    name.rsplit_once('.').is_some_and(|(_, ext)| {
-        matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "md" | "markdown" | "rst" | "txt" | "adoc"
-        )
-    })
+    name.rsplit_once('.')
+        .is_some_and(|(stem, ext)| match ext.to_ascii_lowercase().as_str() {
+            "md" | "markdown" | "rst" | "adoc" => true,
+            "txt" => {
+                dirs(path).any(|d| matches!(d.to_ascii_lowercase().as_str(), "docs" | "doc"))
+                    || matches!(
+                        stem.to_ascii_lowercase().as_str(),
+                        "readme" | "changelog" | "notes" | "license" | "contributing"
+                    )
+            }
+            _ => false,
+        })
+}
+
+fn spec_matches_line(
+    rules: &Rules,
+    index: usize,
+    patterns: &[Regex],
+    text: &str,
+    is_test: bool,
+) -> bool {
+    if index == LAZY_CODE_RULE && is_test {
+        return patterns.iter().enumerate().any(|(pat_idx, pattern)| {
+            if pat_idx == LAZY_NOT_IMPL_PATTERN && rules.test_not_impl_assert.is_match(text) {
+                let scrubbed = rules.test_not_impl_assert.replace_all(text, "");
+                pattern.is_match(&scrubbed)
+            } else {
+                pattern.is_match(text)
+            }
+        });
+    }
+    patterns.iter().any(|pattern| pattern.is_match(text))
 }
 
 fn allowed(rules: &Rules, text: &str, id: &str) -> bool {
@@ -479,7 +533,11 @@ pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
                 if spec.skip_comments_and_docs && (is_comment || is_doc) {
                     continue;
                 }
-                if patterns.iter().any(|pattern| pattern.is_match(text)) {
+                if spec_matches_line(rules, index, patterns, text, is_test)
+                    && !hits.iter().any(|(seen_idx, seen_line, _)| {
+                        SPECS[*seen_idx].id == spec.id && *seen_line == *number
+                    })
+                {
                     hits.push((index, *number, allowed(rules, text, spec.id)));
                 }
             }

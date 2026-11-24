@@ -29,8 +29,8 @@ use super::board::store::{SharedRoDb, open_db, refuse_inside_agent_run};
 use super::handover::load_repo_config;
 use super::scope::resolve_scope;
 use super::task_ops::{
-    ApproveRefusal, approve_if_unchanged, eval_task_head_lock, parse_rework_reason, rework_task,
-    task_tree, unblock_task,
+    ApproveOpError, approve_and_regate, eval_task_head_lock, parse_rework_reason, rework_task,
+    unblock_task,
 };
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult, notice};
@@ -351,25 +351,35 @@ impl CommandHandler for CliTelegramHandler<'_> {
         expected_lock_fp: &str,
         user_id: i64,
     ) -> Result<String, String> {
-        let target_tree = task_tree(self.require_db_ro()?, task_id, self.ctx)
-            .map_err(|e| e.message().to_string())?;
+        let db = self.db_rw()?;
         let reviewer = format!("telegram:{user_id}");
-        match approve_if_unchanged(self.ctx, &target_tree, expected_lock_fp, &reviewer) {
-            Ok(a) => Ok(format!(
-                "approved {task_id} by {} (lock_fp={})",
-                a.reviewer, a.lock_fp
-            )),
-            Err(ApproveRefusal::Eval(e)) => Err(e.message().to_string()),
-            Err(ApproveRefusal::NothingLocked) => {
-                Err("no locked file is changed; nothing to approve".to_string())
+        match approve_and_regate(
+            &db,
+            self.ctx,
+            task_id,
+            &reviewer,
+            Some(expected_lock_fp),
+            "aaf telegram approve",
+            &reviewer,
+            SystemClock.now(),
+        ) {
+            Ok(out) => {
+                let suffix = match out.transitioned_to {
+                    Some(state) => format!(" -> {}", state.as_str()),
+                    None => String::new(),
+                };
+                Ok(format!(
+                    "approved {task_id} by {} (lock_fp={}){suffix}",
+                    out.approval.reviewer, out.approval.lock_fp
+                ))
             }
-            Err(ApproveRefusal::FpChanged) => {
-                Err("locked diff changed since preview; run /approve again".to_string())
-            }
-            Err(ApproveRefusal::Sign(GateError::NothingLocked)) => {
+            Err(ApproveOpError::Gate(GateError::NothingLocked)) => {
                 Err("no locked file is changed; nothing approved".to_string())
             }
-            Err(ApproveRefusal::Sign(e)) => Err(e.to_string()),
+            Err(ApproveOpError::Gate(GateError::LockFpChanged)) => {
+                Err("locked diff changed since preview; run /approve again".to_string())
+            }
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -379,6 +389,29 @@ impl CommandHandler for CliTelegramHandler<'_> {
         unblock_task(&db, task_id, "aaf telegram unblock", &by, SystemClock.now())
             .map_err(|e| e.to_refused_string())?;
         Ok(format!("{task_id} is ready"))
+    }
+
+    fn unblock_all(&mut self, user_id: i64) -> Result<String, String> {
+        let db = self.db_rw()?;
+        let blocked = db
+            .list_tasks(self.repo_root.as_deref(), Some(TaskState::Blocked))
+            .map_err(s_err)?;
+        if blocked.is_empty() {
+            return Ok("no blocked tasks".to_string());
+        }
+        let by = format!("telegram:{user_id}");
+        let now = SystemClock.now();
+        let mut unblocked = Vec::with_capacity(blocked.len());
+        for task in &blocked {
+            unblock_task(&db, &task.id, "aaf telegram unblock all", &by, now)
+                .map_err(|e| e.to_refused_string())?;
+            unblocked.push(task.id.as_str());
+        }
+        Ok(format!(
+            "unblocked {} blocked task(s): {}",
+            unblocked.len(),
+            unblocked.join(", ")
+        ))
     }
 
     fn rework(&mut self, task_id: &str, reason: &str, user_id: i64) -> Result<String, String> {

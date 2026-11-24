@@ -125,8 +125,13 @@ fn guards_v3_human_subcommands_via_launchers() {
 
 #[test]
 fn guards_v3_human_subcommands_via_cargo_run_with_and_without_dashes() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/aaf-cli\"]\n",
+    );
     run_corpus(
-        &Fixture::new(),
+        &fixture,
         &[
             // With `--`
             ("cargo run -- approve", HUMAN),
@@ -208,7 +213,7 @@ fn allows_non_human_commands_and_avoids_short_word_false_positives() {
             ("aaf board show T-1", ALLOW),
             (
                 "aaf board add --title 'rework split gc dep approve-plan cockpit undo steer' --accept 'sync ok'",
-                ALLOW,
+                HUMAN,
             ),
             ("aaf proof verify", ALLOW),
             ("aaf proof show", ALLOW),
@@ -234,6 +239,13 @@ fn allows_non_human_commands_and_avoids_short_word_false_positives() {
             ("aaf proof verify 'oops", ALLOW),
             ("aaf skills list 'oops", ALLOW),
         ],
+    );
+    run_corpus(
+        &Fixture::new().interactive(),
+        &[(
+            "aaf board add --title 'rework split gc dep approve-plan cockpit undo steer' --accept 'sync ok'",
+            ALLOW,
+        )],
     );
 }
 

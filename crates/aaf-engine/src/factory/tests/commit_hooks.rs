@@ -53,23 +53,17 @@ fn a_commit_has_a_budget_of_its_own_longer_than_any_git_call() {
 }
 
 #[test]
-fn a_pre_commit_hook_runs_under_the_commit_budget() {
+fn a_pre_commit_hook_is_bypassed_under_plan_v3_headless_commits() {
     let fx = Fixture::new();
-    install_hook(&fx, "pre-commit", "#!/bin/sh\nsleep 2\n");
+    install_hook(&fx, "pre-commit", "#!/bin/sh\nsleep 2\nexit 1\n");
     let tree = fx.ops.task_worktree("t1").unwrap();
     fs::write(tree.path.join("app.txt"), "two\n").unwrap();
     let impatient = real_git(&fx).with_commit_timeout(Duration::from_secs(1));
 
-    let error = impatient.commit_all(&tree, "aaf: t1").unwrap_err();
+    impatient.commit_all(&tree, "aaf: t1").unwrap();
 
-    assert!(error.to_string().contains("timed out"), "{error}");
-    assert!(
-        error
-            .to_string()
-            .contains("commit hooks ran longer than the commit budget"),
-        "{error}"
-    );
-    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "0");
+    assert_eq!(git(&tree.path, &["status", "--porcelain"]), "");
+    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "1");
 }
 
 #[test]
@@ -85,13 +79,11 @@ fn a_slow_pre_commit_hook_commits_with_the_default_budget() {
     assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "1");
 }
 
-/// A hook that writes something new on every commit never settles: one
-/// follow-up commit, then an error that names the files and the cause.
+/// Plan v3 bypasses repo commit hooks (`-c core.hooksPath=/dev/null --no-verify`),
+/// so a mutating post-commit hook never dirties the worktree or requires follow-up commits.
 #[test]
-fn a_commit_hook_that_never_settles_is_named_after_one_follow_up_commit() {
+fn a_post_commit_hook_never_dirties_the_worktree_under_plan_v3() {
     let fx = Fixture::new();
-    // A counter, not `date +%s%N`: BSD date has no `%N`, and two commits in
-    // the same second would write the same stamp.
     install_hook(
         &fx,
         "post-commit",
@@ -100,16 +92,9 @@ fn a_commit_hook_that_never_settles_is_named_after_one_follow_up_commit() {
     let tree = fx.ops.task_worktree("t1").unwrap();
     fs::write(tree.path.join("app.txt"), "two\n").unwrap();
 
-    let error = fx.ops.commit_all(&tree, "aaf: t1").unwrap_err().to_string();
+    fx.ops.commit_all(&tree, "aaf: t1").unwrap();
 
-    assert!(error.contains("stamp"), "{error}");
-    assert!(
-        error.contains("a commit hook of the repository changed these files after the commit"),
-        "{error}"
-    );
-    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "2");
-    assert_eq!(
-        git(&tree.path, &["log", "-1", "--format=%s"]),
-        "aaf: files changed by the repository's commit hooks"
-    );
+    assert!(!tree.path.join("stamp").exists());
+    assert_eq!(git(&tree.path, &["status", "--porcelain"]), "");
+    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "1");
 }

@@ -1,43 +1,38 @@
-//! `aaf run [--auto] [--auto-merge] [--auto-split] [--max-parallel N|auto] [--unsandboxed]`
+//! `aaf run [GOAL] [--auto|--once] [--land MODE|--auto-merge] [--detach] [--auto-split] [--max-parallel N|auto] [--unsandboxed]`
 //! (docs/PLAN.md C.10): wires the real store, executor, git and gate into
 //! the factory loop of `aaf_engine::factory`.
 
+mod deps;
+pub(crate) mod detach;
+mod goal;
 mod progress;
 #[cfg(test)]
 mod tests;
 
 use std::fs::{File, TryLockError};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
-use aaf_domain::config::{AccountSelection, CrossAuditConfig, RunConfig};
-use aaf_domain::ports::AgentRunner;
+use aaf_domain::config::LandMode;
+use aaf_domain::ports::TaskStore;
 use aaf_domain::task::TaskState;
-use aaf_engine::accounts::{self, DiscoveryEnv, Router};
 use aaf_engine::config::{self, ConfigInputs, ConfigOverlay, EffectiveConfig, RunOverlay};
 use aaf_engine::db::{Db, private};
-use aaf_engine::executors::{self, ExecEnv};
-use aaf_engine::factory::adapters::{
-    RealGate, RouterPool, SystemClock, WebhookNotifier, provider_for,
-};
+use aaf_engine::executors;
 use aaf_engine::factory::{
-    self, AccountPool, AuditBackend, BindingView, Deps, Hooks, Mode, RealGit, RunSummary,
-    SelectingPool, Settings, build_audit_command, configured_audit_provider, resolve_base,
-    same_audit_provider,
+    self, BindingView, Deps, Hooks, Mode, RunSummary, configured_audit_provider,
+    resolve_auto_audit_executor, resolve_base, same_audit_provider,
 };
 use aaf_engine::hook_settings;
-use aaf_engine::split::compute_auto_parallel;
-use aaf_engine::throttle::{LoadProbe, SystemProbe};
 use serde_json::{Value, json};
 
 use super::board::store::{err, open_db, refuse_inside_agent_run, repo_root};
 use crate::ctx::Ctx;
-use crate::output::{CmdError, CmdOutput, CmdResult, notice};
+use crate::output::{CmdError, CmdOutput, CmdResult};
+use deps::build_deps;
 
 /// How often `--auto` looks for new Ready tasks and ended cooldowns.
 const AUTO_POLL: Duration = Duration::from_secs(5);
-const MOBILE_PROFILES: [&str; 5] = ["android", "ios", "flutter", "react-native", "expo"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParallelArg {
@@ -63,14 +58,42 @@ impl std::str::FromStr for ParallelArg {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LandArg {
+    Branch,
+    Pr,
+    PrMerge,
+    Auto,
+}
+
+impl From<LandArg> for LandMode {
+    fn from(arg: LandArg) -> Self {
+        match arg {
+            LandArg::Branch => LandMode::Branch,
+            LandArg::Pr => LandMode::Pr,
+            LandArg::PrMerge => LandMode::PrMerge,
+            LandArg::Auto => LandMode::Auto,
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
+    /// Optional inline goal: creates a Ready task deterministically before running.
+    #[arg(value_name = "GOAL")]
+    pub goal: Option<String>,
     /// Keep running: look for Ready tasks until interrupted or frozen.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "once")]
     pub auto: bool,
+    /// Legacy single-pass mode: every Ready task gets at most one agent turn.
+    #[arg(long, conflicts_with = "auto")]
+    pub once: bool,
     /// Land clear tasks through the merge queue instead of opening a PR.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "land")]
     pub auto_merge: bool,
+    /// Landing strategy for gate-clear tasks (`branch`, `pr`, `pr-merge`, `auto`).
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub land: Option<LandArg>,
     /// Agent runs at the same time (default: `run.max_parallel`; or `auto`).
     #[arg(long, value_name = "N|auto")]
     pub max_parallel: Option<ParallelArg>,
@@ -80,6 +103,21 @@ pub struct RunArgs {
     /// Run agents without the Seatbelt sandbox. Required where there is none.
     #[arg(long)]
     pub unsandboxed: bool,
+    /// Run the factory loop in the background and return once ready.
+    #[arg(long)]
+    pub detach: bool,
+    /// Internal flag set when spawned by `--detach`.
+    #[arg(long, hide = true)]
+    pub detached_child: bool,
+    /// Acceptance criterion for an inline GOAL (repeatable).
+    #[arg(long = "accept", requires = "goal")]
+    pub accept: Vec<String>,
+    /// Priority for an inline GOAL (P0..P3, default P2).
+    #[arg(long, requires = "goal")]
+    pub priority: Option<String>,
+    /// Relative path prefix owned by an inline GOAL (repeatable).
+    #[arg(long = "scope", requires = "goal")]
+    pub scope: Vec<String>,
 }
 
 /// Whether agent runs are sandboxed. Seatbelt exists on macOS only; anywhere
@@ -108,6 +146,7 @@ fn load_config(args: &RunArgs, ctx: &Ctx, repo: &Path) -> Result<EffectiveConfig
     let cli = ConfigOverlay {
         run: RunOverlay {
             auto_merge: args.auto_merge.then_some(true),
+            land: args.land.map(LandMode::from),
             max_parallel: fixed_parallel,
             ..RunOverlay::default()
         },
@@ -130,213 +169,13 @@ fn load_config(args: &RunArgs, ctx: &Ctx, repo: &Path) -> Result<EffectiveConfig
 fn run_lock(ctx: &Ctx, repo: &Path) -> Result<Option<File>, CmdError> {
     let dir = ctx.data_dir.join("locks");
     private::create_dir(&dir).map_err(|e| err("locks dir", e))?;
-    let path = dir.join(format!("{}.run.lock", aaf_fp::repo_id(repo)));
+    let path = detach::run_lock_path(&ctx.data_dir, repo);
     let file = private::open_file(&path).map_err(|e| err(&path.display().to_string(), e))?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(e)) => Err(err(&path.display().to_string(), e)),
     }
-}
-
-fn build_audit_backend(
-    repo: &Path,
-    cfg: &EffectiveConfig,
-    db: &Db,
-    clock: Arc<SystemClock>,
-    leases_dir: std::path::PathBuf,
-    exec_env: ExecEnv,
-) -> Result<Option<AuditBackend>, CmdError> {
-    let cross = &cfg.repo.cross_audit;
-    if cross.executor.trim().is_empty()
-        && cross.executor_cmd.trim().is_empty()
-        && cross.model.trim().is_empty()
-        && cross.effort.trim().is_empty()
-    {
-        return Ok(None);
-    }
-    let audit_exec = configured_audit_provider(&cfg.repo.run.executor, cross);
-    let is_native_claude =
-        audit_exec.eq_ignore_ascii_case("claude") && cross.executor_cmd.trim().is_empty();
-    let audit_run_cfg = if is_native_claude {
-        RunConfig {
-            executor: "claude".to_string(),
-            model: if cross.model.trim().is_empty() {
-                cfg.repo.run.model.clone()
-            } else {
-                cross.model.clone()
-            },
-            effort: if cross.effort.trim().is_empty() {
-                cfg.repo.run.effort.clone()
-            } else {
-                cross.effort.clone()
-            },
-            env_pass: cfg.repo.run.env_pass.clone(),
-            ..RunConfig::default()
-        }
-    } else {
-        let effective = CrossAuditConfig {
-            executor: audit_exec.to_string(),
-            ..cross.clone()
-        };
-        let cmd = build_audit_command(&effective).map_err(|e| err("cross_audit", e))?;
-        RunConfig {
-            executor: "custom".to_string(),
-            executor_cmd: cmd,
-            env_pass: cfg.repo.run.env_pass.clone(),
-            ..RunConfig::default()
-        }
-    };
-    let runner: Arc<dyn AgentRunner> = Arc::from(
-        executors::build_runner_with(&audit_run_cfg, exec_env)
-            .map_err(|e| err("cross_audit executor", e))?,
-    );
-    let accounts: Arc<dyn AccountPool> = Arc::new(SelectingPool::new(
-        RouterPool {
-            accounts: Arc::new(db.clone()),
-            runs: Arc::new(db.clone()),
-            clock,
-            leases_dir,
-            max_concurrent_per_account: cfg.global.accounts.max_concurrent_per_account,
-            provider: provider_for(audit_exec),
-        },
-        cfg.global.accounts.selection,
-        repo,
-        Arc::new(db.clone()),
-    ));
-    Ok(Some(AuditBackend {
-        provider: audit_exec.to_string(),
-        runner,
-        accounts,
-        hook_required: is_native_claude || audit_exec.eq_ignore_ascii_case("claude"),
-    }))
-}
-
-fn build_deps(
-    ctx: &Ctx,
-    repo: &Path,
-    cfg: &EffectiveConfig,
-    db: &Db,
-    sandboxed: bool,
-    parallel_arg: Option<ParallelArg>,
-) -> Result<(Deps, Arc<SelectingPool>, Option<AuditBackend>), CmdError> {
-    let clock = Arc::new(SystemClock);
-    let leases_dir = ctx.data_dir.join("leases");
-    let max_per_account = cfg.global.accounts.max_concurrent_per_account;
-
-    let on_path = |name: &str| accounts::binary_on_path_in(&ctx.path_var, name);
-    let found = accounts::discover(
-        &cfg.global.accounts,
-        &DiscoveryEnv {
-            home: ctx.home.clone(),
-            binary_on_path: &on_path,
-        },
-    );
-    Router::new(db, db, &*clock, leases_dir.clone(), max_per_account)
-        .sync(&found)
-        .map_err(|e| err("accounts", e))?;
-
-    let run_provider = provider_for(&cfg.repo.run.executor);
-    let effective_max_parallel = match parallel_arg {
-        Some(ParallelArg::Auto) => {
-            let cores = std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(2);
-            let provider_accounts = match run_provider {
-                Some(kind) => {
-                    let count = found.iter().filter(|a| a.provider == kind).count();
-                    if cfg.global.accounts.selection == AccountSelection::Pinned {
-                        count.min(1)
-                    } else {
-                        count
-                    }
-                }
-                None => 0,
-            };
-            compute_auto_parallel(
-                provider_accounts,
-                max_per_account,
-                cores,
-                SystemProbe::detect().pressure(),
-            )
-        }
-        Some(ParallelArg::Fixed(n)) => n,
-        None => cfg.repo.run.max_parallel,
-    };
-
-    // The sandbox must close the data dir and open exactly the worktree
-    // directory this command creates worktrees in.
-    let exec_env = ExecEnv {
-        data_dir: Some(ctx.data_dir.to_string_lossy().into_owned()),
-        worktrees_root: Some(ctx.worktrees_dir.to_string_lossy().into_owned()),
-        // The operator's own list (tier 1), kept apart: only it may name a
-        // credential or NODE_OPTIONS. The executor adds the repository's
-        // `run.env_pass` (tier 2) to `env_pass`.
-        machine_env_pass: cfg.global.run.env_pass.clone(),
-        ..ExecEnv::from_process()
-    };
-    let runner: Arc<dyn AgentRunner> = Arc::from(
-        executors::build_runner_with(&cfg.repo.run, exec_env.clone())
-            .map_err(|e| err("executor", e))?,
-    );
-    let audit = build_audit_backend(repo, cfg, db, clock.clone(), leases_dir.clone(), exec_env)?;
-    let base = resolve_base(repo, &cfg.repo.gate.base_ref).map_err(|e| err("base branch", e))?;
-    let profile = config::effective_profile(&cfg.repo, repo);
-    // Which account a job may take follows `accounts.selection`; `repo` is
-    // the path `tasks.repo_root` holds, so the run history finds it.
-    let pool = Arc::new(SelectingPool::new(
-        RouterPool {
-            accounts: Arc::new(db.clone()),
-            runs: Arc::new(db.clone()),
-            clock: clock.clone(),
-            leases_dir,
-            max_concurrent_per_account: max_per_account,
-            provider: provider_for(&cfg.repo.run.executor),
-        },
-        cfg.global.accounts.selection,
-        repo,
-        Arc::new(db.clone()),
-    ));
-
-    let deps = Deps {
-        store: Arc::new(db.clone()),
-        clock: clock.clone(),
-        runner,
-        accounts: pool.clone(),
-        git: Arc::new(RealGit::new(
-            repo.to_path_buf(),
-            ctx.worktrees_dir.clone(),
-            ctx.data_dir.join("locks"),
-            base,
-        )),
-        gate: Arc::new(RealGate {
-            data_dir: ctx.data_dir.clone(),
-            cfg: cfg.repo.clone(),
-            clock,
-            machine: cfg.global.machine.clone(),
-            // A gate that waits for the machine says so, on stderr like
-            // `aaf gate`; without it a throttled run looks hung.
-            progress: Box::new(|tree, event| notice("run", &progress::line(tree, event))),
-            worktrees_dir: ctx.worktrees_dir.clone(),
-        }),
-        notifier: Arc::new(WebhookNotifier {
-            url: cfg.global.notifications.webhook_url.clone(),
-        }),
-        settings: Settings {
-            repo_root: repo.to_string_lossy().into_owned(),
-            repo: cfg.repo.clone(),
-            max_parallel: effective_max_parallel,
-            auto_merge: cfg.repo.run.auto_merge,
-            sandboxed,
-            hook_required: cfg.repo.run.executor == "claude",
-            // The executor hands the PATH of this process on to the agent.
-            agent_path: ctx.path_var.clone(),
-            mobile: MOBILE_PROFILES.contains(&profile.as_str()),
-            data_dir: ctx.data_dir.clone(),
-            home: ctx.home.clone(),
-        },
-    };
-    Ok((deps, pool, audit))
 }
 
 /// Why tasks are waiting, when it is the repository's own account they wait
@@ -350,6 +189,22 @@ pub(crate) fn waiting_line(waiting: u32, binding: &BindingView) -> Option<String
         account.name,
         binding.selection.as_str()
     ))
+}
+
+pub(crate) fn drain_stop_reason(summary: &RunSummary) -> &'static str {
+    if summary.frozen {
+        "frozen"
+    } else if summary.halted.is_some() {
+        "halted"
+    } else if !summary.blocked.is_empty() {
+        "blocked"
+    } else if summary.waiting_for_review_cap > 0 {
+        "waiting_for_review_cap"
+    } else if summary.waiting_for_account > 0 {
+        "waiting_for_account"
+    } else {
+        "drained"
+    }
 }
 
 fn report(
@@ -417,8 +272,23 @@ fn report(
     };
     out.fields.extend(fields);
     Ok(out
+        .field("drain_stop_reason", json!(drain_stop_reason(summary)))
         .field("warnings", json!(warnings))
         .field("account_binding", json!(binding)))
+}
+
+/// True when this repository has a task an agent could be started for.
+fn has_work_in_db(db: &Db, repo: &Path) -> Result<bool, CmdError> {
+    let repo_str = repo.to_string_lossy();
+    for state in [TaskState::Ready, TaskState::Running, TaskState::Gating] {
+        let tasks = db
+            .list_tasks(Some(&repo_str), Some(state))
+            .map_err(|e| err("store", e))?;
+        if !tasks.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// True when this repository has a task an agent could be started for.
@@ -445,7 +315,30 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         Err(why) => return Ok(CmdOutput::policy("refused", why)),
     };
     let repo = repo_root(ctx)?;
-    let cfg = load_config(args, ctx, &repo)?;
+    let mut cfg = load_config(args, ctx, &repo)?;
+    if cfg
+        .repo
+        .cross_audit
+        .executor
+        .trim()
+        .eq_ignore_ascii_case("auto")
+    {
+        let resolved = resolve_auto_audit_executor(
+            &cfg.repo.run.executor,
+            &cfg.repo.cross_audit.executor,
+            &ctx.path_var,
+            &ctx.home,
+        );
+        if resolved.eq_ignore_ascii_case(cfg.repo.run.executor.trim())
+            && cfg.repo.cross_audit.executor_cmd.trim().is_empty()
+            && cfg.repo.cross_audit.model.trim().is_empty()
+            && cfg.repo.cross_audit.effort.trim().is_empty()
+        {
+            cfg.repo.cross_audit.executor.clear();
+        } else {
+            cfg.repo.cross_audit.executor = resolved;
+        }
+    }
     let run_exec = cfg.repo.run.executor.trim();
     let audit_exec = configured_audit_provider(run_exec, &cfg.repo.cross_audit);
     if cfg.repo.cross_audit.require_different_provider && same_audit_provider(run_exec, audit_exec)
@@ -463,10 +356,58 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         let text = "factory is frozen after repeated failures: aaf board unfreeze";
         return Ok(CmdOutput::policy("frozen", text).field("frozen", json!(true)));
     }
-    let Some(_lock) = run_lock(ctx, &repo)? else {
+    let Some(lock) = run_lock(ctx, &repo)? else {
         let text = "another aaf run is already working on this repository";
         return Ok(CmdOutput::policy("refused", text));
     };
+
+    let created_task_id = if let Some(raw_goal) = &args.goal {
+        match goal::create_goal_task(
+            raw_goal,
+            &args.accept,
+            args.priority.as_deref(),
+            &args.scope,
+            &repo,
+            &db,
+        )? {
+            goal::GoalOutcome::Created(id) => Some(id),
+            goal::GoalOutcome::Refused(out) => return Ok(out),
+        }
+    } else {
+        None
+    };
+
+    if args.detach && !args.detached_child {
+        let needs_hook = run_exec == "claude" || audit_exec.eq_ignore_ascii_case("claude");
+        if needs_hook && (created_task_id.is_some() || has_work_in_db(&db, &repo)?) {
+            let base =
+                resolve_base(&repo, &cfg.repo.gate.base_ref).map_err(|e| err("base branch", e))?;
+            let base_sha =
+                aaf_engine::git::cmd::git(&repo, &["rev-parse", "--verify", &base.start_point()])
+                    .map_err(|e| err("base branch", e))?;
+            if let Err(problem) = hook_settings::check_base(&repo, &base_sha, &ctx.path_var) {
+                return Ok(CmdOutput::policy("refused", problem.clone())
+                    .field("reason", json!(problem))
+                    .field("frozen", json!(false)));
+            }
+        }
+        // Release the probed lock so the detached child acquires it immediately.
+        drop(lock);
+        return detach::spawn_detached(args, ctx, &repo, created_task_id.as_deref());
+    }
+    let _lock = lock;
+    let meta_task_id = created_task_id
+        .clone()
+        .or_else(|| std::env::var(detach::DETACHED_TASK_ENV).ok());
+    let meta_log = args
+        .detached_child
+        .then(|| detach::detached_log_path(&ctx.data_dir, &repo));
+    detach::write_run_meta(
+        &ctx.data_dir,
+        &repo,
+        meta_log.as_deref(),
+        meta_task_id.as_deref(),
+    )?;
 
     let (deps, pool, audit) = build_deps(ctx, &repo, &cfg, &db, sandboxed, args.max_parallel)?;
     let needs_hook = deps.settings.hook_required || audit.as_ref().is_some_and(|a| a.hook_required);
@@ -496,9 +437,13 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             let binding = pool
                 .binding(deps.clock.now())
                 .map_err(|e| err("accounts", e))?;
-            return Ok(report(&summary, &cfg.warnings, &binding)?
+            let mut out = report(&summary, &cfg.warnings, &binding)?
                 .field("max_parallel", json!(deps.settings.max_parallel))
-                .field("auto_split_count", json!(auto_split_count)));
+                .field("auto_split_count", json!(auto_split_count));
+            if let Some(task_id) = &created_task_id {
+                out = out.field("task_id", json!(task_id));
+            }
+            return Ok(out);
         }
     }
     let hooks = Hooks {
@@ -519,7 +464,13 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             Ok(())
         },
     };
-    let mode = if args.auto { Mode::Auto } else { Mode::Once };
+    let mode = if args.auto {
+        Mode::Auto
+    } else if args.once {
+        Mode::Once
+    } else {
+        Mode::Drain
+    };
     let summary = factory::run_with_audit(&deps, audit.as_ref(), mode, &hooks)
         .map_err(|e| err("factory", e))?;
     // Read after the run: the binding of a repository's first run exists
@@ -530,6 +481,9 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     let mut out = report(&summary, &cfg.warnings, &binding)?
         .field("max_parallel", json!(deps.settings.max_parallel))
         .field("auto_split_count", json!(auto_split_count));
+    if let Some(task_id) = &created_task_id {
+        out = out.field("task_id", json!(task_id));
+    }
     if auto_split_count > 0 {
         out.text
             .push_str(&format!("\nauto-split: {auto_split_count} root task(s)"));

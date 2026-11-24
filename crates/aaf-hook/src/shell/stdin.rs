@@ -247,6 +247,7 @@ impl Lexer<'_, '_> {
             let mut is_shell = false;
             let mut owner_wrapped = Vec::new();
             let mut owner_slotted = false;
+            let mut owner_slot_bin: Option<String> = None;
             let mut base64_stages: Vec<bool> = Vec::new();
             let mut may_be_lone_cat = false;
             if let Some(idx) = cmd_idx {
@@ -256,6 +257,9 @@ impl Lexer<'_, '_> {
                     is_shell |= SHELLS.contains(&cmd.name());
                     owner_wrapped = cmd.wrapped.clone();
                     owner_slotted |= cmd.slotted;
+                    if owner_slot_bin.is_none() {
+                        owner_slot_bin = cmd.slot_bin.clone();
+                    }
                     if cmd.name() == "base64" && base64_is_decode(cmd.args()) {
                         base64_stages.push(base64_ignores_garbage(cmd.args()));
                     }
@@ -271,6 +275,9 @@ impl Lexer<'_, '_> {
                     if let Some(consumer) = self.out.cmds.get_mut(consumer_idx) {
                         cleared |= consumer.env_cleared;
                         owner_slotted |= consumer.slotted;
+                        if owner_slot_bin.is_none() {
+                            owner_slot_bin = consumer.slot_bin.clone();
+                        }
                         if consumer.name() == "base64" && base64_is_decode(consumer.args()) {
                             base64_stages.push(base64_ignores_garbage(consumer.args()));
                         }
@@ -308,6 +315,7 @@ impl Lexer<'_, '_> {
             } else {
                 let mut sub = Script {
                     in_slot: self.out.in_slot || owner_slotted,
+                    in_slot_bin: self.out.in_slot_bin.clone().or(owner_slot_bin),
                     env_cleared: self.out.env_cleared | cleared,
                     ..Script::default()
                 };

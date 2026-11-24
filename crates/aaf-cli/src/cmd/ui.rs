@@ -11,10 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aaf_domain::blocked::BlockedReason;
+use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::db::Db;
 use aaf_engine::executors::stream_log::read_tail_lines;
+use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
 use aaf_engine::factory::{snapshots::steer_task, unfreeze};
 use aaf_engine::gate::GateError;
 use aaf_engine::handover::{load_handover, render_markdown};
@@ -35,7 +38,10 @@ use self::actions::{collect_recent_runs, do_rework, do_unblock, format_blocked_d
 use super::board::store::{SharedRoDb, open_db, refuse_inside_agent_run};
 use super::handover::load_repo_config;
 use super::scope::resolve_scope;
-use super::task_ops::{ApproveRefusal, approve_if_unchanged, eval_task_head_lock, task_tree};
+use super::task_ops::{
+    ApproveOpError, PLAN_APPROVAL_PREFIX, approve_and_regate, eval_task_head_lock,
+    latest_generated_plan, unblock_task,
+};
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -337,22 +343,15 @@ impl UiBackend for CliUiBackend {
             .map(|t| {
                 let deps = enrichment.deps_by_task.remove(&t.id).unwrap_or_default();
                 let latest_run_id = enrichment.latest_run_by_task.remove(&t.id);
-                let repo_name = Path::new(&t.repo_root)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let repo_name = Path::new(&t.repo_root).file_name().and_then(|s| s.to_str()).unwrap_or("");
                 let blocked_detail = t.blocked_reason.as_ref().map(format_blocked_detail);
                 json!({
-                    "id": t.id, "title": t.title, "state": t.state.as_str(),
-                    "priority": t.priority.as_str(),
-                    "blocked_reason": t.blocked_reason.as_ref().map(|b| b.kind()),
-                    "blocked_detail": blocked_detail,
-                    "spec_description": t.spec.description,
-                    "acceptance": t.spec.acceptance,
-                    "fingerprint": t.fingerprint,
-                    "repo_name": repo_name,
-                    "unblock_cycles": t.unblock_cycles, "deps": deps, "repo_root": t.repo_root,
-                    "created_at": t.created_at, "updated_at": t.updated_at, "latest_run_id": latest_run_id,
+                    "id": t.id, "title": t.title, "state": t.state.as_str(), "priority": t.priority.as_str(),
+                    "blocked_reason": t.blocked_reason.as_ref().map(|b| b.kind()), "blocked_detail": blocked_detail,
+                    "spec_description": t.spec.description, "acceptance": t.spec.acceptance,
+                    "fingerprint": t.fingerprint, "repo_name": repo_name, "unblock_cycles": t.unblock_cycles,
+                    "deps": deps, "repo_root": t.repo_root, "created_at": t.created_at,
+                    "updated_at": t.updated_at, "latest_run_id": latest_run_id,
                 })
             })
             .collect();
@@ -396,8 +395,7 @@ impl UiBackend for CliUiBackend {
     }
 
     fn approve_commit(&self, id: &str, expected_fp: &str, reviewer: &str) -> Result<Value, String> {
-        let tree =
-            task_tree(self.require_db_ro()?, id, &self.ctx).map_err(|e| e.message().to_string())?;
+        let db = open_db(&self.ctx).map_err(|e| e.message)?;
         let by: String = reviewer
             .trim()
             .chars()
@@ -405,24 +403,30 @@ impl UiBackend for CliUiBackend {
             .take(64)
             .collect();
         let who = if by.is_empty() { "web-ui" } else { &by };
-        match approve_if_unchanged(&self.ctx, &tree, expected_fp, who) {
-            Ok(a) => {
+        match approve_and_regate(
+            &db,
+            &self.ctx,
+            id,
+            who,
+            Some(expected_fp),
+            "aaf ui approve",
+            who,
+            SystemClock.now(),
+        ) {
+            Ok(out) => {
                 self.invalidate_status_cache();
                 Ok(json!({
-                    "approved": true, "task_id": id, "reviewer": a.reviewer, "lock_fp": a.lock_fp
+                    "approved": true, "task_id": id, "reviewer": out.approval.reviewer,
+                    "lock_fp": out.approval.lock_fp, "state": out.transitioned_to.map(TaskState::as_str),
                 }))
             }
-            Err(ApproveRefusal::Eval(e)) => Err(e.message().to_string()),
-            Err(ApproveRefusal::NothingLocked) => {
-                Err("refused: no locked file is changed; nothing to approve".to_string())
-            }
-            Err(ApproveRefusal::FpChanged) => {
-                Err("lock_fp mismatch: locked diff changed since preview".to_string())
-            }
-            Err(ApproveRefusal::Sign(GateError::NothingLocked)) => {
+            Err(ApproveOpError::Gate(GateError::NothingLocked)) => {
                 Err("refused: no locked file is changed; nothing approved".into())
             }
-            Err(ApproveRefusal::Sign(e)) => Err(e.to_string()),
+            Err(ApproveOpError::Gate(GateError::LockFpChanged)) => {
+                Err("lock_fp mismatch: locked diff changed since preview".into())
+            }
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -430,6 +434,21 @@ impl UiBackend for CliUiBackend {
         let db = open_db(&self.ctx).map_err(|e| e.message)?;
         let res = match action {
             "unblock" => do_unblock(&db, task_id),
+            "unblock_all" | "unblock-all" => {
+                let repo = self.repo_root.as_deref().and_then(Path::to_str);
+                let blocked = db
+                    .list_tasks(repo, Some(TaskState::Blocked))
+                    .map_err(s_err)?;
+                let now = SystemClock.now();
+                let mut ids = Vec::with_capacity(blocked.len());
+                for t in &blocked {
+                    unblock_task(&db, &t.id, "aaf ui unblock-all", "web-ui", now)
+                        .map_err(|e| e.to_refused_string())?;
+                    ids.push(t.id.clone());
+                }
+                Ok(json!({ "action": "unblock_all", "count": ids.len(), "task_ids": ids }))
+            }
+            "approve_plan" | "approve-plan" => do_approve_plan(&db, task_id),
             "rework" => do_rework(&db, &self.ctx, task_id, note),
             "steer" => {
                 let recorded = steer_task(&db, task_id, note, SystemClock.now())?;
@@ -454,6 +473,43 @@ impl UiBackend for CliUiBackend {
             Err(e) => Err(e.to_string()),
         }
     }
+}
+
+fn do_approve_plan(db: &Db, task_id: &str) -> Result<Value, String> {
+    let task = db.get_task(task_id).map_err(s_err)?;
+    if task.state != TaskState::Blocked {
+        return Err(format!(
+            "refused: {task_id} is {}, not blocked",
+            task.state.as_str()
+        ));
+    }
+    let waiting = matches!(
+        &task.blocked_reason,
+        Some(BlockedReason::NeedsHuman { why }) if why.starts_with(PLAN_APPROVAL_PREFIX)
+    );
+    if !waiting {
+        return Err(format!(
+            "refused: {task_id} is not waiting for plan approval"
+        ));
+    }
+    let Some(plan) = latest_generated_plan(db, task_id).map_err(s_err)? else {
+        return Err(format!(
+            "refused: {task_id} has no generated plan event to approve"
+        ));
+    };
+    let now = SystemClock.now();
+    db.append_context_note(task_id, &format!("{PLAN_APPROVED_PREFIX} {plan}"), now)
+        .map_err(s_err)?;
+    db.set_state(task_id, TaskState::Ready, None, now)
+        .map_err(s_err)?;
+    let ev = FactoryEvent::new(
+        EventKind::TaskStateChanged,
+        json!({"from": "blocked", "to": "ready", "why": "plan_approved", "by": "web-ui"})
+            .to_string(),
+        now,
+    );
+    db.emit(&ev.for_task(task_id)).map_err(s_err)?;
+    Ok(json!({ "action": "approve_plan", "task_id": task_id, "state": "ready", "approved": true }))
 }
 
 #[cfg(test)]

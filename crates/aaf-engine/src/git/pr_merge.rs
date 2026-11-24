@@ -1,10 +1,11 @@
 //! Native locked Pull Request merge gate (`aaf merge <PR> --expect-head <sha40>`).
 //!
 //! Security & correctness invariants:
-//! 1. Tier-2 config is always loaded from the immutable `<base_sha>` (`git show`), never from the PR;
-//!    the tighten-only tier-1/tier-3/`AAF_*` overlays are layered on top as `aaf gate` does.
-//! 2. Independent cross-provider approval is enforced unconditionally (`same_account=true`
-//!    approvals never unlock head-locked changes during merge).
+//! 1. Tier-2 config is always loaded from the immutable `<base_sha>` (`git show`),
+//!    tightened monotonically with Tier-1/Tier-3/env policy, never read from the PR.
+//! 2. Tier-1 (`LockTier::Hard`) changes and `cross_audit.require_different_provider = true`
+//!    enforce independent (`same_account = false`) approval; Tier-2 pure test changes
+//!    allow solo-dev `same_account = true` approval when `require_different_provider = false`.
 //! 3. Verifies `headRefOid == expect_head` both before and inside the per-repo merge lock,
 //!    and passes `--match-head-commit <expect_head>` to `gh pr merge`.
 //! 4. Pre-checks non-FF merges in memory via `git merge-tree --write-tree` (catching
@@ -13,7 +14,7 @@
 //!    (wiped on `Drop`) and runs the full `aaf gate` on the merged result.
 //! 5. Never touches uncommitted changes or sibling worktrees in the local checkout.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,8 +27,9 @@ use super::gh_client::{GhClient, MergeStrategy, PrInfo};
 use super::pr_merge_support::{
     InMemoryMerge, ScratchWorktree, acquire_merge_lock, bounded_deadline, check_ci,
     fetch_base_and_pr, has_local_commit_and_tree, in_memory_merge_tree, load_trusted_base_config,
-    ls_remote_head, sync_local_base, valid_sha40,
+    ls_remote_head, sync_local_base as sync_checked_out_local_base, valid_sha40,
 };
+use super::worktree;
 use super::{GitError, has_remote};
 use crate::gate::{self, HiddenPolicy};
 use crate::throttle::{Progress, SystemProbe, Throttle};
@@ -190,6 +192,7 @@ fn verify_merged_tree(
         }
     };
 
+    let require_independent = trusted_cfg.cross_audit.require_different_provider;
     if !trusted_cfg.proof.required
         && let Some(tree_oid) = candidate_tree
     {
@@ -201,7 +204,7 @@ fn verify_merged_tree(
             req.mode,
             &tree_fp,
             base_sha,
-            true,
+            require_independent,
         ) {
             return Ok(VerifyOutcome::Clear(Box::new(receipt)));
         }
@@ -260,7 +263,7 @@ fn verify_merged_tree(
         gate::GateRunOptions {
             policy: HiddenPolicy::Remove,
             base_ref_override: Some(base_sha),
-            require_independent_approval: true,
+            require_independent_approval: require_independent,
             allow_common_receipt_write: true,
             strip_compiler_wrappers: true,
         },
@@ -450,8 +453,8 @@ pub fn merge_pr(
             fetch_base_and_pr(&req.repo_root, &req.remote, &pr_now, &req.expect_head)?
         };
 
-        let final_receipt = if base_now == base_sha {
-            receipt
+        let (final_receipt, final_cfg) = if base_now == base_sha {
+            (receipt, trusted_cfg)
         } else if attempt < MAX_OPTIMISTIC_RETRIES {
             // An external actor (e.g. GitHub Web UI) moved base while we verified;
             // re-verify cleanly while keeping the repo merge lock held.
@@ -464,12 +467,15 @@ pub fn merge_pr(
             match verify_merged_tree(
                 req, &common_id, &base_now, &head_now, &cfg_now, clock, &throttle,
             )? {
-                VerifyOutcome::Clear(r) => *r,
+                VerifyOutcome::Clear(r) => (*r, cfg_now),
                 VerifyOutcome::Blocked(outcome) => return Ok(outcome),
             }
         };
 
+        let need_independent = final_receipt.head_lock.has_hard_lock()
+            || final_cfg.cross_audit.require_different_provider;
         if final_receipt.head_lock.status == LockStatus::Approved
+            && need_independent
             && !final_receipt
                 .head_lock
                 .approval
@@ -509,5 +515,63 @@ pub fn merge_pr(
             receipt: Box::new(final_receipt),
             local_sync_note,
         });
+    }
+}
+
+/// Fetches `remote/base_branch` and fast-forwards local `refs/heads/<base_branch>`:
+/// - when `HEAD == base_branch`, delegates to clean checked-out `--ff-only` merge;
+/// - when `HEAD != base_branch` and `worktree::list` confirms no worktree has
+///   `base_branch` checked out, fast-forwards via `--is-ancestor` + CAS `update-ref`.
+pub fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str) -> String {
+    let current = git(repo_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
+    if current == base_branch {
+        return sync_checked_out_local_base(repo_root, remote, base_branch);
+    }
+    let refspec = format!("+refs/heads/{base_branch}:refs/remotes/{remote}/{base_branch}");
+    if git(repo_root, &["fetch", "--quiet", "--", remote, &refspec]).is_err() {
+        return format!("warning: could not fetch {remote}/{base_branch} after merge");
+    }
+    let checked_out_elsewhere = worktree::list(repo_root)
+        .map(|entries| {
+            entries
+                .into_iter()
+                .any(|entry| entry.branch.as_deref() == Some(base_branch))
+        })
+        .unwrap_or(true);
+    if checked_out_elsewhere {
+        return format!(
+            "local branch `{base_branch}` is checked out in another worktree; skipped local fast-forward"
+        );
+    }
+    let remote_ref = format!("refs/remotes/{remote}/{base_branch}");
+    let local_ref = format!("refs/heads/{base_branch}");
+    let Ok(new_sha) = git(repo_root, &["rev-parse", "--verify", &remote_ref]) else {
+        return format!("warning: could not resolve `{remote_ref}` after fetch");
+    };
+    let Ok(old_sha) = git(repo_root, &["rev-parse", "--verify", &local_ref]) else {
+        return format!("local branch `{base_branch}` does not exist; skipped local fast-forward");
+    };
+    if old_sha == new_sha {
+        return format!("local `{base_branch}` already up to date with `{remote}/{base_branch}`");
+    }
+    let is_ancestor = git_raw(
+        repo_root,
+        &["merge-base", "--is-ancestor", &old_sha, &new_sha],
+    )
+    .is_ok_and(|out| out.code == Some(0));
+    if !is_ancestor {
+        return format!(
+            "warning: local `{base_branch}` could not fast-forward to `{remote}/{base_branch}` (diverged)"
+        );
+    }
+    match git_raw(repo_root, &["update-ref", &local_ref, &new_sha, &old_sha]) {
+        Ok(out) if out.success() => {
+            format!(
+                "fast-forwarded local `{base_branch}` to `{remote}/{base_branch}` via update-ref"
+            )
+        }
+        _ => format!(
+            "warning: local `{base_branch}` moved concurrently; skipped update-ref to `{remote}/{base_branch}`"
+        ),
     }
 }

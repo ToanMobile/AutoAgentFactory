@@ -4,6 +4,8 @@
 //! failure is read back from marker lines in the task's `context_notes`, so
 //! the decision survives a factory restart without extra storage.
 
+mod repo_freeze;
+
 use serde::Serialize;
 
 use aaf_domain::blocked::{BlockedReason, UnblockAction, UnblockTier};
@@ -17,12 +19,19 @@ use aaf_domain::ports::{
 use aaf_domain::task::Task;
 
 use super::classifier::{
-    FailureSignal, budget_detail, classify, extract_gate_diagnostics, failure_digest, one_line,
-    truncate_chars,
+    FailureSignal, budget_detail, classify, extract_gate_diagnostics, failure_digest,
+    failure_error_count, one_line, truncate_chars,
 };
 use super::proposer::{SubtaskProposer, validate_plans};
 
+pub use repo_freeze::{
+    DEFAULT_REPO_FREEZE_THRESHOLD, MAX_REPO_PROBE_COUNT, REPO_FREEZE_COOLDOWN_SECS, is_repo_frozen,
+    record_repo_root_result, repo_consecutive_fails_key, repo_frozen_key, repo_frozen_until_key,
+    repo_probe_count_key, try_begin_repo_probe, unfreeze_repo,
+};
+
 const NOTE_MAX_CHARS: usize = 300;
+const MAX_T3_ATTEMPTS_ON_PROGRESS: usize = 2;
 
 /// What a task can do after its account ran into a usage limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +102,29 @@ pub(crate) fn tried(task: &Task, tier: UnblockTier, digest: &str) -> bool {
         .any(|n| n.starts_with(&marker))
 }
 
+fn parse_note_errors(note: &str) -> Option<u32> {
+    let rest = note.split("errors=").nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn t3_progress_state(task: &Task, digest: &str) -> (usize, Option<u32>) {
+    let prefix = marker(UnblockTier::T3FreshContext, digest);
+    let start = task
+        .context_notes
+        .iter()
+        .rposition(|n| n.starts_with("rework:") || n.starts_with("unblocked:"))
+        .map_or(0, |idx| idx + 1);
+    let (mut attempts, mut last_errors) = (0usize, None);
+    for note in &task.context_notes[start..] {
+        if note.starts_with(&prefix) {
+            attempts += 1;
+            last_errors = parse_note_errors(note);
+        }
+    }
+    (attempts, last_errors)
+}
+
 fn reason_text(reason: &BlockedReason) -> &str {
     match reason {
         BlockedReason::MergeConflict { detail }
@@ -137,12 +169,7 @@ impl<'a> Ladder<'a> {
         self.next_action_routed(task_id, signal, proposer, None)
     }
 
-    /// [`Ladder::next_action`] told what a usage limit leaves this task
-    /// (`quota`), by whoever knows the account pool. Without it the ladder
-    /// can only guess from the repeat count: one hit means "another account
-    /// may be free", a second in a row "none is". That guess is wrong for a
-    /// repository pinned to one account (it must wait at the first hit) and
-    /// for a pool of three or more (the second hit leaves a third account).
+    /// [`Ladder::next_action`] told what a usage limit leaves this task (`quota`).
     pub fn next_action_routed(
         &self,
         task_id: &str,
@@ -160,18 +187,19 @@ impl<'a> Ladder<'a> {
         let digest = failure_digest(signal);
         let classified = classify(signal);
         let gate_diag = extract_gate_diagnostics(signal);
+        let error_count = failure_error_count(signal);
 
         let (cycle, tier, reason, action) = if matches!(
             classified,
             BlockedReason::Infra { .. } | BlockedReason::Quota { .. }
         ) {
-            // Upstream infrastructure and quota/rate-limit events must not
-            // burn task unblock cycles or trigger FreezeRoot.
-            let (tier, reason, action) = match self.walk(
+            // Upstream infra/quota must not burn task unblock cycles or trigger FreezeRoot.
+            let (t, r, a) = match self.walk(
                 &task,
                 classified,
                 &digest,
                 gate_diag.as_deref(),
+                error_count,
                 quota,
                 proposer,
                 now,
@@ -180,12 +208,10 @@ impl<'a> Ladder<'a> {
                     (t, r, a)
                 }
             };
-            (task.unblock_cycles, tier, reason, action)
+            (task.unblock_cycles, t, r, a)
         } else {
-            let current = self.ensure_budget(&task.root_id)?;
-            let mut projected = current.clone();
+            let mut projected = self.ensure_budget(&task.root_id)?;
             projected.add_usage(0, 0, 1);
-            // The store is authoritative; the signal's view may be older.
             let check = match projected.check() {
                 BudgetCheck::Ok => signal.budget,
                 other => other,
@@ -193,14 +219,15 @@ impl<'a> Ladder<'a> {
             if let Some(detail) = budget_detail(check) {
                 let cycle = self.tasks.increment_unblock_cycles(task_id, now)?;
                 let budget = self.charge_cycle(&task.root_id)?;
-                let (tier, reason, action) = self.freeze_root(&task, &budget, detail, now)?;
-                (cycle, tier, reason, action)
+                let (t, r, a) = self.freeze_root(&task, &budget, detail, now)?;
+                (cycle, t, r, a)
             } else {
                 match self.walk(
                     &task,
                     classified,
                     &digest,
                     gate_diag.as_deref(),
+                    error_count,
                     quota,
                     proposer,
                     now,
@@ -212,10 +239,10 @@ impl<'a> Ladder<'a> {
                             action,
                         });
                     }
-                    WalkOutcome::Decision(tier, reason, action) => {
+                    WalkOutcome::Decision(t, r, a) => {
                         let cycle = self.tasks.increment_unblock_cycles(task_id, now)?;
                         self.charge_cycle(&task.root_id)?;
-                        (cycle, tier, reason, action)
+                        (cycle, t, r, a)
                     }
                 }
             }
@@ -300,6 +327,7 @@ impl<'a> Ladder<'a> {
         reason: BlockedReason,
         digest: &str,
         gate_diag: Option<&str>,
+        error_count: Option<u32>,
         quota: QuotaRoute,
         proposer: Option<&dyn SubtaskProposer>,
         now: i64,
@@ -347,9 +375,14 @@ impl<'a> Ladder<'a> {
         }
 
         let t3 = UnblockTier::T3FreshContext;
-        if !tried(task, t3, digest) {
+        let (t3_attempts, prev_errors) = t3_progress_state(task, digest);
+        let t3_making_progress = t3_attempts > 0
+            && t3_attempts < MAX_T3_ATTEMPTS_ON_PROGRESS
+            && prev_errors.is_some_and(|prev| error_count.is_some_and(|cur| cur < prev));
+        if t3_attempts == 0 || t3_making_progress {
+            let err_tag = error_count.map_or_else(String::new, |n| format!("errors={n} "));
             let text = format!(
-                "previous attempt failed ({}): {}",
+                "{err_tag}previous attempt failed ({}): {}",
                 reason.kind(),
                 reason_text(&reason)
             );
@@ -499,6 +532,47 @@ impl<'a> Ladder<'a> {
     pub fn unfreeze(&self) -> Result<(), PortError> {
         self.kv.set_meta(META_FACTORY_FROZEN, "0")?;
         self.kv.set_meta(META_CONSECUTIVE_ROOT_FAILS, "0")?;
+        self.events.emit(&FactoryEvent::new(
+            EventKind::FactoryUnfrozen,
+            "{}",
+            self.clock.now(),
+        ))?;
+        Ok(())
+    }
+
+    pub fn is_repo_frozen(&self, repo_root: &str) -> Result<bool, PortError> {
+        is_repo_frozen(self.kv, repo_root, self.clock.now())
+    }
+
+    pub fn record_repo_root_result(
+        &self,
+        repo_root: &str,
+        root_id: &str,
+        success: bool,
+    ) -> Result<bool, PortError> {
+        let now = self.clock.now();
+        let was_frozen = is_repo_frozen(self.kv, repo_root, now)?;
+        let threshold = self.cfg.global_freeze_consecutive_fails.max(1);
+        let frozen = repo_freeze::record_repo_root_result_with_threshold(
+            self.kv, repo_root, root_id, success, threshold, now,
+        )?;
+        if frozen && !was_frozen {
+            let fails =
+                repo_freeze::parse_u32_meta(self.kv, &repo_consecutive_fails_key(repo_root))?;
+            let payload = to_json(&FreezePayload {
+                root_id,
+                consecutive_fails: fails,
+                threshold,
+            })?;
+            self.events.emit(
+                &FactoryEvent::new(EventKind::FactoryFrozen, payload, now).for_task(root_id),
+            )?;
+        }
+        Ok(frozen)
+    }
+
+    pub fn unfreeze_repo(&self, repo_root: &str) -> Result<(), PortError> {
+        unfreeze_repo(self.kv, repo_root)?;
         self.events.emit(&FactoryEvent::new(
             EventKind::FactoryUnfrozen,
             "{}",

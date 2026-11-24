@@ -30,3 +30,7 @@ Owns **surface-mode framing and iterative critique/distillation/polish passes** 
 
 - Never invoke paid image-generation APIs without explicit user approval and cost notice.
 - Keep edits strictly inside app source and `DESIGN.md`/`PRODUCT.md`; never alter `.claude/settings.json` or repo hooks.
+
+## 5. Headless / `AAF_RUN_ID` Mode
+
+When `AAF_RUN_ID` is set, never stop to ask questions or wait for confirmation, and never invoke blocked host commands (`aaf gate`, `aaf approve`). Choose the surface mode and refinement vs. redesign scope autonomously from the task spec and existing `DESIGN.md`/`PRODUCT.md`, skip paid external image-generation APIs, and finish cleanly on the task branch.

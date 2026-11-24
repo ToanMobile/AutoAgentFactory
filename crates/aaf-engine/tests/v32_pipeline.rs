@@ -426,11 +426,12 @@ fn audit_rework_routes_explicit_fail_up_to_cap_sanitizes_and_charges_budget() {
     assert!(note.starts_with("audit_rework:") && !note.starts_with("rework:"));
     assert!(note.contains("<untrusted-data id=\"audit-findings\">"));
     assert_eq!(note.matches("</untrusted-data>").count(), 1, "{note}");
-    assert_eq!(db.get_budget("t1").unwrap().cycles_used, 1);
+    // Audit rework is decoupled from unblocker cycles (Plan v3).
+    assert_eq!(db.get_budget("t1").unwrap().cycles_used, 0);
 
     let s2 = run_with_audit(&deps, Some(&audit), Mode::Once, &hooks()).unwrap();
     assert_eq!(s2.requeued, vec!["t1"]);
-    assert_eq!(db.get_budget("t1").unwrap().cycles_used, 2);
+    assert_eq!(db.get_budget("t1").unwrap().cycles_used, 0);
 
     let _ = run_with_audit(&deps, Some(&audit), Mode::Once, &hooks()).unwrap();
     let t3 = db.get_task("t1").unwrap();

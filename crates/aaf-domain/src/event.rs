@@ -23,10 +23,14 @@ pub enum EventKind {
     ReworkRequested,
     ProofRecorded,
     PlanGenerated,
+    PlanDebateTurn,
+    PlanConverged,
+    DualReviewTurn,
+    ImplementerEscalated,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 18] = [
+    pub const ALL: [EventKind; 22] = [
         EventKind::TaskCreated,
         EventKind::TaskStateChanged,
         EventKind::RunStarted,
@@ -45,6 +49,10 @@ impl EventKind {
         EventKind::ReworkRequested,
         EventKind::ProofRecorded,
         EventKind::PlanGenerated,
+        EventKind::PlanDebateTurn,
+        EventKind::PlanConverged,
+        EventKind::DualReviewTurn,
+        EventKind::ImplementerEscalated,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -67,6 +75,10 @@ impl EventKind {
             EventKind::ReworkRequested => "rework_requested",
             EventKind::ProofRecorded => "proof_recorded",
             EventKind::PlanGenerated => "plan_generated",
+            EventKind::PlanDebateTurn => "plan_debate_turn",
+            EventKind::PlanConverged => "plan_converged",
+            EventKind::DualReviewTurn => "dual_review_turn",
+            EventKind::ImplementerEscalated => "implementer_escalated",
         }
     }
 

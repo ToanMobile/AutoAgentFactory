@@ -1,6 +1,12 @@
 //! The loop itself: the scheduler on the caller's thread, one thread per job
 //! that needs an account, and one gate thread for the repository.
 
+mod outcome;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering;
@@ -23,9 +29,6 @@ use super::sweep;
 pub use super::sweep::recover;
 use super::worker::{self, GateJob, Job, Outcome, PreGateAudit};
 use super::{Deps, Mode, RunSummary, is_frozen};
-
-mod outcome;
-
 use outcome::gate_loop;
 
 const MAX_GATE_RETRIES: u32 = 3;
@@ -163,7 +166,7 @@ impl<'a> Scheduler<'a> {
             let frozen = is_frozen(&*self.deps.store)?;
             let halted = self.summary.halted.is_some();
             if !frozen && !halted {
-                if self.mode == Mode::Auto {
+                if matches!(self.mode, Mode::Auto | Mode::Drain) {
                     self.poll_gating()?;
                 }
                 self.start_jobs(scope)?;
@@ -181,8 +184,25 @@ impl<'a> Scheduler<'a> {
                         Some(self.msg_rx.recv().map_err(|_| closed())?)
                     };
                 match msg {
-                    Some(Msg::Worker(outcome)) => self.handle_worker(outcome)?,
-                    Some(Msg::Gate(job, resolution)) => self.handle_gate(job, resolution)?,
+                    Some(Msg::Worker(outcome)) => {
+                        if matches!(
+                            outcome.next,
+                            worker::Next::Gate(_)
+                                | worker::Next::GateAudited(..)
+                                | worker::Next::Unblock { .. }
+                                | worker::Next::Ready
+                                | worker::Next::Blocked
+                        ) {
+                            self.state.restarts.remove(&outcome.task_id);
+                        }
+                        self.handle_worker(outcome)?;
+                    }
+                    Some(Msg::Gate(job, resolution)) => {
+                        if matches!(resolution, Ok(Resolution::Settled(_))) {
+                            self.state.restarts.remove(&job.task_id);
+                        }
+                        self.handle_gate(job, resolution)?;
+                    }
                     None => {}
                 }
                 continue;
@@ -203,10 +223,17 @@ impl<'a> Scheduler<'a> {
             if !halted {
                 self.summary.waiting_for_account = u32::try_from(waiting).unwrap_or(u32::MAX);
             }
-            if frozen || halted || self.mode == Mode::Once || !(hooks.idle)() {
+            if frozen || halted || matches!(self.mode, Mode::Once | Mode::Drain) || !(hooks.idle)()
+            {
                 return Ok(());
             }
-            self.parked.clear();
+            for id in self.parked.drain() {
+                self.state.restarts.remove(&id);
+            }
+            let _woken = self
+                .deps
+                .store
+                .wake_due_blocked_tasks(&self.deps.settings.repo_root, self.deps.now())?;
             self.sweep_review(false)?;
             self.state.last_review_sweep = Some(Instant::now());
             self.state.last_review_sweep_now = Some(self.deps.now());
@@ -240,7 +267,8 @@ impl<'a> Scheduler<'a> {
     }
 
     fn review_cap(&self) -> Option<usize> {
-        (!self.deps.settings.auto_merge && self.deps.settings.repo.run.max_open_review > 0)
+        (!self.deps.settings.effective_land().auto_lands()
+            && self.deps.settings.repo.run.max_open_review > 0)
             .then_some(self.deps.settings.repo.run.max_open_review as usize)
     }
 

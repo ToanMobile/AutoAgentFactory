@@ -66,11 +66,13 @@ fn an_agent_cannot_run_the_human_actions() {
             ("aaf board list --status blocked", ALLOW),
             ("aaf board show T-3", ALLOW),
             ("aaf --json board show T-3", ALLOW),
+            // `aaf board add` is Tier-B: blocked inside a factory worker run,
+            // allowed interactively (tested below without false positives on title words).
             (
                 "aaf board add --title 'approve the plan' --accept 'unblock works'",
-                ALLOW,
+                HUMAN,
             ),
-            ("aaf board add --title unblock --accept unfreeze", ALLOW),
+            ("aaf board add --title unblock --accept unfreeze", HUMAN),
             ("aaf board show unblock", ALLOW),
             ("aaf run", HUMAN),
             ("aaf init", HUMAN),
@@ -86,6 +88,17 @@ fn an_agent_cannot_run_the_human_actions() {
             ("cat approve.md", ALLOW),
             ("./approve.sh", ALLOW),
             ("aaf doctor 'oops", ALLOW),
+        ],
+    );
+    // Interactive mode allows `aaf board add` even when title/accept contain Tier-A words.
+    run_corpus(
+        &Fixture::new().interactive(),
+        &[
+            (
+                "aaf board add --title 'approve the plan' --accept 'unblock works'",
+                ALLOW,
+            ),
+            ("aaf board add --title unblock --accept unfreeze", ALLOW),
         ],
     );
 }

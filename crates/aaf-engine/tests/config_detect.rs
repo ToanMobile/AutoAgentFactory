@@ -91,10 +91,17 @@ fn android_commands_only_with_gradlew() {
         ("app/src/main/AndroidManifest.xml", "<manifest/>"),
     ]);
     assert_eq!(d.profile, "android");
-    assert_eq!(d.commands.build, "./gradlew assembleDebug");
-    assert_eq!(d.commands.test_scoped, "./gradlew testDebugUnitTest");
-    assert_eq!(d.commands.test_full, "./gradlew testDebugUnitTest");
-    assert_eq!(d.commands.lint, "./gradlew lint");
+    assert_eq!(d.commands.build, "./gradlew assembleDebug --no-daemon");
+    assert_eq!(
+        d.commands.test_scoped,
+        "./gradlew testDebugUnitTest --no-daemon"
+    );
+    assert_eq!(
+        d.commands.test_full,
+        "./gradlew testDebugUnitTest --no-daemon"
+    );
+    assert_eq!(d.commands.lint, "");
+    assert_eq!(d.commands.lint_full, "./gradlew lint --no-daemon");
     assert!(d.evidence.contains(&"gradlew".to_string()));
 }
 
@@ -222,24 +229,29 @@ fn react_native_by_package_dependency_and_it_wins_over_native_shells() {
 
 #[test]
 fn web_by_plain_package_json() {
-    // Conservative rule: web repos keep [commands] empty instead of guessing npm/pnpm/yarn/bun.
     let d = detect(&[("package.json", WEB_PACKAGE)]);
     assert_eq!(d.profile, "web");
     assert_eq!(d.evidence, vec!["package.json"]);
-    assert_eq!(d.commands, CommandsConfig::default());
+    assert_eq!(d.commands.test_scoped, "npm run test");
+    assert_eq!(d.commands.test_full, "npm run test");
+    assert_eq!(d.commands.build, "");
+    assert_eq!(d.commands.lint, "");
 
     let full_pkg =
         r#"{"scripts": {"build": "vite build", "test": "vitest run", "lint": "eslint ."}}"#;
-    for lock in [
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-        "package-lock.json",
+    for (lock, runner) in [
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lock", "bun run"),
+        ("bun.lockb", "bun run"),
+        ("package-lock.json", "npm run"),
     ] {
         let w = detect(&[("package.json", full_pkg), (lock, "")]);
         assert_eq!(w.profile, "web", "{lock}");
-        assert_eq!(w.commands, CommandsConfig::default(), "{lock}");
+        assert_eq!(w.commands.build, format!("{runner} build"), "{lock}");
+        assert_eq!(w.commands.test_scoped, format!("{runner} test"), "{lock}");
+        assert_eq!(w.commands.test_full, format!("{runner} test"), "{lock}");
+        assert_eq!(w.commands.lint, format!("{runner} lint"), "{lock}");
         assert_eq!(w.evidence, vec!["package.json"], "{lock}");
     }
 
@@ -436,7 +448,10 @@ fn android_with_product_flavors_gets_no_commands_and_says_why() {
             "android {\n    buildTypes { release {} }\n}\n",
         ),
     ]);
-    assert_eq!(d.commands.test_full, "./gradlew testDebugUnitTest");
+    assert_eq!(
+        d.commands.test_full,
+        "./gradlew testDebugUnitTest --no-daemon"
+    );
     assert!(
         !d.evidence
             .iter()

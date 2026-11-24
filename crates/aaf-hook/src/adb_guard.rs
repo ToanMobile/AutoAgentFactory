@@ -11,7 +11,10 @@ use crate::{Ctx, Denial};
 const RULE: &str = "adb_guard";
 const FIX_SERIAL: &str =
     "pass -s <serial> with a literal serial that the adb allowlist/denylist permits";
-const FIX_DESTRUCTIVE: &str = "do not flash, wipe or reboot devices into bootloader/recovery; this needs a human: finish the task without it and name the step in your final message";
+const FIX_DESTRUCTIVE: &str = "skip destructive device commands (flash/wipe/bootloader/recovery) \
+                               and use safe adb operations (install, logcat, shell pm clear, \
+                               instrumentation tests) instead; this needs a human: finish the \
+                               task without it and name the step in your final message";
 
 /// Subcommands that talk to the adb server only, never to a device.
 const NO_DEVICE: &[&str] = &[
@@ -148,6 +151,23 @@ fn adb_destructive(call: &Call) -> Option<String> {
     }
 }
 
+/// Matches destructive wipe commands and flags (`wipe`, `wipefs`, `wipe-data`,
+/// `wipe_data`, `--wipe_data`, `--wipe_cache`, `factory-wipe`, `data_wipe`)
+/// without falsely matching words like `swipe` or `SwipeTest`.
+pub(crate) fn is_wipe_token(token: &str) -> bool {
+    let name = basename(token).to_ascii_lowercase();
+    let lower = token.to_ascii_lowercase();
+    name == "wipe"
+        || name == "wipefs"
+        || lower == "--wipe_data"
+        || lower == "--wipe_cache"
+        || name
+            .strip_prefix("wipe")
+            .is_some_and(|rest| rest.starts_with(['-', '_', '.']))
+        || lower.contains("_wipe")
+        || lower.contains("-wipe")
+}
+
 /// Looks for destructive commands in the text the device shell will run.
 /// Text-based on purpose: the device re-parses the joined arguments.
 pub fn remote_destructive(remote: &str) -> Option<&'static str> {
@@ -159,7 +179,7 @@ pub fn remote_destructive(remote: &str) -> Option<&'static str> {
         for (at, token) in tokens.iter().enumerate() {
             let name = basename(token);
             let after = &tokens[at + 1..];
-            if token.to_ascii_lowercase().contains("wipe") {
+            if is_wipe_token(token) {
                 return Some("a wipe");
             }
             if name == "dd" {

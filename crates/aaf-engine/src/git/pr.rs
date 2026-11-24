@@ -36,6 +36,26 @@ pub enum PrOutcome {
     },
 }
 
+impl PrOutcome {
+    /// Parses the positive pull request number from `Opened { url }`, if any.
+    pub fn pr_number(&self) -> Option<u64> {
+        match self {
+            PrOutcome::Opened { url } => parse_pr_number_from_url(url),
+            PrOutcome::Skipped { .. } => None,
+        }
+    }
+}
+
+/// Extracts the positive pull request number from a GitHub PR URL
+/// (`.../pull/<N>` or `.../pulls/<N>`).
+pub fn parse_pr_number_from_url(url: &str) -> Option<u64> {
+    let trimmed = url.trim().split(['?', '#']).next()?.trim_end_matches('/');
+    let mut parts = trimmed.rsplit('/');
+    let num = parts.next()?.parse::<u64>().ok()?;
+    let seg = parts.next()?;
+    (num > 0 && matches!(seg, "pull" | "pulls")).then_some(num)
+}
+
 /// The serde name of a status enum (`CLEAR`, `scoped`, ...), so the body
 /// uses the same words as the receipt file.
 fn label<T: Serialize>(value: &T) -> String {

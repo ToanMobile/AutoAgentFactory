@@ -142,12 +142,23 @@ fn skills_list_sync_and_init_with_skills_filter_by_profile() {
             .is_file()
     );
 
-    // `--host all` syncs both `.claude/skills` and `.agents/skills`.
-    let (code, sync_both) = sb.json(&["skills", "sync", "--host", "all"]);
-    assert_eq!(code, 0, "{sync_both}");
-    assert_eq!(sync_both["host"], json!("all"));
-    assert_eq!(sync_both["dirs"].as_array().unwrap().len(), 2);
-    assert_eq!(sync_both["targets"].as_array().unwrap().len(), 2);
+    // `--host agent` (singular) writes to `.agent/skills`.
+    let (code, sync_agent) = sb.json(&["skills", "sync", "--host", "agent"]);
+    assert_eq!(code, 0, "{sync_agent}");
+    assert_eq!(sync_agent["host"], json!("agent"));
+    assert_eq!(sync_agent["written"].as_array().unwrap().len(), 7);
+    assert!(
+        sb.repo
+            .join(".agent/skills/backend-service-gate/SKILL.md")
+            .is_file()
+    );
+
+    // `--host all` syncs `.claude/skills`, `.agents/skills`, and `.agent/skills`.
+    let (code, sync_all_hosts) = sb.json(&["skills", "sync", "--host", "all"]);
+    assert_eq!(code, 0, "{sync_all_hosts}");
+    assert_eq!(sync_all_hosts["host"], json!("all"));
+    assert_eq!(sync_all_hosts["dirs"].as_array().unwrap().len(), 3);
+    assert_eq!(sync_all_hosts["targets"].as_array().unwrap().len(), 3);
 
     // `doctor` reports skills_sync warning for the modified skill, while proof_readiness & github_board stay ok on Rust.
     let (code, doc) = sb.json(&["doctor"]);
@@ -176,6 +187,7 @@ fn init_with_skills_on_auto_repo_prints_hint_and_doctor_advisories_work() {
     assert!(text.contains("aaf skills sync --profile <stack>"), "{text}");
     assert!(sb.repo.join(".claude/skills/qa-review/SKILL.md").is_file());
     assert!(sb.repo.join(".agents/skills/qa-review/SKILL.md").is_file());
+    assert!(sb.repo.join(".agent/skills/qa-review/SKILL.md").is_file());
 
     // Enable proof & github in config without denylist / mobile-mcp / allowlist -> doctor warns advisories only.
     write(
@@ -259,4 +271,73 @@ fn init_refused_inside_agent_run_skills_validates_profile_with_only_and_doctor_p
     let (code, doc_ok) = sb.json(&["doctor"]);
     assert_eq!(code, 0, "{doc_ok}");
     assert_eq!(doctor_check(&doc_ok, "proof_readiness")["ok"], json!(true));
+}
+
+#[test]
+fn skills_sync_global_respects_home_hosts_and_defaults_to_aaf_workflow() {
+    // Works even outside a git repository.
+    let sb = Sandbox::without_git();
+    std::fs::create_dir_all(sb.home.join(".claude")).unwrap();
+    std::fs::create_dir_all(sb.home.join(".gemini")).unwrap();
+    std::fs::create_dir_all(sb.home.join(".codex")).unwrap();
+
+    // Seed a personal user-level `~/.claude/skills/qa-review/SKILL.md` to verify
+    // `--global` never clobbers or collides with it.
+    let user_qa = sb.home.join(".claude/skills/qa-review/SKILL.md");
+    write(&user_qa, "# personal interactive qa-review\n");
+
+    let (code, out) = sb.json(&["skills", "sync", "--global"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out["global"], json!(true));
+    assert_eq!(out["host"], json!("global"));
+    assert_eq!(out["written"], json!(["aaf-workflow"]));
+    assert_eq!(out["dirs"].as_array().unwrap().len(), 3);
+    assert!(
+        sb.home
+            .join(".claude/skills/aaf-workflow/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        sb.home
+            .join(".gemini/config/skills/aaf-workflow/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        sb.home
+            .join(".codex/skills/aaf-workflow/SKILL.md")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&user_qa).unwrap(),
+        "# personal interactive qa-review\n"
+    );
+    assert!(!sb.home.join(".gemini/config/skills/qa-review").exists());
+
+    // Explicit `--only` and `--host gemini` target only the requested global host.
+    let (code, gemini_only) = sb.json(&[
+        "skills",
+        "sync",
+        "--global",
+        "--host",
+        "gemini",
+        "--only",
+        "tdd-workflow",
+    ]);
+    assert_eq!(code, 0, "{gemini_only}");
+    assert_eq!(gemini_only["host"], json!("global:gemini"));
+    assert_eq!(gemini_only["written"], json!(["tdd-workflow"]));
+    assert!(
+        sb.home
+            .join(".gemini/config/skills/tdd-workflow/SKILL.md")
+            .is_file()
+    );
+    assert!(!sb.home.join(".claude/skills/tdd-workflow").exists());
+
+    // Inside an agent run, `--global` is still refused with exit 2.
+    let refused = sb
+        .command(&["--json", "skills", "sync", "--global"])
+        .env("AAF_RUN_ID", "run-global-1")
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
 }

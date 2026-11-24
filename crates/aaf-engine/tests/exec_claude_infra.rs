@@ -185,6 +185,7 @@ fn request(cwd: &str) -> AgentRequest {
         account: None,
         timeout_secs: 60,
         sandbox: SandboxPolicy::default(),
+        json_schema: None,
     }
 }
 

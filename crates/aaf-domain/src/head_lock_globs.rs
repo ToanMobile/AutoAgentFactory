@@ -92,16 +92,34 @@ pub const CI_AND_MANIFEST_GLOBS: &[&str] = &[
 /// its own guard (`.claude/settings.json` registers `aaf-hook`) and, once
 /// merged, what runs in the owner's own sessions outside any sandbox.
 /// Part of the default `head_lock_globs`.
-pub const AGENT_CONFIG_GLOBS: [&str; 5] = [
+pub const AGENT_CONFIG_GLOBS: [&str; 22] = [
     "**/.claude/**",
     "**/CLAUDE.md",
     "**/.mcp.json",
     "**/.agents/**",
     "**/AGENTS.md",
+    "**/.agent/**",
+    "**/.gemini/**",
+    "**/GEMINI.md",
+    "**/.codex/**",
+    "**/.opencode/**",
+    "**/opencode.json",
+    "**/.autofactory/sops/**",
+    "**/.husky/**",
+    "**/.githooks/**",
+    "**/.pre-commit-config.*",
+    "**/*lefthook*.yml",
+    "**/*lefthook*.yaml",
+    "**/.lintstagedrc*",
+    "**/lint-staged.config.*",
+    "**/.npmrc",
+    "**/.yarnrc*",
+    "**/.pnpmfile.cjs",
 ];
 
 /// Commit-hook managers' configuration: what runs on the owner's machine at
-/// every commit once merged. Part of the default `head_lock_globs`.
+/// every commit once merged. Covered by [`AGENT_CONFIG_GLOBS`] in
+/// [`default_head_lock_globs`]; retained as a named constant for callers.
 pub const COMMIT_HOOK_GLOBS: &[&str] = &[
     "**/.husky/**",
     "**/.githooks/**",
@@ -112,6 +130,10 @@ pub const COMMIT_HOOK_GLOBS: &[&str] = &[
     "**/.lefthook*.yaml",
 ];
 
+/// Additional Git metadata files that alter checkout/filter/merge behavior on
+/// the host.
+pub const GIT_ATTR_GLOBS: [&str; 1] = ["**/.gitattributes"];
+
 /// Build the default `gate.head_lock_globs` list from all constant groups.
 pub fn default_head_lock_globs() -> Vec<String> {
     TEST_FILE_GLOBS
@@ -119,7 +141,7 @@ pub fn default_head_lock_globs() -> Vec<String> {
         .chain(RUNNER_CONFIG_GLOBS.iter())
         .chain(CI_AND_MANIFEST_GLOBS.iter())
         .chain(AGENT_CONFIG_GLOBS.iter())
-        .chain(COMMIT_HOOK_GLOBS.iter())
+        .chain(GIT_ATTR_GLOBS.iter())
         .map(|g| (*g).to_string())
         .collect()
 }

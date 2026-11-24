@@ -2,6 +2,7 @@
 
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use aaf_domain::ports::Clock;
 
@@ -117,6 +118,8 @@ impl Throttle<'_> {
         };
         let mut free_unreadable = false;
         let mut load_wait_started: Option<i64> = None;
+        let mut warn_wait_started: Option<i64> = None;
+        let mut orphan_wait_started: Option<i64> = None;
         let mut warned = (false, false);
         // A second the clock turned while nothing slept is not a wait.
         let mut ever_waited = false;
@@ -138,14 +141,25 @@ impl Throttle<'_> {
                     });
                 }
                 let event = match pressure {
-                    Some(pressure @ (Pressure::Warn | Pressure::Critical)) => {
+                    Some(Pressure::Critical) => Progress::WaitingForMemory {
+                        label,
+                        pressure: Pressure::Critical,
+                        waited_secs: waited(now),
+                    },
+                    Some(Pressure::Warn) => {
+                        let since = *warn_wait_started.get_or_insert(now);
+                        if waited_from(since, now) >= self.machine.heavy_wait_secs {
+                            degraded = true;
+                            break;
+                        }
                         Progress::WaitingForMemory {
                             label,
-                            pressure,
+                            pressure: Pressure::Warn,
                             waited_secs: waited(now),
                         }
                     }
                     Some(Pressure::Normal) | None => {
+                        warn_wait_started = None;
                         let max = self.machine.max_load_percent;
                         if max == 0 {
                             break;
@@ -273,6 +287,28 @@ impl Throttle<'_> {
                             });
                         }
                         let now = clock.now();
+                        if matches!(reason, Busy::Orphaned { .. }) {
+                            let since = *orphan_wait_started.get_or_insert(now);
+                            let timed_out = waited_from(since, now) >= self.machine.heavy_wait_secs;
+                            let reaped = if timed_out {
+                                slots::reap_orphaned_slots(data_dir, ceiling).unwrap_or(0)
+                            } else if self.machine.heavy_wait_secs > 0 {
+                                slots::reap_stale_orphans(
+                                    data_dir,
+                                    ceiling,
+                                    Duration::from_secs(self.machine.heavy_wait_secs),
+                                )
+                                .unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            if reaped > 0 {
+                                orphan_wait_started = None;
+                                continue;
+                            }
+                        } else {
+                            orphan_wait_started = None;
+                        }
                         if budget.expired(now) {
                             return Ok(None);
                         }
@@ -332,7 +368,12 @@ impl Throttle<'_> {
             // machine.
             if slot_waited {
                 let pressure_now = self.probe.pressure();
-                if matches!(pressure_now, Some(Pressure::Warn | Pressure::Critical)) {
+                let must_recheck = match pressure_now {
+                    Some(Pressure::Critical) => true,
+                    Some(Pressure::Warn) => !degraded,
+                    Some(Pressure::Normal) | None => false,
+                };
+                if must_recheck {
                     ever_waited = true;
                     drop(slot);
                     continue;

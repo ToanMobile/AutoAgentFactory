@@ -220,6 +220,7 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         data_dir: Some(ctx.data_dir.to_string_lossy().into_owned()),
         worktrees_root: Some(ctx.worktrees_dir.to_string_lossy().into_owned()),
         machine_env_pass: cfg.global.run.env_pass.clone(),
+        machine_writable_caches: cfg.global.machine.writable_caches.clone(),
         ..ExecEnv::from_process()
     };
     let runner =
@@ -266,6 +267,7 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         account: grant.account.clone(),
         timeout_secs: SPLIT_TIMEOUT_SECS,
         sandbox,
+        json_schema: None,
     };
     let max_subtasks = usize::try_from(args.max)
         .unwrap_or(MAX_SPLIT_SUBTASKS)
@@ -367,6 +369,7 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
             account: grant.account.clone(),
             timeout_secs: SPLIT_TIMEOUT_SECS,
             sandbox,
+            json_schema: None,
         };
         let watch = SplitInfraWatch::new(&*deps.runner);
         let result = propose_and_apply_split(

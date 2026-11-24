@@ -42,12 +42,7 @@ impl LinuxIsolation {
     }
 }
 
-/// Detects whether the current process appears to be running inside a Linux
-/// container from pure probe inputs (safe for deterministic unit tests).
-///
-/// Checks Docker (`/.dockerenv`), OCI/Podman `container` environment variable,
-/// and `/proc/1/cgroup` (or `/proc/self/cgroup`) markers (`kubepods`,
-/// `containerd`, `docker`, `podman`/`libpod`, `lxc`).
+/// Detects whether the current process appears to be running inside a Linux container.
 pub fn detect_container(
     has_dockerenv: bool,
     cgroup_text: Option<&str>,
@@ -56,43 +51,34 @@ pub fn detect_container(
     if has_dockerenv {
         return Some("docker");
     }
-    if let Some(raw) = env_container {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            let lower = trimmed.to_ascii_lowercase();
-            return Some(match lower.as_str() {
-                "podman" => "podman",
-                "docker" => "docker",
-                "oci" => "oci",
-                "lxc" | "lxd" => "lxc",
-                "kubepods" | "kubernetes" => "kubernetes",
-                "containerd" => "containerd",
-                _ => "container",
-            });
-        }
+    if let Some(trimmed) = env_container.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(match trimmed.to_ascii_lowercase().as_str() {
+            "podman" => "podman",
+            "docker" => "docker",
+            "oci" => "oci",
+            "lxc" | "lxd" => "lxc",
+            "kubepods" | "kubernetes" => "kubernetes",
+            "containerd" => "containerd",
+            _ => "container",
+        });
     }
-    if let Some(cgroup) = cgroup_text {
-        let lower = cgroup.to_ascii_lowercase();
-        for (needle, label) in [
+    if let Some(lower) = cgroup_text.map(str::to_ascii_lowercase) {
+        const MARKERS: [(&str, &str); 6] = [
             ("kubepods", "kubernetes"),
             ("containerd", "containerd"),
             ("docker", "docker"),
             ("podman", "podman"),
             ("libpod", "podman"),
             ("lxc", "lxc"),
-        ] {
-            if lower.contains(needle) {
-                return Some(label);
-            }
+        ];
+        if let Some((_, label)) = MARKERS.iter().find(|(needle, _)| lower.contains(needle)) {
+            return Some(label);
         }
     }
     None
 }
 
 /// Resolves the effective [`LinuxIsolation`] from deterministic probe inputs.
-///
-/// Bubblewrap is preferred when available because it enforces per-run worktree
-/// and `AAF_DATA_DIR` isolation; otherwise falls back to container detection.
 pub fn linux_sandbox_status(
     bwrap_bin: Option<PathBuf>,
     has_dockerenv: bool,
@@ -102,15 +88,13 @@ pub fn linux_sandbox_status(
     if let Some(bwrap_bin) = bwrap_bin {
         return LinuxIsolation::Bubblewrap { bwrap_bin };
     }
-    if let Some(indicator) = detect_container(has_dockerenv, cgroup_text, env_container) {
-        return LinuxIsolation::HardenedContainer { indicator };
-    }
-    LinuxIsolation::None
+    detect_container(has_dockerenv, cgroup_text, env_container)
+        .map_or(LinuxIsolation::None, |indicator| {
+            LinuxIsolation::HardenedContainer { indicator }
+        })
 }
 
-/// Probes the current host environment for Linux sandbox capabilities
-/// (`bwrap` binary, `/.dockerenv`, `/run/.containerenv`, `/proc/1/cgroup`, and
-/// the `container` environment variable).
+/// Probes the current host environment for Linux sandbox capabilities.
 pub fn detect_host_linux_isolation() -> LinuxIsolation {
     let bwrap_bin = find_bwrap_binary();
     let has_dockerenv = Path::new("/.dockerenv").exists();
@@ -122,7 +106,6 @@ pub fn detect_host_linux_isolation() -> LinuxIsolation {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .or_else(|| container_env.then(|| "podman".to_string()));
-
     linux_sandbox_status(
         bwrap_bin,
         has_dockerenv,
@@ -132,18 +115,14 @@ pub fn detect_host_linux_isolation() -> LinuxIsolation {
 }
 
 fn find_bwrap_binary() -> Option<PathBuf> {
-    if let Some(path_var) = std::env::var_os("PATH")
-        && let Some(found) = super::find_on_path(&path_var, "bwrap")
-    {
-        return Some(found);
-    }
-    for standard in ["/usr/bin/bwrap", "/bin/bwrap"] {
-        let candidate = PathBuf::from(standard);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    std::env::var_os("PATH")
+        .and_then(|p| super::find_on_path(&p, "bwrap"))
+        .or_else(|| {
+            ["/usr/bin/bwrap", "/bin/bwrap"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|p| p.is_file())
+        })
 }
 
 const BASE_BWRAP_ARGS: &str = concat!(
@@ -151,24 +130,29 @@ const BASE_BWRAP_ARGS: &str = concat!(
     "--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp",
 );
 
-/// Builds a least-privilege Bubblewrap (`bwrap`) argument vector for running
-/// `program` with `args` under the confinement described by `paths`.
-///
-/// Mount order is security-critical because Bubblewrap applies mounts
-/// sequentially:
-/// 1. Process/IPC/session isolation (`--die-with-parent`, `--unshare-pid`,
-///    `--unshare-ipc`, `--new-session`).
-/// 2. Read-only rootfs (`--ro-bind / /`), device nodes (`--dev /dev`),
-///    procfs (`--proc /proc`), and private `--tmpfs /tmp`.
-/// 3. Writable binds for existing build caches / account dirs, the run's own
-///    worktree, and git common directories.
-/// 4. Read-only re-mounts over sensitive subpaths inside writable trees (git
-///    `hooks`/`config`/`refs/aaf`, linked worktree metadata, `.claude/settings.json`,
-///    `write_denied`, `write_denied_prefix`, and writable `PATH` entries).
-/// 5. Complete masking of `read_denied` paths (including `AAF_DATA_DIR`, hiding
-///    `receipt.key`, receipts, and approvals) via `--tmpfs <dir>`.
-/// 6. Minimal re-binds inside `read_denied` for `<data_dir>/throttle` (read-only),
-///    `<data_dir>/throttle/guest` (writable), and `run_mark` when present.
+/// Build-cache roots that stay read-only (via `--ro-bind / /`) so agents can
+/// never create `init.gradle.kts`, `init.d/*`, `.cargo/config.toml`, `bin/*`,
+/// or `adbkey*`; only existing safe data subdirectories are bound writable.
+fn ro_cache_safe_subdirs(path: &Path, canon: &Path) -> Option<&'static [&'static str]> {
+    let name = path
+        .file_name()
+        .or_else(|| canon.file_name())
+        .and_then(|n| n.to_str())?;
+    match name {
+        ".gradle" => Some(&["caches", "wrapper", "daemon"]),
+        ".cargo" => Some(&["registry", "git"]),
+        ".m2" => Some(&["repository"]),
+        ".pub-cache" => Some(&["hosted", "git"]),
+        ".android" => Some(&["cache", "build-cache"]),
+        _ => None,
+    }
+}
+
+/// Builds a least-privilege Bubblewrap (`bwrap`) argv for `program` with `args`.
+/// Mount order: (1) namespace + `--ro-bind / /` + `/dev`/`/proc`/`--tmpfs /tmp`,
+/// (2) writable binds (keeping build-cache roots RO and binding only existing
+/// safe data subdirs), (3) RO overlays for sensitive subpaths, (4) mask
+/// `read_denied`, (5) reopen throttle/run_mark.
 pub fn build_bwrap_args(
     paths: &SandboxPaths,
     program: &str,
@@ -195,20 +179,31 @@ pub fn build_bwrap_args(
     let mut bound_rw: BTreeSet<String> = BTreeSet::new();
 
     let tmp_canon = canonical_or_self(Path::new("/tmp"));
-    // 1. Existing writable build caches, SDKs, account directories, and non-/tmp temp dirs.
+    let is_excluded = |canon: &Path| {
+        worktrees_root_canon
+            .as_ref()
+            .is_some_and(|root| canon.starts_with(root))
+            || read_denied_canon.iter().any(|d| canon.starts_with(d))
+    };
+    // 1. Existing writable caches, SDKs, account dirs, and non-/tmp temp dirs.
     for raw in &paths.writable {
         let path = Path::new(raw);
         let canon = canonical_or_self(path);
-        if path == Path::new("/tmp")
-            || canon == tmp_canon
-            || worktrees_root_canon
-                .as_ref()
-                .is_some_and(|root| canon.starts_with(root))
-            || read_denied_canon.iter().any(|d| canon.starts_with(d))
+        if path == Path::new("/tmp") || canon == tmp_canon || is_excluded(&canon) || !path.exists()
         {
             continue;
         }
-        if path.exists() {
+        if let Some(subdirs) = ro_cache_safe_subdirs(path, &canon) {
+            for sub in subdirs {
+                let sub_path = path.join(sub);
+                if sub_path.exists() {
+                    let sub_canon = canonical_or_self(&sub_path);
+                    if !is_excluded(&sub_canon) {
+                        push_flag_path(&mut argv, &mut bound_rw, "--bind", &sub_path)?;
+                    }
+                }
+            }
+        } else {
             push_flag_pair(&mut argv, &mut bound_rw, "--bind", raw);
         }
     }
@@ -256,7 +251,12 @@ pub fn build_bwrap_args(
         if dot_git.is_file() {
             ro.bind_with_target(&dot_git)?;
         }
-        for rel in [".claude/settings.json", ".claude/settings.local.json"] {
+        for rel in [
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".gemini/settings.json",
+            ".gemini/trusted_hooks.json",
+        ] {
             ro.protect_existing(&wt.join(rel))?;
         }
     }
@@ -359,18 +359,23 @@ fn validate_sandbox_paths(paths: &SandboxPaths) -> Result<(), String> {
             validate_abs_path(item, &format!("{label}[{idx}]"))?;
         }
     }
-    for (idx, entry) in paths.path_dirs.iter().enumerate() {
-        validate_no_nul(entry, &format!("path_dirs[{idx}]"))?;
+    for (list, label) in [
+        (&paths.path_dirs, "path_dirs"),
+        (&paths.writable_regex, "writable_regex"),
+    ] {
+        for (idx, entry) in list.iter().enumerate() {
+            validate_no_nul(entry, &format!("{label}[{idx}]"))?;
+        }
     }
     Ok(())
 }
 
 fn validate_abs_path(path: &str, label: &str) -> Result<(), String> {
     validate_non_empty_no_nul(path, label)?;
-    if !Path::new(path).is_absolute() {
-        return Err(format!("{label} must be an absolute path: {path:?}"));
-    }
-    Ok(())
+    Path::new(path)
+        .is_absolute()
+        .then_some(())
+        .ok_or_else(|| format!("{label} must be an absolute path: {path:?}"))
 }
 
 fn validate_non_empty_no_nul(value: &str, label: &str) -> Result<(), String> {
@@ -381,10 +386,9 @@ fn validate_non_empty_no_nul(value: &str, label: &str) -> Result<(), String> {
 }
 
 fn validate_no_nul(value: &str, label: &str) -> Result<(), String> {
-    if value.as_bytes().contains(&0) {
-        return Err(format!("{label} contains a NUL byte"));
-    }
-    Ok(())
+    (!value.as_bytes().contains(&0))
+        .then_some(())
+        .ok_or_else(|| format!("{label} contains a NUL byte"))
 }
 
 fn canonical_or_self(path: &Path) -> PathBuf {

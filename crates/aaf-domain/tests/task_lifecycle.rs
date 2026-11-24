@@ -15,7 +15,7 @@ const ALLOWED: [(TaskState, &[TaskState]); 8] = [
     (Running, &[Gating, Blocked, Ready, Cancelled]),
     (Gating, &[Review, Done, Blocked, Ready, Cancelled]),
     (Review, &[Gating, Done, Blocked, Ready, Cancelled]),
-    (Blocked, &[Ready, Cancelled]),
+    (Blocked, &[Ready, Gating, Cancelled]),
     (Done, &[]),
     (Cancelled, &[]),
 ];
@@ -38,7 +38,7 @@ fn every_pair_matches_the_documented_table() {
             allowed_count += usize::from(want);
         }
     }
-    assert_eq!(allowed_count, 21);
+    assert_eq!(allowed_count, 22);
 }
 
 #[test]
@@ -73,12 +73,12 @@ fn every_non_terminal_state_can_be_cancelled() {
 }
 
 #[test]
-fn blocked_is_only_left_through_ready_or_cancelled() {
+fn blocked_is_only_left_through_ready_gating_or_cancelled() {
     let exits: Vec<TaskState> = TaskState::ALL
         .into_iter()
         .filter(|to| Blocked.can_transition_to(*to))
         .collect();
-    assert_eq!(exits, vec![Ready, Cancelled]);
+    assert_eq!(exits, vec![Ready, Gating, Cancelled]);
 }
 
 #[test]

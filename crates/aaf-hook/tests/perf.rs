@@ -35,6 +35,8 @@ fn a_non_matching_command_is_decided_in_under_a_millisecond() {
         config_dir: Some(dir.path().join("config")),
         home: Some(dir.path().join("home")),
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let payloads: Vec<Vec<u8>> = [
         "cargo test -p aaf-hook --all-targets -- --nocapture",

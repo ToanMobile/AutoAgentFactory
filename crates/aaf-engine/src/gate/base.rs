@@ -47,6 +47,53 @@ pub(crate) fn origin_head_branch(target: &str) -> Option<&str> {
     (parts_ok && branch != "HEAD" && !task).then_some(branch)
 }
 
+/// Parses a full remote-tracking ref (`refs/remotes/<remote>/<branch>`) into
+/// `(remote, branch)`, rejecting invalid segments, `HEAD`, and task branches
+/// (`aaf/*`) so an upstream ref can never empty the change set.
+pub(crate) fn parse_remote_tracking_ref(full_ref: &str) -> Option<(&str, &str)> {
+    let rest = full_ref.strip_prefix("refs/remotes/")?;
+    let (remote, branch) = rest.split_once('/')?;
+    if remote.is_empty() || remote.starts_with('-') || matches!(remote, "." | "..") {
+        return None;
+    }
+    let task = branch.starts_with(crate::git::worktree::BRANCH_PREFIX);
+    let parts_ok = branch.split('/').all(|p| !matches!(p, "" | "." | ".."));
+    (parts_ok && branch != "HEAD" && !task).then_some((remote, branch))
+}
+
+/// Probes `@{upstream}` as a fallback when `origin/HEAD` and `AUTO_FALLBACKS`
+/// did not resolve, rejecting `aaf/*` task branches.
+fn resolve_upstream_commit(
+    repo_root: &Path,
+    timeout: Duration,
+) -> Result<Option<String>, GateError> {
+    let full_ref = match aaf_fp::git_or_none(
+        repo_root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+        timeout,
+    ) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Ok(None),
+        Err(aaf_fp::FpError::Git(msg))
+            if msg.contains("no upstream configured")
+                || msg.contains("does not point to a branch") =>
+        {
+            return Ok(None);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if parse_remote_tracking_ref(&full_ref).is_none() {
+        return Ok(None);
+    }
+    commit_of(repo_root, &full_ref, timeout)
+}
+
 /// Probes `refs/remotes/origin/HEAD` and [`AUTO_FALLBACKS`] in a single
 /// `git for-each-ref` call. Returns `(origin_head_seen, candidate_commits)` in
 /// priority order.
@@ -173,6 +220,10 @@ pub fn resolve(repo_root: &Path, base_ref: &str, timeout: Duration) -> Result<Ba
             if has_origin_head {
                 let msg = "origin/HEAD is set but no base shares history with HEAD";
                 return Err(GateError::Config(format!("{msg}; set gate.base_ref")));
+            }
+            if let Some(upstream_sha) = resolve_upstream_commit(repo_root, timeout)? {
+                found =
+                    aaf_fp::git_or_none(repo_root, &["merge-base", &upstream_sha, &head], timeout)?;
             }
         }
         found

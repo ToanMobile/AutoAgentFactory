@@ -91,6 +91,11 @@ impl CommandHandler for MockHandler {
         self.calls.push(msg.clone());
         Ok(msg)
     }
+    fn unblock_all(&mut self, uid: i64) -> Result<String, String> {
+        let msg = format!("unblock_all(u={uid})");
+        self.calls.push(msg.clone());
+        Ok(msg)
+    }
     fn rework(&mut self, id: &str, reason: &str, uid: i64) -> Result<String, String> {
         let msg = format!("rework({id},{reason},u={uid})");
         self.calls.push(msg.clone());
@@ -342,17 +347,37 @@ fn two_step_mutating_commands_work_and_anonymous_or_bad_id_refused() {
     );
     assert!(bad_id.contains("invalid task id"));
 
-    let cases = [
+    // Safe recovery commands execute in 1 step when allowed_chat_ids is non-empty.
+    for (idx, (cmd, expected)) in [
         ("/unblock t-1", "unblock(t-1,u=88)"),
+        ("/unblock all", "unblock_all(u=88)"),
+        ("/unfreeze", "unfreeze(u=88)"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let done = reply_of(
+            &mut disp,
+            &mut handler,
+            &clock,
+            mk_update(10 + idx as i64, 1001, Some(88), cmd),
+        );
+        assert_eq!(done, *expected);
+    }
+    assert_eq!(disp.pending_len(), 0);
+
+    // Higher-impact commands still require 2-step `/confirm`.
+    for (idx, (cmd, expected)) in [
         (
             "/rework t-2 add edge test",
             "rework(t-2,add edge test,u=88)",
         ),
         ("/steer t-3 avoid alloc", "steer(t-3,avoid alloc,u=88)"),
-        ("/unfreeze", "unfreeze(u=88)"),
-    ];
-    for (idx, (cmd, expected)) in cases.iter().enumerate() {
-        let base_id = (idx as i64) * 2 + 10;
+    ]
+    .iter()
+    .enumerate()
+    {
+        let base_id = (idx as i64) * 2 + 20;
         let preview = reply_of(
             &mut disp,
             &mut handler,
@@ -368,7 +393,7 @@ fn two_step_mutating_commands_work_and_anonymous_or_bad_id_refused() {
         );
         assert_eq!(done, *expected);
     }
-    assert_eq!(handler.calls.len(), 4);
+    assert_eq!(handler.calls.len(), 5);
 }
 
 #[test]
@@ -426,7 +451,7 @@ fn expired_nonce_is_rejected_and_pending_store_is_bounded() {
         &mut disp,
         &mut handler,
         &clock,
-        mk_update(1, 1001, Some(10), "/unfreeze"),
+        mk_update(1, 1001, Some(10), "/rework t-1 retry"),
     );
     let code = extract_code(&preview);
 
@@ -445,7 +470,7 @@ fn expired_nonce_is_rejected_and_pending_store_is_bounded() {
             &mut disp,
             &mut handler,
             &clock,
-            mk_update(100 + i as i64, 1001, Some(10), "/unfreeze"),
+            mk_update(100 + i as i64, 1001, Some(10), "/rework t-1 retry"),
         );
     }
     assert_eq!(disp.pending_len(), MAX_PENDING_CONFIRMATIONS);

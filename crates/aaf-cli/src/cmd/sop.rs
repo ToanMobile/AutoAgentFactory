@@ -1,31 +1,30 @@
 //! `aaf sop`: declarative SOP workflow inspection, scaffolding, validation, execution, and approvals.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use aaf_domain::gate::GateStatus;
 use aaf_domain::ports::Clock;
-use aaf_domain::sop::{
-    DEFAULT_SCRIPT_TIMEOUT_SECS, SopCheckpoint, SopRunStatus, SopStage, StageKind, StageStatus,
-};
-use aaf_engine::process::{CommandRunner, SystemRunner};
+use aaf_domain::sop::{SopCheckpoint, SopRunStatus, StageStatus};
 use aaf_engine::sop::runner::{
-    StageDriver, StageOutcome, approve_human_gate, checkpoint_path, list_checkpoints,
-    load_checkpoint, ready_stages, run_sop_persisted, save_checkpoint, send_back,
+    approve_human_gate, checkpoint_path, list_checkpoints, load_checkpoint, ready_stages,
+    run_sop_persisted, save_checkpoint, send_back,
 };
 use aaf_engine::sop::{
     init_sop_file, list_all_sops, load_repo_sops, load_sop_file, render_ascii_dag, resolve_sop,
 };
-use aaf_engine::throttle::Progress;
 use serde_json::json;
 
+mod driver;
+pub(crate) mod exec_support;
 mod heavy;
+mod trusted;
 
 use super::board::store::{refuse_inside_agent_run, repo_root};
-use super::gate::progress_line;
 use crate::ctx::{Ctx, SystemClock};
-use crate::output::{CmdError, CmdOutput, CmdResult, notice};
-use heavy::{run_heavy_script, script_outcome};
+use crate::output::{CmdError, CmdOutput, CmdResult};
+use driver::CliStageDriver;
+use trusted::{
+    acquire_sop_run_lock, ensure_sop_worktree, resolve_trusted_sop, spec_needs_worktree,
+};
 
 #[derive(Debug, clap::Args)]
 pub struct SopArgs {
@@ -70,6 +69,10 @@ pub enum SopCommand {
         /// Validate and print the execution plan without running stages or writing checkpoints.
         #[arg(long)]
         dry_run: bool,
+        /// Auto-clear non-release human gates when preceded by a CLEAR gate receipt with clear
+        /// or independent head-lock approval.
+        #[arg(long)]
+        auto: bool,
     },
     /// Approve a paused `WaitingHuman` stage so the run can be resumed.
     Approve {
@@ -78,6 +81,9 @@ pub enum SopCommand {
         /// Reviewer name recorded in the checkpoint audit log.
         #[arg(long)]
         reviewer: String,
+        /// Immediately resume the SOP run after approving the waiting human gate.
+        #[arg(long)]
+        resume: bool,
     },
     /// Send a run back to an earlier stage, resetting it and all downstream dependents.
     SendBack {
@@ -107,8 +113,25 @@ pub fn run(args: &SopArgs, ctx: &Ctx) -> CmdResult {
             name,
             resume,
             dry_run,
-        } => cmd_run(name, resume.as_deref(), *dry_run, ctx),
-        SopCommand::Approve { run_id, reviewer } => cmd_approve(run_id, reviewer, ctx),
+            auto,
+        } => {
+            if *auto {
+                cmd_run_opts(name, resume.as_deref(), *dry_run, true, ctx)
+            } else {
+                cmd_run(name, resume.as_deref(), *dry_run, ctx)
+            }
+        }
+        SopCommand::Approve {
+            run_id,
+            reviewer,
+            resume,
+        } => {
+            if *resume {
+                cmd_approve_opts(run_id, reviewer, true, ctx)
+            } else {
+                cmd_approve(run_id, reviewer, ctx)
+            }
+        }
         SopCommand::SendBack { run_id, to, reason } => cmd_send_back(run_id, to, reason, ctx),
     }
 }
@@ -245,8 +268,8 @@ fn cmd_runs(ctx: &Ctx) -> CmdResult {
         rows.push(json!({
             "run_id": cp.run_id, "sop_name": cp.sop_name, "repo_root": cp.repo_root,
             "status": cp.status, "passed_stages": passed, "total_stages": total,
-            "rework_count": cp.rework_count, "created_at": cp.created_at,
-            "updated_at": cp.updated_at,
+            "rework_count": cp.rework_count, "worktree_path": cp.worktree_path,
+            "branch": cp.branch, "created_at": cp.created_at, "updated_at": cp.updated_at,
         }));
     }
     Ok(CmdOutput::ok("ok", lines.join("\n"))
@@ -255,29 +278,46 @@ fn cmd_runs(ctx: &Ctx) -> CmdResult {
 }
 
 fn cmd_run(name: &str, resume: Option<&str>, dry_run: bool, ctx: &Ctx) -> CmdResult {
+    cmd_run_opts(name, resume, dry_run, false, ctx)
+}
+
+fn cmd_run_opts(
+    name: &str,
+    resume: Option<&str>,
+    dry_run: bool,
+    auto: bool,
+    ctx: &Ctx,
+) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf sop run") {
         return Ok(refused);
     }
     let repo_opt = repo_root(ctx).ok();
-    let spec = resolve_sop(repo_opt.as_deref(), name)
-        .map_err(sop_err)?
-        .spec;
+    let cfg_opt = repo_opt.as_deref().and_then(|r| ctx.load_config(r).ok());
+    let base_ref = cfg_opt
+        .as_ref()
+        .map_or("auto", |c| c.repo.gate.base_ref.as_str());
+    let (discovered, base_sha) = resolve_trusted_sop(repo_opt.as_deref(), base_ref, name)?;
+    let spec = discovered.spec;
+    let source_label = discovered.source.label();
     let order = spec.validate().map_err(sop_err)?;
 
     if dry_run {
         let dag = render_ascii_dag(&spec).map_err(sop_err)?;
         let text = format!(
-            "DRY RUN (no stages executed, no checkpoint written)\n{dag}\nexecution order: {}",
+            "DRY RUN (no stages executed, no worktree or checkpoint written)\n{dag}\nsource: {source_label}\nexecution order: {}",
             order.join(" -> ")
         );
         return Ok(CmdOutput::ok("dry_run", text)
             .field("sop_name", json!(spec.name))
+            .field("source", json!(source_label))
             .field("dry_run", json!(true))
+            .field("auto", json!(auto))
             .field("order", json!(order))
             .field("dag", json!(dag)));
     }
 
     let root = repo_root(ctx)?;
+    let cfg = ctx.load_config(&root)?;
     let root_str = path_str(&root);
     let now = SystemClock.now();
     let mut cp = match resume {
@@ -298,9 +338,33 @@ fn cmd_run(name: &str, resume: Option<&str>, dry_run: bool, ctx: &Ctx) -> CmdRes
         }
     };
 
+    let Some(_lock) = acquire_sop_run_lock(ctx, &root)? else {
+        return Ok(CmdOutput::policy(
+            "refused",
+            "another aaf run is already working on this repository",
+        ));
+    };
+
+    let worktree_path = if spec_needs_worktree(&spec) {
+        let wt = ensure_sop_worktree(ctx, &root, &cfg.repo.gate.base_ref, &mut cp)?;
+        save_checkpoint(&ctx.data_dir, &cp).map_err(sop_err)?;
+        Some(wt.path)
+    } else {
+        cp.worktree_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+    };
+
     let mut driver = CliStageDriver {
         ctx,
         repo_root: &root,
+        worktree_path,
+        base_sha,
+        cfg,
+        spec: &spec,
+        auto,
+        last_gate_receipt: None,
     };
     let final_status = run_sop_persisted(&spec, &mut cp, &ctx.data_dir, &mut driver, &SystemClock)
         .map_err(sop_err)?;
@@ -316,6 +380,9 @@ fn cmd_run(name: &str, resume: Option<&str>, dry_run: bool, ctx: &Ctx) -> CmdRes
         "SOP '{}' run {} -> {} (reworks={})",
         cp.sop_name, cp.run_id, status_word, cp.rework_count
     )];
+    if let (Some(branch), Some(wt)) = (&cp.branch, &cp.worktree_path) {
+        lines.push(format!("worktree: {wt} (branch {branch})"));
+    }
     for stage_id in &order {
         if let Some(rec) = cp.stage_states.get(stage_id) {
             let detail = rec.summary.as_deref().unwrap_or("");
@@ -327,8 +394,8 @@ fn cmd_run(name: &str, resume: Option<&str>, dry_run: bool, ctx: &Ctx) -> CmdRes
     }
     if final_status == SopRunStatus::WaitingHuman {
         lines.push(format!(
-            "next: run `aaf sop approve {} --reviewer <name>` then `aaf sop run {} --resume {}`",
-            cp.run_id, cp.sop_name, cp.run_id
+            "next: run `aaf sop approve {} --reviewer <name> --resume`",
+            cp.run_id
         ));
     }
     lines.push(format!("checkpoint: {}", cp_path.display()));
@@ -343,8 +410,12 @@ fn cmd_run(name: &str, resume: Option<&str>, dry_run: bool, ctx: &Ctx) -> CmdRes
     Ok(out
         .field("run_id", json!(cp.run_id))
         .field("sop_name", json!(cp.sop_name))
+        .field("source", json!(source_label))
         .field("run_status", json!(final_status))
         .field("rework_count", json!(cp.rework_count))
+        .field("worktree_path", json!(cp.worktree_path))
+        .field("branch", json!(cp.branch))
+        .field("auto", json!(auto))
         .field("next_ready", json!(next_ready))
         .field("checkpoint_path", json!(path_str(&cp_path)))
         .field("checkpoint", cp_json))
@@ -361,6 +432,10 @@ fn check_checkpoint_repo(run_id: &str, cp_repo: &str, current: &Path) -> Result<
 }
 
 fn cmd_approve(run_id: &str, reviewer: &str, ctx: &Ctx) -> CmdResult {
+    cmd_approve_opts(run_id, reviewer, false, ctx)
+}
+
+fn cmd_approve_opts(run_id: &str, reviewer: &str, resume: bool, ctx: &Ctx) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf sop approve") {
         return Ok(refused);
     }
@@ -370,15 +445,34 @@ fn cmd_approve(run_id: &str, reviewer: &str, ctx: &Ctx) -> CmdResult {
     }
     let stage_id = approve_human_gate(&mut cp, reviewer, &SystemClock).map_err(sop_err)?;
     let cp_path = save_checkpoint(&ctx.data_dir, &cp).map_err(sop_err)?;
+    let approve_line = format!(
+        "approved stage '{stage_id}' on run '{}' by {reviewer}",
+        cp.run_id
+    );
+
+    if resume {
+        let mut run_ctx = ctx.clone();
+        if repo_root(&run_ctx).is_err() && !cp.repo_root.is_empty() {
+            run_ctx.cwd = PathBuf::from(&cp.repo_root);
+        }
+        let mut resumed = cmd_run_opts(&cp.sop_name, Some(&cp.run_id), false, false, &run_ctx)?;
+        resumed.text = format!("{approve_line}\n{}", resumed.text);
+        return Ok(resumed
+            .field("approved_stage", json!(stage_id))
+            .field("reviewer", json!(reviewer))
+            .field("resumed", json!(true)));
+    }
+
     let text = format!(
-        "approved stage '{stage_id}' on run '{}' by {reviewer}\nresume with: aaf sop run {} --resume {}",
-        cp.run_id, cp.sop_name, cp.run_id
+        "{approve_line}\nresume with: aaf sop run {} --resume {}",
+        cp.sop_name, cp.run_id
     );
     Ok(CmdOutput::ok("ok", text)
         .field("run_id", json!(cp.run_id))
         .field("sop_name", json!(cp.sop_name))
         .field("approved_stage", json!(stage_id))
         .field("reviewer", json!(reviewer))
+        .field("resumed", json!(false))
         .field("checkpoint_path", json!(path_str(&cp_path))))
 }
 
@@ -392,7 +486,11 @@ fn cmd_send_back(run_id: &str, to: &str, reason: &str, ctx: &Ctx) -> CmdResult {
     }
     let cp_repo = (!cp.repo_root.is_empty()).then(|| PathBuf::from(&cp.repo_root));
     let repo_opt = cp_repo.or_else(|| repo_root(ctx).ok());
-    let discovered = resolve_sop(repo_opt.as_deref(), &cp.sop_name).map_err(sop_err)?;
+    let base_ref = repo_opt
+        .as_deref()
+        .and_then(|r| ctx.load_config(r).ok())
+        .map_or_else(|| "auto".to_string(), |c| c.repo.gate.base_ref);
+    let (discovered, _) = resolve_trusted_sop(repo_opt.as_deref(), &base_ref, &cp.sop_name)?;
     send_back(&discovered.spec, &mut cp, to, reason, &SystemClock).map_err(sop_err)?;
     let cp_path = save_checkpoint(&ctx.data_dir, &cp).map_err(sop_err)?;
     let text = format!(
@@ -427,7 +525,7 @@ fn next_run_id(data_dir: &Path, sop_name: &str, now: i64) -> String {
                 '-'
             }
         })
-        .take(32)
+        .take(24)
         .collect();
     let base = format!("sop-{slug}-{now}-{}", std::process::id());
     if checkpoint_path(data_dir, &base).is_ok_and(|p| !p.exists()) {
@@ -440,108 +538,6 @@ fn next_run_id(data_dir: &Path, sop_name: &str, now: i64) -> String {
         }
     }
     base
-}
-
-struct CliStageDriver<'a> {
-    ctx: &'a Ctx,
-    repo_root: &'a Path,
-}
-
-impl StageDriver for CliStageDriver<'_> {
-    fn run_stage(&mut self, stage: &SopStage, _cp: &SopCheckpoint) -> StageOutcome {
-        match &stage.kind {
-            StageKind::Script {
-                command,
-                heavy,
-                timeout_secs,
-            } => {
-                let secs = if *timeout_secs != 0 {
-                    *timeout_secs
-                } else {
-                    DEFAULT_SCRIPT_TIMEOUT_SECS
-                };
-                if *heavy {
-                    return run_heavy_script(self.ctx, self.repo_root, stage, command, secs);
-                }
-                notice("sop", &format!("running script stage '{}'", stage.id));
-                let runner = SystemRunner {
-                    timeout: Duration::from_secs(secs),
-                };
-                match runner.run("sh", &["-c", command], self.repo_root) {
-                    Ok(out) => {
-                        let detail = if out.success() || out.stderr.trim().is_empty() {
-                            &out.stdout
-                        } else {
-                            &out.stderr
-                        };
-                        script_outcome(out.exit_code, false, secs, detail, &stage.artifacts)
-                    }
-                    Err(e) => StageOutcome::Failed {
-                        reason: format!("script execution error: {e}"),
-                    },
-                }
-            }
-            StageKind::Gate { mode } => {
-                notice(
-                    "sop",
-                    &format!("running gate stage '{}' ({mode:?})", stage.id),
-                );
-                let cfg = match self.ctx.load_config(self.repo_root) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return StageOutcome::Failed {
-                            reason: format!("load config: {}", e.message),
-                        };
-                    }
-                };
-                let progress = |event: &Progress<'_>| notice("sop", &progress_line(event));
-                match aaf_engine::gate::run_gate_observed_reporting(
-                    &self.ctx.data_dir,
-                    self.repo_root,
-                    &cfg.repo,
-                    *mode,
-                    &SystemClock,
-                    &cfg.global.machine,
-                    &progress,
-                ) {
-                    Ok(run) if run.receipt.status == GateStatus::Clear => StageOutcome::Passed {
-                        summary: format!("gate {:?} CLEAR (tree={})", mode, run.receipt.tree_fp),
-                        artifacts: stage.artifacts.clone(),
-                    },
-                    Ok(run) => StageOutcome::Failed {
-                        reason: format!(
-                            "gate {:?} {:?}: {}",
-                            mode,
-                            run.receipt.status,
-                            run.receipt.reasons.join("; ")
-                        ),
-                    },
-                    Err(e) => StageOutcome::Failed {
-                        reason: format!("gate error: {e}"),
-                    },
-                }
-            }
-            StageKind::HumanGate { prompt } => StageOutcome::WaitHuman {
-                prompt: prompt.clone(),
-            },
-            StageKind::Agent {
-                role,
-                executor,
-                model,
-                read_only,
-                prompt,
-            } => {
-                let exec_str = executor.as_deref().unwrap_or("default");
-                let model_str = model.as_deref().unwrap_or("default");
-                StageOutcome::WaitHuman {
-                    prompt: format!(
-                        "agent stage '{}' (role={role}, read_only={read_only}, executor={exec_str}, model={model_str}): {prompt}",
-                        stage.id
-                    ),
-                }
-            }
-        }
-    }
 }
 
 fn path_str(p: &Path) -> String {

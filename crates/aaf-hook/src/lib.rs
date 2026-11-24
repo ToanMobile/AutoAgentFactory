@@ -52,6 +52,13 @@ pub struct HookEnv<'a> {
     /// The hook process's own working directory: the base for relative paths
     /// when the payload carries no `cwd`.
     pub cwd: Option<PathBuf>,
+    /// True when `AAF_RUN_ID` is set and non-empty (autonomous factory worker run).
+    /// When `false`, the hook is running in an interactive user session.
+    pub in_factory_run: bool,
+    /// Trusted absolute paths to the installed `aaf` CLI binary (lexical and
+    /// canonical forms of the sibling `aaf` next to `aaf-hook`, plus any PATH
+    /// match whose canonical path equals the canonical sibling outside temp dirs).
+    pub trusted_aaf_bins: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,10 +126,14 @@ impl Line {
                 .iter()
                 .any(|cmd| vars.iter().any(|var| cmd.sets_var(var)))
         };
+        let home_moved = script.cmds.iter().any(|cmd| {
+            (cmd.name() != "git" || cmd.dynamic_name)
+                && (cmd.sets_var("HOME") || cmd.sets_var("XDG_CONFIG_HOME"))
+        });
         Line {
             aaf_untrusted: script.aaf_untrusted(),
             git_dir_moved: sets(["GIT_DIR", "GIT_COMMON_DIR"]),
-            home_moved: sets(["HOME", "XDG_CONFIG_HOME"]),
+            home_moved,
         }
     }
 }
@@ -142,6 +153,9 @@ pub struct Ctx<'a> {
     /// How many git aliases deep the command being judged is.
     pub depth: usize,
     pub line: Line,
+    /// Shell variables assigned directly from `mktemp -d` earlier in the same
+    /// script and never reassigned or unset before the current command.
+    pub mktemp_vars: Vec<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -163,6 +177,7 @@ impl<'a> Ctx<'a> {
             data_dirs,
             depth: 0,
             line: Line::default(),
+            mktemp_vars: Vec::new(),
         }
     }
 
@@ -180,6 +195,7 @@ impl<'a> Ctx<'a> {
             data_dirs: self.data_dirs.clone(),
             depth: self.depth,
             line: self.line,
+            mktemp_vars: self.mktemp_vars.clone(),
         }
     }
 
@@ -385,7 +401,7 @@ fn check_delete_guard(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
 
 fn judge_direct(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
     data_guard::check_cmd(cmd, ctx)
-        .or_else(|| human_guard::check(cmd))
+        .or_else(|| human_guard::check(cmd, ctx))
         .or_else(|| git_guard::check(cmd, ctx))
         .or_else(|| git_persist::check(cmd, ctx))
         .or_else(|| git_files::check_cmd(cmd, ctx))
@@ -396,7 +412,7 @@ fn judge_direct(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
         .or_else(|| tool_exec::check_cmd(cmd, ctx))
         .or_else(|| pr_merge_guard::check(cmd))
         .or_else(|| store_guard::check(cmd, ctx))
-        .or_else(|| heavy_guard::check(cmd))
+        .or_else(|| heavy_guard::check(cmd, ctx))
 }
 
 /// Every guard on one simple command. When a wrapper changes the working

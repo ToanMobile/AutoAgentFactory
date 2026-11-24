@@ -67,6 +67,11 @@ pub struct Cmd {
     /// Run by `aaf slot -- …`, directly or through a shell it starts: the
     /// command holds a slot of the machine queue.
     pub slotted: bool,
+    /// Exact `argv[0]` string of the `aaf` wrapper that opened `slot -- …`
+    /// (bare `"aaf"` or an explicit path matched lexically against
+    /// `HookEnv::trusted_aaf_bins`). Cleared on PATH/alias rebinding only for
+    /// bare `"aaf"`, never for an explicit absolute path.
+    pub slot_bin: Option<String>,
     /// The line rebinds the word `aaf` (a function, an alias, `hash`, the
     /// search path): a bare `aaf` on it is some other program.
     pub aaf_untrusted: bool,
@@ -109,6 +114,8 @@ pub struct Script {
     pub(crate) plain_steps: Vec<usize>,
     /// The commands being split right now are the payload of an `aaf slot`.
     in_slot: bool,
+    /// Exact `argv[0]` of the `aaf` wrapper currently holding `slot -- …`.
+    in_slot_bin: Option<String>,
     /// An `aaf slot` was started with a search path of its own.
     rebound: bool,
     /// Commands being split right now run under an environment-clearing wrapper.

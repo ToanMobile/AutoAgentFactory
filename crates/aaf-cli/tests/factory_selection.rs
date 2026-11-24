@@ -39,11 +39,43 @@ fn bind(fx: &Fixture, account: &str) {
 }
 
 #[test]
-fn without_a_key_the_selection_is_pinned_and_next_follows_the_binding() {
+fn without_a_key_the_selection_is_sticky_and_next_follows_the_binding_with_failover() {
     let fx = two_accounts("");
 
-    // No settings entry, no history: the least-used account would become
-    // the binding, and nothing is bound yet.
+    // No settings entry, no history: default selection is sticky and nothing
+    // is bound yet.
+    let fresh = fx.aaf(&["accounts", "next"]);
+    assert_eq!(fresh.code, 0, "{}", fresh.stderr);
+    assert_eq!(fresh.json["selection"], json!("sticky"), "{}", fresh.stderr);
+    assert_eq!(fresh.json["binding"]["account"], Value::Null);
+    assert!(fresh.json["account"]["name"].is_string());
+
+    bind(&fx, "work");
+    let bound = fx.aaf(&["accounts", "next"]);
+    assert_eq!(bound.code, 0, "{}", bound.stderr);
+    assert_eq!(bound.json["account"]["name"], json!("work"));
+    assert_eq!(bound.json["binding"]["account"]["name"], json!("work"));
+    assert_eq!(bound.json["binding"]["source"], json!("settings"));
+
+    // The preferred account cools down: sticky fails over to the free account
+    // `home` while still reporting the repository's settings binding.
+    let cooled = fx.aaf(&["accounts", "cooldown", "work", "--until", "4102444800"]);
+    assert_eq!(cooled.code, 0, "{}", cooled.stderr);
+    let failover = fx.aaf(&["accounts", "next"]);
+    assert_eq!(failover.code, 0, "{}", failover.stderr);
+    assert_eq!(failover.json["selection"], json!("sticky"));
+    assert_eq!(failover.json["account"]["name"], json!("home"));
+    assert_eq!(failover.json["binding"]["account"]["name"], json!("work"));
+    assert_eq!(
+        failover.json["binding"]["cooldown_until"],
+        json!(4_102_444_800_i64)
+    );
+}
+
+#[test]
+fn explicit_pinned_waits_for_the_bound_account_on_cooldown() {
+    let fx = two_accounts("\n[accounts]\nselection = \"pinned\"\n");
+
     let fresh = fx.aaf(&["accounts", "next"]);
     assert_eq!(fresh.code, 0, "{}", fresh.stderr);
     assert_eq!(fresh.json["selection"], json!("pinned"), "{}", fresh.stderr);
@@ -107,7 +139,7 @@ fn doctor_shows_the_mode_and_the_binding() {
 
     let doctor = fx.aaf(&["doctor"]);
 
-    assert_eq!(doctor.json["accounts"]["selection"], json!("pinned"));
+    assert_eq!(doctor.json["accounts"]["selection"], json!("sticky"));
     assert_eq!(
         doctor.json["accounts"]["binding"]["account"]["name"],
         json!("work")
@@ -120,7 +152,7 @@ fn doctor_shows_the_mode_and_the_binding() {
     let accounts = checks.iter().find(|c| c["name"] == "accounts").unwrap();
     let detail = accounts["detail"].as_str().unwrap();
     assert!(
-        detail.contains("selection=pinned") && detail.contains("bound to work"),
+        detail.contains("selection=sticky") && detail.contains("bound to work"),
         "{detail}"
     );
 }

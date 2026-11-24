@@ -360,6 +360,7 @@ fn inspect_skills_flags_symlinks_and_phase0_security_invariants_hold() {
                 read_only: true,
                 ..Default::default()
             },
+            json_schema: None,
         })
         .unwrap();
     let mode_idx = spec

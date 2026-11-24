@@ -22,6 +22,11 @@ pub struct Fixture {
     /// How often the hook asked for the repository root (a `git` spawn in
     /// the real hook).
     pub root_lookups: Cell<u32>,
+    /// Whether `AAF_RUN_ID` is set (factory worker run). Defaults to `true` so
+    /// existing worker-guard corpus tests keep testing autonomous worker mode.
+    pub in_factory_run: bool,
+    /// Trusted absolute paths to `aaf` for `aaf slot --` lexical matching.
+    pub trusted_aaf_bins: Vec<PathBuf>,
 }
 
 impl Fixture {
@@ -53,6 +58,8 @@ impl Fixture {
             git_config: RefCell::new(Some(String::new())),
             config_lookups: Cell::new(0),
             root_lookups: Cell::new(0),
+            in_factory_run: true,
+            trusted_aaf_bins: Vec::new(),
             _dir: dir,
         };
         for path in [&fixture.root, &fixture.data, &fixture.config, &fixture.home] {
@@ -60,6 +67,18 @@ impl Fixture {
         }
         fixture.checkout("feature/x");
         fixture
+    }
+
+    /// Switches this fixture to interactive session mode (`AAF_RUN_ID` unset).
+    pub fn interactive(mut self) -> Fixture {
+        self.in_factory_run = false;
+        self
+    }
+
+    /// Configures static trusted absolute paths for `aaf slot --`.
+    pub fn with_trusted_aaf_bins(mut self, bins: Vec<PathBuf>) -> Fixture {
+        self.trusted_aaf_bins = bins;
+        self
     }
 
     /// Points the fake repo's HEAD at `branch`.
@@ -103,6 +122,8 @@ impl Fixture {
             config_dir: Some(self.config.clone()),
             home: Some(self.home.clone()),
             cwd: None,
+            in_factory_run: self.in_factory_run,
+            trusted_aaf_bins: self.trusted_aaf_bins.clone(),
         };
         decide(payload.to_string().as_bytes(), &env)
     }

@@ -47,6 +47,14 @@ pub struct DiscoveredSop {
     pub source: SopSource,
 }
 
+/// Parses and validates an SOP specification from raw TOML text.
+pub fn parse_sop_toml(raw: &str) -> Result<SopSpec, SopError> {
+    let spec: SopSpec =
+        toml::from_str(raw).map_err(|e| SopError::Parse(format!("parse SOP TOML: {e}")))?;
+    spec.validate()?;
+    Ok(spec)
+}
+
 /// Loads, parses, and validates a single SOP TOML file (refusing symlinks).
 pub fn load_sop_file(path: &Path) -> Result<SopSpec, SopError> {
     reject_parent_dir(path)?;
@@ -99,10 +107,10 @@ pub fn load_sop_file(path: &Path) -> Result<SopSpec, SopError> {
             MAX_SOP_TOML_BYTES
         )));
     }
-    let spec: SopSpec = toml::from_str(&text)
-        .map_err(|e| SopError::Parse(format!("parse {}: {e}", path.display())))?;
-    spec.validate()?;
-    Ok(spec)
+    parse_sop_toml(&text).map_err(|e| match e {
+        SopError::Parse(msg) => SopError::Parse(format!("parse {}: {msg}", path.display())),
+        other => other,
+    })
 }
 
 /// Discovers and validates all `*.toml` SOP files under `<repo_root>/.autofactory/sops/`.

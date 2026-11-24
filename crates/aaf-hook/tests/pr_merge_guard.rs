@@ -13,6 +13,8 @@ fn env() -> HookEnv<'static> {
         config_dir: None,
         home: None,
         cwd: None,
+        in_factory_run: false,
+        trusted_aaf_bins: Vec::new(),
     }
 }
 
@@ -46,14 +48,20 @@ fn direct_gh_pr_merge_and_api_merge_are_denied() {
 }
 
 #[test]
-fn read_only_gh_and_aaf_merge_are_allowed() {
+fn read_only_gh_and_aaf_merge_dry_run_are_allowed() {
     for cmd in [
         "gh pr view 563 --json headRefOid",
         "gh pr checks 563",
         "gh pr list --state open",
         "gh api repos/ToanMobile/OfficeReader/pulls/563",
-        "aaf merge 563 --expect-head 0123456789abcdef0123456789abcdef01234567",
+        "aaf merge 563 --expect-head 0123456789abcdef0123456789abcdef01234567 --dry-run",
     ] {
         assert_eq!(check(cmd), Decision::Allow, "expected ALLOW for `{cmd}`");
+    }
+    // Non-`--dry-run` `aaf merge` is a Tier-A human action even interactively
+    // (refused by `human_action_guard`, not `pr_merge_guard`).
+    match check("aaf merge 563 --expect-head 0123456789abcdef0123456789abcdef01234567") {
+        Decision::Deny(d) => assert_eq!(d.rule, "human_action_guard"),
+        Decision::Allow => panic!("expected DENY for non-dry-run `aaf merge`"),
     }
 }

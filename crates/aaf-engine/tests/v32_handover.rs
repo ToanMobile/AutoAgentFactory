@@ -250,6 +250,9 @@ fn build_handover_handles_compact_events_xong_chua_xong_and_solo_badge() {
         llm_average: Some(92),
         effective_score: 92,
         scores: all_seven_scores(92, "needs edge test"),
+        adjudicated: false,
+        dual_consensus: false,
+        reviewers: Vec::new(),
         created_at: 200,
     };
     let low = build_handover_from_parts(
@@ -322,6 +325,9 @@ fn render_html_sets_csp_escapes_xss_embeds_verified_png_and_degrades_safely() {
         llm_average: Some(98),
         effective_score: 98,
         scores: all_seven_scores(98, "checked <script>evil</script>"),
+        adjudicated: false,
+        dual_consensus: false,
+        reviewers: Vec::new(),
         created_at: 1_700_000_600,
     };
 

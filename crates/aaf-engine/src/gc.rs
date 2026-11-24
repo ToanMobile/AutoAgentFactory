@@ -2,6 +2,8 @@
 //! fingerprint temp files, and expired stream/report artifacts, plus verified
 //! squash-merge matching for the factory review sweep.
 
+mod periodic;
+
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
@@ -28,6 +30,8 @@ use expired::orphan_scratch_lock_removable;
 use refs::RepoRefs;
 pub(crate) use squash::verify_squash_merges;
 
+pub use periodic::{DEFAULT_MIN_FREE_DISK_BYTES, check_free_disk_bytes, lightweight_sweep};
+
 /// Default retention window for stream `.jsonl` and report `.html` artifacts.
 pub const DEFAULT_OLDER_THAN_DAYS: u64 = 14;
 
@@ -41,6 +45,12 @@ pub enum GcError {
     Git(#[from] GitError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("low disk space at {path}: {available_bytes} bytes free (minimum {min_free_bytes})")]
+    LowDisk {
+        path: String,
+        available_bytes: u64,
+        min_free_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

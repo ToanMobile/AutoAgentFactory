@@ -16,4 +16,8 @@ description: Paired RED->GREEN regression oracle discipline, surviving-mutant gu
    - Do not weaken, delete, or skip existing assertions to make a suite green; changes to head-locked existing tests require explicit review (`aaf approve`).
 
 3. **Scoped & Honest Verification**
-   - Run the smallest targeted test command first during iteration, then finish with the project's scoped/full gate without relying on cached or stale results.
+   - Run the smallest targeted test command first during iteration, then finish with the project's scoped/full verification suite without relying on cached or stale results.
+
+## Headless / `AAF_RUN_ID` Mode
+
+When `AAF_RUN_ID` is set, never stop to ask questions or wait for confirmation, and never invoke blocked host commands (`aaf gate`, `aaf approve`). Run the project's own test runner directly for the RED -> GREEN cycle, keep head-locked existing tests untouched unless required by the task spec, and finish cleanly on the task branch so the factory executes `aaf gate` and cross-audit automatically.

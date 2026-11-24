@@ -157,10 +157,9 @@ fn measured_command_waits_while_free_memory_is_short_or_unknown() {
 fn memory_pressure_is_waited_out_without_a_ceiling() {
     let data = TempDir::new().unwrap();
     let mut rig = Rig::calm();
-    // The load ceiling is tiny; pressure must ignore it.
+    // Critical memory pressure ignores heavy_wait_secs; Warn is bounded (UNBLK-12).
     rig.machine.heavy_wait_secs = 1;
-    let mut script = vec![Some(Pressure::Warn); 40];
-    script.extend(vec![Some(Pressure::Critical); 40]);
+    let mut script = vec![Some(Pressure::Critical); 40];
     script.push(Some(Pressure::Normal));
     rig.probe.pressure.set(script);
 
@@ -168,8 +167,8 @@ fn memory_pressure_is_waited_out_without_a_ceiling() {
         .throttle()
         .admit(data.path(), &*rig.clock, REPO, LABEL)
         .unwrap();
-    assert_eq!(rig.sleeper.count(), 80);
-    assert!(admitted.waited_secs > 80);
+    assert_eq!(rig.sleeper.count(), 40);
+    assert!(admitted.waited_secs > 40);
     assert!(!admitted.degraded);
     assert!(rig.events_starting("WaitingForMemory") >= 2);
 }

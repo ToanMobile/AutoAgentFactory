@@ -15,4 +15,8 @@ description: Trust-boundary, sandboxing, allowlist, path safety, and secret-hygi
    - Resolve `git`/`gh` executables safely; execute subprocesses via explicit argv vectors without shell interpolation.
 
 3. **Approval & Head-Lock**
-   - Any changes to locked agent config or workflow definitions require explicit review via `aaf approve`.
+   - Any changes to locked agent config or workflow definitions require explicit operator review via `aaf approve` (outside `AAF_RUN_ID`).
+
+## Headless / `AAF_RUN_ID` Mode
+
+When `AAF_RUN_ID` is set, never stop to ask questions or wait for confirmation, and never invoke blocked host commands (`aaf approve`, `aaf gate`). Enforce every trust-boundary, path-safety, and secret-hygiene requirement directly in code and tests, avoid editing head-locked files unless strictly required by the task spec, and let the factory's automated gate and cross-audit verify the change.

@@ -334,6 +334,7 @@ mod real {
                     writable_paths: Vec::new(),
                     read_denied_paths: vec![dirs.denied.to_string_lossy().into_owned()],
                 },
+                json_schema: None,
             })
             .unwrap();
         let log = &outcome.log_tail;

@@ -9,11 +9,20 @@ use aaf_domain::config::{GlobalConfig, OracleMode, RepoConfig, StoreMode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+#[path = "load_worktree.rs"]
+mod load_worktree;
+
+#[allow(unused_imports)]
+pub use load_worktree::load_base_worktree_config;
+
 use super::detect::PROFILES;
 use super::merge::{
-    ConfigOverlay, CrossAuditOverlay, GateOverlay, OverlayOrigin, PipelineOverlay, ProjectOverlay,
-    RunOverlay, apply_cross_audit_overlay, apply_overlay, apply_pipeline_overlay, clamp_pipeline,
-    merge_cross_audit, merge_max_open_review,
+    ConfigOverlay, CrossAuditOverlay, GateOverlay, OverlayOrigin, ProjectOverlay, RunOverlay,
+    apply_cross_audit_overlay, apply_overlay, merge_cross_audit, merge_max_open_review,
+};
+use super::merge_pipeline::{
+    PipelineOverlay, RepoKeyPresence, apply_pipeline_overlay, merge_cross_audit_dual,
+    merge_pipeline, merge_unblocker, parse_repo_key_presence, reconcile_land_mode,
 };
 
 /// Tier 2, relative to the repo root.
@@ -99,6 +108,7 @@ struct LocalFile {
     telegram: Option<toml::Value>,
     proof: Option<toml::Value>,
     github: Option<toml::Value>,
+    worktree: Option<toml::Value>,
 }
 
 /// `AAF_CONFIG_DIR/config.toml`, else `$HOME/.config/autofactory/config.toml`.
@@ -139,12 +149,18 @@ pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
     let mut sources = Vec::new();
     let global = read_global(inputs, &mut sources)?;
     let repo_path = inputs.repo_root.join(REPO_CONFIG_REL);
-    let repo: RepoConfig = read_tier(&repo_path, &mut sources)?.unwrap_or_default();
+    let (repo, presence) = match read_tier_with_text::<RepoConfig>(&repo_path, &mut sources)? {
+        Some((cfg, text)) => (cfg, parse_repo_key_presence(&text)),
+        None => (RepoConfig::default(), RepoKeyPresence::all_unspecified()),
+    };
+    let repo_source = repo_path.display().to_string();
     layer(
         inputs,
         global,
         repo,
-        &repo_path.display().to_string(),
+        &presence,
+        Some(&inputs.repo_root),
+        &repo_source,
         sources,
     )
 }
@@ -162,7 +178,15 @@ pub fn load_over_repo(
     let mut sources = Vec::new();
     let global = read_global(inputs, &mut sources)?;
     sources.push(repo_source.to_string());
-    layer(inputs, global, repo, repo_source, sources)
+    layer(
+        inputs,
+        global,
+        repo,
+        &RepoKeyPresence::all_explicit(),
+        None,
+        repo_source,
+        sources,
+    )
 }
 
 /// [`load_over_repo`] with the real environment and no command-line overrides.
@@ -198,32 +222,28 @@ fn layer(
     inputs: &ConfigInputs<'_>,
     global: GlobalConfig,
     mut repo: RepoConfig,
+    presence: &RepoKeyPresence,
+    repo_root_for_land: Option<&Path>,
     repo_source: &str,
     mut sources: Vec<String>,
 ) -> Result<EffectiveConfig, ConfigError> {
     let mut warnings = Vec::new();
-    merge_cross_audit(&global.cross_audit, &mut repo.cross_audit, &mut warnings);
-    merge_max_open_review(global.run.max_open_review, &mut repo.run.max_open_review);
-    clamp_pipeline(&mut repo.pipeline, repo_source, &mut warnings);
-
-    let local_path = inputs.repo_root.join(LOCAL_CONFIG_REL);
-    if let Some(local) = read_tier::<LocalFile>(&local_path, &mut sources)? {
-        apply_local_file(
-            &mut repo,
-            local,
-            &local_path.display().to_string(),
-            &mut warnings,
-        );
-    }
-
-    let env_overlay = env_overlay(inputs.env, &mut warnings)?;
-    apply_overlay(
+    apply_trusted_merges(
+        &global,
         &mut repo,
-        env_overlay,
-        "environment",
-        OverlayOrigin::Ambient,
+        presence,
+        repo_root_for_land,
+        Path::new(repo_source),
+        repo_source,
         &mut warnings,
-    );
+    )?;
+    apply_local_and_env(
+        &mut repo,
+        Some(&inputs.repo_root),
+        inputs.env,
+        &mut sources,
+        &mut warnings,
+    )?;
     apply_overlay(
         &mut repo,
         inputs.cli.clone(),
@@ -231,9 +251,7 @@ fn layer(
         OverlayOrigin::CommandLine,
         &mut warnings,
     );
-
     validate_profile(&repo)?;
-
     Ok(EffectiveConfig {
         global,
         repo,
@@ -256,33 +274,42 @@ pub fn tighten_trusted_base(
 ) -> Result<RepoConfig, ConfigError> {
     let mut sources = Vec::new();
     let mut warnings = Vec::new();
-    merge_cross_audit(&global.cross_audit, &mut repo.cross_audit, &mut warnings);
-    merge_max_open_review(global.run.max_open_review, &mut repo.run.max_open_review);
-    clamp_pipeline(&mut repo.pipeline, REPO_CONFIG_REL, &mut warnings);
+    apply_trusted_merges(
+        global,
+        &mut repo,
+        &RepoKeyPresence::all_explicit(),
+        None,
+        Path::new(REPO_CONFIG_REL),
+        REPO_CONFIG_REL,
+        &mut warnings,
+    )?;
+    apply_local_and_env(&mut repo, local_repo_root, env, &mut sources, &mut warnings)?;
+    validate_profile(&repo)?;
+    Ok(repo)
+}
 
+fn apply_local_and_env(
+    repo: &mut RepoConfig,
+    local_repo_root: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<String>,
+    sources: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Result<(), ConfigError> {
     if let Some(root) = local_repo_root {
         let local_path = root.join(LOCAL_CONFIG_REL);
-        if let Some(local) = read_tier::<LocalFile>(&local_path, &mut sources)? {
-            apply_local_file(
-                &mut repo,
-                local,
-                &local_path.display().to_string(),
-                &mut warnings,
-            );
+        if let Some(local) = read_tier::<LocalFile>(&local_path, sources)? {
+            apply_local_file(repo, local, &local_path.display().to_string(), warnings);
         }
     }
-
-    let env_ov = env_overlay(env, &mut warnings)?;
+    let env_ov = env_overlay(env, warnings)?;
     apply_overlay(
-        &mut repo,
+        repo,
         env_ov,
         "environment",
         OverlayOrigin::Ambient,
-        &mut warnings,
+        warnings,
     );
-
-    validate_profile(&repo)?;
-    Ok(repo)
+    Ok(())
 }
 
 /// [`tighten_trusted_base`] using the real process environment.
@@ -292,6 +319,54 @@ pub fn tighten_trusted_base_from_env(
     local_repo_root: Option<&Path>,
 ) -> Result<RepoConfig, ConfigError> {
     tighten_trusted_base(repo, global, local_repo_root, &process_env)
+}
+
+fn apply_trusted_merges(
+    global: &GlobalConfig,
+    repo: &mut RepoConfig,
+    presence: &RepoKeyPresence,
+    repo_root: Option<&Path>,
+    error_path: &Path,
+    source: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), ConfigError> {
+    reconcile_land_mode(&global.run.auto_merge_repos, repo_root, repo, presence).map_err(
+        |message| ConfigError::Parse {
+            path: error_path.to_path_buf(),
+            line: 0,
+            column: 0,
+            message,
+        },
+    )?;
+    merge_cross_audit(&global.cross_audit, &mut repo.cross_audit, warnings);
+    merge_cross_audit_dual(
+        &global.cross_audit,
+        &mut repo.cross_audit,
+        presence,
+        warnings,
+    )
+    .map_err(|message| ConfigError::Parse {
+        path: error_path.to_path_buf(),
+        line: 0,
+        column: 0,
+        message,
+    })?;
+    merge_pipeline(
+        &global.pipeline,
+        &mut repo.pipeline,
+        presence,
+        source,
+        warnings,
+    );
+    let dual_or_debate = repo.pipeline.plan_debate || repo.cross_audit.dual_review;
+    merge_unblocker(
+        &global.unblocker,
+        &mut repo.unblocker,
+        presence,
+        dual_or_debate,
+    );
+    merge_max_open_review(global.run.max_open_review, &mut repo.run.max_open_review);
+    Ok(())
 }
 
 fn apply_local_file(
@@ -309,6 +384,7 @@ fn apply_local_file(
         ("telegram", &local.telegram, "the global config"),
         ("proof", &local.proof, REPO_CONFIG_REL),
         ("github", &local.github, REPO_CONFIG_REL),
+        ("worktree", &local.worktree, REPO_CONFIG_REL),
     ];
     for (section, value, owner) in tier_two_only {
         if value.is_some() {
@@ -317,16 +393,19 @@ fn apply_local_file(
             ));
         }
     }
+    // Apply `[cross_audit]` and `[pipeline]` BEFORE `apply_overlay` so turning
+    // on `plan_debate` or `dual_review` in the same local file immediately locks
+    // `run.model` and `run.effort` (R3-SEC-7).
+    apply_cross_audit_overlay(&mut repo.cross_audit, local.cross_audit, source, warnings);
+    if let Some(pipeline) = local.pipeline {
+        apply_pipeline_overlay(&mut repo.pipeline, pipeline, source, warnings);
+    }
     let overlay = ConfigOverlay {
         project: local.project,
         gate: local.gate,
         run: local.run,
     };
     apply_overlay(repo, overlay, source, OverlayOrigin::Ambient, warnings);
-    apply_cross_audit_overlay(&mut repo.cross_audit, local.cross_audit, source, warnings);
-    if let Some(pipeline) = local.pipeline {
-        apply_pipeline_overlay(&mut repo.pipeline, pipeline, source, warnings);
-    }
 }
 
 fn validate_profile(repo: &RepoConfig) -> Result<(), ConfigError> {
@@ -347,6 +426,27 @@ fn read_tier<T: DeserializeOwned>(
     path: &Path,
     sources: &mut Vec<String>,
 ) -> Result<Option<T>, ConfigError> {
+    Ok(read_tier_with_text(path, sources)?.map(|(value, _)| value))
+}
+
+fn parse_toml_at<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T, ConfigError> {
+    toml::from_str::<T>(text).map_err(|err| {
+        let (line, column) = err
+            .span()
+            .map_or((0, 0), |span| line_column(text, span.start));
+        ConfigError::Parse {
+            path: path.to_path_buf(),
+            line,
+            column,
+            message: err.message().to_string(),
+        }
+    })
+}
+
+fn read_tier_with_text<T: DeserializeOwned>(
+    path: &Path,
+    sources: &mut Vec<String>,
+) -> Result<Option<(T, String)>, ConfigError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -357,19 +457,9 @@ fn read_tier<T: DeserializeOwned>(
             });
         }
     };
-    let value = toml::from_str::<T>(&text).map_err(|err| {
-        let (line, column) = err
-            .span()
-            .map_or((0, 0), |span| line_column(&text, span.start));
-        ConfigError::Parse {
-            path: path.to_path_buf(),
-            line,
-            column,
-            message: err.message().to_string(),
-        }
-    })?;
+    let value = parse_toml_at::<T>(path, &text)?;
     sources.push(path.display().to_string());
-    Ok(Some(value))
+    Ok(Some((value, text)))
 }
 
 /// 1-based line and column (in characters) of a byte offset.

@@ -1,9 +1,15 @@
 ---
 name: qa-review
-description: Pre-PR diff audit, 7 Golden Standards (/100) + MechanicalScore evaluation, acceptance-criteria traceability, edge-case probing, blast-radius check, and secret/placeholder screening.
+description: AutoAgentFactory automated Pre-PR diff audit, 7 Golden Standards (/100) + MechanicalScore evaluation, acceptance-criteria traceability, edge-case probing, and secret screening (overrides interactive QA skills when AAF_RUN_ID is set).
 ---
 
-# Pre-PR QA Review
+# AutoAgentFactory Pre-PR QA Review
+
+## Headless / `AAF_RUN_ID` Mode (Overrides Interactive QA Flows)
+
+When `AAF_RUN_ID` is set, you are running headlessly with no human present. This automated audit discipline **overrides** any user-level interactive Q&A or acceptance-matrix `qa-review` skill:
+- **NEVER** stop to ask clarifying questions, **NEVER** request human confirmation, and **NEVER** invoke blocked host commands (`aaf gate`, `aaf approve`, `aaf proof record`).
+- Audit your own diff autonomously against every acceptance criterion below, fix any gap directly in code and tests, run the project's test/lint suite, and commit cleanly on the task branch; the factory runs `aaf gate` and independent cross-audit automatically.
 
 1. **Acceptance Criteria & Diff Completeness**
    - Map every acceptance criterion in the task spec to concrete code paths and executable tests in the diff; flag any unverified requirement explicitly.

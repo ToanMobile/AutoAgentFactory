@@ -50,6 +50,7 @@ mod seatbelt {
                     enabled: true,
                     ..SandboxPolicy::default()
                 },
+                json_schema: None,
             })
             .unwrap()
             .log_tail
@@ -86,7 +87,7 @@ mod seatbelt {
         let log = run_probes(ProviderKind::Antigravity, &gemini, &wt, &script);
         for marker in [
             "g-tmp-ok",
-            "g-creds-ok",
+            "g-creds-denied",
             "g-settings-denied",
             "g-trusted-denied",
             "g-ext-denied",

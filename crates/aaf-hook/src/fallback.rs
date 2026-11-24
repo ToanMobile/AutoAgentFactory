@@ -89,12 +89,12 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
     }
     if has("adb") || has("fastboot") {
         let dangerous = tokens.iter().any(|t| {
-            let t = t.to_ascii_lowercase();
-            matches!(t.as_str(), "reboot" | "erase" | "rm" | "dd" | "format")
-                || t.starts_with("flash")
-                || t.starts_with("unlock")
-                || t.starts_with("mkfs")
-                || t.contains("wipe")
+            let lower = t.to_ascii_lowercase();
+            matches!(lower.as_str(), "reboot" | "erase" | "rm" | "dd" | "format")
+                || lower.starts_with("flash")
+                || lower.starts_with("unlock")
+                || lower.starts_with("mkfs")
+                || crate::adb_guard::is_wipe_token(t)
         });
         if dangerous {
             return Some("mixes adb/fastboot with a destructive word");
@@ -147,7 +147,7 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
     {
         return Some("runs an inline interpreter script with a dangerous API");
     }
-    if human_guard::names_action(&tokens) {
+    if human_guard::names_action_in(&tokens, ctx.env.in_factory_run) {
         return Some("runs aaf with a human-only action");
     }
     if data_guard::mentions(line, ctx) {
@@ -156,7 +156,7 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
     if store_guard::matches(&tokens, true).is_some() {
         return Some("looks like a store submission");
     }
-    if heavy_guard::mentions(&tokens) {
+    if ctx.env.in_factory_run && heavy_guard::mentions(&tokens) {
         return Some("names a heavy build tool");
     }
     None

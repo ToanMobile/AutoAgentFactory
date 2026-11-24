@@ -13,16 +13,16 @@ mod writers;
 use find::{DELETERS, feeds_protected, find};
 
 const RULE: &str = "delete_guard";
-const FIX: &str = "leave it in place; protected files are changed by a human, by hand";
+const FIX: &str = "leave this protected file in place and work on non-protected source/config \
+                   files instead (use .env.example for env templates)";
+const FIX_RECURSIVE_RM: &str = "use an explicit literal path under the repository or /tmp";
 /// Directories whose removal takes protected settings with them.
 const GUARDED_DIRS: &[&str] = &[".claude", ".autofactory"];
-/// Protected `(parent_dir, file_name)` pairs mirrored from `paths.rs` for glob fallback.
 const NESTED_PROTECTED: &[(&str, &str)] = &[
     (".autofactory", "config.toml"),
     (".claude", "settings.json"),
     (".claude", "settings.local.json"),
 ];
-/// Additional `.env.*` variants checked during glob pattern fallback.
 const ENV_SAMPLES: &[&str] = &[
     ".env",
     ".env.local",
@@ -30,15 +30,38 @@ const ENV_SAMPLES: &[&str] = &[
     ".env.development",
     ".env.staging",
     ".env.test",
-    ".env.example",
     ".env.qa",
 ];
-/// Bounds for directory walks over globs with wildcards in parent segments.
 const WALK_ENTRIES: usize = 2000;
 const WALK_DEPTH: usize = 8;
 
 fn deny(reason: String) -> Denial {
     Denial::new(RULE, reason, FIX)
+}
+
+fn deny_recursive(reason: String) -> Denial {
+    Denial::new(RULE, reason, FIX_RECURSIVE_RM)
+}
+
+/// Returns `VAR` only when `raw` is bare `$VAR` or `${VAR}` with a plain
+/// identifier and NO prefix, suffix, `/`, or `..`.
+fn bare_var_name(raw: &str) -> Option<&str> {
+    let name = raw
+        .strip_prefix("${")
+        .and_then(|s| s.strip_suffix('}'))
+        .or_else(|| raw.strip_prefix('$'))?;
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        .then_some(name)
+}
+
+fn is_safe_mktemp_operand(raw: &str, ctx: &Ctx) -> bool {
+    bare_var_name(raw).is_some_and(|var| ctx.mktemp_vars.iter().any(|v| v == var))
 }
 
 /// True when `path` (or its symlink target) names one of `GUARDED_DIRS` under
@@ -103,6 +126,9 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                     .any(|a| a == "--recursive" || short_has(a, &['r', 'R']));
             let takes_dirs = name == "mv" || is_recursive_rm;
             positional(args).into_iter().find_map(|arg| {
+                if is_recursive_rm && is_safe_mktemp_operand(arg, ctx) {
+                    return None;
+                }
                 if is_recursive_rm && let Some(denial) = check_recursive_rm_target(arg, "rm", ctx) {
                     return Some(denial);
                 }
@@ -142,12 +168,14 @@ fn check_one_rm_path(
         paths::real(path)
     };
     if let Some(why) = paths::is_system_or_home_danger(&check_path, ctx.env.home.as_deref()) {
-        return Some(deny(format!("{verb} {raw}: refuses to delete {why}")));
+        return Some(deny_recursive(format!(
+            "{verb} {raw}: refuses to delete {why}"
+        )));
     }
     // The repository the call started in, or a directory above it, after a
     // `cd`/`env -C` elsewhere: it is not "inside the workspace".
     if !holds_repo_ok && (ctx.holds_workspace_repo(&check_path) || ctx.holds_workspace_repo(path)) {
-        return Some(deny(format!(
+        return Some(deny_recursive(format!(
             "{verb} {raw}: it contains the whole repository"
         )));
     }
@@ -167,7 +195,7 @@ fn check_one_rm_path(
         None => check_path.is_relative() && !paths::escapes(&check_path),
     };
     if !in_repo && !paths::is_allowed_tmp_subpath(raw, &check_path, repo.as_deref()) {
-        return Some(deny(format!(
+        return Some(deny_recursive(format!(
             "{verb} {raw}: recursive delete target lies outside the repository root (only repo-local paths or /tmp / $TMPDIR subpaths are allowed)"
         )));
     }
@@ -175,8 +203,7 @@ fn check_one_rm_path(
 }
 
 /// Enforces home/system protection, unresolved-var fail-closed, and repo-root
-/// containment (allowing only `/tmp/...` and `$TMPDIR/...` subpaths outside the
-/// repository) for recursive deletion targets (`rm -r`/`-rf`, `shutil.rmtree`, etc.).
+/// containment for recursive deletion targets (`rm -r`/`-rf`, `shutil.rmtree`, etc.).
 pub(crate) fn check_recursive_rm_target(raw: &str, verb: &str, ctx: &Ctx) -> Option<Denial> {
     contain(raw, verb, false, ctx)
 }
@@ -190,12 +217,12 @@ pub(crate) fn check_delete_root(raw: &str, verb: &str, ctx: &Ctx) -> Option<Deni
 
 fn contain(raw: &str, verb: &str, holds_repo_ok: bool, ctx: &Ctx) -> Option<Denial> {
     if paths::references_home(raw) && ctx.env.home.is_none() {
-        return Some(deny(format!(
+        return Some(deny_recursive(format!(
             "{verb} {raw}: home directory path cannot be safely verified"
         )));
     }
     if paths::has_unresolved_var(raw) {
-        return Some(deny(format!(
+        return Some(deny_recursive(format!(
             "{verb} {raw}: recursive delete target contains an unresolved variable or substitution"
         )));
     }
@@ -217,13 +244,12 @@ fn short_has(arg: &str, flags: &[char]) -> bool {
 }
 
 fn positional(args: &[String]) -> Vec<&str> {
-    let mut only_positional = false;
-    let mut out = Vec::new();
+    let (mut only_pos, mut out) = (false, Vec::new());
     for arg in args.iter().map(String::as_str) {
-        if only_positional || !arg.starts_with('-') {
+        if only_pos || !arg.starts_with('-') {
             out.push(arg);
         } else if arg == "--" {
-            only_positional = true;
+            only_pos = true;
         }
     }
     out
@@ -233,7 +259,6 @@ fn git(args: &[String], ctx: &Ctx) -> Option<Denial> {
     let call = git_guard::split(args);
     match call.sub {
         "rm" => {
-            // Pathspecs are relative to `-C <dir>` when given.
             let moved;
             let ctx = match call.dir {
                 Some(dir) => {
@@ -254,12 +279,11 @@ fn git(args: &[String], ctx: &Ctx) -> Option<Denial> {
                 .take_while(|a| *a != "--")
                 .collect();
             let ignored = flags.iter().any(|a| short_has(a, &['x', 'X']));
-            // The last of `-n`/`--dry-run` and `--no-dry-run` wins, as in git.
-            let dry_run = flags.iter().fold(false, |dry_run, a| {
+            let dry_run = flags.iter().fold(false, |dry, a| {
                 if *a == "--dry-run" || short_has(a, &['n']) {
                     true
                 } else {
-                    dry_run && !a.starts_with("--no-d")
+                    dry && !a.starts_with("--no-d")
                 }
             });
             (ignored && !dry_run).then(|| {
@@ -310,8 +334,6 @@ fn hit(path: &Path, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         return Some(format!("{name}/ holds protected settings"));
     }
-    // Only a path at or above the current or workspace working directory can
-    // contain the repo, so the root lookup stays off the common `rm -rf build` path.
     if (paths::is_inside(&ctx.cwd, path)
         && ctx.root().is_some_and(|root| paths::is_inside(&root, path)))
         || (!ctx.workspace_cwd.as_os_str().is_empty()
@@ -414,36 +436,29 @@ impl Walk {
 }
 
 pub(super) fn pattern_could_match(path: &Path, last: &str, takes_dirs: bool) -> bool {
-    if paths::protected_name(path).is_some() {
-        return true;
-    }
-    if paths::SAMPLE_NAMES
-        .iter()
-        .chain(ENV_SAMPLES)
-        .any(|sample| paths::glob_match(last, sample))
+    if paths::protected_name(path).is_some()
+        || paths::SAMPLE_NAMES
+            .iter()
+            .chain(ENV_SAMPLES)
+            .any(|sample| paths::glob_match(last, sample))
+        || (takes_dirs && GUARDED_DIRS.iter().any(|dir| paths::glob_match(last, dir)))
     {
         return true;
     }
-    if takes_dirs && GUARDED_DIRS.iter().any(|dir| paths::glob_match(last, dir)) {
-        return true;
-    }
-    let parent_name = path
+    let parent = path
         .parent()
         .and_then(Path::file_name)
         .and_then(|n| n.to_str())
         .unwrap_or("");
     NESTED_PROTECTED
         .iter()
-        .any(|(dir, file)| paths::glob_match(parent_name, dir) && paths::glob_match(last, file))
+        .any(|(dir, file)| paths::glob_match(parent, dir) && paths::glob_match(last, file))
 }
 
-/// Walks unnormalized `raw` containing both a glob and `..` (e.g.
-/// `claude*/../settings.json` with `claudelink -> .claude/sub`) so symlinks
-/// matched by a glob are resolved before stepping into `..`.
-fn glob_dotdot_hit(raw: &str, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
+fn split_glob_prefix(path: &Path) -> Option<(PathBuf, Vec<&str>)> {
     let mut prefix = PathBuf::new();
-    let mut segs: Vec<&str> = Vec::new();
-    for part in Path::new(raw).components() {
+    let mut segs = Vec::new();
+    for part in path.components() {
         let text = part.as_os_str().to_str()?;
         if segs.is_empty() && !paths::has_glob(text) {
             prefix.push(text);
@@ -451,32 +466,27 @@ fn glob_dotdot_hit(raw: &str, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
             segs.push(text);
         }
     }
+    Some((prefix, segs))
+}
+
+/// Walks unnormalized `raw` containing both a glob and `..` so symlinks
+/// matched by a glob are resolved before stepping into `..`.
+fn glob_dotdot_hit(raw: &str, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
+    let (prefix, segs) = split_glob_prefix(Path::new(raw))?;
     if segs.is_empty() {
         return None;
     }
     let base = ctx.expand_real_dotdot(prefix.to_str()?);
-    let mut walk = Walk::default();
-    walk.find(&base, &segs, 0, takes_dirs, ctx)
+    Walk::default().find(&base, &segs, 0, takes_dirs, ctx)
 }
 
-/// Expands a glob against the real directory tree (resolving symlinks and nested
-/// protected files); when a parent-glob matches nothing on disk or the walk is
-/// cut, falls back to pattern matching over protected names, nested pairs,
-/// guarded directories, and `.env.*` variants.
+/// Expands a glob against the real directory tree, falling back to pattern
+/// matching when a parent-glob matches nothing on disk or the walk is cut.
 fn glob_hit(path: &Path, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
     let parent = path.parent()?;
     let last = path.file_name()?.to_str()?;
     if paths::has_glob(&parent.to_string_lossy()) || last == "**" {
-        let mut prefix = PathBuf::new();
-        let mut segs: Vec<&str> = Vec::new();
-        for part in path.components() {
-            let text = part.as_os_str().to_str()?;
-            if segs.is_empty() && !paths::has_glob(text) {
-                prefix.push(text);
-            } else {
-                segs.push(text);
-            }
-        }
+        let (prefix, segs) = split_glob_prefix(path)?;
         let mut walk = Walk::default();
         if let Some(found) = walk.find(&prefix, &segs, 0, takes_dirs, ctx) {
             return Some(found);
@@ -487,9 +497,8 @@ fn glob_hit(path: &Path, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
         return (pattern_could_match(path, last, takes_dirs) && ctx.in_repo(path))
             .then(|| "the pattern can match a protected file".to_string());
     }
-    // A directory that cannot be listed has nothing the glob could delete.
-    let entries = fs::read_dir(parent).ok()?;
-    entries
+    fs::read_dir(parent)
+        .ok()?
         .flatten()
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| paths::glob_match(last, name))

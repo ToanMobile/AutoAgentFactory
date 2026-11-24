@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use aaf_domain::config::{AuditScope, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus, LockStatus, RECEIPT_SCHEMA_VERSION, Receipt};
+use aaf_domain::pipeline::canonical_provider;
 use sha2::{Digest, Sha256};
 
 use super::{GIT_TIMEOUT, GateError};
@@ -19,6 +20,7 @@ pub fn config_hash(cfg: &RepoConfig) -> String {
     if cfg.cross_audit.audit_scope == AuditScope::HeadLock
         && !cfg.cross_audit.score_gate
         && !cfg.cross_audit.require_different_provider
+        && !cfg.cross_audit.dual_review
     {
         return aaf_fp::sha256_hex(json.as_bytes());
     }
@@ -32,13 +34,45 @@ pub fn config_hash(cfg: &RepoConfig) -> String {
         cfg.cross_audit.min_criterion_score,
         u8::from(cfg.cross_audit.require_different_provider),
     ]);
+    if cfg.cross_audit.dual_review {
+        hasher.update(b"\0dual_review\0");
+        hasher.update([
+            u8::from(cfg.cross_audit.dual_review),
+            u8::from(cfg.cross_audit.cross_adjudicate),
+        ]);
+        let mut canonical: Vec<(&str, &str, &str, String, &str, &str)> = cfg
+            .cross_audit
+            .reviewers
+            .iter()
+            .map(|r| {
+                (
+                    r.id.as_str(),
+                    r.executor.as_str(),
+                    r.executor_cmd.as_str(),
+                    canonical_provider(&r.executor),
+                    r.model.as_str(),
+                    r.effort.as_str(),
+                )
+            })
+            .collect();
+        canonical.sort();
+        hasher.update((canonical.len() as u64).to_le_bytes());
+        for (id, executor, executor_cmd, provider, model, effort) in canonical {
+            for field in [id, executor, executor_cmd, provider.as_str(), model, effort] {
+                hasher.update((field.len() as u64).to_le_bytes());
+                hasher.update(field.as_bytes());
+                hasher.update([0u8]);
+            }
+        }
+    }
     aaf_fp::hex(&hasher.finalize())
 }
 
 /// Alternate config hash with `require_different_provider = true` so callers
-/// enforcing independent approval reuse receipts signed under tier-1 hardening.
-pub(crate) fn alt_config_hash(cfg: &RepoConfig, require_independent: bool) -> Option<String> {
-    if require_independent && !cfg.cross_audit.require_different_provider {
+/// with `require_different_provider = false` still reuse strictly stronger
+/// receipts signed under tier-1 hardening.
+pub(crate) fn alt_config_hash(cfg: &RepoConfig, _require_independent: bool) -> Option<String> {
+    if !cfg.cross_audit.require_different_provider {
         let mut strict_cfg = cfg.clone();
         strict_cfg.cross_audit.require_different_provider = true;
         Some(config_hash(&strict_cfg))
@@ -149,7 +183,8 @@ pub(crate) fn receipt_matches(stored: &Receipt, asked: &Asked<'_>, check_repo_ro
         || asked
             .alt_config_hash
             .is_some_and(|alt| stored.config_hash == alt);
-    let approval_ok = !asked.require_independent_approval
+    let need_ind = asked.require_independent_approval || stored.head_lock.has_hard_lock();
+    let approval_ok = !need_ind
         || stored.head_lock.status == LockStatus::Clear
         || (stored.head_lock.status == LockStatus::Approved
             && stored

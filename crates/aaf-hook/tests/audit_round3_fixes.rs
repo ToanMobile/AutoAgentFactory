@@ -281,6 +281,8 @@ fn git_abbreviations_git_dir_head_and_multi_c_alias() {
         config_dir: Some(fx.config.clone()),
         home: Some(fx.home.clone()),
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let payload = json!({
         "tool_name": "Bash",

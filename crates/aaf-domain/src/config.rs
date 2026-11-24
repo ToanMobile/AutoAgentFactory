@@ -7,7 +7,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::land_mode::LandMode;
 pub use crate::oracle_config::OracleMode;
+pub use crate::pipeline::{
+    DEFAULT_ESCALATE_IMPLEMENTER_AFTER_REWORKS, DEFAULT_MAX_PLAN_ROUNDS, GlobalPipelineConfig,
+    GlobalUnblockerConfig, MAX_PLAN_ROUNDS_CAP, ReviewerConfig, StageModelConfig,
+};
 
 /// Tier 1: `~/.config/autofactory/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -19,6 +24,8 @@ pub struct GlobalConfig {
     pub machine: MachineConfig,
     pub run: MachineRunConfig,
     pub cross_audit: GlobalCrossAuditConfig,
+    pub pipeline: GlobalPipelineConfig,
+    pub unblocker: GlobalUnblockerConfig,
     pub telegram: crate::telegram::TelegramConfig,
 }
 
@@ -37,6 +44,10 @@ pub struct MachineRunConfig {
     /// `auto_merge = false`. Positive tier-1 caps cannot be loosened by repo
     /// or local config.
     pub max_open_review: Option<u32>,
+    /// Explicit Tier-1 allowlist of repo roots allowed to auto-land when Tier-2
+    /// leaves `auto_merge`/`land` unset. Explicit Tier-2 `false`/`pr` wins.
+    #[serde(default)]
+    pub auto_merge_repos: Vec<String>,
 }
 
 /// Machine-wide limits on heavy gate commands (Gradle, Unity, Xcode builds),
@@ -81,6 +92,9 @@ pub struct MachineConfig {
     /// Load percentage ceiling (100 = 1.0x CPU count) used by `aaf gate --when-idle`.
     /// 0 disables the load check in idle mode.
     pub idle_max_load_percent: u32,
+    /// Extra Tier-1-only writable cache directories inside sandbox.
+    #[serde(default)]
+    pub writable_caches: Vec<String>,
 }
 
 impl Default for MachineConfig {
@@ -89,11 +103,12 @@ impl Default for MachineConfig {
             max_heavy_parallel: 0,
             max_load_percent: 150,
             max_cpu_percent: 85,
-            heavy_wait_secs: 1800,
+            heavy_wait_secs: 300,
             low_priority: true,
             exclusive_build_tools: true,
             max_unity_parallel: 1,
             idle_max_load_percent: 100,
+            writable_caches: Vec::new(),
         }
     }
 }
@@ -105,11 +120,11 @@ pub enum AccountSelection {
     /// One account per provider for a repository. While that account is
     /// cooling down or leased the job waits; it never moves to another
     /// account of the same provider.
-    #[default]
     Pinned,
-    /// A task keeps its account and a repository prefers its last one, but
-    /// a limit hit or a busy lease moves to another account, which is then
-    /// kept.
+    /// Default. A task keeps its account and a repository prefers its
+    /// configured or last account, but a limit hit or a busy lease moves to
+    /// another free account, which is then kept.
+    #[default]
     Sticky,
     /// The free account with the fewest tokens in the last 5 hours.
     LeastUsed,
@@ -175,29 +190,54 @@ pub struct RepoConfig {
     pub proof: ProofConfig,
     pub github: GithubBoardConfig,
     pub pipeline: PipelineConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::worktree_config::WorktreeConfig::is_empty"
+    )]
+    pub worktree: crate::worktree_config::WorktreeConfig,
 }
 
 /// Hard upper bound on automatic audit-rework rounds before escalating.
 pub const MAX_AUDIT_REWORKS_CAP: u32 = 5;
 
-/// Optional multi-stage pipeline settings (plan stage & automatic audit rework).
+/// Optional multi-stage pipeline settings (plan stage, debate, tiered implementer & rework).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Generate a read-only plan before the first implementation turn.
     pub plan_stage: bool,
+    /// Enable adversarial cross-provider Plan Debate before implementation.
+    pub plan_debate: bool,
     /// Pause for explicit human approval (`aaf board approve-plan`) after plan generation.
     pub require_plan_approval: bool,
+    /// Maximum Plan Debate rounds before escalating (capped at [`MAX_PLAN_ROUNDS_CAP`]).
+    pub max_plan_rounds: u32,
+    /// Allow deterministic Tier-S safe docs tasks to skip Plan Debate.
+    pub allow_tier_s_skip_debate: bool,
     /// Maximum automatic rework rounds after an explicit `AuditVerdict::Fail` (capped at 5).
     pub max_audit_reworks: u32,
+    /// Rework count threshold after which implementation escalates to `implementer_escalated`.
+    pub escalate_implementer_after_reworks: u32,
+    pub plan_author: StageModelConfig,
+    pub plan_challenger: StageModelConfig,
+    pub implementer: StageModelConfig,
+    pub implementer_escalated: StageModelConfig,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         PipelineConfig {
             plan_stage: false,
+            plan_debate: false,
             require_plan_approval: false,
-            max_audit_reworks: 2,
+            max_plan_rounds: DEFAULT_MAX_PLAN_ROUNDS,
+            allow_tier_s_skip_debate: false,
+            max_audit_reworks: 3,
+            escalate_implementer_after_reworks: DEFAULT_ESCALATE_IMPLEMENTER_AFTER_REWORKS,
+            plan_author: StageModelConfig::default(),
+            plan_challenger: StageModelConfig::default(),
+            implementer: StageModelConfig::default(),
+            implementer_escalated: StageModelConfig::default(),
         }
     }
 }
@@ -250,6 +290,12 @@ pub struct ProofConfig {
     pub min_height: u32,
     pub denylist_file: String,
     pub allowed_tools: Vec<String>,
+    /// Optional host-side capture command loaded strictly from `base_sha`.
+    #[serde(default)]
+    pub capture_cmd: String,
+    /// Optional globs scoping `proof.required` to matching diff paths.
+    #[serde(default)]
+    pub trigger_globs: Vec<String>,
 }
 
 impl Default for ProofConfig {
@@ -261,6 +307,8 @@ impl Default for ProofConfig {
             min_height: 100,
             denylist_file: ".adb-denylist".to_string(),
             allowed_tools: vec!["mobile-mcp:mobile_save_screenshot".to_string()],
+            capture_cmd: String::new(),
+            trigger_globs: Vec::new(),
         }
     }
 }
@@ -344,6 +392,12 @@ pub struct GateConfig {
     /// Opt-in red->green & vacuity oracle (`off`, `warn`, `block`).
     #[serde(default, skip_serializing_if = "OracleMode::is_off")]
     pub red_green_oracle: OracleMode,
+    /// Policy for `OracleOutcome::CompileRed` when `red_green_oracle = "block"`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::oracle_config::OracleCompileRedPolicy::is_default"
+    )]
+    pub oracle_compile_red_policy: crate::oracle_config::OracleCompileRedPolicy,
 }
 
 // Re-export glob constants from the dedicated module so callers can import
@@ -367,6 +421,7 @@ impl Default for GateConfig {
             docs_fast_path: true,
             docs_fast_path_exclude_globs: Vec::new(),
             red_green_oracle: OracleMode::Off,
+            oracle_compile_red_policy: crate::oracle_config::OracleCompileRedPolicy::Blocked,
         }
     }
 }
@@ -384,10 +439,10 @@ pub struct UnblockerConfig {
 impl Default for UnblockerConfig {
     fn default() -> Self {
         UnblockerConfig {
-            max_unblock_cycles: 5,
+            max_unblock_cycles: 10,
             max_subtask_depth: 1,
-            max_token_budget: 500_000,
-            max_wall_clock_secs: 3600,
+            max_token_budget: 2_000_000,
+            max_wall_clock_secs: 10_800,
             global_freeze_consecutive_fails: 3,
         }
     }
@@ -401,6 +456,8 @@ pub struct RunConfig {
     /// Command template for non-Claude executors; `{prompt}` is substituted.
     pub executor_cmd: Vec<String>,
     pub auto_merge: bool,
+    #[serde(default, skip_serializing_if = "LandMode::is_default")]
+    pub land: LandMode,
     pub max_parallel: u32,
     pub run_timeout_secs: u64,
     /// `--model` of the Claude executor; empty leaves the CLI's own default.
@@ -426,6 +483,7 @@ impl Default for RunConfig {
             executor: "claude".to_string(),
             executor_cmd: Vec::new(),
             auto_merge: false,
+            land: LandMode::Pr,
             max_parallel: 1,
             run_timeout_secs: 3600,
             model: String::new(),
@@ -474,6 +532,9 @@ pub struct GlobalCrossAuditConfig {
     pub score_gate: Option<bool>,
     pub min_average_score: Option<u8>,
     pub min_criterion_score: Option<u8>,
+    pub dual_review: Option<bool>,
+    pub cross_adjudicate: Option<bool>,
+    pub reviewers: Vec<ReviewerConfig>,
 }
 
 /// Default minimum average score (/100) required when `score_gate = true`.
@@ -504,6 +565,12 @@ pub struct CrossAuditConfig {
     pub min_average_score: u8,
     /// Minimum required score per golden criterion `G1..G7` in `0..=100` (default 90).
     pub min_criterion_score: u8,
+    /// Enable Blind Parallel Dual-Review across `reviewers`.
+    pub dual_review: bool,
+    /// Allow one cross-adjudication turn when exactly one reviewer reports P0/P1 findings.
+    pub cross_adjudicate: bool,
+    /// Explicit reviewer pool for Dual-Review (`[[cross_audit.reviewers]]`).
+    pub reviewers: Vec<ReviewerConfig>,
 }
 
 impl Default for CrossAuditConfig {
@@ -518,6 +585,9 @@ impl Default for CrossAuditConfig {
             score_gate: false,
             min_average_score: DEFAULT_MIN_AVERAGE_SCORE,
             min_criterion_score: DEFAULT_MIN_CRITERION_SCORE,
+            dual_review: false,
+            cross_adjudicate: true,
+            reviewers: Vec::new(),
         }
     }
 }

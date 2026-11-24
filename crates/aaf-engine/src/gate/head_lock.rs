@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use aaf_domain::config::{RepoConfig, TEST_FILE_GLOBS};
-use aaf_domain::gate::{Approval, ChangeKind, HeadLockReport, LockStatus, LockedChange};
+use aaf_domain::gate::{Approval, ChangeKind, HeadLockReport, LockStatus, LockTier, LockedChange};
 use aaf_domain::ports::Clock;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
@@ -118,6 +118,28 @@ impl LockMatchers {
             && fs::symlink_metadata(repo_root.join(path))
                 .is_ok_and(|meta| meta.file_type().is_symlink())
     }
+
+    /// Tier-2 (`Soft`) ONLY for pure test-file paths that match no Tier-1 glob,
+    /// no locked symlink directory prefix, and no inline `aaf:allow(...)` path.
+    fn classify_tier(
+        &self,
+        locked_path: &str,
+        current_path: &str,
+        allow_paths: &HashSet<&str>,
+    ) -> LockTier {
+        let is_pure_test = self.test_globs.is_match(locked_path)
+            && !self.non_test_globs.is_match(locked_path)
+            && !self.non_test_globs.is_match(current_path)
+            && !self.symlink_dir_globs.is_match(locked_path)
+            && !self.symlink_dir_globs.is_match(current_path)
+            && !allow_paths.contains(locked_path)
+            && !allow_paths.contains(current_path);
+        if is_pure_test {
+            LockTier::Soft
+        } else {
+            LockTier::Hard
+        }
+    }
 }
 
 /// The path `change` is locked under, if it is locked.
@@ -216,6 +238,7 @@ fn locked_with(
         // The hash follows the content on disk, so an approval stops
         // covering the change the moment the file is edited again.
         let hash = hash(&change.path)?;
+        let tier = matchers.classify_tier(path, &change.path, &allow_paths);
         entries.push((
             path.to_string(),
             change.kind.letter(),
@@ -225,6 +248,7 @@ fn locked_with(
         report.push(LockedChange {
             path: path.to_string(),
             change: change.kind,
+            tier,
         });
     }
     if entries.is_empty() {
@@ -242,7 +266,7 @@ fn locked_with(
     Ok((report, aaf_fp::sha256_hex(&material), entries))
 }
 
-fn common_repo_root(repo_root: &Path) -> Option<std::path::PathBuf> {
+pub(crate) fn common_repo_root(repo_root: &Path) -> Option<std::path::PathBuf> {
     let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
     let common = aaf_fp::git(repo_root, &args, &[], GIT_TIMEOUT).ok()?;
     let common = Path::new(&common);
@@ -301,15 +325,8 @@ pub(crate) fn evaluate_changes(
     changes: &[Change],
     added: &[AddedLines],
 ) -> Result<HeadLockReport, GateError> {
-    evaluate_changes_with_common(
-        data_dir,
-        repo_root,
-        None,
-        cfg,
-        changes,
-        added,
-        cfg.cross_audit.require_different_provider,
-    )
+    let req = cfg.cross_audit.require_different_provider;
+    evaluate_changes_with_common(data_dir, repo_root, None, cfg, changes, added, req)
 }
 
 pub(crate) fn evaluate_changes_with_common(
@@ -330,13 +347,10 @@ pub(crate) fn evaluate_changes_with_common(
             approval: None,
         });
     }
-    let approval = valid_approval(
-        data_dir,
-        repo_root,
-        common_root,
-        &lock_fp,
-        require_independent,
-    );
+    let has_hard_lock = locked_changes.iter().any(|c| c.tier == LockTier::Hard);
+    let need_independent =
+        require_independent || cfg.cross_audit.require_different_provider || has_hard_lock;
+    let approval = valid_approval(data_dir, repo_root, common_root, &lock_fp, need_independent);
     Ok(HeadLockReport {
         status: if approval.is_some() {
             LockStatus::Approved
@@ -377,7 +391,7 @@ pub fn evaluate(
         })
 }
 
-fn write_approval_everywhere(
+pub(crate) fn write_approval_everywhere(
     data_dir: &Path,
     key: &[u8],
     repo_root: &Path,
@@ -407,6 +421,29 @@ pub fn approve(
     let who = (reviewer, same_account);
     let mut hash = |path: &str| content_hash(repo_root, path);
     approve_inner(data_dir, repo_root, cfg, &base, who, clock, None, &mut hash)
+}
+
+/// Signs a `PASS` approval only if the locked-file fingerprint still matches
+/// `expected_lock_fp` (closing TOCTOU between preview and confirmation).
+pub fn approve_matching(
+    data_dir: &Path,
+    repo_root: &Path,
+    cfg: &RepoConfig,
+    reviewer: &str,
+    same_account: bool,
+    expected_lock_fp: &str,
+    clock: &dyn Clock,
+) -> Result<Approval, GateError> {
+    let base = base::resolve(repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
+    approve_expecting(
+        data_dir,
+        repo_root,
+        cfg,
+        &base,
+        (reviewer, same_account),
+        clock,
+        expected_lock_fp,
+    )
 }
 
 /// [`approve`] against an already resolved `base`, for the locked diff a

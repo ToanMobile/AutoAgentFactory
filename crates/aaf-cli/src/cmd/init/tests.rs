@@ -6,8 +6,11 @@ use serde_json::{Value, json};
 
 use super::settings::{
     HookChange, command_program, find_hooks, matcher, matcher_covers_all, merge_hook, shell_quote,
+    strip_empty_hooks_object,
 };
-use super::{HookSource, gitignore_with_local, hook_command, resolve_hook};
+use super::{
+    HookSource, gitignore_unignore_settings, gitignore_with_local, hook_command, resolve_hook,
+};
 
 fn touch(path: &Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -184,12 +187,58 @@ fn merge_refuses_what_it_cannot_safely_rewrite() {
 
 #[test]
 fn gitignore_line_is_added_once_and_keeps_existing_lines() {
-    let line = ".autofactory/config.local.toml";
-    assert_eq!(gitignore_with_local(None), Some(format!("{line}\n")));
+    let local_cfg = ".autofactory/config.local.toml";
+    let local_settings = ".claude/settings.local.json";
+    assert_eq!(
+        gitignore_with_local(None),
+        Some(format!("{local_cfg}\n{local_settings}\n"))
+    );
     assert_eq!(
         gitignore_with_local(Some("target")),
-        Some(format!("target\n{line}\n"))
+        Some(format!("target\n{local_cfg}\n{local_settings}\n"))
     );
-    assert_eq!(gitignore_with_local(Some(&format!("a\n{line}\nb\n"))), None);
-    assert_eq!(gitignore_with_local(Some(&format!("/{line}\n"))), None);
+    assert_eq!(
+        gitignore_with_local(Some(&format!("a\n{local_cfg}\nb\n"))),
+        Some(format!("a\n{local_cfg}\nb\n{local_settings}\n"))
+    );
+    assert_eq!(
+        gitignore_with_local(Some(&format!("a\n{local_cfg}\n{local_settings}\nb\n"))),
+        None
+    );
+    assert_eq!(
+        gitignore_with_local(Some(&format!("/{local_cfg}\n/{local_settings}\n"))),
+        None
+    );
+}
+
+#[test]
+fn gitignore_unignore_settings_handles_claude_dir_and_file_rules() {
+    let dir_ignored = ".claude/\n.autofactory/config.local.toml\n.claude/settings.local.json\n";
+    let updated = gitignore_unignore_settings(Some(dir_ignored)).unwrap();
+    assert_eq!(
+        updated,
+        format!("{dir_ignored}!.claude/\n.claude/*\n!.claude/settings.json\n")
+    );
+    assert_eq!(gitignore_unignore_settings(Some(&updated)), None);
+
+    let pattern_ignored = "*.json\n";
+    let updated = gitignore_unignore_settings(Some(pattern_ignored)).unwrap();
+    assert_eq!(updated, "*.json\n!.claude/settings.json\n");
+    assert_eq!(gitignore_unignore_settings(Some(&updated)), None);
+}
+
+#[test]
+fn strip_empty_hooks_object_cleans_only_empty_object() {
+    let with_empty = json!({"permissions": {"allow": ["Bash(ls:*)"]}, "hooks": {}}).to_string();
+    let cleaned = strip_empty_hooks_object(&with_empty).unwrap();
+    let parsed: Value = serde_json::from_str(&cleaned).unwrap();
+    assert!(parsed.get("hooks").is_none(), "{cleaned}");
+    assert_eq!(parsed["permissions"]["allow"], json!(["Bash(ls:*)"]));
+    assert_eq!(strip_empty_hooks_object(&cleaned), None);
+
+    let non_empty = json!({"hooks": {"Stop": []}}).to_string();
+    assert_eq!(strip_empty_hooks_object(&non_empty), None);
+    assert_eq!(strip_empty_hooks_object("{\"hooks\": []}"), None);
+    assert_eq!(strip_empty_hooks_object("{\"permissions\": {}}"), None);
+    assert_eq!(strip_empty_hooks_object("{ not json"), None);
 }

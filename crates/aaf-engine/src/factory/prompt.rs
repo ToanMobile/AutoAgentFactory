@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use aaf_domain::account::AccountProfile;
+use aaf_domain::account::{AccountProfile, ProviderKind};
 use aaf_domain::ports::SandboxPolicy;
 use aaf_domain::task::Task;
 
@@ -37,6 +37,10 @@ pub fn build_prompt(task: &Task, branch: &str) -> String {
     let mut prompt = format!(
         "You are working on one task in the git worktree at the current directory, on \
          branch `{branch}`.\n\
+         Headless Autonomous Execution: you are running headlessly with no human present. \
+         Never stop to ask questions or wait for confirmation; make pragmatic engineering \
+         decisions from the codebase and task spec, write tests, verify your changes, and \
+         finish cleanly with your work committed on this branch.\n\
          Rules: stay on this branch and inside this directory; write the test first, then the \
          change; commit your work on this branch when it is complete; do not push, do not \
          merge, do not edit the task description. Existing tests and build configuration are \
@@ -87,8 +91,8 @@ pub fn build_prompt(task: &Task, branch: &str) -> String {
         prompt.push_str(
             "\n# Notes from earlier attempts\n\n\
              Earlier runs of this task failed as described below. Do not repeat the same \
-             approach. For a merge conflict, merge the base branch into this branch and \
-             resolve it.\n\n",
+             approach. For a merge conflict, run `git rebase <base>` onto this branch and \
+             resolve conflicts linearly — do not create merge commits.\n\n",
         );
         for note in failure_notes {
             prompt.push_str(&format!("- {note}\n"));
@@ -101,8 +105,9 @@ pub fn build_prompt(task: &Task, branch: &str) -> String {
 /// repository and produce a concise implementation plan without editing files.
 pub fn build_plan_prompt(task: &Task, ctx: &PromptContext<'_>) -> String {
     let mut prompt = format!(
-        "You are in READ-ONLY planning mode for one task. Do NOT edit, create, or delete \
-         any files, and do NOT run commits or mutating commands.\n\
+        "You are in READ-ONLY planning mode for one task (running headlessly with no human \
+         present — do not ask questions or wait for confirmation). Do NOT edit, create, or \
+         delete any files, and do NOT run commits or mutating commands.\n\
          Inspect the codebase and produce a concise implementation plan covering:\n\
          1. Files to change (paths and responsibilities)\n\
          2. Test strategy (tests to add/update to prove each acceptance criterion)\n\
@@ -176,7 +181,7 @@ fn append_repo_environment(prompt: &mut String, ctx: &PromptContext<'_>) {
 
 fn discover_skills(repo_root: &Path) -> Vec<String> {
     let mut names = BTreeSet::new();
-    for rel in [".claude/skills", ".agents/skills"] {
+    for rel in [".claude/skills", ".agents/skills", ".agent/skills"] {
         let Ok(entries) = fs::read_dir(repo_root.join(rel)) else {
             continue;
         };
@@ -194,35 +199,52 @@ fn discover_skills(repo_root: &Path) -> Vec<String> {
     names.into_iter().collect()
 }
 
-/// Sandbox for a run on `own` account.
-///
-/// Sandboxed: the agent may not read the aaf data dir (receipt key,
-/// approvals) nor another account's config dir. `<home>/.claude` is never
-/// denied: profile directories symlink their `projects` and `settings` into
-/// it, so denying it breaks every other Claude account.
-/// Unsandboxed (Linux, or `--unsandboxed`): disabled, and the executor then
-/// drops its permission-bypass flags.
-pub fn sandbox_policy(
+/// Sandbox for a run on `provider` (and optional `own` account), enforcing
+/// cross-provider credential isolation:
+/// - `$HOME/.claude` is exempt only for `ProviderKind::ClaudeCode`.
+/// - Every non-Claude run denies `$HOME/.claude` and `$HOME/.claude.json` if present.
+/// - Every non-Antigravity run denies `$HOME/.gemini` if present (including symlinks).
+/// - `data_dir` and all other discovered accounts in `all` are always denied.
+pub fn sandbox_policy_for(
     sandboxed: bool,
     data_dir: &Path,
     home: &Path,
+    provider: ProviderKind,
     own: Option<&AccountProfile>,
     all: &[AccountProfile],
 ) -> SandboxPolicy {
     if !sandboxed {
         return SandboxPolicy::default();
     }
-    // Resolved, because the sandbox matches resolved paths: an account dir
-    // that is itself a link to `~/.claude` must not deny it either.
     let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let shared = resolve(&home.join(".claude"));
+    let exists_or_link = |path: &Path| std::fs::symlink_metadata(path).is_ok() || path.exists();
+    let shared_claude = resolve(&home.join(".claude"));
     let own_dir = own.map(|own| resolve(Path::new(&own.config_dir)));
     let mut read_denied = vec![data_dir.to_string_lossy().into_owned()];
+    let mut push_unique = |path: String| {
+        if !read_denied.contains(&path) {
+            read_denied.push(path);
+        }
+    };
     for account in all {
         let dir = resolve(Path::new(&account.config_dir));
-        // A directory that is gone cannot be read, so it needs no rule.
-        if Some(&dir) != own_dir.as_ref() && dir != shared && dir.is_dir() {
-            read_denied.push(account.config_dir.clone());
+        let exempt_shared = provider == ProviderKind::ClaudeCode && dir == shared_claude;
+        if Some(&dir) != own_dir.as_ref() && !exempt_shared && dir.is_dir() {
+            push_unique(account.config_dir.clone());
+        }
+    }
+    if provider != ProviderKind::ClaudeCode {
+        for name in [".claude", ".claude.json"] {
+            let path = home.join(name);
+            if exists_or_link(&path) {
+                push_unique(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if provider != ProviderKind::Antigravity {
+        let gemini = home.join(".gemini");
+        if exists_or_link(&gemini) {
+            push_unique(gemini.to_string_lossy().into_owned());
         }
     }
     SandboxPolicy {
@@ -230,6 +252,39 @@ pub fn sandbox_policy(
         writable_paths: Vec::new(),
         read_denied_paths: read_denied,
         read_only: false,
+    }
+}
+
+/// Sandbox for a run on `own` account (infers provider from `own`, defaulting to
+/// `ProviderKind::ClaudeCode` for legacy single-provider callers).
+pub fn sandbox_policy(
+    sandboxed: bool,
+    data_dir: &Path,
+    home: &Path,
+    own: Option<&AccountProfile>,
+    all: &[AccountProfile],
+) -> SandboxPolicy {
+    let provider = own.map(|a| a.provider).unwrap_or(ProviderKind::ClaudeCode);
+    sandbox_policy_for(sandboxed, data_dir, home, provider, own, all)
+}
+
+/// Read-only sandbox policy for a plan-stage run with an explicit provider.
+pub fn plan_sandbox_policy_for(
+    settings: &Settings,
+    provider: ProviderKind,
+    own: Option<&AccountProfile>,
+    all: &[AccountProfile],
+) -> SandboxPolicy {
+    SandboxPolicy {
+        read_only: true,
+        ..sandbox_policy_for(
+            settings.sandboxed,
+            &settings.data_dir,
+            &settings.home,
+            provider,
+            own,
+            all,
+        )
     }
 }
 
@@ -241,14 +296,84 @@ pub fn plan_sandbox_policy(
     own: Option<&AccountProfile>,
     all: &[AccountProfile],
 ) -> SandboxPolicy {
-    SandboxPolicy {
-        read_only: true,
-        ..sandbox_policy(
-            settings.sandboxed,
-            &settings.data_dir,
-            &settings.home,
-            own,
-            all,
-        )
+    let provider = own.map(|a| a.provider).unwrap_or(ProviderKind::ClaudeCode);
+    plan_sandbox_policy_for(settings, provider, own, all)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use aaf_domain::task::{ImmutableSpec, Priority};
+
+    use super::*;
+
+    fn sample_task(notes: Vec<String>) -> Task {
+        let spec = ImmutableSpec {
+            description: "Implement parser".to_string(),
+            acceptance: vec!["parses cleanly".to_string()],
+        };
+        let mut task = Task::new_root("t-1", "/repo", "Parser", spec, Priority::P1, 1);
+        task.context_notes = notes;
+        task
+    }
+
+    #[test]
+    fn worker_prompt_includes_headless_directive_and_rebase_conflict_instruction() {
+        let task = sample_task(vec!["merge conflict on src/lib.rs".to_string()]);
+        let prompt = build_prompt(&task, "aaf/t-1");
+        assert!(prompt.contains("Headless Autonomous Execution"), "{prompt}");
+        assert!(
+            prompt.contains("Never stop to ask questions or wait for confirmation"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("git rebase <base>"), "{prompt}");
+        assert!(
+            !prompt.contains("merge the base branch into this branch"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn plan_prompt_stays_read_only_and_headless() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let task = sample_task(vec![]);
+        let ctx = PromptContext {
+            repo_root: tmp.path(),
+            profile: "rust",
+            proof_required: false,
+        };
+        let prompt = build_plan_prompt(&task, &ctx);
+        assert!(prompt.contains("READ-ONLY"), "{prompt}");
+        assert!(prompt.contains("running headlessly"), "{prompt}");
+        assert!(prompt.contains("Do NOT edit"), "{prompt}");
+    }
+
+    #[test]
+    fn discover_skills_reads_claude_agents_and_singular_agent_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (dir, name) in [
+            (".claude/skills", "alpha-skill"),
+            (".agents/skills", "beta-skill"),
+            (".agent/skills", "gamma-skill"),
+            (".agent/skills", "alpha-skill"),
+        ] {
+            let path = tmp.path().join(dir).join(name);
+            fs::create_dir_all(&path).expect("mkdir");
+            fs::write(path.join("SKILL.md"), "# skill\n").expect("write");
+        }
+        // Directory without SKILL.md and dot-prefixed entries must be ignored.
+        fs::create_dir_all(tmp.path().join(".agent/skills/no-skill-file")).expect("mkdir");
+        fs::create_dir_all(tmp.path().join(".agent/skills/.hidden")).expect("mkdir");
+        fs::write(tmp.path().join(".agent/skills/.hidden/SKILL.md"), "# x\n").expect("write");
+
+        let found = discover_skills(tmp.path());
+        assert_eq!(
+            found,
+            vec![
+                "alpha-skill".to_string(),
+                "beta-skill".to_string(),
+                "gamma-skill".to_string()
+            ]
+        );
     }
 }

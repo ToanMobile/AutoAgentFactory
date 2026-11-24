@@ -146,9 +146,16 @@ fn store_submit_guard_matching_corpus() {
         aaf_hook::Decision::Deny(denial) => denial,
         other => panic!("expected a denial, got {other:?}"),
     };
-    // Kept on purpose: a store submission is the operator's act (a
-    // hook-only session of their own), where `aaf gate --release` runs.
-    assert_eq!(denial.fix, "aaf gate --release");
+    // Inside a factory worker run, `aaf gate --release` cannot be run by the
+    // agent, so the fix guides the worker to build/verify locally instead.
+    assert_eq!(denial.fix, aaf_hook::store_guard::FIX_IN_FACTORY_RUN);
+
+    // Interactive operator sessions keep the `aaf gate --release` fix.
+    let interactive_denial = match Fixture::new().interactive().bash("fastlane deliver") {
+        aaf_hook::Decision::Deny(denial) => denial,
+        other => panic!("expected a denial, got {other:?}"),
+    };
+    assert_eq!(interactive_denial.fix, "aaf gate --release");
 }
 
 /// The reader of the data guard's fix is an agent. Inside a factory run

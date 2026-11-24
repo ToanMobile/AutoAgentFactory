@@ -1,16 +1,19 @@
-//! Auditor turn execution (with 1-shot format-repair retry on `Inconclusive`),
-//! short-circuit guard for empty/truncated diffs, and runner outcome watcher.
-
-use std::sync::{Mutex, PoisonError};
+//! Auditor turn execution (with up to 2 format/citation-repair retries on
+//! `Inconclusive`), lockfile-summarized short-circuit guard for empty/truncated
+//! diffs, and runner outcome watcher.
 
 use aaf_domain::budget::BudgetCheck;
 use aaf_domain::event::EventKind;
 use aaf_domain::ports::{
-    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, InfraKind, LimitHit, PortError,
-    PortResult,
+    AgentOutcome, AgentRunner, InfraFailure, InfraKind, LimitHit, PortError, PortResult,
 };
 use aaf_domain::run::RunStatus;
 use aaf_domain::task::{Task, TaskState};
+
+#[path = "audit_turn_watch.rs"]
+mod watch;
+
+pub(super) use watch::InfraWatch;
 
 use super::audit_backend::{AuditBackend, audit_cmd_is_claude};
 use super::git_real::COMMIT_DEFERRED;
@@ -23,7 +26,7 @@ use crate::git::TaskWorktree;
 use crate::unblocker::{FailureSignal, QuotaRoute};
 
 /// An account whose login was refused rests this long while others work.
-const AUTH_COOLDOWN_SECS: i64 = 3600;
+const AUTH_QUARANTINE_SECS: i64 = 3600;
 /// A commit that may pass later (signing, a slow hook, the commit lock)
 /// waits this long between tries ...
 const COMMIT_WAIT_SECS: i64 = 900;
@@ -34,113 +37,22 @@ const NOTE_TEXT_CHARS: usize = 1500;
 const NO_CHANGE_REASON_CHARS: usize = 300;
 const HISTORY_EVENTS: u32 = 50;
 
-/// Passes a run on to the real runner and captures any infra failure, usage
-/// limit, failed log tail, and final text: wrappers like audit and subtask
-/// proposer only report their own result.
-pub(super) struct InfraWatch<'a> {
-    runner: &'a dyn AgentRunner,
-    seen: Mutex<Option<InfraFailure>>,
-    limit_hit: Mutex<Option<LimitHit>>,
-    failed_tail: Mutex<Option<String>>,
-    last_succeeded: Mutex<bool>,
-    last_final_text: Mutex<String>,
-}
+/// Maximum format/citation-repair retries when an auditor returns `Inconclusive`.
+pub(super) const MAX_AUDITOR_INCONCLUSIVE_RETRIES: usize = 2;
 
-impl<'a> InfraWatch<'a> {
-    pub(super) fn new(runner: &'a dyn AgentRunner) -> Self {
-        Self {
-            runner,
-            seen: Mutex::new(None),
-            limit_hit: Mutex::new(None),
-            failed_tail: Mutex::new(None),
-            last_succeeded: Mutex::new(false),
-            last_final_text: Mutex::new(String::new()),
-        }
-    }
-
-    pub(super) fn take(self) -> (Option<InfraFailure>, Option<LimitHit>) {
-        let (infra, hit, _, _, _) = self.take_all();
-        (infra, hit)
-    }
-
-    pub(super) fn take_all(
-        self,
-    ) -> (
-        Option<InfraFailure>,
-        Option<LimitHit>,
-        Option<String>,
-        bool,
-        String,
-    ) {
-        (
-            self.seen
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-            self.limit_hit
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-            self.failed_tail
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-            self.last_succeeded
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-            self.last_final_text
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
-    }
-}
-
-impl AgentRunner for InfraWatch<'_> {
-    fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome> {
-        let outcome = self.runner.run(request)?;
-        *self
-            .last_succeeded
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = outcome.succeeded();
-        *self
-            .last_final_text
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = outcome.final_text.clone();
-        if let Some(infra) = &outcome.infra {
-            *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(infra.clone());
-        }
-        if let Some(hit) = &outcome.limit_hit {
-            *self
-                .limit_hit
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(hit.clone());
-        }
-        if !outcome.succeeded()
-            && outcome.infra.is_none()
-            && outcome.limit_hit.is_none()
-            && !outcome.log_tail.trim().is_empty()
-        {
-            *self
-                .failed_tail
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(outcome.log_tail.clone());
-        }
-        Ok(outcome)
-    }
-
-    fn reports_tokens(&self) -> bool {
-        self.runner.reports_tokens()
-    }
-}
-
-/// Returns a concise diagnostic reason when `diff` cannot possibly be approved
-/// by an auditor (empty or exceeding [`cross_audit::prompt::MAX_DIFF_BYTES`]),
+/// Returns a concise diagnostic reason when `diff` (after deterministic
+/// allowlisted lockfile summarization) cannot possibly be approved by an
+/// auditor (empty or exceeding [`cross_audit::prompt::MAX_DIFF_BYTES`]),
 /// allowing callers to short-circuit with 0 worktrees and 0 LLM tokens.
 pub(super) fn short_circuit_audit_reason(diff: &str) -> Option<String> {
     if diff.trim().is_empty() {
         return Some("inconclusive: empty diff: nothing to audit".to_string());
     }
-    if cross_audit::prompt::truncate_diff(diff).1 {
+    let prepared = cross_audit::prompt::summarize_diff_lockfiles(diff);
+    if cross_audit::prompt::truncate_diff(&prepared).1 {
         return Some(format!(
             "inconclusive: diff was truncated ({} > {} bytes): the unseen part cannot be approved",
-            diff.len(),
+            prepared.len(),
             cross_audit::prompt::MAX_DIFF_BYTES,
         ));
     }
@@ -229,8 +141,10 @@ fn classify_auditor_log_tail(
 }
 
 /// One recorded auditor run in `tree`, plus any infra failure or rate limit.
-/// Performs at most one format-repair retry when the auditor succeeded with
-/// unparseable / schema-invalid output (`Inconclusive`) and budget remains.
+/// Summarizes allowlisted lockfiles before diff truncation and performs up to
+/// [`MAX_AUDITOR_INCONCLUSIVE_RETRIES`] (2) format/citation-repair retries when
+/// the auditor succeeded with unparseable / schema-invalid output (`Inconclusive`)
+/// and budget remains.
 pub(crate) fn run_auditor_turn(
     deps: &Deps,
     audit_backend: Option<&AuditBackend>,
@@ -255,17 +169,27 @@ pub(crate) fn run_auditor_turn(
         accounts,
     )?;
     run.request.sandbox.read_only = true;
+    let prepared_input = AuditInput {
+        spec: input.spec.clone(),
+        diff: cross_audit::prompt::summarize_diff_lockfiles(&input.diff),
+        mobile: input.mobile,
+    };
     let watch = InfraWatch::new(runner);
     let tokens_measured = watch.reports_tokens();
-    let mut report =
-        match cross_audit::run_scored_audit(input, &watch, &run.request, require_scores) {
-            Ok(report) => report,
-            Err(err) => {
-                worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0), false)?;
-                return Err(err);
-            }
-        };
-    let (mut infra, mut limit_hit, failed_tail, succeeded, final_text) = watch.take_all();
+    let mut report = match cross_audit::run_scored_audit(
+        &prepared_input,
+        &watch,
+        &run.request,
+        require_scores,
+    ) {
+        Ok(report) => report,
+        Err(err) => {
+            worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0), false)?;
+            return Err(err);
+        }
+    };
+    let (mut infra, mut limit_hit, failed_tail, last_succeeded, mut last_final_text) =
+        watch.take_all();
     if limit_hit.is_none()
         && infra.is_none()
         && let Some(tail) = failed_tail.as_deref()
@@ -273,63 +197,84 @@ pub(crate) fn run_auditor_turn(
         classify_auditor_log_tail(tail, deps.now(), &mut infra, &mut limit_hit);
     }
 
-    if succeeded
-        && !report.diff_truncated
-        && infra.is_none()
-        && limit_hit.is_none()
-        && !final_text.trim().is_empty()
-        && final_text.chars().count() <= cross_audit::prompt::MAX_REPAIR_PRIOR_CHARS
-        && let AuditVerdict::Inconclusive { ref reason } = report.verdict
-    {
+    let mut saw_named_blocker = false;
+    for _attempt in 0..MAX_AUDITOR_INCONCLUSIVE_RETRIES {
+        let reason = match &report.verdict {
+            AuditVerdict::Inconclusive { reason }
+                if last_succeeded
+                    && !report.diff_truncated
+                    && infra.is_none()
+                    && limit_hit.is_none()
+                    && !last_final_text.trim().is_empty() =>
+            {
+                reason.clone()
+            }
+            _ => break,
+        };
+        if cross_audit::verdict::names_blocking_yes(&last_final_text, &report.checklist) {
+            saw_named_blocker = true;
+        }
         let mut projected = worker::ensure_budget(deps, &task.root_id)?;
         projected.add_usage(report.tokens_in.saturating_add(report.tokens_out), 0, 0);
-        if projected.check() == BudgetCheck::Ok {
-            let mut repair_req = run.request.clone();
-            repair_req.run_id = unblock::unique_id();
-            repair_req.prompt = cross_audit::prompt::build_format_repair_prompt(
-                input,
-                require_scores,
-                reason,
-                &final_text,
-            );
-            // Fall back to the original Inconclusive verdict if the runner errors
-            // on the retry (e.g. transient port failure or single-shot test mock).
-            if let Ok(repair_out) = runner.run(&repair_req) {
-                report.tokens_in = report.tokens_in.saturating_add(repair_out.tokens_in);
-                report.tokens_out = report.tokens_out.saturating_add(repair_out.tokens_out);
-                if let Some(hit) = repair_out.limit_hit {
-                    limit_hit = Some(hit);
-                } else if let Some(inf) = repair_out.infra {
-                    infra = Some(inf);
-                } else if !repair_out.succeeded() {
-                    if !repair_out.log_tail.trim().is_empty() {
-                        let tail = &repair_out.log_tail;
-                        classify_auditor_log_tail(tail, deps.now(), &mut infra, &mut limit_hit);
-                    }
-                } else {
-                    let (visible_diff, _) = cross_audit::prompt::truncate_diff(&input.diff);
-                    let hunks = cross_audit::parse_diff_hunks_with_truncation(visible_diff, false);
-                    let parsed = cross_audit::validate_verdict_against_diff(
-                        cross_audit::parse_scored_verdict(
-                            &repair_out.final_text,
-                            &report.checklist,
-                            require_scores,
-                        ),
-                        &hunks,
-                    );
-                    // A blocker the first reply named (but left uncited or
-                    // cited outside the diff) may be cited now, never dropped.
-                    let named_blocker =
-                        cross_audit::verdict::names_blocking_yes(&final_text, &report.checklist);
-                    if !matches!(parsed.verdict, AuditVerdict::Inconclusive { .. })
-                        && !(named_blocker && parsed.verdict.is_pass())
-                    {
-                        report.verdict = parsed.verdict;
-                        report.scores = parsed.scores;
-                    }
-                }
-            }
+        if projected.check() != BudgetCheck::Ok {
+            break;
         }
+        let mut repair_req = run.request.clone();
+        repair_req.run_id = unblock::unique_id();
+        repair_req.prompt = cross_audit::prompt::build_format_repair_prompt(
+            &prepared_input,
+            require_scores,
+            &reason,
+            &last_final_text,
+        );
+        // Fall back to the latest Inconclusive verdict if the runner errors
+        // on the retry (e.g. transient port failure or single-shot test mock).
+        let Ok(repair_out) = runner.run(&repair_req) else {
+            break;
+        };
+        report.tokens_in = report.tokens_in.saturating_add(repair_out.tokens_in);
+        report.tokens_out = report.tokens_out.saturating_add(repair_out.tokens_out);
+        if let Some(hit) = repair_out.limit_hit {
+            limit_hit = Some(hit);
+            break;
+        }
+        if let Some(inf) = repair_out.infra {
+            infra = Some(inf);
+            break;
+        }
+        if !repair_out.succeeded() {
+            if !repair_out.log_tail.trim().is_empty() {
+                classify_auditor_log_tail(
+                    &repair_out.log_tail,
+                    deps.now(),
+                    &mut infra,
+                    &mut limit_hit,
+                );
+            }
+            break;
+        }
+        let (visible_diff, _) = cross_audit::prompt::truncate_diff(&prepared_input.diff);
+        let hunks = cross_audit::parse_diff_hunks_with_truncation(visible_diff, false);
+        let parsed = cross_audit::validate_verdict_against_diff(
+            cross_audit::parse_scored_verdict(
+                &repair_out.final_text,
+                &report.checklist,
+                require_scores,
+            ),
+            &hunks,
+        );
+        // A blocker an earlier reply named (but left uncited or cited outside
+        // the diff) may be cited now, never dropped into a pass.
+        if saw_named_blocker && parsed.verdict.is_pass() {
+            break;
+        }
+        if !matches!(parsed.verdict, AuditVerdict::Inconclusive { .. }) {
+            report.verdict = parsed.verdict;
+            report.scores = parsed.scores;
+            break;
+        }
+        report.verdict = parsed.verdict;
+        last_final_text = repair_out.final_text;
     }
 
     let status = if limit_hit.is_some() {
@@ -371,8 +316,9 @@ pub(super) fn halt_message(task_id: &str, what: &str, infra: &InfraFailure, fix:
 
 /// The agent CLI could not work for its account or network: the task goes
 /// back to Ready without a ladder step (no note, no cycle, no failed root).
-/// Network failures return [`Next::RetryAfter`]; an auth failure moves the task to
-/// another account when one can take it, and halts otherwise.
+/// Network failures return [`Next::RetryAfter`]. Auth failures quarantine the
+/// failing account and rotate (`Next::Switch`) when another healthy account
+/// exists in the pool, halting only when none remain.
 pub(super) fn halt_on_infra(
     deps: &Deps,
     task_id: &str,
@@ -401,29 +347,61 @@ pub(super) fn halt_on_infra(
     Ok(Next::Halt(detail))
 }
 
-/// O12-R10-2: a login refused on one account says nothing about the others:
-/// the account rests and another one takes the task. False when no other
-/// account can (a single or pinned account, all others resting), and the run
-/// halts as before.
+/// O12-R10-2 / Plan v3 auth quarantine: a login refused on one account says
+/// nothing about the others: the account is quarantined and another takes the
+/// task. False when no other account can (single or pinned account, or all
+/// others quarantined/resting), and the run halts.
 fn switch_after_auth(
     deps: &Deps,
     task_id: &str,
     grant: &Grant,
     infra: &InfraFailure,
 ) -> PortResult<bool> {
-    if grant.account_id().is_none()
-        || deps.accounts.provider_account_count()? < 2
+    let Some(acct) = &grant.account else {
+        return Ok(false);
+    };
+    if deps.accounts.provider_account_count()? < 2
         || deps.accounts.after_limit()? == Some(QuotaRoute::Wait)
     {
         return Ok(false);
     }
+    let now = deps.now();
+    let until = now.saturating_add(AUTH_QUARANTINE_SECS);
+    let raw = format!("auth: {}", unblock::one_line(&infra.raw, 300));
     let hit = LimitHit {
-        reset_at: Some(deps.now().saturating_add(AUTH_COOLDOWN_SECS)),
-        raw: format!("auth: {}", unblock::one_line(&infra.raw, 300)),
+        reset_at: Some(until),
+        raw: raw.clone(),
     };
-    unblock::report_account_limit(deps, task_id, grant, &hit)?;
-    // Asked after the report: the refused account already counts as resting.
-    Ok(deps.accounts.after_limit()? != Some(QuotaRoute::Wait))
+    deps.accounts.report_limit(&acct.id, &hit)?;
+    deps.store.set_meta(
+        &format!("account_auth_quarantine:{}", acct.id),
+        &until.to_string(),
+    )?;
+    deps.emit(
+        EventKind::AccountCooldown,
+        task_id,
+        serde_json::json!({
+            "account": acct.id,
+            "reset_at": Some(until),
+            "reason": "auth_quarantine",
+            "raw": raw,
+        }),
+    )?;
+    let can_rotate = match deps.accounts.after_limit()? {
+        Some(QuotaRoute::Switch) => true,
+        Some(QuotaRoute::Wait) => false,
+        None => deps.accounts.profiles()?.iter().any(|profile| {
+            profile.id != acct.id
+                && deps
+                    .store
+                    .get_meta(&format!("account_auth_quarantine:{}", profile.id))
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .is_none_or(|exp| exp <= now)
+        }),
+    };
+    Ok(can_rotate)
 }
 
 /// O12-R10-6: what the agent said about a run that changed nothing, for the

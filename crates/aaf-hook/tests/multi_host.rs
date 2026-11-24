@@ -23,6 +23,8 @@ fn with_env<T>(fixture: &Fixture, work: impl FnOnce(&HookEnv) -> T) -> T {
         config_dir: Some(fixture.config.clone()),
         home: Some(fixture.home.clone()),
         cwd: None,
+        in_factory_run: fixture.in_factory_run,
+        trusted_aaf_bins: fixture.trusted_aaf_bins.clone(),
     };
     work(&env)
 }

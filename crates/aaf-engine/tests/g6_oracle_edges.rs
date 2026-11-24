@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use aaf_domain::config::{CommandsConfig, MachineConfig, OracleMode, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus, Receipt};
+use aaf_domain::oracle_config::OracleCompileRedPolicy;
 use aaf_domain::ports::Clock;
 use aaf_engine::config::{
     ConfigError, ConfigInputs, ConfigOverlay, Detected, LOCAL_CONFIG_REL, REPO_CONFIG_REL, load,
@@ -15,30 +16,21 @@ use aaf_engine::config::{
 };
 use aaf_engine::gate::oracle_classify::{OracleOutcome, classify};
 use aaf_engine::gate::{config_hash, run_gate_throttled};
-use aaf_engine::throttle::{
-    LoadProbe, Pressure, PriorityTools, SAMPLE_EVERY, SystemGroup, ThreadSleeper, Throttle,
-};
 use tempfile::TempDir;
 
-struct Calm;
-
-impl LoadProbe for Calm {
-    fn load_percent(&self) -> Option<u32> {
-        Some(0)
-    }
-    fn pressure(&self) -> Option<Pressure> {
-        Some(Pressure::Normal)
-    }
-    fn free_memory_bytes(&self) -> Option<u64> {
-        Some(u64::MAX)
-    }
-}
+#[path = "throttle_support.rs"]
+mod throttle_support;
+use throttle_support::calm_throttle;
 
 struct FixedClock(i64);
 impl Clock for FixedClock {
     fn now(&self) -> i64 {
         self.0
     }
+}
+
+fn has_reason(receipt: &Receipt, needle: &str) -> bool {
+    receipt.reasons.iter().any(|r| r.contains(needle))
 }
 
 fn git_out(repo: &Path, args: &[&str]) -> String {
@@ -66,15 +58,29 @@ fn git_out(repo: &Path, args: &[&str]) -> String {
 }
 
 fn init_repo(oracle_mode: &str, test_cmd: &str) -> TempDir {
+    init_repo_with_gate(oracle_mode, "", test_cmd)
+}
+
+fn init_repo_with_gate(oracle_mode: &str, extra_gate: &str, test_cmd: &str) -> TempDir {
+    init_repo_with_cmds(oracle_mode, extra_gate, test_cmd, test_cmd)
+}
+
+fn init_repo_with_cmds(
+    oracle_mode: &str,
+    extra_gate: &str,
+    scoped_cmd: &str,
+    full_cmd: &str,
+) -> TempDir {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git_out(root, &["init", "-q", "-b", "main"]);
     fs::create_dir_all(root.join(".autofactory")).unwrap();
     fs::create_dir_all(root.join("src")).unwrap();
     fs::create_dir_all(root.join("tests")).unwrap();
-    let cmd_toml = toml::Value::String(test_cmd.to_string()).to_string();
+    let scoped_toml = toml::Value::String(scoped_cmd.to_string()).to_string();
+    let full_toml = toml::Value::String(full_cmd.to_string()).to_string();
     let cfg = format!(
-        "[commands]\ntest_scoped = {cmd_toml}\ntest_full = {cmd_toml}\n\n[gate]\nbase_ref = \"main\"\nred_green_oracle = \"{oracle_mode}\"\n"
+        "[commands]\ntest_scoped = {scoped_toml}\ntest_full = {full_toml}\n\n[gate]\nbase_ref = \"main\"\nred_green_oracle = \"{oracle_mode}\"\n{extra_gate}"
     );
     fs::write(root.join(REPO_CONFIG_REL), cfg).unwrap();
     fs::write(root.join("src/app.sh"), "#!/bin/sh\necho 0\n").unwrap();
@@ -99,17 +105,7 @@ fn run_gate_mode(repo: &Path, data: &Path, mode: GateMode) -> Receipt {
     })
     .unwrap();
     let machine = MachineConfig::default();
-    let throttle = Throttle {
-        machine: &machine,
-        probe: &Calm,
-        sleeper: &ThreadSleeper,
-        control: &SystemGroup,
-        progress: &|_| {},
-        cpus: 4,
-        tools: PriorityTools::detect(),
-        jitter_seed: 1,
-        sample_every: SAMPLE_EVERY,
-    };
+    let throttle = calm_throttle(&machine);
     run_gate_throttled(
         data,
         repo,
@@ -152,27 +148,19 @@ fn warn_mode_reports_warning_for_vacuous_and_no_tests_without_blocking() {
     let data = TempDir::new().unwrap();
     fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
 
-    // No test change in warn mode -> Clear with warning.
     let no_tests = run_gate(repo.path(), data.path());
     assert_eq!(no_tests.status, GateStatus::Clear, "{:?}", no_tests.reasons);
     assert!(
-        no_tests
-            .reasons
-            .iter()
-            .any(|r| r.starts_with("warning: oracle: no test")),
+        has_reason(&no_tests, "warning: oracle: no test"),
         "{:?}",
         no_tests.reasons
     );
 
-    // Vacuous test in warn mode -> Clear with warning.
     fs::write(repo.path().join("tests/test_vacuous.sh"), "echo PASS\n").unwrap();
     let vacuous = run_gate(repo.path(), data.path());
     assert_eq!(vacuous.status, GateStatus::Clear, "{:?}", vacuous.reasons);
     assert!(
-        vacuous
-            .reasons
-            .iter()
-            .any(|r| r.starts_with("warning: oracle: vacuous")),
+        has_reason(&vacuous, "warning: oracle: vacuous"),
         "{:?}",
         vacuous.reasons
     );
@@ -180,37 +168,65 @@ fn warn_mode_reports_warning_for_vacuous_and_no_tests_without_blocking() {
 
 #[test]
 fn block_mode_marks_compile_red_and_zero_tests_as_unverified() {
-    // 1. CompileRed: passes on head (echo 42), emits rust compiler error on base (echo 0).
+    let run_case = |extra_gate: &str, cmd: &str, prod: (&str, &str), test: (&str, &str)| {
+        let repo = init_repo_with_gate("block", extra_gate, cmd);
+        let data = TempDir::new().unwrap();
+        fs::write(repo.path().join(prod.0), prod.1).unwrap();
+        fs::write(repo.path().join(test.0), test.1).unwrap();
+        run_gate(repo.path(), data.path())
+    };
     let compile_cmd = "if [ \"$(sh src/app.sh)\" = \"42\" ]; then exit 0; else echo \"error[E0425]: cannot find value new_api\"; echo \"error: could not compile demo\"; exit 101; fi";
-    let repo = init_repo("block", compile_cmd);
-    let data = TempDir::new().unwrap();
-    fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
-    fs::write(repo.path().join("tests/test_api.sh"), "echo test\n").unwrap();
-    let r = run_gate(repo.path(), data.path());
+    // 1a. Default OracleCompileRedPolicy::Blocked -> retryable GateStatus::Blocked.
     // CompileRed goes back to the agent (Blocked, with guidance) instead of
     // waiting for a human (O12-R10-7); it never lands as Clear.
+    let r = run_case(
+        "",
+        compile_cmd,
+        ("src/app.sh", "#!/bin/sh\necho 42\n"),
+        ("tests/test_api.sh", "echo test\n"),
+    );
     assert_eq!(r.status, GateStatus::Blocked, "{:?}", r.reasons);
+    assert!(has_reason(&r, "oracle: compile_red ("), "{:?}", r.reasons);
+
+    // 1b. Explicit OracleCompileRedPolicy::Unverified -> GateStatus::Unverified.
+    let r_unv = run_case(
+        "oracle_compile_red_policy = \"unverified\"\n",
+        compile_cmd,
+        ("src/app.sh", "#!/bin/sh\necho 42\n"),
+        ("tests/test_api.sh", "echo test\n"),
+    );
+    assert_eq!(r_unv.status, GateStatus::Unverified, "{:?}", r_unv.reasons);
     assert!(
-        r.reasons
-            .iter()
-            .any(|m| m.contains("oracle: compile_red (")),
+        has_reason(&r_unv, "oracle: inconclusive (compile_red:"),
         "{:?}",
-        r.reasons
+        r_unv.reasons
+    );
+
+    // 1c. All-Added new prod module under default Blocked policy -> Warn + behavioral_red_unproven.
+    let new_mod_cmd = "if [ -f src/new_mod.sh ]; then exit 0; else echo \"error[E0425]: cannot find value new_mod\"; echo \"error: could not compile demo\"; exit 101; fi";
+    let r_new = run_case(
+        "",
+        new_mod_cmd,
+        ("src/new_mod.sh", "#!/bin/sh\necho 1\n"),
+        ("tests/test_new_mod.sh", "echo test\n"),
+    );
+    assert_eq!(r_new.status, GateStatus::Clear, "{:?}", r_new.reasons);
+    assert!(
+        has_reason(&r_new, "behavioral_red_unproven"),
+        "{:?}",
+        r_new.reasons
     );
 
     // 2. Zero tests ran during oracle run -> Unverified (NOT Clear!).
     let zero_cmd = "if [ \"$(sh src/app.sh)\" = \"42\" ]; then echo \"running 1 test\"; exit 0; else echo \"running 0 tests\"; exit 0; fi";
-    let repo2 = init_repo("block", zero_cmd);
-    let data2 = TempDir::new().unwrap();
-    fs::write(repo2.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
-    fs::write(repo2.path().join("tests/test_zero.sh"), "echo test\n").unwrap();
-    let r2 = run_gate(repo2.path(), data2.path());
-    assert_eq!(r2.status, GateStatus::Unverified, "{:?}", r2.reasons);
-    assert!(
-        r2.reasons.iter().any(|m| m.contains("0 tests ran")),
-        "{:?}",
-        r2.reasons
+    let r2 = run_case(
+        "",
+        zero_cmd,
+        ("src/app.sh", "#!/bin/sh\necho 42\n"),
+        ("tests/test_zero.sh", "echo test\n"),
     );
+    assert_eq!(r2.status, GateStatus::Unverified, "{:?}", r2.reasons);
+    assert!(has_reason(&r2, "0 tests ran"), "{:?}", r2.reasons);
 }
 
 #[test]
@@ -280,26 +296,21 @@ fn oracle_populates_test_files_env_preserves_live_tree_and_cleans_scratch_worktr
 fn config_tier_monotonic_tightening_and_render_round_trip() {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join(".autofactory")).unwrap();
-    fs::write(
-        dir.path().join(REPO_CONFIG_REL),
-        "[gate]\nred_green_oracle = \"block\"\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.path().join(LOCAL_CONFIG_REL),
-        "[gate]\nred_green_oracle = \"off\"\n",
-    )
-    .unwrap();
+    let load_with = |env: &dyn Fn(&str) -> Option<String>| {
+        load(&ConfigInputs {
+            global_config: None,
+            repo_root: dir.path().to_path_buf(),
+            env,
+            cli: ConfigOverlay::default(),
+        })
+    };
+
+    let write_cfg = |rel: &str, body: &str| fs::write(dir.path().join(rel), body).unwrap();
 
     // Tier 3 cannot downgrade block -> off, nor can env downgrade block -> warn.
-    let env_warn = |k: &str| (k == "AAF_RED_GREEN_ORACLE").then(|| "warn".to_string());
-    let loaded = load(&ConfigInputs {
-        global_config: None,
-        repo_root: dir.path().to_path_buf(),
-        env: &env_warn,
-        cli: ConfigOverlay::default(),
-    })
-    .unwrap();
+    write_cfg(REPO_CONFIG_REL, "[gate]\nred_green_oracle = \"block\"\n");
+    write_cfg(LOCAL_CONFIG_REL, "[gate]\nred_green_oracle = \"off\"\n");
+    let loaded = load_with(&|k| (k == "AAF_RED_GREEN_ORACLE").then(|| "warn".to_string())).unwrap();
     assert_eq!(loaded.repo.gate.red_green_oracle, OracleMode::Block);
     assert_eq!(loaded.warnings.len(), 2, "{:?}", loaded.warnings);
     assert!(
@@ -309,37 +320,39 @@ fn config_tier_monotonic_tightening_and_render_round_trip() {
             .all(|w| w.contains("gate.red_green_oracle"))
     );
 
-    // Tightening off -> warn via local and warn -> block via env works with no warnings.
-    fs::write(
-        dir.path().join(REPO_CONFIG_REL),
-        "[gate]\nred_green_oracle = \"off\"\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.path().join(LOCAL_CONFIG_REL),
-        "[gate]\nred_green_oracle = \"warn\"\n",
-    )
-    .unwrap();
+    // Tier 3 cannot downgrade oracle_compile_red_policy (blocked -> warn), only tighten.
+    write_cfg(
+        REPO_CONFIG_REL,
+        "[gate]\nred_green_oracle = \"off\"\noracle_compile_red_policy = \"blocked\"\n",
+    );
+    write_cfg(
+        LOCAL_CONFIG_REL,
+        "[gate]\nred_green_oracle = \"warn\"\noracle_compile_red_policy = \"warn\"\n",
+    );
     let env_block = |k: &str| (k == "AAF_RED_GREEN_ORACLE").then(|| "block".to_string());
-    let raised = load(&ConfigInputs {
-        global_config: None,
-        repo_root: dir.path().to_path_buf(),
-        env: &env_block,
-        cli: ConfigOverlay::default(),
-    })
-    .unwrap();
+    let raised = load_with(&env_block).unwrap();
     assert_eq!(raised.repo.gate.red_green_oracle, OracleMode::Block);
-    assert!(raised.warnings.is_empty(), "{:?}", raised.warnings);
+    assert_eq!(
+        raised.repo.gate.oracle_compile_red_policy,
+        OracleCompileRedPolicy::Blocked
+    );
+    assert_eq!(raised.warnings.len(), 1, "{:?}", raised.warnings);
+    assert!(raised.warnings[0].contains("gate.oracle_compile_red_policy"));
+
+    write_cfg(
+        LOCAL_CONFIG_REL,
+        "[gate]\noracle_compile_red_policy = \"unverified\"\n",
+    );
+    let tightened = load_with(&env_block).unwrap();
+    assert_eq!(
+        tightened.repo.gate.oracle_compile_red_policy,
+        OracleCompileRedPolicy::Unverified
+    );
+    assert!(tightened.warnings.is_empty(), "{:?}", tightened.warnings);
 
     // Invalid env value is rejected.
-    let env_bad = |k: &str| (k == "AAF_RED_GREEN_ORACLE").then(|| "strict".to_string());
-    let err = load(&ConfigInputs {
-        global_config: None,
-        repo_root: dir.path().to_path_buf(),
-        env: &env_bad,
-        cli: ConfigOverlay::default(),
-    })
-    .unwrap_err();
+    let err =
+        load_with(&|k| (k == "AAF_RED_GREEN_ORACLE").then(|| "strict".to_string())).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidEnv { .. }), "{err:?}");
 
     // render_repo_config includes red_green_oracle = "off" and parses back cleanly.
@@ -397,47 +410,49 @@ fn classifier_covers_multi_language_outcomes() {
             "expected CompileRed for:\n{compile}"
         );
     }
-    assert!(matches!(
-        classify(Some(127), false, "sh: 1: missing: not found"),
-        OracleOutcome::Inconclusive(_)
-    ));
-    assert!(matches!(
-        classify(Some(1), false, "BUILD FAILED\nECONNREFUSED"),
-        OracleOutcome::Inconclusive(_)
-    ));
     // Zero-tests must win over behavioral substrings; bare expect(/Assert. must not match.
     assert_eq!(
         classify(Some(1), false, "running 0 tests\nexpect(foo).toBe(1)"),
         OracleOutcome::Inconclusive("0 tests ran".to_string())
     );
+    let echo_only = "12 | let _ = new_sym(); // running 1 test; assertion failed: x\n   | ^^^^^^^";
+    for (code, log) in [
+        (127, "sh: 1: missing: not found"),
+        (1, "BUILD FAILED\nECONNREFUSED"),
+        (1, "log: expect(config) loaded"),
+        (1, "Assert.IsNotNull helper registered"),
+        (1, echo_only),
+    ] {
+        assert!(matches!(
+            classify(Some(code), false, log),
+            OracleOutcome::Inconclusive(_)
+        ));
+    }
+    // Comment injection inside rustc diagnostic echo must stay CompileRed, never Proven.
+    let injected = "error[E0425]: cannot find value `new_sym` in this scope\n  --> src/lib.rs:12:13\n   |\n12 |     let _ = new_sym(); // running 1 test; assertion failed: x\n   |             ^^^^^^^ not found\nerror: could not compile `demo`";
     assert!(matches!(
-        classify(Some(1), false, "log: expect(config) loaded"),
-        OracleOutcome::Inconclusive(_)
+        classify(Some(101), false, injected),
+        OracleOutcome::CompileRed(_)
     ));
-    assert!(matches!(
-        classify(Some(1), false, "Assert.IsNotNull helper registered"),
-        OracleOutcome::Inconclusive(_)
-    ));
+    // Ambiguous runtime exception names with an anchored runner summary prove behavioral failure.
+    for anchored in [
+        "FAILED tests/t.py::t - ImportError: bad\n=== 1 failed in 0.02s ===",
+        "FAIL a.test.js\nReferenceError: x is not defined\nTests: 1 failed, 1 total",
+    ] {
+        assert_eq!(classify(Some(1), false, anchored), OracleOutcome::Proven);
+    }
 }
 
 #[test]
 fn rename_prod_to_docs_and_comment_cfg_test_do_not_bypass_g6a() {
-    // 1. Renaming a prod file to docs/ without test changes must be Blocked, not Skipped.
     let repo = init_repo("block", "true");
     let data = TempDir::new().unwrap();
     fs::create_dir_all(repo.path().join("docs")).unwrap();
     git_out(repo.path(), &["mv", "src/app.sh", "docs/app.md"]);
     let r = run_gate(repo.path(), data.path());
     assert_eq!(r.status, GateStatus::Blocked, "{:?}", r.reasons);
-    assert!(
-        r.reasons
-            .iter()
-            .any(|m| m.to_ascii_lowercase().contains("no test")),
-        "{:?}",
-        r.reasons
-    );
+    assert!(has_reason(&r, "no test"), "{:?}", r.reasons);
 
-    // 2. Adding a `// #[cfg(test)]` comment inside a prod .rs file must NOT count as a test change.
     let repo2 = init_repo("block", "true");
     let data2 = TempDir::new().unwrap();
     fs::write(
@@ -447,12 +462,45 @@ fn rename_prod_to_docs_and_comment_cfg_test_do_not_bypass_g6a() {
     .unwrap();
     let r2 = run_gate(repo2.path(), data2.path());
     assert_eq!(r2.status, GateStatus::Blocked, "{:?}", r2.reasons);
-    assert!(
-        r2.reasons
-            .iter()
-            .any(|m| m.to_ascii_lowercase().contains("no test")),
-        "{:?}",
-        r2.reasons
+    assert!(has_reason(&r2, "no test"), "{:?}", r2.reasons);
+}
+
+#[test]
+fn inline_rust_tests_existing_block_raw_strings_and_trailing_prod() {
+    let assert_proven = |cmd: &str, msg: &str, base_src: &str, new_src: &str| {
+        let repo = init_repo("block", cmd);
+        let data = TempDir::new().unwrap();
+        git_out(repo.path(), &["checkout", "-q", "main"]);
+        fs::write(repo.path().join("src/lib.rs"), base_src).unwrap();
+        git_out(repo.path(), &["add", "-A"]);
+        git_out(repo.path(), &["commit", "-q", "-m", msg]);
+        git_out(repo.path(), &["checkout", "-q", "-B", "feat/work"]);
+        fs::write(repo.path().join("src/lib.rs"), new_src).unwrap();
+        let r = run_gate(repo.path(), data.path());
+        assert_eq!(r.status, GateStatus::Clear, "{:?}", r.reasons);
+        assert!(
+            has_reason(&r, "oracle: red_green=proven"),
+            "{:?}",
+            r.reasons
+        );
+    };
+
+    // 1. Adding #[test] inside an existing #[cfg(test)] mod tests is detected & proven Red->Green.
+    let cmd1 = "grep -q 'fn new_case' src/lib.rs || exit 0; grep -q 'fn val() -> i32 { 42 }' src/lib.rs && exit 0; echo 'test tests::new_case ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed;'; exit 1";
+    assert_proven(
+        cmd1,
+        "base lib",
+        "pub fn val() -> i32 { 0 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn old() {}\n}\n",
+        "pub fn val() -> i32 { 42 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn old() {}\n    #[test]\n    fn new_case() { assert_eq!(super::val(), 42); }\n}\n",
+    );
+
+    // 2. Raw string r#"#[cfg(test)]"# does not corrupt split, and prod AFTER #[cfg(test)] reverts.
+    let cmd2 = "grep -Fq 'r#\"#[cfg(test)]\"#' src/lib.rs || { echo 'raw string broken'; exit 2; }; grep -q 'fn checks_after' src/lib.rs || exit 0; grep -q 'fn after() -> i32 { 42 }' src/lib.rs && exit 0; echo 'test tests::checks_after ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed;'; exit 1";
+    assert_proven(
+        cmd2,
+        "base raw+after",
+        "pub fn tmpl() -> &'static str { r#\"#[cfg(test)]\"# }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn old() {}\n}\npub fn after() -> i32 { 0 }\n",
+        "pub fn tmpl() -> &'static str { r#\"#[cfg(test)]\"# }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn old() {}\n    #[test]\n    fn checks_after() { assert_eq!(super::after(), 42); }\n}\npub fn after() -> i32 { 42 }\n",
     );
 }
 
@@ -462,30 +510,13 @@ fn full_mode_runs_test_full_and_symlink_revert_never_escapes_scratch() {
     let marker_dir = TempDir::new().unwrap();
     let full_marker = marker_dir.path().join("ran_full.txt");
     let scoped_marker = marker_dir.path().join("ran_scoped.txt");
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    git_out(root, &["init", "-q", "-b", "main"]);
-    fs::create_dir_all(root.join(".autofactory")).unwrap();
-    fs::create_dir_all(root.join("src")).unwrap();
-    fs::create_dir_all(root.join("tests")).unwrap();
-    let scoped_cmd =
-        toml::Value::String(format!("touch \"{}\" && exit 0", scoped_marker.display())).to_string();
-    let full_cmd = toml::Value::String(format!(
+    let scoped_cmd = format!("touch \"{}\" && exit 0", scoped_marker.display());
+    let full_cmd = format!(
         "if [ -n \"$AAF_TEST_FILES_FILE\" ]; then touch \"{}\" ; fi; val=$(sh src/app.sh); if [ \"$val\" != \"42\" ]; then echo \"FAIL: expected 42\"; exit 1; fi",
         full_marker.display()
-    ))
-    .to_string();
-    fs::write(
-        root.join(REPO_CONFIG_REL),
-        format!(
-            "[commands]\ntest_scoped = {scoped_cmd}\ntest_full = {full_cmd}\n\n[gate]\nbase_ref = \"main\"\nred_green_oracle = \"block\"\n"
-        ),
-    )
-    .unwrap();
-    fs::write(root.join("src/app.sh"), "#!/bin/sh\necho 0\n").unwrap();
-    git_out(root, &["add", "-A"]);
-    git_out(root, &["commit", "-q", "-m", "base"]);
-    git_out(root, &["checkout", "-q", "-b", "feat/work"]);
+    );
+    let dir = init_repo_with_cmds("block", "", &scoped_cmd, &full_cmd);
+    let root = dir.path();
     fs::write(root.join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
     fs::write(root.join("tests/test_full_case.sh"), "echo ok\n").unwrap();
 

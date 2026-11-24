@@ -62,12 +62,16 @@ impl Script {
         }
     }
 
-    /// No command of the line is run by the trusted `aaf`: a payload of
-    /// `aaf slot --` is judged as if typed bare, and `aaf` itself like any
-    /// other program.
+    /// No command of the line is run by the trusted bare `aaf`: a payload of
+    /// bare `aaf slot --` is judged as if typed bare, and `aaf` itself like any
+    /// other program. Explicit absolute paths in `slot_bin` are unaffected by
+    /// `PATH`, shell functions, or aliases.
     pub fn distrust_aaf(&mut self) {
         for cmd in &mut self.cmds {
             cmd.slotted = false;
+            if cmd.slot_bin.as_deref() == Some("aaf") {
+                cmd.slot_bin = None;
+            }
             cmd.aaf_untrusted = true;
         }
     }
@@ -217,6 +221,7 @@ impl Lexer<'_, '_> {
         let mut wrapped = Vec::new();
         let mut xargs = false;
         let outer_slot = self.out.in_slot;
+        let outer_slot_bin = self.out.in_slot_bin.clone();
         let outer_cleared = self.out.env_cleared;
         let mut env_s_depth = self.depth;
         loop {
@@ -237,9 +242,10 @@ impl Lexer<'_, '_> {
                     }
                     match words.first().map(|w| w.text.as_str()) {
                         // Also for what the payload nests (`aaf slot -- sh -c '…'`).
-                        // Only the bare name is the installed aaf: `./aaf` or
-                        // `/tmp/x/aaf` is any program, and its payload is judged as
-                        // if typed without it.
+                        // Bare `aaf` sets `in_slot` (protected by `aaf_untrusted`);
+                        // an explicit path records `in_slot_bin` so `heavy_guard`
+                        // can match it lexically against `trusted_aaf_bins` without
+                        // ever canonicalizing untrusted `/tmp/aaf` symlinks.
                         Some("aaf") => {
                             // The search path given to aaf itself (`PATH=… aaf`,
                             // `env PATH=… aaf`): the payload's command carries the
@@ -248,6 +254,14 @@ impl Lexer<'_, '_> {
                                 .iter()
                                 .any(|(key, _)| key.eq_ignore_ascii_case("PATH"));
                             self.out.in_slot = true;
+                            if self.out.in_slot_bin.is_none() {
+                                self.out.in_slot_bin = Some("aaf".to_string());
+                            }
+                        }
+                        Some(first) if basename(first) == "aaf" => {
+                            if self.out.in_slot_bin.is_none() {
+                                self.out.in_slot_bin = Some(first.to_string());
+                            }
                         }
                         Some(first) if basename(first) == "xargs" => xargs = true,
                         // The external `time -o <file>` writes its report there.
@@ -349,11 +363,13 @@ impl Lexer<'_, '_> {
             xargs,
             feeder,
             slotted: self.out.in_slot,
+            slot_bin: self.out.in_slot_bin.clone(),
             // Decided for the whole line once it is split: `Script::settle`.
             aaf_untrusted: false,
             env_cleared: self.out.env_cleared,
         });
         self.out.in_slot = outer_slot;
+        self.out.in_slot_bin = outer_slot_bin;
         self.out.env_cleared = outer_cleared;
         name
     }

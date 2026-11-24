@@ -167,20 +167,27 @@ pub(super) fn github_board_status(cfg: &EffectiveConfig) -> Result<String, Strin
     }
 }
 
+fn reports_tokens(executor: &str) -> bool {
+    matches!(
+        executor.trim().to_ascii_lowercase().as_str(),
+        "claude" | "antigravity"
+    )
+}
+
 /// Warns when a generic executor (which does not report token usage) is paired
 /// with a positive `unblocker.max_token_budget`.
 pub(super) fn executor_token_budget(repo: &RepoConfig) -> Result<String, String> {
     let run_exec = repo.run.executor.trim();
     let audit_exec = configured_audit_provider(run_exec, &repo.cross_audit);
     let mut generic = Vec::new();
-    if run_exec != "claude" {
+    if !reports_tokens(run_exec) {
         generic.push(format!("run.executor={run_exec:?}"));
     }
-    if audit_exec != "claude" && audit_exec != run_exec {
+    if !reports_tokens(audit_exec) && audit_exec != run_exec {
         generic.push(format!("cross_audit.executor={audit_exec:?}"));
     }
     if generic.is_empty() {
-        return Ok("claude reports token usage; max_token_budget enforced".to_string());
+        return Ok("claude/antigravity report token usage; max_token_budget enforced".to_string());
     }
     if repo.unblocker.max_token_budget == 0 {
         return Ok(format!(

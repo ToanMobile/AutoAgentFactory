@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use aaf_engine::config::{PROFILES, REPO_CONFIG_REL, detect_stack, effective_profile};
 use aaf_engine::skills::{
-    SkillSyncOutcome, all_skills, is_valid_profile, skills_for_profile, sync_skills_for_profile,
+    DEFAULT_GLOBAL_SKILLS, GlobalSkillHost, SkillSyncOutcome, all_skills, global_skill_dirs,
+    is_valid_profile, skills_for_profile, sync_skills_for_profile,
 };
 use serde_json::json;
 
@@ -16,7 +17,10 @@ use crate::output::{CmdError, CmdOutput, CmdResult};
 pub enum SkillHost {
     #[default]
     Claude,
+    #[value(alias = "codex")]
     Agents,
+    #[value(alias = "gemini")]
+    Agent,
     All,
 }
 
@@ -25,6 +29,7 @@ impl SkillHost {
         match self {
             SkillHost::Claude => "claude",
             SkillHost::Agents => "agents",
+            SkillHost::Agent => "agent",
             SkillHost::All => "all",
         }
     }
@@ -33,11 +38,35 @@ impl SkillHost {
         match self {
             SkillHost::Claude => vec![root.join(".claude").join("skills")],
             SkillHost::Agents => vec![root.join(".agents").join("skills")],
+            SkillHost::Agent => vec![root.join(".agent").join("skills")],
             SkillHost::All => vec![
                 root.join(".claude").join("skills"),
                 root.join(".agents").join("skills"),
+                root.join(".agent").join("skills"),
             ],
         }
+    }
+}
+
+fn resolve_global_dirs(host: Option<SkillHost>, home: &Path) -> (Vec<PathBuf>, &'static str) {
+    match host {
+        None => (
+            global_skill_dirs(home, GlobalSkillHost::ExistingOrDefault),
+            "global",
+        ),
+        Some(SkillHost::Claude) => (
+            global_skill_dirs(home, GlobalSkillHost::Claude),
+            "global:claude",
+        ),
+        Some(SkillHost::Agents) => (
+            global_skill_dirs(home, GlobalSkillHost::Codex),
+            "global:codex",
+        ),
+        Some(SkillHost::Agent) => (
+            global_skill_dirs(home, GlobalSkillHost::Gemini),
+            "global:gemini",
+        ),
+        Some(SkillHost::All) => (global_skill_dirs(home, GlobalSkillHost::All), "global:all"),
     }
 }
 
@@ -51,7 +80,7 @@ pub struct SkillsArgs {
 pub enum SkillsCommand {
     /// List bundled AutoAgentFactory domain skills (all, or filtered by `--profile`).
     List(ListArgs),
-    /// Write profile-matched skills into `.claude/skills`, `.agents/skills`, or `--dir` without clobbering edits.
+    /// Write profile-matched skills into `.claude/skills`, `.agents/skills`, `.agent/skills`, `--dir`, or `--global` without clobbering edits.
     Sync(SyncArgs),
 }
 
@@ -67,9 +96,12 @@ pub struct SyncArgs {
     /// Destination directory; overrides `--host` when provided.
     #[arg(long)]
     pub dir: Option<PathBuf>,
-    /// Target host directory layout (`claude` -> `.claude/skills`, `agents` -> `.agents/skills`, `all` -> both).
-    #[arg(long, value_enum, default_value_t = SkillHost::Claude)]
-    pub host: SkillHost,
+    /// Sync into global user-level host directories (`~/.claude/skills`, `~/.gemini/config/skills`, `~/.codex/skills`). Defaults to `aaf-workflow` unless `--only`, `--profile`, or `--all` is given.
+    #[arg(long, conflicts_with = "dir")]
+    pub global: bool,
+    /// Target host directory layout (`claude` -> `.claude/skills`, `agents`/`codex` -> `.agents/skills`, `agent`/`gemini` -> `.agent/skills`, `all` -> all hosts).
+    #[arg(long, value_enum)]
+    pub host: Option<SkillHost>,
     /// Override target profile instead of auto-detecting from repo config/files.
     #[arg(long, conflicts_with = "all")]
     pub profile: Option<String>,
@@ -156,22 +188,49 @@ fn sync(args: &SyncArgs, ctx: &Ctx) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf skills sync") {
         return Ok(refused);
     }
-    let repo = repo_root(ctx).ok();
-    let (dests, host_label) = match &args.dir {
-        Some(dir) => (vec![dir.clone()], "custom"),
-        None => {
-            let root = match &repo {
-                Some(root) => root.clone(),
-                None => repo_root(ctx)?,
-            };
-            (args.host.resolve_dirs(&root), args.host.as_str())
+    let repo = if args.global {
+        None
+    } else {
+        repo_root(ctx).ok()
+    };
+    let (dests, host_label) = if args.global {
+        resolve_global_dirs(args.host, &ctx.home)
+    } else {
+        match &args.dir {
+            Some(dir) => (vec![dir.clone()], "custom"),
+            None => {
+                let root = match &repo {
+                    Some(root) => root.clone(),
+                    None => repo_root(ctx)?,
+                };
+                let host = args.host.unwrap_or_default();
+                (host.resolve_dirs(&root), host.as_str())
+            }
         }
     };
 
     if let Some(explicit) = &args.profile {
         validate_profile(explicit)?;
     }
-    let resolved_profile = if args.all || !args.only.is_empty() {
+
+    let default_global_only: Vec<String> =
+        if args.global && !args.all && args.profile.is_none() && args.only.is_empty() {
+            DEFAULT_GLOBAL_SKILLS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let only: Option<&[String]> = if !args.only.is_empty() {
+        Some(args.only.as_slice())
+    } else if !default_global_only.is_empty() {
+        Some(default_global_only.as_slice())
+    } else {
+        None
+    };
+
+    let resolved_profile = if args.all || only.is_some() {
         None
     } else if let Some(explicit) = &args.profile {
         Some(explicit.clone())
@@ -186,7 +245,6 @@ fn sync(args: &SyncArgs, ctx: &Ctx) -> CmdResult {
     } else {
         Some("auto".to_string())
     };
-    let only = (!args.only.is_empty()).then_some(args.only.as_slice());
 
     let mut per_target = Vec::with_capacity(dests.len());
     let mut raw_outcomes = Vec::with_capacity(dests.len());
@@ -223,6 +281,7 @@ fn sync(args: &SyncArgs, ctx: &Ctx) -> CmdResult {
         .field("dir", json!(primary_dir))
         .field("dirs", json!(dirs_json))
         .field("host", json!(host_label))
+        .field("global", json!(args.global))
         .field("profile", json!(resolved_profile))
         .field("written", json!(merged.written))
         .field("skipped_existing", json!(merged.skipped_existing))

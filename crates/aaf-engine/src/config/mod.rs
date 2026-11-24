@@ -11,6 +11,7 @@ mod detect;
 mod detect_unity;
 mod load;
 mod merge;
+mod merge_pipeline;
 mod render;
 
 pub use detect::{Detected, PROFILES, detect_stack, effective_profile};

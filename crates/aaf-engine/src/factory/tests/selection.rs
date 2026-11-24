@@ -449,10 +449,10 @@ fn the_auditor_is_another_account_in_sticky_and_the_bound_one_in_pinned() {
     // An audit run is not what the task or the repository "ran on".
     lab.ran("t1", "a", crate::cross_audit::AUDIT_EXECUTOR);
     assert_eq!(granted(&sticky, "t1", Purpose::Work).as_deref(), Some("b"));
-    // Only the author's account is left: the audit runs on it.
+    // Multi-account pool waits rather than falling back to the author's own account.
     lab.db.set_cooldown("a", Some(i64::MAX)).unwrap();
     lab.db.set_cooldown("c", Some(i64::MAX)).unwrap();
-    assert_eq!(granted(&sticky, "t1", Purpose::Audit).as_deref(), Some("b"));
+    assert_eq!(granted(&sticky, "t1", Purpose::Audit), None);
     lab.db.set_cooldown("a", None).unwrap();
     lab.db.set_cooldown("c", None).unwrap();
 

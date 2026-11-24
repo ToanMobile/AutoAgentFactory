@@ -441,6 +441,7 @@ fn env_pass_tightening_and_generic_stream_log_and_hook_settings_hardening() {
                 account: None,
                 timeout_secs: 30,
                 sandbox: SandboxPolicy::default(),
+                json_schema: None,
             })
             .unwrap();
         assert_eq!(out.exit_code, Some(0));
@@ -531,6 +532,7 @@ fn custom_toolchain_homes_and_codex_config_stay_guarded_in_seatbelt() {
                 enabled: true,
                 ..SandboxPolicy::default()
             },
+            json_schema: None,
         })
         .unwrap()
         .log_tail;

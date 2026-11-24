@@ -3,25 +3,32 @@
 use aaf_domain::blocked::BlockedReason;
 use aaf_domain::budget::RootBudget;
 use aaf_domain::dag;
-use aaf_domain::event::FactoryEvent;
+use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{PortError, PortResult, TaskStore};
 use aaf_domain::task::{Priority, Task, TaskState};
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
 use super::{Db, corrupt, sql_err, to_i64};
 
+const MAX_AUTO_RECOVER_COUNT: u32 = 6;
+
 const TASK_COLS_V3: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
      state, priority, fingerprint, blocked_reason, unblock_cycles, created_at, updated_at";
 const TASK_COLS_V4: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
      state, priority, fingerprint, blocked_reason, unblock_cycles, created_at, updated_at, \
      scope_paths";
+const TASK_COLS_V5: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
+     state, priority, fingerprint, blocked_reason, unblock_cycles, created_at, updated_at, \
+     scope_paths, retry_after, auto_recover_count";
 
 /// Priority first (`P0` sorts lowest), then oldest first; `rowid` keeps
 /// insertion order for tasks created in the same second.
 const TASK_ORDER: &str = " ORDER BY priority, created_at, rowid";
 
-fn task_cols(has_scope_paths: bool) -> &'static str {
-    if has_scope_paths {
+fn task_cols(schema_version: i64) -> &'static str {
+    if schema_version >= 5 {
+        TASK_COLS_V5
+    } else if schema_version >= 4 {
         TASK_COLS_V4
     } else {
         TASK_COLS_V3
@@ -36,17 +43,22 @@ fn from_json<T: serde::de::DeserializeOwned>(text: &str, what: &str) -> PortResu
     serde_json::from_str(text).map_err(|_| corrupt(what, text))
 }
 
-fn task_from_row(row: &Row<'_>, has_scope_paths: bool) -> PortResult<Task> {
+fn task_from_row(row: &Row<'_>, schema_version: i64) -> PortResult<Task> {
     let spec: String = row.get(6).map_err(sql_err)?;
     let notes: String = row.get(7).map_err(sql_err)?;
     let state: String = row.get(8).map_err(sql_err)?;
     let priority: String = row.get(9).map_err(sql_err)?;
     let blocked: Option<String> = row.get(11).map_err(sql_err)?;
-    let scope_paths = if has_scope_paths {
+    let scope_paths = if schema_version >= 4 {
         let text: String = row.get(15).map_err(sql_err)?;
         from_json(&text, "tasks.scope_paths")?
     } else {
         Vec::new()
+    };
+    let (retry_after, auto_recover_count) = if schema_version >= 5 {
+        (row.get(16).map_err(sql_err)?, row.get(17).map_err(sql_err)?)
+    } else {
+        (None, 0)
     };
     Ok(Task {
         id: row.get(0).map_err(sql_err)?,
@@ -66,6 +78,8 @@ fn task_from_row(row: &Row<'_>, has_scope_paths: bool) -> PortResult<Task> {
         },
         unblock_cycles: row.get(12).map_err(sql_err)?,
         scope_paths,
+        retry_after,
+        auto_recover_count,
         created_at: row.get(13).map_err(sql_err)?,
         updated_at: row.get(14).map_err(sql_err)?,
     })
@@ -75,15 +89,86 @@ fn query_tasks(
     conn: &Connection,
     sql: &str,
     params: impl Params,
-    has_scope_paths: bool,
+    schema_version: i64,
 ) -> PortResult<Vec<Task>> {
     let mut stmt = conn.prepare_cached(sql).map_err(sql_err)?;
     let mut rows = stmt.query(params).map_err(sql_err)?;
     let mut tasks = Vec::new();
     while let Some(row) = rows.next().map_err(sql_err)? {
-        tasks.push(task_from_row(row, has_scope_paths)?);
+        tasks.push(task_from_row(row, schema_version)?);
     }
     Ok(tasks)
+}
+
+struct EncodedTask {
+    task: Task,
+    spec: String,
+    notes: String,
+    blocked: Option<String>,
+    scope_paths: String,
+}
+
+fn encode_task(task: &Task) -> PortResult<EncodedTask> {
+    Ok(EncodedTask {
+        spec: to_json(&task.spec, "spec")?,
+        notes: to_json(&task.context_notes, "context_notes")?,
+        blocked: task
+            .blocked_reason
+            .as_ref()
+            .map(|r| to_json(r, "blocked_reason"))
+            .transpose()?,
+        scope_paths: to_json(&task.scope_paths, "scope_paths")?,
+        task: task.clone(),
+    })
+}
+
+fn insert_task_row(conn: &Connection, enc: &EncodedTask, state_str: &str) -> PortResult<()> {
+    let t = &enc.task;
+    conn.prepare_cached(
+        "INSERT INTO tasks (id, repo_root, parent_id, root_id, depth, title, spec, \
+         context_notes, state, priority, fingerprint, blocked_reason, unblock_cycles, \
+         created_at, updated_at, scope_paths, retry_after, auto_recover_count) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+    )
+    .and_then(|mut stmt| {
+        stmt.execute(params![
+            t.id,
+            t.repo_root,
+            t.parent_id,
+            t.root_id,
+            t.depth,
+            t.title,
+            enc.spec,
+            enc.notes,
+            state_str,
+            t.priority.as_str(),
+            t.fingerprint,
+            enc.blocked,
+            t.unblock_cycles,
+            t.created_at,
+            t.updated_at,
+            enc.scope_paths,
+            t.retry_after,
+            t.auto_recover_count,
+        ])
+    })
+    .map_err(sql_err)?;
+    Ok(())
+}
+
+fn append_note_tx(conn: &Connection, id: &str, note: String, now: i64) -> PortResult<()> {
+    let stored: Option<String> = conn
+        .prepare_cached("SELECT context_notes FROM tasks WHERE id = ?1")
+        .and_then(|mut stmt| stmt.query_row(params![id], |row| row.get(0)).optional())
+        .map_err(sql_err)?;
+    let stored = stored.ok_or_else(|| task_not_found(id))?;
+    let mut notes: Vec<String> = from_json(&stored, "tasks.context_notes")?;
+    notes.push(note);
+    let notes_json = to_json(&notes, "context_notes")?;
+    conn.prepare_cached("UPDATE tasks SET context_notes = ?1, updated_at = ?2 WHERE id = ?3")
+        .and_then(|mut stmt| stmt.execute(params![notes_json, now, id]))
+        .map_err(sql_err)?;
+    Ok(())
 }
 
 fn task_not_found(id: &str) -> PortError {
@@ -113,53 +198,17 @@ fn one_task_changed(changed: usize, id: &str) -> PortResult<()> {
 
 impl TaskStore for Db {
     fn insert_task(&self, task: &Task) -> PortResult<()> {
-        let task = task.clone();
-        let spec = to_json(&task.spec, "spec")?;
-        let notes = to_json(&task.context_notes, "context_notes")?;
-        let blocked = match &task.blocked_reason {
-            Some(reason) => Some(to_json(reason, "blocked_reason")?),
-            None => None,
-        };
-        let scope_paths = to_json(&task.scope_paths, "scope_paths")?;
-        self.write(move |tx| {
-            tx.prepare_cached(
-                "INSERT INTO tasks (id, repo_root, parent_id, root_id, depth, title, spec, \
-                 context_notes, state, priority, fingerprint, blocked_reason, unblock_cycles, \
-                 created_at, updated_at, scope_paths) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            )
-            .and_then(|mut stmt| {
-                stmt.execute(params![
-                    task.id,
-                    task.repo_root,
-                    task.parent_id,
-                    task.root_id,
-                    task.depth,
-                    task.title,
-                    spec,
-                    notes,
-                    task.state.as_str(),
-                    task.priority.as_str(),
-                    task.fingerprint,
-                    blocked,
-                    task.unblock_cycles,
-                    task.created_at,
-                    task.updated_at,
-                    scope_paths,
-                ])
-            })
-            .map_err(sql_err)?;
-            Ok(())
-        })
+        let enc = encode_task(task)?;
+        self.write(move |tx| insert_task_row(tx, &enc, enc.task.state.as_str()))
     }
 
     fn get_task(&self, id: &str) -> PortResult<Task> {
         let id = id.to_string();
-        let has_scope_paths = self.schema_version() >= 4;
-        let cols = task_cols(has_scope_paths);
+        let ver = self.schema_version();
+        let cols = task_cols(ver);
         self.read(move |conn| {
             let sql = format!("SELECT {cols} FROM tasks WHERE id = ?1");
-            query_tasks(conn, &sql, params![id], has_scope_paths)?
+            query_tasks(conn, &sql, params![id], ver)?
                 .pop()
                 .ok_or_else(|| task_not_found(&id))
         })
@@ -181,22 +230,15 @@ impl TaskStore for Db {
             clauses.push("state = ?");
             args.push(state.as_str().to_string());
         }
-        let has_scope_paths = self.schema_version() >= 4;
-        let cols = task_cols(has_scope_paths);
+        let ver = self.schema_version();
+        let cols = task_cols(ver);
         let mut sql = format!("SELECT {cols} FROM tasks");
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
         sql.push_str(TASK_ORDER);
-        self.read(move |conn| {
-            query_tasks(
-                conn,
-                &sql,
-                rusqlite::params_from_iter(args),
-                has_scope_paths,
-            )
-        })
+        self.read(move |conn| query_tasks(conn, &sql, rusqlite::params_from_iter(args), ver))
     }
 
     fn set_state(
@@ -211,6 +253,10 @@ impl TaskStore for Db {
             (TaskState::Blocked, Some(reason)) => Some(to_json(reason, "blocked_reason")?),
             _ => None,
         };
+        let reset_recover = matches!(
+            state,
+            TaskState::Done | TaskState::Review | TaskState::Cancelled
+        );
         self.write(move |tx| {
             let current: Option<String> = tx
                 .prepare_cached("SELECT state FROM tasks WHERE id = ?1")
@@ -226,32 +272,23 @@ impl TaskStore for Db {
                     state.as_str()
                 )));
             }
-            tx.prepare_cached(
-                "UPDATE tasks SET state = ?1, blocked_reason = ?2, updated_at = ?3 WHERE id = ?4",
-            )
-            .and_then(|mut stmt| stmt.execute(params![state.as_str(), blocked, now, id]))
-            .map_err(sql_err)?;
+            let sql = if reset_recover {
+                "UPDATE tasks SET state = ?1, blocked_reason = ?2, retry_after = NULL, \
+                 auto_recover_count = 0, updated_at = ?3 WHERE id = ?4"
+            } else {
+                "UPDATE tasks SET state = ?1, blocked_reason = ?2, retry_after = NULL, \
+                 updated_at = ?3 WHERE id = ?4"
+            };
+            tx.prepare_cached(sql)
+                .and_then(|mut stmt| stmt.execute(params![state.as_str(), blocked, now, id]))
+                .map_err(sql_err)?;
             Ok(())
         })
     }
 
     fn append_context_note(&self, id: &str, note: &str, now: i64) -> PortResult<()> {
-        let id = id.to_string();
-        let note = note.to_string();
-        self.write(move |tx| {
-            let stored: Option<String> = tx
-                .prepare_cached("SELECT context_notes FROM tasks WHERE id = ?1")
-                .and_then(|mut stmt| stmt.query_row(params![id], |row| row.get(0)).optional())
-                .map_err(sql_err)?;
-            let stored = stored.ok_or_else(|| task_not_found(&id))?;
-            let mut notes: Vec<String> = from_json(&stored, "tasks.context_notes")?;
-            notes.push(note);
-            let notes = to_json(&notes, "context_notes")?;
-            tx.prepare_cached("UPDATE tasks SET context_notes = ?1, updated_at = ?2 WHERE id = ?3")
-                .and_then(|mut stmt| stmt.execute(params![notes, now, id]))
-                .map_err(sql_err)?;
-            Ok(())
-        })
+        let (id, note) = (id.to_string(), note.to_string());
+        self.write(move |tx| append_note_tx(tx, &id, note, now))
     }
 
     fn increment_unblock_cycles(&self, id: &str, now: i64) -> PortResult<u32> {
@@ -342,11 +379,92 @@ impl TaskStore for Db {
 
     fn children_of(&self, parent_id: &str) -> PortResult<Vec<Task>> {
         let parent_id = parent_id.to_string();
-        let has_scope_paths = self.schema_version() >= 4;
-        let cols = task_cols(has_scope_paths);
+        let ver = self.schema_version();
+        let cols = task_cols(ver);
         self.read(move |conn| {
             let sql = format!("SELECT {cols} FROM tasks WHERE parent_id = ?1{TASK_ORDER}");
-            query_tasks(conn, &sql, params![parent_id], has_scope_paths)
+            query_tasks(conn, &sql, params![parent_id], ver)
+        })
+    }
+
+    fn set_retry_schedule(
+        &self,
+        id: &str,
+        retry_after: Option<i64>,
+        auto_recover_count: u32,
+        now: i64,
+    ) -> PortResult<()> {
+        let id = id.to_string();
+        self.write(move |tx| {
+            let changed = tx
+                .prepare_cached(
+                    "UPDATE tasks SET retry_after = ?1, auto_recover_count = ?2, updated_at = ?3 \
+                     WHERE id = ?4",
+                )
+                .and_then(|mut stmt| {
+                    stmt.execute(params![retry_after, auto_recover_count, now, id])
+                })
+                .map_err(sql_err)?;
+            one_task_changed(changed, &id)
+        })
+    }
+
+    fn wake_due_blocked_tasks(&self, repo_root: &str, now: i64) -> PortResult<Vec<String>> {
+        let repo_root = repo_root.to_string();
+        self.write(move |tx| {
+            let candidates: Vec<(String, Option<String>)> = tx
+                .prepare_cached(
+                    "SELECT id, blocked_reason FROM tasks \
+                     WHERE repo_root = ?1 AND state = 'blocked' \
+                       AND retry_after IS NOT NULL AND retry_after <= ?2 \
+                       AND auto_recover_count < ?3 \
+                     ORDER BY priority, created_at, rowid",
+                )
+                .and_then(|mut stmt| {
+                    stmt.query_map(params![repo_root, now, MAX_AUTO_RECOVER_COUNT], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                    .collect()
+                })
+                .map_err(sql_err)?;
+            let mut woken = Vec::new();
+            let payload = r#"{"to":"ready","why":"auto_retry_due"}"#;
+            for (id, blocked_raw) in candidates {
+                let Some(raw) = blocked_raw else { continue };
+                let reason: BlockedReason = from_json(&raw, "tasks.blocked_reason")?;
+                if !matches!(
+                    reason,
+                    BlockedReason::Infra { .. } | BlockedReason::Quota { .. }
+                ) {
+                    continue;
+                }
+                let changed = tx
+                    .prepare_cached(
+                        "UPDATE tasks SET state = 'ready', blocked_reason = NULL, \
+                         retry_after = NULL, auto_recover_count = auto_recover_count + 1, \
+                         updated_at = ?1 WHERE id = ?2 AND state = 'blocked'",
+                    )
+                    .and_then(|mut stmt| stmt.execute(params![now, id]))
+                    .map_err(sql_err)?;
+                if changed == 0 {
+                    continue;
+                }
+                tx.prepare_cached(
+                    "INSERT INTO events (task_id, run_id, kind, payload_json, created_at) \
+                     VALUES (?1, NULL, ?2, ?3, ?4)",
+                )
+                .and_then(|mut stmt| {
+                    stmt.execute(params![
+                        id,
+                        EventKind::TaskStateChanged.as_str(),
+                        payload,
+                        now
+                    ])
+                })
+                .map_err(sql_err)?;
+                woken.push(id);
+            }
+            Ok(woken)
         })
     }
 }
@@ -373,17 +491,10 @@ impl Db {
         let token_limit = to_i64(budget.token_limit, "token_limit")?;
         let wall_secs_used = to_i64(budget.wall_secs_used, "wall_secs_used")?;
         let wall_secs_limit = to_i64(budget.wall_secs_limit, "wall_secs_limit")?;
-        let mut encoded_children = Vec::with_capacity(children.len());
-        for child in children {
-            let spec = to_json(&child.spec, "spec")?;
-            let notes = to_json(&child.context_notes, "context_notes")?;
-            let blocked = match &child.blocked_reason {
-                Some(reason) => Some(to_json(reason, "blocked_reason")?),
-                None => None,
-            };
-            let scope_paths = to_json(&child.scope_paths, "scope_paths")?;
-            encoded_children.push((child.clone(), spec, notes, blocked, scope_paths));
-        }
+        let encoded_children: Vec<EncodedTask> = children
+            .iter()
+            .map(encode_task)
+            .collect::<PortResult<_>>()?;
         let deps = deps.to_vec();
         let events = events.to_vec();
         let parent_note = parent_note.to_string();
@@ -433,34 +544,8 @@ impl Db {
             })
             .map_err(sql_err)?;
 
-            for (task, spec, notes, blocked, scope_paths) in encoded_children {
-                tx.prepare_cached(
-                    "INSERT INTO tasks (id, repo_root, parent_id, root_id, depth, title, spec, \
-                     context_notes, state, priority, fingerprint, blocked_reason, unblock_cycles, \
-                     created_at, updated_at, scope_paths) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                )
-                .and_then(|mut stmt| {
-                    stmt.execute(params![
-                        task.id,
-                        task.repo_root,
-                        task.parent_id,
-                        task.root_id,
-                        task.depth,
-                        task.title,
-                        spec,
-                        notes,
-                        parent_state.as_str(),
-                        task.priority.as_str(),
-                        task.fingerprint,
-                        blocked,
-                        task.unblock_cycles,
-                        task.created_at,
-                        task.updated_at,
-                        scope_paths,
-                    ])
-                })
-                .map_err(sql_err)?;
+            for enc in &encoded_children {
+                insert_task_row(tx, enc, parent_state.as_str())?;
             }
 
             let mut edges: Vec<(String, String)> = tx
@@ -503,21 +588,7 @@ impl Db {
                 .map_err(sql_err)?;
             }
 
-            let stored: Option<String> = tx
-                .prepare_cached("SELECT context_notes FROM tasks WHERE id = ?1")
-                .and_then(|mut stmt| {
-                    stmt.query_row(params![parent_id], |row| row.get(0))
-                        .optional()
-                })
-                .map_err(sql_err)?;
-            let stored = stored.ok_or_else(|| task_not_found(&parent_id))?;
-            let mut notes: Vec<String> = from_json(&stored, "tasks.context_notes")?;
-            notes.push(parent_note);
-            let notes_json = to_json(&notes, "context_notes")?;
-            tx.prepare_cached("UPDATE tasks SET context_notes = ?1, updated_at = ?2 WHERE id = ?3")
-                .and_then(|mut stmt| stmt.execute(params![notes_json, now, parent_id]))
-                .map_err(sql_err)?;
-            Ok(())
+            append_note_tx(tx, &parent_id, parent_note, now)
         })
     }
 }

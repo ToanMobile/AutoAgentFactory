@@ -8,6 +8,18 @@ use crate::{Ctx, Denial};
 
 pub const RULE: &str = "store_submit_guard";
 pub const FIX: &str = "aaf gate --release";
+/// Worker-mode fix: inside a factory run the agent cannot run `aaf gate --release`.
+pub const FIX_IN_FACTORY_RUN: &str = "skip store submission inside a worker run; build and verify \
+                                      artifacts locally (e.g. publishToMavenLocal or \
+                                      assembleRelease) — the operator or release pipeline runs \
+                                      aaf gate --release outside the sandbox";
+
+fn is_local_gradle_publish(task: &str) -> bool {
+    let lower = task.to_ascii_lowercase();
+    lower.ends_with("tomavenlocal")
+        || lower.ends_with("tolocalrepository")
+        || lower.contains("localpublication")
+}
 
 /// Programs that run the tool named in their arguments.
 const LAUNCHERS: &[&str] = &[
@@ -40,7 +52,10 @@ pub fn matches<S: AsRef<str>>(words: &[S], anywhere: bool) -> Option<&'static st
                 .then_some("altool upload"),
             "gradlew" | "gradlew.bat" | "gradle" => after()
                 .map(|w| w.rsplit(':').next().unwrap_or(w))
-                .any(|task| task.starts_with("publish") || task == "promoteArtifact")
+                .any(|task| {
+                    (task.starts_with("publish") || task == "promoteArtifact")
+                        && !is_local_gradle_publish(task)
+                })
                 .then_some("gradle publish"),
             _ => None,
         };
@@ -53,11 +68,16 @@ pub fn matches<S: AsRef<str>>(words: &[S], anywhere: bool) -> Option<&'static st
 
 pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let tool = matches(&cmd.words, false)?;
+    let fix = if ctx.env.in_factory_run {
+        FIX_IN_FACTORY_RUN
+    } else {
+        FIX
+    };
     verify(ctx).err().map(|why| {
         Denial::new(
             RULE,
             format!("{tool} without a valid release receipt: {why}"),
-            FIX,
+            fix,
         )
     })
 }

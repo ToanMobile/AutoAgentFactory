@@ -29,7 +29,7 @@ fn request(fx: &Fixture, wt: &TaskWorktree) -> MergeRequest {
         repo_root: fx.repo.clone(),
         worktree: wt.clone(),
         base: "main".to_string(),
-        remote: "origin".to_string(),
+        remote: Some("origin".to_string()),
         locks_dir: fx.locks.clone(),
         lock_timeout: Duration::from_secs(30),
     }

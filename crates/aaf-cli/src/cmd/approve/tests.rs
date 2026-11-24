@@ -63,6 +63,7 @@ fn fixture(locked_change: bool) -> (TempDir, Ctx) {
 fn approve(ctx: &Ctx, reviewer: &str) -> CmdOutput {
     let args = ApproveArgs {
         reviewer: reviewer.to_string(),
+        task: None,
     };
     run(&args, ctx).unwrap()
 }

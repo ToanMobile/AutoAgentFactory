@@ -70,10 +70,27 @@ impl ChangeKind {
     }
 }
 
+/// Trust boundary tier for a head-locked file change.
+/// Defaults to `Hard` so legacy receipts without `tier` fail closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LockTier {
+    /// Security/config/CI/build-manifest/inline-suppression change: ALWAYS
+    /// requires independent (`same_account == false`) approval.
+    #[default]
+    Hard,
+    /// Pure test file change (`TEST_FILE_GLOBS` only, no Tier-1 glob or
+    /// inline suppression): may be approved by `same_account` cross-audit when
+    /// `cross_audit.require_different_provider == false`.
+    Soft,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedChange {
     pub path: String,
     pub change: ChangeKind,
+    #[serde(default)]
+    pub tier: LockTier,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -116,6 +133,16 @@ pub struct HeadLockReport {
     pub lock_fp: String,
     pub locked_changes: Vec<LockedChange>,
     pub approval: Option<Approval>,
+}
+
+impl HeadLockReport {
+    /// True when any locked change belongs to Tier-1 (`LockTier::Hard`).
+    /// Mixed Tier-1 + Tier-2 diffs always return `true` (Tier-1 dominates).
+    pub fn has_hard_lock(&self) -> bool {
+        self.locked_changes
+            .iter()
+            .any(|change| change.tier == LockTier::Hard)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,5 +284,11 @@ pub struct PostGateAuditRecord {
     pub effective_score: u8,
     #[serde(default)]
     pub scores: Vec<GoldenScore>,
+    #[serde(default)]
+    pub dual_consensus: bool,
+    #[serde(default)]
+    pub adjudicated: bool,
+    #[serde(default)]
+    pub reviewers: Vec<crate::pipeline::ReviewerVerdictRecord>,
     pub created_at: i64,
 }

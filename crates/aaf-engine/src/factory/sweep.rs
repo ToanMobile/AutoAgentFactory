@@ -187,10 +187,13 @@ impl<'a> Scheduler<'a> {
         for id in expired {
             self.state.task_wait_until.remove(&id);
             self.parked.remove(&id);
+            self.state.restarts.remove(&id);
         }
         if self.state.work_default_wait_until.is_some_and(|u| u <= now) {
             self.state.work_default_wait_until = None;
-            self.parked.clear();
+            for id in self.parked.drain() {
+                self.state.restarts.remove(&id);
+            }
         }
         if self
             .state
@@ -198,7 +201,9 @@ impl<'a> Scheduler<'a> {
             .is_some_and(|u| u <= now)
         {
             self.state.audit_default_wait_until = None;
-            self.parked.clear();
+            for id in self.parked.drain() {
+                self.state.restarts.remove(&id);
+            }
         }
     }
 
@@ -256,7 +261,7 @@ impl<'a> Scheduler<'a> {
     ) -> PortResult<()> {
         let state = self.deps.store.get_task(&task_id)?.state;
         self.requeue_if_ready(task_id.clone(), state);
-        if self.mode == Mode::Once {
+        if matches!(self.mode, Mode::Once | Mode::Drain) {
             self.summary.halted.get_or_insert(detail);
             return Ok(());
         }
@@ -406,6 +411,7 @@ impl<'a> Scheduler<'a> {
             if let Err(err) = deps.git.cleanup(&task.id) {
                 self.summary.errors.push(format!("{}: {err}", task.id));
             }
+            self.state.restarts.remove(&task.id);
             self.summary.done.push(task.id);
         }
         self.sweep_squash_merged(remaining)
@@ -486,6 +492,7 @@ impl<'a> Scheduler<'a> {
             )?;
             finish::close(deps, &task)?;
             unblock::root_succeeded(deps, &task)?;
+            self.state.restarts.remove(&task.id);
             self.summary.done.push(task.id);
         }
         Ok(())
@@ -539,6 +546,7 @@ impl<'a> Scheduler<'a> {
         )?;
         finish::close(self.deps, task)?;
         unblock::root_succeeded(self.deps, task)?;
+        self.state.restarts.remove(&task.id);
         self.summary.done.push(task.id.clone());
         Ok(true)
     }

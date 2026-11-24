@@ -32,6 +32,8 @@ fn judge_host(fixture: &Fixture, payload: &Value, host: HookHost) -> (Decision, 
         config_dir: Some(fixture.config.clone()),
         home: Some(fixture.home.clone()),
         cwd: None,
+        in_factory_run: fixture.in_factory_run,
+        trusted_aaf_bins: fixture.trusted_aaf_bins.clone(),
     };
     decide_for_host(payload.to_string().as_bytes(), &env, host)
 }

@@ -1,9 +1,16 @@
 //! Stack detection by marker files, for `aaf init` and for `profile = "auto"`.
 
+#[path = "detect_scripts.rs"]
+mod detect_scripts;
+
 use std::fs;
 use std::path::Path;
 
 use aaf_domain::config::{CommandsConfig, RepoConfig};
+use detect_scripts::{
+    android_gradle_commands, depends_on, package_json_commands, product_flavors_file,
+    pyproject_commands,
+};
 
 use super::detect_unity;
 
@@ -94,38 +101,6 @@ fn android_manifest(root: &Path, children: &[String]) -> Option<String> {
     candidates.into_iter().find(|rel| root.join(rel).is_file())
 }
 
-/// The first module build file (root or a direct child directory) that
-/// mentions `productFlavors`. A plain text search: a mention in a comment
-/// also counts, which only errs towards suggesting no command.
-fn product_flavors_file(root: &Path, children: &[String]) -> Option<String> {
-    let modules = std::iter::once(String::new()).chain(
-        children
-            .iter()
-            .filter(|name| !name.starts_with('.'))
-            .map(|name| format!("{name}/")),
-    );
-    modules
-        .flat_map(|module| {
-            ["build.gradle.kts", "build.gradle"]
-                .into_iter()
-                .map(move |file| format!("{module}{file}"))
-        })
-        .find(|rel| {
-            read_marker(&root.join(rel)).is_some_and(|text| text.contains("productFlavors"))
-        })
-}
-
-fn depends_on(package: &serde_json::Value, dependency: &str) -> bool {
-    ["dependencies", "devDependencies", "peerDependencies"]
-        .iter()
-        .any(|section| {
-            package
-                .get(section)
-                .and_then(|deps| deps.get(dependency))
-                .is_some()
-        })
-}
-
 /// Cross-platform frameworks are checked before the native shells they
 /// generate (`android/`, `ios/`), and specific stacks before the generic
 /// `package.json` fallback.
@@ -161,11 +136,18 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
         );
     }
 
+    let package = read_json(&repo_root.join("package.json"));
+    let pkg_cmds = || {
+        package
+            .as_ref()
+            .map(|p| package_json_commands(repo_root, p))
+            .unwrap_or_default()
+    };
+
     let app_json = read_json(&repo_root.join("app.json"));
     if app_json.is_some_and(|app| app.get("expo").is_some()) {
-        return found("expo", none(), vec!["app.json (\"expo\")".to_string()]);
+        return found("expo", pkg_cmds(), vec!["app.json (\"expo\")".to_string()]);
     }
-    let package = read_json(&repo_root.join("package.json"));
     let pkg_has_expo = package.as_ref().is_some_and(|p| depends_on(p, "expo"));
     if let Some(cfg) = [
         "app.config.ts",
@@ -184,11 +166,11 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
                         || text.contains("'expo/")
                 }))
     }) {
-        return found("expo", none(), vec![cfg.to_string()]);
+        return found("expo", pkg_cmds(), vec![cfg.to_string()]);
     }
 
     if pkg_has_expo {
-        return found("expo", none(), vec!["package.json (expo)".to_string()]);
+        return found("expo", pkg_cmds(), vec!["package.json (expo)".to_string()]);
     }
     if package
         .as_ref()
@@ -196,7 +178,7 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
     {
         return found(
             "react-native",
-            none(),
+            pkg_cmds(),
             vec!["package.json (react-native)".to_string()],
         );
     }
@@ -223,12 +205,7 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
             none()
         } else {
             evidence.push("gradlew".to_string());
-            commands(
-                "./gradlew assembleDebug",
-                "./gradlew testDebugUnitTest",
-                "./gradlew testDebugUnitTest",
-                "./gradlew lint",
-            )
+            android_gradle_commands("")
         };
         return found("android", cmds, evidence);
     }
@@ -246,7 +223,11 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
         return found("ios", none(), vec![project.clone()]);
     }
     if is_file("Package.swift") {
-        return found("ios", none(), vec!["Package.swift".to_string()]);
+        return found(
+            "ios",
+            commands("swift build", "swift test", "swift test", ""),
+            vec!["Package.swift".to_string()],
+        );
     }
 
     if is_file("Cargo.toml") {
@@ -276,11 +257,19 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
         );
     }
     if is_file("pyproject.toml") {
-        return found("backend", none(), vec!["pyproject.toml".to_string()]);
+        return found(
+            "backend",
+            pyproject_commands(repo_root),
+            vec!["pyproject.toml".to_string()],
+        );
     }
 
-    if package.is_some() {
-        return found("web", none(), vec!["package.json".to_string()]);
+    if let Some(pkg) = &package {
+        return found(
+            "web",
+            package_json_commands(repo_root, pkg),
+            vec!["package.json".to_string()],
+        );
     }
 
     if let Some(nested) = nested_gradle_builds(repo_root, &children) {
@@ -337,13 +326,7 @@ fn nested_gradle_builds(repo_root: &Path, children: &[String]) -> Option<Detecte
         CommandsConfig::default()
     } else {
         evidence.push(format!("{dir}/gradlew"));
-        let run = |tasks: &str| format!("cd {dir} && ./gradlew {tasks}");
-        commands(
-            &run("assembleDebug"),
-            &run("testDebugUnitTest"),
-            &run("testDebugUnitTest"),
-            &run("lint"),
-        )
+        android_gradle_commands(&format!("cd {dir} && "))
     };
     Some(found("android", cmds, evidence))
 }

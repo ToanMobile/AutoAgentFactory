@@ -97,10 +97,12 @@ fn cockpit_handover_uses_the_cwd_repo_config_when_the_task_repo_is_gone() {
     }
 
     let args = HandoverArgs {
-        task_id: "t-gone".to_string(),
+        task_id: Some("t-gone".to_string()),
         format: Some(HandoverFormat::Json),
         out: None,
         open: false,
+        since: None,
+        summary: false,
     };
     let cli = cmd::handover::run(&args, &ctx).unwrap();
     let missing: Vec<String> = cli.fields["handover"]["missing"]

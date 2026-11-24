@@ -52,7 +52,9 @@ impl TaskState {
         matches!(self, TaskState::Done | TaskState::Cancelled)
     }
 
-    /// The only legal lifecycle moves. `Blocked` is re-entered through `Ready`.
+    /// The only legal lifecycle moves. `Blocked` is re-entered through `Ready`
+    /// or directly into `Gating` after a verified head-lock approval on an
+    /// existing registered worktree.
     pub fn can_transition_to(self, next: TaskState) -> bool {
         use TaskState::{Backlog, Blocked, Cancelled, Done, Gating, Ready, Review, Running};
         matches!(
@@ -62,7 +64,7 @@ impl TaskState {
                 | (Running, Gating | Blocked | Ready | Cancelled)
                 | (Gating, Review | Done | Blocked | Ready | Cancelled)
                 | (Review, Gating | Done | Blocked | Ready | Cancelled)
-                | (Blocked, Ready | Cancelled)
+                | (Blocked, Ready | Gating | Cancelled)
         )
     }
 
@@ -135,6 +137,12 @@ pub struct Task {
     /// Optional owned path prefixes for scope-keyed parallelism; empty means unscoped.
     #[serde(default)]
     pub scope_paths: Vec<String>,
+    /// Optional persisted retry deadline (Unix epoch) for transient `Blocked` auto-recovery.
+    #[serde(default)]
+    pub retry_after: Option<i64>,
+    /// Number of automatic `Blocked -> Ready` recovery attempts performed in `Mode::Auto`.
+    #[serde(default)]
+    pub auto_recover_count: u32,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -164,6 +172,8 @@ impl Task {
             blocked_reason: None,
             unblock_cycles: 0,
             scope_paths: Vec::new(),
+            retry_after: None,
+            auto_recover_count: 0,
             created_at: now,
             updated_at: now,
         }
@@ -199,6 +209,8 @@ impl Task {
             blocked_reason: None,
             unblock_cycles: 0,
             scope_paths: Vec::new(),
+            retry_after: None,
+            auto_recover_count: 0,
             created_at: now,
             updated_at: now,
         })

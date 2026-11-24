@@ -5,6 +5,7 @@ mod hidden;
 pub mod output;
 mod proc;
 mod signed;
+mod signed_audit;
 mod stale;
 #[cfg(test)]
 mod tests;
@@ -24,12 +25,13 @@ use sha2::{Digest, Sha256};
 pub use hidden::{HiddenFiles, IgnoredFile, hidden_files};
 use proc::Failure;
 pub use signed::{
-    APPROVAL_DOMAIN, AUDIT_DOMAIN, COMMON_RECEIPT_DOMAIN, PROOF_DOMAIN, RECEIPT_DOMAIN, Signed,
-    approval_path, audit_verdict_path, check_store_receipt, check_store_receipt_in,
-    common_receipt_path, load_key, load_or_create_key, proof_path, read_approval,
-    read_audit_verdict, read_common_receipt, read_proof, read_receipt, receipt_path,
-    remove_common_receipt, sign, sign_tagged, verify, verify_tagged, write_approval,
-    write_audit_verdict, write_common_receipt, write_proof, write_receipt,
+    APPROVAL_DOMAIN, AUDIT_DOMAIN, AUDIT_PARTIAL_DOMAIN, COMMON_RECEIPT_DOMAIN, PROOF_DOMAIN,
+    PartialAuditKey, PartialAuditRecord, RECEIPT_DOMAIN, Signed, approval_path, audit_verdict_path,
+    check_store_receipt, check_store_receipt_in, clear_audits_for_repo, common_receipt_path,
+    load_key, load_or_create_key, partial_audit_path, proof_path, read_approval,
+    read_audit_verdict, read_common_receipt, read_partial_audit, read_proof, read_receipt,
+    receipt_path, remove_common_receipt, sign, sign_tagged, verify, verify_tagged, write_approval,
+    write_audit_verdict, write_common_receipt, write_partial_audit, write_proof, write_receipt,
 };
 pub use tools::{find_program, program, repository_dirs, resolve_programs};
 

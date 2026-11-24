@@ -74,6 +74,7 @@ mod real {
                     enabled: true,
                     ..SandboxPolicy::default()
                 },
+                json_schema: None,
             })
             .unwrap();
         let log = outcome.log_tail;

@@ -126,10 +126,17 @@ impl SelectingPool {
         let other = self
             .inner
             .acquire_where(&|p| Some(&p.id) != of_task.as_ref())?;
-        match other {
-            Some(grant) => Ok(Some(grant)),
-            None => self.inner.acquire(),
+        if other.is_some() {
+            return Ok(other);
         }
+        // V2-SEC-07: when multiple accounts exist in this provider's pool, wait
+        // for a free non-author account instead of silently leasing the author's
+        // own account (`same_account = true`), which wastes tokens on rejected
+        // Tier-1 audits. Keep single-account fallback for solo-dev Tier-2 pools.
+        if self.inner.provider_account_count()? > 1 {
+            return Ok(None);
+        }
+        self.inner.acquire()
     }
 
     fn sticky(
@@ -142,9 +149,23 @@ impl SelectingPool {
             return self.acquire_for_audit(provider, task_id);
         }
         let of_task = self.history.last_account_of_task(task_id, provider)?;
+        let settings_account_id = match selection::settings_account(&self.repo_root) {
+            Some(wanted) => {
+                let profiles: Vec<AccountProfile> = self
+                    .usable()?
+                    .into_iter()
+                    .map(|state| state.profile)
+                    .collect();
+                selection::match_account(&wanted, &profiles).map(|profile| profile.id.clone())
+            }
+            None => None,
+        };
         let repo = self.repo_root.to_string_lossy();
         let of_repo = self.history.last_account_of_repo(&repo, provider)?;
-        for preferred in [of_task, of_repo].into_iter().flatten() {
+        for preferred in [of_task, settings_account_id, of_repo]
+            .into_iter()
+            .flatten()
+        {
             if let Some(grant) = self.inner.acquire_where(&|p| p.id == preferred)? {
                 return Ok(Some(grant));
             }
@@ -227,5 +248,223 @@ impl AccountPool for SelectingPool {
 
     fn provider_account_count(&self) -> PortResult<usize> {
         self.inner.provider_account_count()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use aaf_domain::account::{AccountProfile, ProviderKind};
+    use aaf_domain::config::AccountSelection;
+    use aaf_domain::ports::{AccountStore, Clock, RunStore, TaskStore};
+    use aaf_domain::run::{RunRecord, RunStatus};
+    use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
+
+    use super::{AccountPool, Purpose, RouterPool, SelectingPool};
+    use crate::db::Db;
+
+    struct TestClock(AtomicI64);
+
+    impl Clock for TestClock {
+        fn now(&self) -> i64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn sticky_honors_settings_local_account_and_fails_over_when_busy_or_limited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let db = Db::open(&root.join("aaf.db")).unwrap();
+        for (id, name) in [("claude-home", "home"), ("claude-work", "work")] {
+            let dir = root.join(format!("home/.claude-{name}"));
+            fs::create_dir_all(&dir).unwrap();
+            db.upsert_account(&AccountProfile {
+                id: id.to_string(),
+                provider: ProviderKind::ClaudeCode,
+                config_dir: dir.to_string_lossy().into_owned(),
+                name: name.to_string(),
+            })
+            .unwrap();
+        }
+
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".claude")).unwrap();
+        fs::write(
+            repo.join(".claude/settings.local.json"),
+            r#"{ "account": "work" }"#,
+        )
+        .unwrap();
+
+        let store = Arc::new(db.clone());
+        let clock = Arc::new(TestClock(AtomicI64::new(1_000)));
+        let pool = SelectingPool::new(
+            RouterPool {
+                accounts: store.clone(),
+                runs: store.clone(),
+                clock,
+                leases_dir: root.join("leases"),
+                max_concurrent_per_account: 1,
+                provider: Some(ProviderKind::ClaudeCode),
+            },
+            AccountSelection::Sticky,
+            &repo,
+            store,
+        );
+
+        // First run with no history honors `.claude/settings.local.json` ("work" -> "claude-work").
+        let first = pool.acquire_for("t1", Purpose::Work).unwrap().unwrap();
+        assert_eq!(first.account_id(), Some("claude-work"));
+
+        // While "claude-work" is busy (leased), another work job fails over to "claude-home".
+        let while_busy = pool.acquire_for("t2", Purpose::Work).unwrap().unwrap();
+        assert_eq!(while_busy.account_id(), Some("claude-home"));
+        drop(while_busy);
+        drop(first);
+
+        // When "claude-work" is cooling down (rate-limited), sticky still fails over to "claude-home".
+        db.set_cooldown("claude-work", Some(9_000)).unwrap();
+        let while_limited = pool.acquire_for("t3", Purpose::Work).unwrap().unwrap();
+        assert_eq!(while_limited.account_id(), Some("claude-home"));
+        drop(while_limited);
+
+        // Once "claude-work" recovers:
+        // - a task with its own history (`t3` on `claude-home`) keeps its task account (`of_task`),
+        // - a fresh task (`t4`) prefers `.claude/settings.local.json` (`claude-work`) over repo history (`of_repo`).
+        db.set_cooldown("claude-work", None).unwrap();
+        let spec = ImmutableSpec {
+            description: "test".to_string(),
+            acceptance: vec!["ok".to_string()],
+        };
+        let repo_str = repo.to_string_lossy().into_owned();
+        let mut t3 = Task::new_root("t3", &repo_str, "t3", spec, Priority::P2, 1);
+        t3.state = TaskState::Ready;
+        db.insert_task(&t3).unwrap();
+        db.insert_run(&RunRecord {
+            id: "run-t3-1".to_string(),
+            task_id: "t3".to_string(),
+            account_id: Some("claude-home".to_string()),
+            executor: "claude".to_string(),
+            worktree_path: String::new(),
+            branch: String::new(),
+            status: RunStatus::Succeeded,
+            exit_code: Some(0),
+            tokens_in: 0,
+            tokens_out: 0,
+            started_at: 1_000,
+            ended_at: Some(1_001),
+        })
+        .unwrap();
+
+        let t3_next = pool.acquire_for("t3", Purpose::Work).unwrap().unwrap();
+        assert_eq!(t3_next.account_id(), Some("claude-home"));
+        drop(t3_next);
+
+        let t4_next = pool.acquire_for("t4", Purpose::Work).unwrap().unwrap();
+        assert_eq!(t4_next.account_id(), Some("claude-work"));
+        drop(t4_next);
+    }
+
+    #[test]
+    fn audit_waits_for_non_author_when_multi_account_pool_and_falls_back_when_single() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let db = Db::open(&root.join("aaf.db")).unwrap();
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let spec = ImmutableSpec {
+            description: "audit test".to_string(),
+            acceptance: vec!["ok".to_string()],
+        };
+        let repo_str = repo.to_string_lossy().into_owned();
+        let mut t1 = Task::new_root("t1", &repo_str, "t1", spec, Priority::P2, 1);
+        t1.state = TaskState::Gating;
+        db.insert_task(&t1).unwrap();
+        db.insert_run(&RunRecord {
+            id: "run-t1".to_string(),
+            task_id: "t1".to_string(),
+            account_id: Some("claude-a".to_string()),
+            executor: "claude".to_string(),
+            worktree_path: String::new(),
+            branch: String::new(),
+            status: RunStatus::Succeeded,
+            exit_code: Some(0),
+            tokens_in: 0,
+            tokens_out: 0,
+            started_at: 1_000,
+            ended_at: Some(1_001),
+        })
+        .unwrap();
+
+        let dir_a = root.join("home/.claude-a");
+        fs::create_dir_all(&dir_a).unwrap();
+        db.upsert_account(&AccountProfile {
+            id: "claude-a".to_string(),
+            provider: ProviderKind::ClaudeCode,
+            config_dir: dir_a.to_string_lossy().into_owned(),
+            name: "a".to_string(),
+        })
+        .unwrap();
+
+        let store = Arc::new(db.clone());
+        let clock = Arc::new(TestClock(AtomicI64::new(1_000)));
+        let make_pool = || {
+            SelectingPool::new(
+                RouterPool {
+                    accounts: store.clone(),
+                    runs: store.clone(),
+                    clock: clock.clone(),
+                    leases_dir: root.join("leases"),
+                    max_concurrent_per_account: 1,
+                    provider: Some(ProviderKind::ClaudeCode),
+                },
+                AccountSelection::Sticky,
+                &repo,
+                store.clone(),
+            )
+        };
+
+        // Single-account pool keeps solo-dev fallback to author account.
+        let single_pool = make_pool();
+        let solo_grant = single_pool
+            .acquire_for("t1", Purpose::Audit)
+            .unwrap()
+            .expect("single-account pool must fall back");
+        assert_eq!(solo_grant.account_id(), Some("claude-a"));
+        drop(solo_grant);
+
+        // Multi-account pool: when non-author account is busy/cooling down,
+        // Purpose::Audit returns None instead of leasing author's account.
+        let dir_b = root.join("home/.claude-b");
+        fs::create_dir_all(&dir_b).unwrap();
+        db.upsert_account(&AccountProfile {
+            id: "claude-b".to_string(),
+            provider: ProviderKind::ClaudeCode,
+            config_dir: dir_b.to_string_lossy().into_owned(),
+            name: "b".to_string(),
+        })
+        .unwrap();
+        db.set_cooldown("claude-b", Some(9_000)).unwrap();
+
+        let multi_pool = make_pool();
+        assert!(
+            multi_pool
+                .acquire_for("t1", Purpose::Audit)
+                .unwrap()
+                .is_none(),
+            "multi-account pool must wait instead of leasing author account"
+        );
+
+        // Once claude-b recovers, audit acquires claude-b.
+        db.set_cooldown("claude-b", None).unwrap();
+        let ind_grant = multi_pool
+            .acquire_for("t1", Purpose::Audit)
+            .unwrap()
+            .expect("independent account should be leased");
+        assert_eq!(ind_grant.account_id(), Some("claude-b"));
     }
 }

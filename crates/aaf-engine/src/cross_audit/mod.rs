@@ -10,9 +10,12 @@ pub mod verdict;
 
 use std::path::Path;
 
+use aaf_domain::config::RepoConfig;
 use aaf_domain::gate::{Approval, GoldenScore};
 use aaf_domain::ports::{AgentRequest, AgentRunner, Clock, PortError};
 use aaf_domain::task::ImmutableSpec;
+
+use crate::gate::{GateError, head_lock};
 
 pub use checklist::{Item, build_checklist};
 pub use diff_hunks::{
@@ -159,6 +162,47 @@ pub fn approve_if_pass(
     };
     let io = |err: aaf_fp::FpError| PortError::Io(err.to_string());
     let key = aaf_fp::load_or_create_key(data_dir).map_err(io)?;
-    aaf_fp::write_approval(data_dir, &key, repo_root, &approval).map_err(io)?;
+    head_lock::write_approval_everywhere(data_dir, &key, repo_root, &approval)
+        .map_err(|err| PortError::Io(err.to_string()))?;
+    Ok(Some(approval))
+}
+
+/// Writes signed `PASS` approvals (with TOCTOU `lock_fp` verification, derived
+/// base/tracked views, and mirroring to the common repository root) via
+/// [`head_lock::approve_matching`] when, and only when, the report passed.
+#[allow(clippy::too_many_arguments)]
+pub fn approve_if_pass_with_config(
+    report: &AuditReport,
+    data_dir: &Path,
+    repo_root: &Path,
+    cfg: &RepoConfig,
+    lock_fp: &str,
+    reviewer: &str,
+    same_account: bool,
+    clock: &dyn Clock,
+) -> Result<Option<Approval>, PortError> {
+    if !report.verdict.is_pass() || report.diff_truncated {
+        return Ok(None);
+    }
+    if lock_fp.trim().is_empty() || reviewer.trim().is_empty() {
+        return Err(PortError::Invalid(
+            "approval needs a lock fingerprint and a reviewer".to_string(),
+        ));
+    }
+    let approval = head_lock::approve_matching(
+        data_dir,
+        repo_root,
+        cfg,
+        reviewer,
+        same_account,
+        lock_fp,
+        clock,
+    )
+    .map_err(|err| match err {
+        GateError::NothingLocked | GateError::LockFpChanged | GateError::Config(_) => {
+            PortError::Invalid(err.to_string())
+        }
+        other => PortError::Io(other.to_string()),
+    })?;
     Ok(Some(approval))
 }

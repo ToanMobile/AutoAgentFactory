@@ -124,6 +124,7 @@ fn build_bwrap_args_enforces_least_privilege_mounts_and_hides_data_dir() {
             missing_str.clone(),
             sibling_str.clone(),
         ],
+        writable_regex: vec![],
         write_denied: vec![cargo_bin_str.clone()],
         write_denied_prefix: vec![cargo_cfg_prefix],
         read_denied: vec![data_str.clone()],
@@ -156,8 +157,9 @@ fn build_bwrap_args_enforces_least_privilege_mounts_and_hides_data_dir() {
     // `/tmp` must stay private tmpfs (never host-bound).
     assert!(find_flag_pair(&argv, "--bind", "/tmp", "/tmp").is_none());
 
-    // Existing cache is bound writable; missing cache and sibling worktree are skipped.
-    assert!(find_flag_pair(&argv, "--bind", &cargo_str, &cargo_str).is_some());
+    // Under Plan v3 (V2-SEC-06), `.cargo` root stays RO (never bound RW) so agents
+    // cannot create `.cargo/config.toml` or `bin/*`; missing cache and sibling are skipped.
+    assert!(find_flag_pair(&argv, "--bind", &cargo_str, &cargo_str).is_none());
     assert!(find_flag_pair(&argv, "--bind", &missing_str, &missing_str).is_none());
     assert!(find_flag_pair(&argv, "--bind", &sibling_str, &sibling_str).is_none());
 

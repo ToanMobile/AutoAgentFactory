@@ -48,7 +48,8 @@ fn edited_existing_test_file_is_locked() {
         report.locked_changes,
         vec![LockedChange {
             path: "tests/a_test.rs".to_string(),
-            change: ChangeKind::Modified
+            change: ChangeKind::Modified,
+            tier: aaf_domain::gate::LockTier::Soft,
         }]
     );
     assert!(report.approval.is_none());
@@ -78,7 +79,8 @@ fn renamed_locked_file_counts_for_its_old_path() {
         report.locked_changes,
         vec![LockedChange {
             path: "tests/a_test.rs".to_string(),
-            change: ChangeKind::Renamed
+            change: ChangeKind::Renamed,
+            tier: aaf_domain::gate::LockTier::Soft,
         }]
     );
 }

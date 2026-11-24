@@ -13,4 +13,8 @@ description: Backend/Rust service reliability, bounded timeouts, schema migratio
    - Pair every schema change with a reversible migration and migration test; never emit destructive schema drops against live data.
 
 3. **Observability & Secrets**
-   - Use structured logging with secrets, tokens, emails, and PII masked; verify unit and integration coverage cleanly through `aaf gate`.
+   - Use structured logging with secrets, tokens, emails, and PII masked; verify unit and integration coverage cleanly (and via `aaf gate` in operator sessions).
+
+## Headless / `AAF_RUN_ID` Mode
+
+When `AAF_RUN_ID` is set, never stop to ask questions or wait for confirmation, and never invoke blocked host commands (`aaf gate`, `aaf approve`). Run the repository's own unit, integration, and lint commands directly (wrapping heavy builds via `aaf slot -- <cmd>`) and commit cleanly on the task branch so the factory executes `aaf gate` and cross-audit automatically.

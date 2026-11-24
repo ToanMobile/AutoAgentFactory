@@ -360,14 +360,18 @@ fn single_gradle_build_one_directory_down_gets_commands_that_enter_it() {
     assert_eq!(d.profile, "android");
     assert_eq!(
         d.commands.test_full,
-        "cd android-app && ./gradlew testDebugUnitTest"
+        "cd android-app && ./gradlew testDebugUnitTest --no-daemon"
     );
     assert_eq!(
         d.commands.build,
-        "cd android-app && ./gradlew assembleDebug"
+        "cd android-app && ./gradlew assembleDebug --no-daemon"
     );
-    assert_eq!(d.commands.lint, "cd android-app && ./gradlew lint");
-    assert_eq!(heavy_tool(&d.commands.lint), Some(HeavyTool::Gradle));
+    assert_eq!(d.commands.lint, "");
+    assert_eq!(
+        d.commands.lint_full,
+        "cd android-app && ./gradlew lint --no-daemon"
+    );
+    assert_eq!(heavy_tool(&d.commands.lint_full), Some(HeavyTool::Gradle));
     // A directory name the shell would read as more than a name: no command.
     let odd = detect(&[
         ("my app/settings.gradle", "include ':app'\n"),

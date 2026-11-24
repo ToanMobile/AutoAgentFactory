@@ -457,7 +457,8 @@ fn least_used_audit_prefers_non_author_account_and_falls_back() {
     assert_eq!(pick(Purpose::Work).as_deref(), Some("acct-a"));
     assert_eq!(pick(Purpose::Audit).as_deref(), Some("acct-b"));
     env.db.set_cooldown("acct-b", Some(20_000)).unwrap();
-    assert_eq!(pick(Purpose::Audit).as_deref(), Some("acct-a"));
+    // Multi-account pool waits for a non-author account instead of falling back to same_account.
+    assert!(pool.acquire_for("t1", Purpose::Audit).unwrap().is_none());
 }
 
 #[test]

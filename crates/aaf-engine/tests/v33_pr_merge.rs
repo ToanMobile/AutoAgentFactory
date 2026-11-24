@@ -117,6 +117,11 @@ require_different_provider = false
 "#
         );
         fs::write(work.path().join(".autofactory/config.toml"), cfg).unwrap();
+        fs::write(
+            work.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         fs::write(work.path().join("src/lib.rs"), "pub fn v() -> i32 { 1 }\n").unwrap();
         fs::write(
             work.path().join("tests/basic_test.rs"),
@@ -185,12 +190,14 @@ fn pr_info(number: u64, branch: &str, head: &str) -> PrInfo {
 }
 
 #[test]
-fn merge_blocks_head_mismatch_and_unapproved_or_same_account_test_edit() {
+fn merge_blocks_head_mismatch_and_unapproved_or_same_account_tier1_edit() {
     let fx = Fixture::new("true");
-    let head = fx.make_pr_branch("feat/edit-test", |root| {
+    // Cargo.toml is Tier-1 (LockTier::Hard): same_account=true MUST be rejected
+    // even when require_different_provider = false.
+    let head = fx.make_pr_branch("feat/edit-manifest", |root| {
         fs::write(
-            root.join("tests/basic_test.rs"),
-            "#[test] fn t() { assert_eq!(2, 2); }\n",
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.2.0\"\n",
         )
         .unwrap();
     });
@@ -199,7 +206,7 @@ fn merge_blocks_head_mismatch_and_unapproved_or_same_account_test_edit() {
     // 1. Head mismatch is rejected before any gate or merge.
     let wrong_sha = "0".repeat(40);
     let gh = FakeGh {
-        pr: pr_info(10, "feat/edit-test", &head),
+        pr: pr_info(10, "feat/edit-manifest", &head),
         checks: vec![],
         merged_calls: AtomicUsize::new(0),
     };
@@ -210,7 +217,7 @@ fn merge_blocks_head_mismatch_and_unapproved_or_same_account_test_edit() {
     }
     assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 0);
 
-    // 2. Edited existing test without cross-approval -> Blocked(cross_approval_required).
+    // 2. Edited Tier-1 manifest without approval -> Blocked(cross_approval_required).
     let out = merge_pr(&fx.req(10, &head, false), &gh, &FixedClock(2), &noop).unwrap();
     match out {
         PrMergeOutcome::Blocked { code, .. } => assert_eq!(code, "cross_approval_required"),
@@ -218,9 +225,9 @@ fn merge_blocks_head_mismatch_and_unapproved_or_same_account_test_edit() {
     }
     assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 0);
 
-    // 3. Signing a same_account=true approval MUST STILL BE REJECTED during merge
+    // 3. Signing a same_account=true approval MUST STILL BE REJECTED for Tier-1
     // (even though repo config had require_different_provider = false).
-    git(fx.work.path(), &["checkout", "feat/edit-test"]);
+    git(fx.work.path(), &["checkout", "feat/edit-manifest"]);
     let mut cfg = RepoConfig::default();
     cfg.gate.base_ref = "origin/main".to_string();
     head_lock::approve(
@@ -236,11 +243,11 @@ fn merge_blocks_head_mismatch_and_unapproved_or_same_account_test_edit() {
     let out = merge_pr(&fx.req(10, &head, false), &gh, &FixedClock(4), &noop).unwrap();
     match out {
         PrMergeOutcome::Blocked { code, .. } => assert_eq!(code, "cross_approval_required"),
-        other => panic!("same_account approval must be blocked, got {other:?}"),
+        other => panic!("same_account approval must be blocked for Tier-1, got {other:?}"),
     }
 
     // 4. Independent approval (same_account = false) unlocks the exact lock_fp and merges!
-    git(fx.work.path(), &["checkout", "feat/edit-test"]);
+    git(fx.work.path(), &["checkout", "feat/edit-manifest"]);
     head_lock::approve(
         fx.data.path(),
         fx.work.path(),
@@ -256,6 +263,66 @@ fn merge_blocks_head_mismatch_and_unapproved_or_same_account_test_edit() {
         PrMergeOutcome::Merged { pr_number, .. } => assert_eq!(pr_number, 10),
         other => panic!("expected Merged with independent approval, got {other:?}"),
     }
+    assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn solo_dev_tier2_pure_test_edit_merges_unless_different_provider_required() {
+    let fx = Fixture::new("true");
+    let head = fx.make_pr_branch("feat/tier2-test", |root| {
+        fs::write(
+            root.join("tests/basic_test.rs"),
+            "#[test] fn t() { assert_eq!(2, 2); }\n",
+        )
+        .unwrap();
+    });
+    let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
+    let gh = FakeGh {
+        pr: pr_info(12, "feat/tier2-test", &head),
+        checks: vec![],
+        merged_calls: AtomicUsize::new(0),
+    };
+
+    // Unapproved Tier-2 test edit is still blocked.
+    let unapproved = merge_pr(&fx.req(12, &head, false), &gh, &FixedClock(1), &noop).unwrap();
+    assert!(matches!(
+        unapproved,
+        PrMergeOutcome::Blocked { ref code, .. } if code == "cross_approval_required"
+    ));
+
+    // Sign same_account = true approval for the pure test change.
+    git(fx.work.path(), &["checkout", "feat/tier2-test"]);
+    let mut cfg = RepoConfig::default();
+    cfg.gate.base_ref = "origin/main".to_string();
+    head_lock::approve(
+        fx.data.path(),
+        fx.work.path(),
+        &cfg,
+        "solo",
+        true,
+        &FixedClock(2),
+    )
+    .unwrap();
+    git(fx.work.path(), &["checkout", "main"]);
+
+    // With global require_different_provider = true, same_account = true is STILL blocked!
+    let mut strict_req = fx.req(12, &head, false);
+    let mut global = aaf_domain::config::GlobalConfig::default();
+    global.cross_audit.require_different_provider = Some(true);
+    strict_req.global_config = Some(global);
+    let strict_out = merge_pr(&strict_req, &gh, &FixedClock(3), &noop).unwrap();
+    assert!(matches!(
+        strict_out,
+        PrMergeOutcome::Blocked { ref code, .. } if code == "cross_approval_required"
+    ));
+    assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 0);
+
+    // With require_different_provider = false (solo dev), Tier-2 pure test edit merges!
+    let solo_out = merge_pr(&fx.req(12, &head, false), &gh, &FixedClock(4), &noop).unwrap();
+    assert!(
+        matches!(solo_out, PrMergeOutcome::Merged { pr_number: 12, .. }),
+        "{solo_out:?}"
+    );
     assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 1);
 }
 

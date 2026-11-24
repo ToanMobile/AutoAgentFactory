@@ -110,6 +110,8 @@ fn whole_repo_deletion_after_cd_and_symlink_before_dotdot() {
         config_dir: Some(fx.config.clone()),
         home: Some(fx.home.clone()),
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let check_realistic = |cmd: &str| {
         let payload = json!({

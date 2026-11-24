@@ -1,7 +1,8 @@
 //! Blocks git calls that rewrite shared history, delete protected branches
 //! or switch the repository's hooks off.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::shell::Cmd;
 use crate::{Ctx, Denial, git_alias, git_files, paths};
@@ -272,9 +273,50 @@ const FIX_FORCE: &str =
     "push without force; to update your own feature branch use --force-with-lease and name it";
 const FIX_PROTECTED: &str = "leave main, master and release/* alone; open a pull request instead";
 
+fn strictly_under(child: &Path, parent: &Path) -> bool {
+    child != parent && child.starts_with(parent)
+}
+
+fn overlaps_dir(a: &Path, b: &Path) -> bool {
+    let real_b = paths::real(b);
+    a == real_b || a.starts_with(&real_b) || real_b.starts_with(a)
+}
+
+/// True iff `path` exists on disk, canonicalizes cleanly strictly inside
+/// `/tmp` or `$TMPDIR` (never `/tmp` or `$TMPDIR` itself), and does not
+/// resolve into or overlap the workspace repository.
+fn is_safe_tmp_dir(path: &Path, ctx: &Ctx) -> bool {
+    let Ok(canon) = fs::canonicalize(path) else {
+        return false;
+    };
+    let in_tmp = fs::canonicalize("/tmp")
+        .ok()
+        .is_some_and(|tmp| strictly_under(&canon, &tmp))
+        || strictly_under(&canon, Path::new("/tmp"))
+        || strictly_under(&canon, Path::new("/private/tmp"));
+    let in_tmpdir = std::env::var_os("TMPDIR")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| fs::canonicalize(v).ok())
+        .is_some_and(|td| strictly_under(&canon, &td));
+    (in_tmp || in_tmpdir)
+        && !ctx.root().is_some_and(|r| overlaps_dir(&canon, &r))
+        && !ctx
+            .workspace_root()
+            .is_some_and(|r| overlaps_dir(&canon, &r))
+        && !(ctx.root().is_none()
+            && !ctx.workspace_cwd.as_os_str().is_empty()
+            && overlaps_dir(&canon, &ctx.workspace_cwd))
+}
+
+fn is_safe_tmp_raw(raw: &str, ctx: &Ctx) -> bool {
+    !raw.is_empty()
+        && !paths::has_unresolved_var(raw)
+        && is_safe_tmp_dir(&ctx.expand_real_dotdot(raw), ctx)
+}
+
 pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let deny = |(reason, fix): (String, &'static str)| Denial::new(RULE, reason, fix);
-    if let Some(verdict) = env_override(cmd) {
+    if let Some(verdict) = env_override(cmd, ctx) {
         return Some(deny(verdict));
     }
     // A command word built from an expansion could be git: judge its
@@ -304,10 +346,9 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                 FIX_CONFIG,
             )));
         }
-        let moved = cmd
-            .assigns
-            .iter()
-            .find(|(key, _)| key == "HOME" || key == "XDG_CONFIG_HOME");
+        let moved = cmd.assigns.iter().find(|(key, val)| {
+            (key == "HOME" && !is_safe_tmp_raw(val, ctx)) || key == "XDG_CONFIG_HOME"
+        });
         if let Some((key, _)) = moved {
             return Some(deny((
                 format!("{key} moves git's global configuration to a place the hook cannot read"),
@@ -326,11 +367,21 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         "reset" => options(call.rest)
             .any(|a| abbrev(a, "--hard", 3))
             .then(|| {
-                (
-                    "reset --hard discards uncommitted work".to_string(),
-                    "use git stash, or git reset --soft/--mixed",
-                )
+                let target = call.resolve_dir(ctx);
+                let safe_scratch = !call.dirs.is_empty()
+                    && call.aliases.is_empty()
+                    && call.explicit_git_dir().is_none()
+                    && !ctx.line.git_dir_moved
+                    && is_safe_tmp_dir(&target, ctx)
+                    && target.join(".git").exists();
+                (!safe_scratch).then(|| {
+                    (
+                        "reset --hard discards uncommitted work".to_string(),
+                        "use git stash, or git reset --soft/--mixed",
+                    )
+                })
             })
+            .flatten()
             .or_else(|| no_verify(call.rest)),
         "branch" => branch_delete(call.rest).or_else(|| no_verify(call.rest)),
         "update-ref" => update_ref(call.rest),
@@ -341,8 +392,9 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
 }
 
 /// `GIT_CONFIG_KEY_0=core.hooksPath …` does what `-c core.hooksPath=` does.
-fn env_override(cmd: &Cmd) -> Verdict {
+fn env_override(cmd: &Cmd, ctx: &Ctx) -> Verdict {
     let exported = matches!(cmd.name(), "export" | "declare" | "typeset" | "readonly");
+    let direct_git = cmd.name() == "git" && !cmd.dynamic_name;
     let assigned = cmd
         .assigns
         .iter()
@@ -365,10 +417,14 @@ fn env_override(cmd: &Cmd) -> Verdict {
                     git_alias::FIX,
                 ))
             } else if let Some(var) = config_file_var(&text) {
-                Some((
-                    format!("{var} points git at a configuration file the hook cannot read"),
-                    FIX_CONFIG,
-                ))
+                if direct_git && var == "GIT_CONFIG_GLOBAL" && is_safe_tmp_raw(value, ctx) {
+                    None
+                } else {
+                    Some((
+                        format!("{var} points git at a configuration file the hook cannot read"),
+                        FIX_CONFIG,
+                    ))
+                }
             } else if reads_unseen_config(&text) {
                 Some((
                     "GIT_CONFIG_* includes a configuration file the hook cannot read".to_string(),

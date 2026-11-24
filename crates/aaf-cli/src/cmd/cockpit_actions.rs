@@ -18,7 +18,7 @@ use aaf_engine::git::worktree::validate_task_id;
 use aaf_engine::watch::sanitize_display as san;
 
 use super::task_ops::{
-    ApproveRefusal, HeadLockEvalError, TaskOpError, approve_if_unchanged, eval_tree_head_lock,
+    ApproveOpError, HeadLockEvalError, TaskOpError, approve_and_regate, eval_tree_head_lock,
     parse_rework_reason, resolve_task_tree, rework_task, unblock_task,
 };
 use crate::ctx::Ctx;
@@ -191,29 +191,42 @@ pub(crate) fn action_approve(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("cockpit");
-    // Sign only the diff the reviewer just saw: re-evaluated after the prompt.
-    match approve_if_unchanged(ctx, &target_tree, &report.lock_fp, reviewer) {
-        Ok(a) => wln(
+    let db = open_db_rw(ctx)?;
+    match approve_and_regate(
+        &db,
+        ctx,
+        id,
+        reviewer,
+        Some(&report.lock_fp),
+        "aaf cockpit approve",
+        "human",
+        SystemClock.now(),
+    ) {
+        Ok(out) => {
+            let suffix = match out.transitioned_to {
+                Some(state) => format!(" -> {}", state.as_str()),
+                None => String::new(),
+            };
+            wln(
+                w,
+                &format!(
+                    "approved {safe_id} by {} (lock_fp={}){suffix}",
+                    san(&out.approval.reviewer),
+                    san(&out.approval.lock_fp)
+                ),
+            )
+        }
+        Err(ApproveOpError::Gate(GateError::NothingLocked)) => wln(
             w,
-            &format!(
-                "approved {safe_id} by {} (lock_fp={})",
-                san(&a.reviewer),
-                san(&a.lock_fp)
-            ),
+            &format!("refused: no locked file is changed for {safe_id}; nothing approved"),
         ),
-        Err(ApproveRefusal::Eval(e)) => wln(w, &eval_error_line(&e)),
-        // The preview had locked changes, so none now means the diff changed.
-        Err(ApproveRefusal::NothingLocked | ApproveRefusal::FpChanged) => wln(
+        Err(ApproveOpError::Gate(GateError::LockFpChanged)) => wln(
             w,
             &format!(
                 "refused: lock_fp mismatch for {safe_id}: locked diff changed since preview; run approve again"
             ),
         ),
-        Err(ApproveRefusal::Sign(GateError::NothingLocked)) => wln(
-            w,
-            &format!("refused: no locked file is changed for {safe_id}; nothing approved"),
-        ),
-        Err(ApproveRefusal::Sign(e)) => wln(w, &format!("approve failed: {}", san(&e.to_string()))),
+        Err(e) => wln(w, &format!("approve failed: {}", san(&e.to_string()))),
     }
 }
 
@@ -252,9 +265,7 @@ pub(crate) fn action_rework(
     if !confirm(&format!("Confirm rework {safe_id} [y/N]: "), reader, w)? {
         return wln(w, "cancelled");
     }
-
     let db = open_db_rw(ctx)?;
-    let now = SystemClock.now();
     match rework_task(
         &db,
         ctx,
@@ -263,7 +274,7 @@ pub(crate) fn action_rework(
         rerun,
         "aaf cockpit rework",
         "human",
-        now,
+        SystemClock.now(),
     ) {
         Ok(out) => wln(
             w,

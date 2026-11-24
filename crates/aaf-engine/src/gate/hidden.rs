@@ -129,10 +129,26 @@ fn remove(root: &Path, ignored: Vec<IgnoredFile>, when: When, found: &mut Found)
     }
 }
 
+/// Benign OS and local-editor clutter that does not alter build or release
+/// artifacts and is reported as an advisory note (not a hard block) under
+/// [`HiddenPolicy::Warn`] with `release == true`.
+pub fn is_benign_release_clutter(path: &str) -> bool {
+    if path.ends_with('/') {
+        return false;
+    }
+    let normalized = path.trim_start_matches("./");
+    let file_name = normalized.rsplit('/').next().unwrap_or(normalized);
+    file_name == ".DS_Store"
+        || (file_name.ends_with('~') && file_name.len() > 1)
+        || normalized == ".claude/settings.local.json"
+}
+
 /// Looks at `root` (canonical) and applies `policy`. With `release`, what
-/// the policy would only name blocks instead: a release receipt unlocks a
-/// store submission of the tree on disk, so it is not signed beside a file
-/// that is not in the fingerprint.
+/// the policy would only name blocks instead (except benign OS/local-editor
+/// clutter such as `.DS_Store`, `*~`, and `.claude/settings.local.json`, which
+/// stay advisory notes): a release receipt unlocks a store submission of the
+/// tree on disk, so it is not signed beside an unexpected file outside the
+/// fingerprint.
 pub(crate) fn inspect(
     root: &Path,
     policy: HiddenPolicy,
@@ -157,12 +173,28 @@ where
     let hidden = scan(root)?;
     let mut found = Found::default();
     match policy {
-        HiddenPolicy::Warn if release => found.blocks.extend(
-            ignored_only(hidden.ignored)
-                .reasons()
+        HiddenPolicy::Warn if release => {
+            let (benign, blocking): (Vec<_>, Vec<_>) = hidden
+                .ignored
                 .into_iter()
-                .map(|reason| format!("work tree: {reason}")),
-        ),
+                .partition(|file| is_benign_release_clutter(&file.path));
+            if !benign.is_empty() {
+                found.notes.extend(
+                    ignored_only(benign)
+                        .reasons()
+                        .into_iter()
+                        .map(|reason| format!("advisory: work tree: {reason}")),
+                );
+            }
+            if !blocking.is_empty() {
+                found.blocks.extend(
+                    ignored_only(blocking)
+                        .reasons()
+                        .into_iter()
+                        .map(|reason| format!("work tree: {reason}")),
+                );
+            }
+        }
         HiddenPolicy::Warn => found.notes.extend(
             ignored_only(hidden.ignored)
                 .reasons()

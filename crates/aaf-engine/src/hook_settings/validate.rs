@@ -145,6 +145,7 @@ pub(super) fn entry_problem(hook: &Value) -> Option<String> {
                 if value
                     .as_u64()
                     .is_some_and(|secs| secs >= MIN_HOOK_TIMEOUT_SECS) => {}
+            "name" | "description" | "statusMessage" if value.is_string() => {}
             other => {
                 return Some(format!(
                     "the {HOOK_BINARY} entry sets \"{other}\": {value}, which a plain blocking \
@@ -201,4 +202,85 @@ pub(super) fn forbidden_env(root: &Value) -> Option<String> {
     map.keys()
         .find(|key| is_guard_env(key))
         .map(|key| format!("\"env\".\"{key}\" overrides the environment {HOOK_BINARY} trusts"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use serde_json::json;
+
+    use crate::hook_settings::covering_hook;
+    use crate::hook_settings::multi_host::{
+        CODEX_TOOLS, codex_matcher, covering_codex_hook, covering_gemini_hook, gemini_matcher,
+    };
+
+    #[test]
+    fn benign_display_metadata_keys_pass_validation_across_all_hosts() {
+        let claude = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash|Write|Edit|MultiEdit|Read",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "aaf-hook",
+                        "name": "AAF Guard",
+                        "description": "Blocks destructive commands and secret reads",
+                        "statusMessage": "Checking AAF safety rules..."
+                    }]
+                }]
+            }
+        });
+        assert!(covering_hook(&claude.to_string()).is_ok());
+
+        let codex = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": codex_matcher(),
+                    "hooks": [{
+                        "type": "command",
+                        "command": "aaf-hook --host codex",
+                        "name": "AAF Codex Guard",
+                        "description": "PreToolUse guard",
+                        "statusMessage": "Checking..."
+                    }]
+                }]
+            }
+        });
+        assert!(covering_codex_hook(&codex.to_string()).is_ok());
+
+        let gemini = json!({
+            "hooks": {
+                "BeforeTool": [{
+                    "matcher": gemini_matcher(),
+                    "hooks": [{
+                        "type": "command",
+                        "command": "aaf-hook --host gemini",
+                        "name": "AAF Gemini Guard",
+                        "description": "BeforeTool guard",
+                        "statusMessage": "Checking..."
+                    }]
+                }]
+            }
+        });
+        assert!(covering_gemini_hook(&gemini.to_string()).is_ok());
+
+        // Non-string metadata values and dangerous keys are still rejected.
+        let bad_meta = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash|Write|Edit|MultiEdit|Read",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "aaf-hook",
+                        "statusMessage": true
+                    }]
+                }]
+            }
+        });
+        assert!(covering_hook(&bad_meta.to_string()).is_err());
+
+        for tool in ["delete_file", "create_file", "view_file"] {
+            assert!(CODEX_TOOLS.contains(&tool), "missing {tool} in CODEX_TOOLS");
+        }
+    }
 }

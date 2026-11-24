@@ -146,6 +146,7 @@ fn dangling_and_chained_links_to_closed_cache_paths_stay_closed() {
                 enabled: true,
                 ..SandboxPolicy::default()
             },
+            json_schema: None,
         })
         .unwrap()
         .log_tail;

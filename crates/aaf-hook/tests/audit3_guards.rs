@@ -16,8 +16,13 @@ const ALLOW: Option<&str> = None;
 
 #[test]
 fn cargo_run_reaches_the_human_actions_without_naming_the_crate() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/aaf-cli\"]\n",
+    );
     run_corpus(
-        &Fixture::new(),
+        &fixture,
         &[
             ("cargo run -- approve --reviewer bob", HUMAN),
             ("cargo run -- board unblock T-3", HUMAN),

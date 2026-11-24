@@ -1,8 +1,10 @@
 //! 7 Golden Standards rubric, deterministic mechanical scoring from signed
 //! verification receipts, and combined score-gate evaluation.
 
-use aaf_domain::gate::{GateStatus, GoldenScore, Receipt, Severity};
+use aaf_domain::gate::{GateMode, GateStatus, GoldenScore, Receipt, Severity};
 use serde::{Deserialize, Serialize};
+
+use crate::store_compliance::PRE_EXISTING_PREFIX;
 
 /// Canonical identifiers of the 7 Golden Standards in fixed order.
 pub const GOLDEN_IDS: [&str; 7] = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"];
@@ -124,7 +126,25 @@ pub fn compute_mechanical_score(
             .count(),
     )
     .unwrap_or(u64::MAX);
-    let total_warns = static_warns.saturating_add(u64::from(receipt.store_compliance.warnings));
+    let pre_existing_store_warns = if receipt.mode == GateMode::Scoped {
+        u64::try_from(
+            receipt
+                .store_compliance
+                .findings
+                .iter()
+                .filter(|finding| {
+                    finding.severity == Severity::Warn
+                        && finding.message.starts_with(PRE_EXISTING_PREFIX)
+                })
+                .count(),
+        )
+        .unwrap_or(u64::MAX)
+    } else {
+        0
+    };
+    let store_warns =
+        u64::from(receipt.store_compliance.warnings).saturating_sub(pre_existing_store_warns);
+    let total_warns = static_warns.saturating_add(store_warns);
     if total_warns > 0 {
         let penalty = i32::try_from(total_warns.saturating_mul(2).min(10)).unwrap_or(10);
         score -= penalty;
@@ -142,7 +162,16 @@ pub fn compute_mechanical_score(
         ));
     }
 
-    let unresolved = receipt.store_compliance.unresolved.len();
+    let unresolved = if receipt.mode == GateMode::Scoped {
+        receipt
+            .store_compliance
+            .unresolved
+            .iter()
+            .filter(|item| !item.starts_with(PRE_EXISTING_PREFIX))
+            .count()
+    } else {
+        receipt.store_compliance.unresolved.len()
+    };
     if unresolved > 0 {
         let penalty = i32::try_from(unresolved.saturating_mul(3).min(12)).unwrap_or(12);
         score -= penalty;

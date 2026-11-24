@@ -256,6 +256,7 @@ impl GateRunner for HeadLockGate {
                 vec![LockedChange {
                     path: "Cargo.toml".into(),
                     change: ChangeKind::Modified,
+                    tier: aaf_domain::gate::LockTier::Hard,
                 }],
             )
         };

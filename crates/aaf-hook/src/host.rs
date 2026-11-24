@@ -135,13 +135,14 @@ fn shell_quote_arg(arg: &str) -> String {
 fn extract_shell_command(
     tool_input: Option<&Value>,
     allow_cmd_alias: bool,
+    allow_array: bool,
 ) -> Result<String, Denial> {
     let Some(obj) = tool_input.and_then(Value::as_object) else {
         return Err(bad_input("shell tool call without a tool_input object"));
     };
     let field = obj.get("command").or_else(|| {
         if allow_cmd_alias {
-            obj.get("cmd")
+            obj.get("cmd").or_else(|| obj.get("CommandLine"))
         } else {
             None
         }
@@ -155,7 +156,7 @@ fn extract_shell_command(
     };
     match value {
         Value::String(cmd) => Ok(cmd.clone()),
-        Value::Array(items) if allow_cmd_alias => {
+        Value::Array(items) if allow_array => {
             if items.is_empty() {
                 return Err(bad_input("shell tool call with empty command array"));
             }
@@ -180,7 +181,10 @@ fn extract_file_path(tool_input: Option<&Value>, allow_path_alias: bool) -> Resu
     };
     let value = obj.get("file_path").and_then(Value::as_str).or_else(|| {
         if allow_path_alias {
-            obj.get("path").and_then(Value::as_str)
+            obj.get("path")
+                .or_else(|| obj.get("TargetFile"))
+                .or_else(|| obj.get("AbsolutePath"))
+                .and_then(Value::as_str)
         } else {
             None
         }
@@ -271,7 +275,15 @@ fn detect_host(payload: &Map<String, Value>, tool: &str) -> HookHost {
     if event == "BeforeTool"
         || matches!(
             tool,
-            "run_shell_command" | "write_file" | "replace" | "read_file" | "read_many_files"
+            "run_shell_command"
+                | "run_command"
+                | "write_file"
+                | "write_to_file"
+                | "replace"
+                | "replace_file_content"
+                | "multi_replace_file_content"
+                | "read_file"
+                | "read_many_files"
         )
     {
         return HookHost::Gemini;
@@ -333,7 +345,7 @@ fn parse_action(
 ) -> Result<ToolAction, Denial> {
     match host {
         HookHost::Claude | HookHost::Auto => match tool {
-            "Bash" => extract_shell_command(tool_input, false).map(ToolAction::Shell),
+            "Bash" => extract_shell_command(tool_input, true, false).map(ToolAction::Shell),
             "Read" => extract_file_path(tool_input, false).map(ToolAction::FileRead),
             "Write" | "Edit" | "MultiEdit" => {
                 extract_file_path(tool_input, false).map(|path| ToolAction::FileWrite(vec![path]))
@@ -342,7 +354,7 @@ fn parse_action(
         },
         HookHost::Codex => match tool {
             "Bash" | "shell" | "shell_command" | "exec_command" => {
-                extract_shell_command(tool_input, true).map(ToolAction::Shell)
+                extract_shell_command(tool_input, true, true).map(ToolAction::Shell)
             }
             "apply_patch" => extract_apply_patch(tool_input).map(ToolAction::FileWrite),
             "write_file" | "edit_file" | "create_file" | "delete_file" | "Write" | "Edit"
@@ -355,13 +367,20 @@ fn parse_action(
             _ => Ok(ToolAction::Unknown),
         },
         HookHost::Gemini => match tool {
-            "run_shell_command" | "shell" => {
-                extract_shell_command(tool_input, true).map(ToolAction::Shell)
+            "run_shell_command" | "run_command" | "shell" => {
+                extract_shell_command(tool_input, true, true).map(ToolAction::Shell)
             }
-            "write_file" | "replace" | "edit_file" => {
+            "write_file"
+            | "write_to_file"
+            | "replace"
+            | "replace_file_content"
+            | "multi_replace_file_content"
+            | "edit_file" => {
                 extract_file_path(tool_input, true).map(|path| ToolAction::FileWrite(vec![path]))
             }
-            "read_file" => extract_file_path(tool_input, true).map(ToolAction::FileRead),
+            "read_file" | "view_file" => {
+                extract_file_path(tool_input, true).map(ToolAction::FileRead)
+            }
             "read_many_files" => extract_many_paths(tool_input).map(ToolAction::FileReadMany),
             _ => Ok(ToolAction::Unknown),
         },

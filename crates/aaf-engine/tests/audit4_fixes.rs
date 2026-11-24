@@ -3,9 +3,11 @@
 
 use std::ffi::OsStr;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
-use aaf_engine::hook_settings::{check_base, check_local, covering_hook};
+use aaf_engine::hook_settings::{check_base, check_local, check_worktree, covering_hook};
 use serde_json::json;
 
 #[path = "../../aaf-fp/tests/exec_support.rs"]
@@ -219,6 +221,7 @@ fn symlinked_write_denied_targets_inside_writable_caches_stay_closed() {
                 enabled: true,
                 ..SandboxPolicy::default()
             },
+            json_schema: None,
         })
         .unwrap()
         .log_tail;
@@ -321,4 +324,113 @@ fn throttle_heavy_classifier_handles_clustered_env_p_s_and_pty_wrappers() {
         heavy_tool_argv(&["script", "-q", "/dev/null", "echo", "gradle"]),
         None
     );
+}
+
+#[test]
+fn check_local_allows_non_pretooluse_hooks_and_rejects_pretooluse_and_non_object_hooks() {
+    for ok in [
+        json!({}),
+        json!({"hooks": {}}),
+        json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}}),
+        json!({"hooks": {"PostToolUse": []}}),
+        json!({"disableAllHooks": false}),
+    ] {
+        assert!(check_local(&ok.to_string()).is_ok(), "expected Ok for {ok}");
+    }
+
+    for bad in [
+        json!({"hooks": {"PreToolUse": []}}),
+        json!({"hooks": {"pretooluse": []}}),
+        json!({"hooks": []}),
+        json!({"hooks": null}),
+        json!({"hooks": true}),
+        json!({"hooks": "nope"}),
+        json!({"disableAllHooks": true}),
+        json!({"disableAllHooks": "false"}),
+        json!({"disableAllHooks": null}),
+    ] {
+        assert!(
+            check_local(&bad.to_string()).is_err(),
+            "expected Err for {bad}"
+        );
+    }
+}
+
+#[test]
+fn check_worktree_rejects_local_settings_created_changed_or_deleted_relative_to_merge_base() {
+    let setup = |base_local: Option<&str>| {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(repo.join(".claude")).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let hook = bin.join("aaf-hook");
+        fs::write(&hook, "#!/bin/sh\necho '{}'\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(
+            repo.join(".claude/settings.json"),
+            json!({
+                "hooks": {"PreToolUse": [{
+                    "matcher": "Bash|Write|Edit|MultiEdit|Read",
+                    "hooks": [{"type": "command", "command": "aaf-hook"}],
+                }]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        git(&["add", "-f", ".claude/settings.json"]);
+        if let Some(local) = base_local {
+            fs::write(repo.join(".claude/settings.local.json"), local).unwrap();
+            git(&["add", "-f", ".claude/settings.local.json"]);
+        }
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["checkout", "-q", "-b", "aaf/task-1"]);
+        (tmp, repo, bin)
+    };
+
+    // Case 1: absent at merge-base -> must remain absent in the task worktree.
+    let (_tmp, repo, bin) = setup(None);
+    check_worktree(&repo, OsStr::new(&bin), Some("main")).unwrap();
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        json!({"permissions": {"allow": ["Bash(ls:*)"]}}).to_string(),
+    )
+    .unwrap();
+    let err = check_worktree(&repo, OsStr::new(&bin), Some("main")).unwrap_err();
+    assert!(err.contains("settings.local.json"), "{err}");
+    assert!(err.contains("not on the base branch"), "{err}");
+
+    // Case 2: present at merge-base -> unchanged passes; modified or deleted fails.
+    let (_tmp, repo, bin) = setup(Some("{\"permissions\": {}}\n"));
+    check_worktree(&repo, OsStr::new(&bin), Some("main")).unwrap();
+
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        "{\"permissions\": {\"allow\": [\"Bash(*)\"]}}\n",
+    )
+    .unwrap();
+    let err = check_worktree(&repo, OsStr::new(&bin), Some("main")).unwrap_err();
+    assert!(err.contains("settings.local.json"), "{err}");
+    assert!(err.contains("not what the base branch has"), "{err}");
+
+    fs::remove_file(repo.join(".claude/settings.local.json")).unwrap();
+    let err = check_worktree(&repo, OsStr::new(&bin), Some("main")).unwrap_err();
+    assert!(err.contains("settings.local.json"), "{err}");
+    assert!(err.contains("deleted"), "{err}");
 }

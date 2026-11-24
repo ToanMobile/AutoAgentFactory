@@ -139,6 +139,10 @@ fn event_kind() {
         (EventKind::ReworkRequested, "rework_requested"),
         (EventKind::ProofRecorded, "proof_recorded"),
         (EventKind::PlanGenerated, "plan_generated"),
+        (EventKind::PlanDebateTurn, "plan_debate_turn"),
+        (EventKind::PlanConverged, "plan_converged"),
+        (EventKind::DualReviewTurn, "dual_review_turn"),
+        (EventKind::ImplementerEscalated, "implementer_escalated"),
     ];
     assert_eq!(cases.len(), EventKind::ALL.len());
     for (kind, name) in cases {

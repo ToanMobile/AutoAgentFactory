@@ -17,7 +17,11 @@ rest by reading the code and recording evidence. A clear gate is necessary, not 
 
 Skip it for a repo with no mobile target; the gate reports `NOT_APPLICABLE` there.
 
-## Run the gate
+## Headless / `AAF_RUN_ID` Mode
+
+When `AAF_RUN_ID` is set, do **not** run `aaf gate` or `aaf approve` (blocked inside the sandbox; the factory runs `aaf gate` automatically after your turn), and do **not** stop to ask questions or wait for human decisions. Inspect manifests, plists, privacy manifests, and source code directly, fix every actionable source-level CRITICAL/WARN issue autonomously, verify with the project's local build/test commands, and list any external store-console items (Play Console declarations, demo account, regional billing enrollment) in your final summary without blocking.
+
+## Run the gate (Operator / Interactive Session)
 
 ```sh
 aaf gate --release          # human-readable

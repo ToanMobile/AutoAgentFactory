@@ -17,19 +17,20 @@ pub mod static_checks;
 #[cfg(test)]
 mod tests;
 
+#[path = "gate_helpers.rs"]
+mod helpers;
+
 use std::path::Path;
 use std::time::Duration;
 
 use aaf_domain::config::{MachineConfig, RepoConfig};
-use aaf_domain::gate::{
-    CommandResult, GateMode, GateStatus, HeadLockReport, LockStatus, RECEIPT_SCHEMA_VERSION,
-    Receipt, StoreComplianceReport, StoreStatus,
-};
+use aaf_domain::gate::{CommandResult, GateMode, GateStatus, RECEIPT_SCHEMA_VERSION, Receipt};
 use aaf_domain::ports::Clock;
 
 use crate::db::private;
 use crate::throttle::{Progress, SystemProbe, Throttle};
 pub use base::GateRunOptions;
+pub(crate) use helpers::{Evidence, decide};
 pub use hidden::HiddenPolicy;
 use hidden::When;
 pub use reuse::{config_hash, repo_root_and_stats_id, stats_repo_id};
@@ -54,99 +55,6 @@ pub enum GateError {
     NothingLocked,
     #[error("the locked diff changed since it was shown; nothing approved")]
     LockFpChanged,
-}
-
-fn mode_name(mode: GateMode) -> &'static str {
-    match mode {
-        GateMode::Scoped => "scoped",
-        GateMode::Full => "full",
-        GateMode::Release => "release",
-    }
-}
-
-/// What the stages found, reduced to what decides the status.
-pub(crate) struct Evidence<'a> {
-    /// The blocking reasons of [`hidden::inspect`]: files on disk that are
-    /// not in the fingerprint and that the policy does not let pass.
-    pub hidden: &'a [String],
-    pub critical_findings: usize,
-    pub head_lock: &'a HeadLockReport,
-    pub store: &'a StoreComplianceReport,
-    pub proof_block: Option<&'a str>,
-    /// `None` when the commands were skipped because an earlier stage blocked.
-    pub commands: Option<&'a [CommandResult]>,
-    pub test_command_missing: bool,
-    pub tree_changed: bool,
-    pub mode: GateMode,
-}
-
-/// Blocking reasons found before any command runs.
-fn early_blocks(evidence: &Evidence<'_>) -> Vec<String> {
-    // First: with files nobody signed in the tree, nothing below describes
-    // what a command would run on.
-    let mut reasons: Vec<String> = evidence.hidden.to_vec();
-    if evidence.critical_findings > 0 {
-        reasons.push(format!(
-            "static checks: {} critical finding(s)",
-            evidence.critical_findings
-        ));
-    }
-    if evidence.head_lock.status == LockStatus::Blocked {
-        reasons.push(format!(
-            "head lock: {} locked file(s) changed without a signed approval",
-            evidence.head_lock.locked_changes.len()
-        ));
-    }
-    if evidence.store.status == StoreStatus::Blocked {
-        reasons.push(format!(
-            "store compliance: {} critical finding(s)",
-            evidence.store.critical
-        ));
-    }
-    if let Some(reason) = evidence.proof_block {
-        reasons.push(format!("proof required: {reason}"));
-    }
-    reasons
-}
-
-/// `Blocked` wins over `Unverified`; `Clear` needs no reason at all.
-pub(crate) fn decide(evidence: &Evidence<'_>) -> (GateStatus, Vec<String>) {
-    let mut reasons = early_blocks(evidence);
-    match evidence.commands {
-        None => reasons.push("commands skipped: an earlier stage already blocks".to_string()),
-        Some(results) => {
-            for result in results.iter().filter(|result| !result.passed()) {
-                reasons.push(if result.timed_out {
-                    format!("command {} timed out", result.name)
-                } else if let Some(code) = result.exit_code {
-                    format!("command {} failed (exit {code})", result.name)
-                } else {
-                    format!("command {} was killed by a signal", result.name)
-                });
-            }
-        }
-    }
-    let blocked = !reasons.is_empty();
-    let mut unverified = false;
-    if evidence.test_command_missing {
-        unverified = true;
-        reasons.push(format!(
-            "no test command is configured for mode {}",
-            mode_name(evidence.mode)
-        ));
-    }
-    if evidence.tree_changed {
-        unverified = true;
-        reasons.push(REASON_TREE_CHANGED.to_string());
-    }
-    let status = if blocked {
-        GateStatus::Blocked
-    } else if unverified {
-        GateStatus::Unverified
-    } else {
-        GateStatus::Clear
-    };
-    (status, reasons)
 }
 
 /// A gate verdict and where it came from.
@@ -180,8 +88,15 @@ pub fn run_gate_reporting(
     clock: &dyn Clock,
     throttle: &Throttle<'_>,
 ) -> Result<GateRun, GateError> {
-    let policy = HiddenPolicy::default();
-    run_gate_policy(data_dir, repo_root, cfg, mode, clock, throttle, policy)
+    run_gate_policy(
+        data_dir,
+        repo_root,
+        cfg,
+        mode,
+        clock,
+        throttle,
+        HiddenPolicy::default(),
+    )
 }
 
 /// [`run_gate_reporting`] with an explicit [`HiddenPolicy`].
@@ -194,18 +109,11 @@ pub fn run_gate_policy(
     throttle: &Throttle<'_>,
     policy: HiddenPolicy,
 ) -> Result<GateRun, GateError> {
-    run_gate_with_options(
-        data_dir,
-        repo_root,
-        cfg,
-        mode,
-        clock,
-        throttle,
-        GateRunOptions {
-            policy,
-            ..GateRunOptions::default()
-        },
-    )
+    let opts = GateRunOptions {
+        policy,
+        ..GateRunOptions::default()
+    };
+    run_gate_with_options(data_dir, repo_root, cfg, mode, clock, throttle, opts)
 }
 
 /// [`run_gate_reporting`] with explicit [`GateRunOptions`].
@@ -226,60 +134,38 @@ pub fn run_gate_with_options(
     // Inspect hidden files first so policy removals happen before fingerprinting.
     let release = mode == GateMode::Release;
     let base_ref = opts.base_ref_override.unwrap_or(&cfg.gate.base_ref);
-    let (found, layout, fp_before, base) = match opts.policy {
-        HiddenPolicy::Warn => {
-            let (hidden_res, base_res, layout_and_fp) = std::thread::scope(|scope| {
-                let hidden_handle = scope.spawn(|| {
-                    hidden::inspect(repo_root, opts.policy, When::BeforeCommands, release)
-                });
-                let base_handle = scope.spawn(|| base::resolve(repo_root, base_ref, GIT_TIMEOUT));
-                let layout_and_fp =
-                    aaf_fp::probe_git_layout(repo_root, GIT_TIMEOUT).map(|layout| {
-                        let fp_res = aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT);
-                        (layout, fp_res)
-                    });
-                let hidden_res = hidden_handle.join().unwrap_or_else(|_| {
-                    Err(GateError::Git("hidden inspect worker panicked".to_string()))
-                });
-                let base_res = base_handle.join().unwrap_or_else(|_| {
-                    Err(GateError::Git("base resolve worker panicked".to_string()))
-                });
-                (hidden_res, base_res, layout_and_fp)
+    let (found, layout, fp_before, base) = {
+        let (hidden_res, base_res, layout_and_fp) = std::thread::scope(|scope| {
+            let hidden_handle = scope
+                .spawn(|| hidden::inspect(repo_root, opts.policy, When::BeforeCommands, release));
+            let base_handle = scope.spawn(|| base::resolve(repo_root, base_ref, GIT_TIMEOUT));
+            let layout_and_fp = aaf_fp::probe_git_layout(repo_root, GIT_TIMEOUT).map(|layout| {
+                let fp = (opts.policy == HiddenPolicy::Warn)
+                    .then(|| aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT));
+                (layout, fp)
             });
-            let found = hidden_res?;
-            let (layout, fp_before_res) = layout_and_fp?;
-            let fp_before = fp_before_res?;
-            let base = base_res?;
-            (found, layout, fp_before, base)
-        }
-        HiddenPolicy::Remove => {
-            let (hidden_res, base_res, layout_res) = std::thread::scope(|scope| {
-                let hidden_handle = scope.spawn(|| {
-                    hidden::inspect(repo_root, opts.policy, When::BeforeCommands, release)
-                });
-                let base_handle = scope.spawn(|| base::resolve(repo_root, base_ref, GIT_TIMEOUT));
-                let layout_res = aaf_fp::probe_git_layout(repo_root, GIT_TIMEOUT);
-                let hidden_res = hidden_handle.join().unwrap_or_else(|_| {
-                    Err(GateError::Git("hidden inspect worker panicked".to_string()))
-                });
-                let base_res = base_handle.join().unwrap_or_else(|_| {
-                    Err(GateError::Git("base resolve worker panicked".to_string()))
-                });
-                (hidden_res, base_res, layout_res)
-            });
-            let found = hidden_res?;
-            let layout = layout_res?;
-            let fp_before = aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT)?;
-            let base = base_res?;
-            (found, layout, fp_before, base)
-        }
+            let hidden_res = hidden_handle
+                .join()
+                .unwrap_or_else(|_| Err(GateError::Git("hidden inspect worker panicked".into())));
+            let base_res = base_handle
+                .join()
+                .unwrap_or_else(|_| Err(GateError::Git("base resolve worker panicked".into())));
+            (hidden_res, base_res, layout_and_fp)
+        });
+        let found = hidden_res?;
+        let (layout, fp_opt) = layout_and_fp?;
+        let fp_before = match fp_opt {
+            Some(res) => res?,
+            None => aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT)?,
+        };
+        (found, layout, fp_before, base_res?)
     };
     let (mut hidden, mut hidden_notes) = (found.blocks, found.notes);
     let common_root = layout.common_repo_root();
     let common_repo_id = aaf_fp::repo_id(common_root);
     let cfg_hash = config_hash(cfg);
     let alt_config_hash = reuse::alt_config_hash(cfg, opts.require_independent_approval);
-    let mut proof_block = if cfg.proof.required {
+    let pre_proof_err = if cfg.proof.required {
         crate::proof::verify_proof(repo_root, data_dir, &cfg.proof, Some(&fp_before))
             .err()
             .map(|e| e.to_string())
@@ -300,10 +186,9 @@ pub fn run_gate_with_options(
         mode,
     };
     // A file behind an index flag does not move the fingerprint, so an
-    // earlier `Clear` receipt for this tree proves nothing about it. Files
-    // the policy lets pass are the operator's own environment.
+    // earlier `Clear` receipt for this tree proves nothing about it.
     if hidden.is_empty()
-        && proof_block.is_none()
+        && pre_proof_err.is_none()
         && let Some(receipt) = reuse::reusable_receipt(data_dir, &key, &asked)
     {
         return Ok(GateRun {
@@ -352,7 +237,32 @@ pub fn run_gate_with_options(
         &added,
         require_independent,
     )?;
-    let store = store_res?;
+    let mut store = store_res?;
+    let changed_paths: Vec<String> = set
+        .changes
+        .iter()
+        .flat_map(|ch| std::iter::once(ch.path.clone()).chain(ch.old_path.iter().cloned()))
+        .collect();
+    if mode == GateMode::Scoped {
+        store = crate::store_compliance::scope_to_diff(store, &changed_paths);
+    }
+    let proof_needed = crate::proof::proof_triggered(&cfg.proof, &changed_paths);
+    if !proof_needed
+        && pre_proof_err.is_some()
+        && hidden.is_empty()
+        && let Some(receipt) = reuse::reusable_receipt(data_dir, &key, &asked)
+    {
+        return Ok(GateRun {
+            receipt,
+            reused: true,
+        });
+    }
+    let has_base_capture = proof_needed
+        && pre_proof_err.is_some()
+        && crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())?.is_some();
+    let pre_cmd_proof_block = (proof_needed && !has_base_capture)
+        .then_some(pre_proof_err.as_deref())
+        .flatten();
 
     let verdict = |hidden: &[String],
                    proof_block: Option<&str>,
@@ -374,7 +284,7 @@ pub fn run_gate_with_options(
     let test_command_missing = runner::test_command(&cfg.commands, mode).1.is_empty();
     // With no command result yet, `Blocked` means an earlier stage blocks.
     let unblocked =
-        verdict(&hidden, proof_block.as_deref(), Some(&[]), false).0 != GateStatus::Blocked;
+        verdict(&hidden, pre_cmd_proof_block, Some(&[]), false).0 != GateStatus::Blocked;
     let take_docs_fast_path = unblocked
         && mode == GateMode::Scoped
         && cfg.gate.docs_fast_path
@@ -418,6 +328,9 @@ pub fn run_gate_with_options(
         } else {
             &[]
         };
+        let _gate_secrets =
+            crate::git::hydration::stage_for_gate_from_base(repo_root, base.sha.as_deref())
+                .map_err(|e| GateError::Git(e.to_string()))?;
         let run = runner::run_all_throttled_with_options(
             repo_root,
             &cfg.commands,
@@ -440,12 +353,29 @@ pub fn run_gate_with_options(
         hidden.extend(after.blocks);
         hidden_notes.extend(after.notes);
     }
-    let tree_fp = aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT)?;
-    if cfg.proof.required && proof_block.is_none() {
-        proof_block = crate::proof::verify_proof(repo_root, data_dir, &cfg.proof, Some(&fp_before))
-            .err()
-            .map(|e| e.to_string());
-    }
+    let mut tree_fp = aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT)?;
+    let pre_capture_status = verdict(&hidden, None, commands.as_deref(), tree_fp != fp_before).0;
+    let proof_ctx = crate::proof::GateProofCheck {
+        repo_root,
+        data_dir,
+        layout: &layout,
+        cfg: &cfg.proof,
+        base_sha: base.sha.as_deref(),
+        fp_before: &fp_before,
+        policy: opts.policy,
+        release,
+        clock,
+    };
+    let proof_block = crate::proof::finalize_gate_proof(
+        &proof_ctx,
+        proof_needed,
+        pre_proof_err.as_deref(),
+        has_base_capture,
+        pre_capture_status,
+        &mut tree_fp,
+        &mut hidden,
+        &mut hidden_notes,
+    )?;
     let (status, mut reasons) = verdict(
         &hidden,
         proof_block.as_deref(),
@@ -555,8 +485,16 @@ pub fn run_gate_strict(
 ) -> Result<Receipt, GateError> {
     let probe = SystemProbe::detect();
     let throttle = Throttle::system(machine, &probe, progress);
-    let policy = HiddenPolicy::Remove;
-    run_gate_policy(data_dir, repo_root, cfg, mode, clock, &throttle, policy).map(|run| run.receipt)
+    run_gate_policy(
+        data_dir,
+        repo_root,
+        cfg,
+        mode,
+        clock,
+        &throttle,
+        HiddenPolicy::Remove,
+    )
+    .map(|run| run.receipt)
 }
 
 /// Runs the gate under this machine's load limits (docs/PLAN.md C.11).
@@ -579,8 +517,14 @@ pub fn run_gate_in(
     mode: GateMode,
     clock: &dyn Clock,
 ) -> Result<Receipt, GateError> {
-    let machine = MachineConfig::default();
-    run_gate_with(data_dir, repo_root, cfg, mode, clock, &machine)
+    run_gate_with(
+        data_dir,
+        repo_root,
+        cfg,
+        mode,
+        clock,
+        &MachineConfig::default(),
+    )
 }
 
 /// Fixed entry point (docs/PLAN.md C.5); the data directory comes from the environment.

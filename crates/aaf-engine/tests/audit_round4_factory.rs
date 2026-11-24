@@ -384,7 +384,7 @@ fn audit_turn_read_only_fresh_repair_id_and_fail_closed_repair_guards() {
     for (label, first_reply, expect_repair) in [
         ("short_prose", "not json yet", true),
         ("empty_whitespace", "   \n\t ", false),
-        ("exceeds_max_chars", too_long.as_str(), false),
+        ("exceeds_max_chars", too_long.as_str(), true),
     ] {
         let env = TestEnv::new(2000);
         env.add_task("t1", TaskState::Ready);
@@ -585,7 +585,7 @@ fn post_audit_short_circuits_low_mechanical_score_with_zero_llm_calls() {
             && n.contains("propagate error with ?")
             && n.contains("dynamic camera permission")
     }));
-    assert_eq!(env.db.get_budget("t1").unwrap().cycles_used, 1);
+    assert_eq!(env.db.get_budget("t1").unwrap().cycles_used, 0);
 
     // Pass 2: max_audit_reworks=1 exhausted -> falls through to Next::Unblock, still 0 LLM calls.
     let _s2 = run_with_audit(&deps, Some(&audit), Mode::Once, &hooks_stop()).unwrap();

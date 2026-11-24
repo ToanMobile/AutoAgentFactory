@@ -63,6 +63,8 @@ fn real_env_decide(fx: &Fixture, command: &str) -> Decision {
         config_dir: Some(fx.config.clone()),
         home: Some(fx.home.clone()),
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let payload = json!({
         "tool_name": "Bash",

@@ -32,6 +32,8 @@ const WRITABLE_DEVICES: &str = r##"(allow file-write*
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SandboxPaths {
     pub writable: Vec<String>,
+    /// Narrow SBPL regexes allowed for writing (emitted before the deny section).
+    pub writable_regex: Vec<String>,
     /// Closed for writing even inside a writable subtree: the entry itself
     /// (it cannot be replaced, renamed or deleted) and everything below it.
     pub write_denied: Vec<String>,
@@ -96,6 +98,15 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     for path in writable.iter().chain(&git_dirs) {
         let path = sbpl_string(path)?;
         profile.push_str(&format!("(allow file-write* (subpath {path}))\n"));
+    }
+    for pattern in &extra.writable_regex {
+        if pattern.is_empty() {
+            return Err(PortError::Invalid(
+                "sandbox writable_regex must not be empty".to_string(),
+            ));
+        }
+        let regex = sbpl_regex(pattern)?;
+        profile.push_str(&format!("(allow file-write* (regex {regex}))\n"));
     }
     // A writable ancestor (a temp dir, the main checkout) must not open
     // sibling task worktrees: close the whole directory, and reopen only this
@@ -489,7 +500,7 @@ fn sbpl_regex(pattern: &str) -> PortResult<String> {
 }
 
 /// Escapes every character that is special in a POSIX extended regex.
-fn regex_escape(text: &str) -> String {
+pub(crate) fn regex_escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         if ".[]()*+?^$|\\{}".contains(c) {
@@ -498,4 +509,50 @@ fn regex_escape(text: &str) -> String {
         escaped.push(c);
     }
     escaped
+}
+
+/// Per-UID `.TemporaryItems` dir on macOS secondary volumes (required by Unity/Carbon).
+pub(crate) fn secondary_volume_temp_dir(worktree: &Path, home: Option<&str>) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let uid = owner_uid(worktree).or_else(|| home.and_then(|h| owner_uid(Path::new(h))));
+    secondary_volume_temp_dir_in(&canonical, uid, Path::exists)
+}
+
+#[cfg(unix)]
+fn owner_uid(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|meta| meta.uid())
+}
+
+#[cfg(not(unix))]
+fn owner_uid(_path: &Path) -> Option<u32> {
+    None
+}
+
+pub(crate) fn secondary_volume_temp_dir_in(
+    canonical: &Path,
+    uid: Option<u32>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    use std::ffi::OsStr;
+    let mut comps = canonical.components();
+    if comps.next() != Some(Component::RootDir)
+        || comps.next() != Some(Component::Normal(OsStr::new("Volumes")))
+    {
+        return None;
+    }
+    let Component::Normal(vol) = comps.next()? else {
+        return None;
+    };
+    if vol.is_empty() {
+        return None;
+    }
+    let base = PathBuf::from("/Volumes").join(vol).join(".TemporaryItems");
+    if let Some(uid) = uid {
+        let per_uid = base.join(format!("folders.{uid}"));
+        if exists(&per_uid) {
+            return Some(per_uid);
+        }
+    }
+    exists(&base).then_some(base)
 }

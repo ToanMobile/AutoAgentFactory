@@ -361,9 +361,13 @@ pub fn fold(text: &str) -> String {
 }
 
 /// The protected pattern `path` matches, if any. Folded like the default
-/// macOS file system compares names.
+/// macOS file system compares names. Public `.env` templates
+/// (`.env.example`, `.env.sample`, `.env.template`) are exempted.
 pub fn protected_name(path: &Path) -> Option<&'static str> {
     let name = fold(path.file_name()?.to_str()?);
+    if SECRET_ENV_ALLOWLIST.contains(&name.as_str()) {
+        return None;
+    }
     if name == ".env" {
         return Some(".env");
     }
@@ -463,13 +467,15 @@ const ENV_VARIANTS: &[&str] = &[
     ".env.development",
     ".env.staging",
     ".env.test",
-    ".env.example",
 ];
 
 /// A file-name glob (as given to `find -name`) can match a protected file.
 pub fn may_name_protected(pattern: &str) -> bool {
     if pattern.len() > MAX_PATTERN {
         return true;
+    }
+    if SECRET_ENV_ALLOWLIST.contains(&fold(pattern).as_str()) {
+        return false;
     }
     let parts = glob_parts(pattern);
     if PROTECTED_GLOBS

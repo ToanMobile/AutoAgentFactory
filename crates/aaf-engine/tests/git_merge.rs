@@ -23,7 +23,7 @@ fn request(fx: &Fixture, wt: &TaskWorktree) -> MergeRequest {
         repo_root: fx.repo.clone(),
         worktree: wt.clone(),
         base: "main".to_string(),
-        remote: "origin".to_string(),
+        remote: Some("origin".to_string()),
         locks_dir: fx.locks.clone(),
         lock_timeout: Duration::from_secs(30),
     }
@@ -101,10 +101,12 @@ fn refuses_when_the_checked_out_base_tree_is_dirty() {
     let before = fx.head(&fx.repo, "main");
     fs::write(fx.repo.join("README.md"), "local edit\n").unwrap();
 
-    let err = merge_queue::merge(&request(&fx, &wt), &pass).unwrap_err();
-    assert!(
-        matches!(err, GitError::Dirty(ref p) if p == &fx.repo),
-        "{err}"
+    let outcome = merge_queue::merge(&request(&fx, &wt), &pass).unwrap();
+    assert_eq!(
+        outcome,
+        MergeOutcome::BaseCheckoutDirty {
+            path: fx.repo.clone()
+        }
     );
     assert_eq!(fx.head(&fx.repo, "main"), before);
     assert_eq!(

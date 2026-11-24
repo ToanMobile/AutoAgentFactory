@@ -373,6 +373,12 @@ fn config(rest: &[String]) -> Verdict {
     let mut words = pos.into_iter().skip_while(|word| !runs_program(word));
     let key = words.next()?;
     let value = words.next()?;
+    let global_or_system = flags
+        .iter()
+        .any(|arg| abbrev(arg, "--global", 4) || abbrev(arg, "--system", 4));
+    if key.eq_ignore_ascii_case("core.pager") && value == "cat" && !global_or_system {
+        return None;
+    }
     (!BOOLEANS.contains(&value.to_ascii_lowercase().as_str())).then(|| {
         (
             format!("config stores {key}, a key whose value git runs as a program"),

@@ -9,7 +9,7 @@ Owns **mobile-specific art direction, platform idioms, and 4-state screen archit
 
 ## Mobile Architecture Workflow
 
-1. **Brief Gate & Dials**: Infer product intent from the repo first (ask at most 3 domain questions if truly ambiguous; never ask the user to pick colors/fonts). Lock 3 dials (`1–10`): `Expression`, `Motion`, `Density`.
+1. **Brief Gate & Dials**: Infer product intent from the repo first (in interactive sessions only, ask at most 3 domain questions if truly ambiguous; never ask the user to pick colors/fonts). Lock 3 dials (`1–10`): `Expression`, `Motion`, `Density`.
 2. **Mobile Token Lock**: Read existing `DESIGN.md`; if none exists, author `MOBILE-DESIGN.md` (palette, type scale, spacing rhythm, motion curves) **before** writing the first screen component.
 3. **Content-First Hierarchy**: Give each screen **one clear visual hero/anchor** and task focus. Use typography and whitespace instead of repetitive bordered cards or boilerplate copy (`"Welcome back"`).
 4. **Native Layout Mechanics**:
@@ -21,3 +21,7 @@ Owns **mobile-specific art direction, platform idioms, and 4-state screen archit
    - `Empty`: domain-specific explanation + single primary next action.
    - `Error`: actionable cause + working Retry trigger.
    - `Populated`: realistic domain formatting, proper ellipsis/wrapping, zero clipped badges.
+
+## Headless / `AAF_RUN_ID` Mode
+
+When `AAF_RUN_ID` is set, **never** ask clarifying questions or wait for confirmation, and never invoke blocked host commands (`aaf gate`, `aaf proof record`, `aaf approve`). Infer product intent, art direction, and the `Expression`/`Motion`/`Density` dials directly from the repo, task spec, and `DESIGN.md`/`MOBILE-DESIGN.md`, implement all 4 screen states and tests autonomously, and finish cleanly on the task branch.

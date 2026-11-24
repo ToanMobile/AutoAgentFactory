@@ -155,6 +155,58 @@ pub fn all_skills() -> &'static [SkillTemplate] {
     &SKILLS
 }
 
+/// Default skill names synced by `aaf skills sync --global` when neither `--only`,
+/// `--all`, nor `--profile` is specified. Limited to `aaf-workflow` so global sync
+/// never collides with user-level interactive skills such as `~/.claude/skills/qa-review`.
+pub const DEFAULT_GLOBAL_SKILLS: &[&str] = &["aaf-workflow"];
+
+/// Target selection for global user-level skill synchronization (`aaf skills sync --global`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalSkillHost {
+    Claude,
+    Gemini,
+    Codex,
+    /// Sync into every global host directory whose home config folder exists as a real directory
+    /// (`~/.claude`, `~/.gemini`, `~/.codex`), falling back to `~/.claude/skills` if none exist.
+    ExistingOrDefault,
+    /// Sync into all three global host directories (`~/.claude/skills`, `~/.gemini/config/skills`,
+    /// `~/.codex/skills`) unconditionally.
+    All,
+}
+
+fn is_real_existing_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
+}
+
+/// Resolves global user-level skills directories under `home`.
+pub fn global_skill_dirs(home: &Path, target: GlobalSkillHost) -> Vec<PathBuf> {
+    let claude = home.join(".claude").join("skills");
+    let gemini = home.join(".gemini").join("config").join("skills");
+    let codex = home.join(".codex").join("skills");
+    match target {
+        GlobalSkillHost::Claude => vec![claude],
+        GlobalSkillHost::Gemini => vec![gemini],
+        GlobalSkillHost::Codex => vec![codex],
+        GlobalSkillHost::All => vec![claude, gemini, codex],
+        GlobalSkillHost::ExistingOrDefault => {
+            let mut dirs = Vec::new();
+            if is_real_existing_dir(&home.join(".claude")) {
+                dirs.push(claude.clone());
+            }
+            if is_real_existing_dir(&home.join(".gemini")) {
+                dirs.push(gemini);
+            }
+            if is_real_existing_dir(&home.join(".codex")) {
+                dirs.push(codex);
+            }
+            if dirs.is_empty() {
+                dirs.push(claude);
+            }
+            dirs
+        }
+    }
+}
+
 pub fn is_valid_profile(profile: &str) -> bool {
     profile == "auto" || PROFILES.contains(&profile)
 }
@@ -476,3 +528,8 @@ fn atomic_write_file(dir: &Path, dest: &Path, content: &str) -> PortResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "skills_tests.rs"]
+mod tests;

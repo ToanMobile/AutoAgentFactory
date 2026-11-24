@@ -110,5 +110,7 @@ fn a_tree_left_dirty_by_a_commit_hook_is_not_handed_to_the_gate() {
             .unwrap()
             .trim_end()
     );
-    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "2");
+    // Plan v3 bypasses repo commit hooks (`-c core.hooksPath=/dev/null --no-verify`),
+    // so the post-commit hook never dirties the tree and HEAD has 1 clean commit.
+    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "1");
 }

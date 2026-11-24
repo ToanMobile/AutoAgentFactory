@@ -4,6 +4,7 @@
 //! Safe to run again: an existing config is kept unless `--force`, the hook
 //! entry is merged and the ignore line is added once.
 
+mod commit;
 pub mod settings;
 #[cfg(test)]
 mod tests;
@@ -24,7 +25,9 @@ use crate::cmd::skills::{SkillHost, merge_outcomes};
 use crate::ctx::{self, Ctx};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
-use settings::{HOOK_BINARY, SETTINGS_REL, Tracking};
+pub(crate) use commit::gitignore_unignore_settings;
+use commit::{commit_init_files, gitignore_with_local};
+use settings::{HOOK_BINARY, LOCAL_SETTINGS_REL, SETTINGS_REL, Tracking};
 
 #[derive(Debug, clap::Args)]
 pub struct InitArgs {
@@ -40,70 +43,16 @@ pub struct InitArgs {
     /// Agent hook hosts to register (`claude`, `codex`, `gemini`, or `all`).
     #[arg(long, default_value = "claude")]
     pub hook_host: String,
+    /// Stage and commit only the AAF init files (handling ignored `.claude/` and unborn HEAD).
+    #[arg(long)]
+    pub commit: bool,
 }
 
 pub fn run(args: &InitArgs, ctx: &Ctx) -> CmdResult {
     if let Some(refused) = super::board::store::refuse_inside_agent_run(ctx, "aaf init") {
         return Ok(refused);
     }
-    let mut out = run_init(args, ctx)?;
-    if args.with_skills && out.exit == crate::output::Exit::Ok {
-        let root = super::board::store::repo_root(ctx).unwrap_or_else(|_| ctx.cwd.clone());
-        let profile = if root.join(REPO_CONFIG_REL).exists() {
-            let cfg = ctx.load_config(&root)?;
-            effective_profile(&cfg.repo, &root)
-        } else {
-            detect_stack(&root).profile
-        };
-        let dests = args.host.resolve_dirs(&root);
-        let mut raw_outcomes = Vec::with_capacity(dests.len());
-        let mut targets = Vec::with_capacity(dests.len());
-        for dest in &dests {
-            let synced =
-                aaf_engine::skills::sync_skills_for_profile(dest, Some(&profile), None, false)
-                    .map_err(|e| CmdError::new(e.to_string()))?;
-            targets.push(json!({
-                "dir": dest.to_string_lossy().into_owned(),
-                "written": synced.written,
-                "skipped_existing": synced.skipped_existing,
-                "unchanged": synced.unchanged,
-                "skipped_modified": synced.skipped_modified,
-            }));
-            raw_outcomes.push(synced);
-        }
-        let merged = merge_outcomes(&raw_outcomes);
-        let dirs: Vec<String> = dests
-            .iter()
-            .map(|d| d.to_string_lossy().into_owned())
-            .collect();
-        out.text.push_str(&format!(
-            "\nskills: profile={profile} host={} written={} unchanged={} skipped_modified={} ({})",
-            args.host.as_str(),
-            merged.written.len(),
-            merged.unchanged.len(),
-            merged.skipped_modified.len(),
-            dirs.join(", "),
-        ));
-        if profile == "auto" {
-            out.text.push_str(
-                "\nnote: profile is auto (core skills only); run `aaf skills sync --profile <stack>` for stack-specific skills",
-            );
-        }
-        out = out.field(
-            "skills",
-            json!({
-                "profile": profile,
-                "host": args.host.as_str(),
-                "dirs": dirs,
-                "written": merged.written,
-                "skipped_existing": merged.skipped_existing,
-                "unchanged": merged.unchanged,
-                "skipped_modified": merged.skipped_modified,
-                "targets": targets,
-            }),
-        );
-    }
-    Ok(out)
+    run_init(args, ctx)
 }
 
 fn run_init(args: &InitArgs, ctx: &Ctx) -> CmdResult {
@@ -187,26 +136,6 @@ fn write_file(path: &Path, text: &str) -> Result<(), CmdError> {
     fs::rename(&temp, path).map_err(fail)
 }
 
-/// `.gitignore` with the local config line appended, or `None` when a line
-/// already covers it.
-fn gitignore_with_local(existing: Option<&str>) -> Option<String> {
-    let existing = existing.unwrap_or("");
-    let covered = existing
-        .lines()
-        .map(str::trim)
-        .any(|line| line.strip_prefix('/').unwrap_or(line) == LOCAL_CONFIG_REL);
-    if covered {
-        return None;
-    }
-    let mut text = existing.to_string();
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(LOCAL_CONFIG_REL);
-    text.push('\n');
-    Some(text)
-}
-
 pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> CmdResult {
     let repo_root = ctx.repo_root()?;
 
@@ -242,6 +171,10 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
                 ))
             },
         )?;
+    let local_settings_path = repo_root.join(LOCAL_SETTINGS_REL);
+    let cleaned_local_settings = read_optional(&local_settings_path)?
+        .as_deref()
+        .and_then(settings::strip_empty_hooks_object);
     let gitignore_path = repo_root.join(".gitignore");
     let new_gitignore = gitignore_with_local(read_optional(&gitignore_path)?.as_deref());
 
@@ -276,33 +209,122 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
     if let Some(text) = &new_settings {
         write_file(&settings_path, text)?;
     }
+    if let Some(text) = &cleaned_local_settings {
+        write_file(&local_settings_path, text)?;
+    }
+    let mut gitignore_changed = false;
     if let Some(text) = &new_gitignore {
         write_file(&gitignore_path, text)?;
+        gitignore_changed = true;
     }
+
+    let mut commit_paths = vec![
+        REPO_CONFIG_REL.to_string(),
+        SETTINGS_REL.to_string(),
+        ".gitignore".to_string(),
+    ];
 
     let mut extra_hooks = Vec::new();
     for (target, path, text, change) in &host_merges {
         if let Some(text) = text {
             write_file(path, text)?;
         }
+        commit_paths.push(target.settings_rel().to_string());
         extra_hooks.push((target.as_str(), target.settings_rel(), change.as_str()));
     }
 
-    // After the writes: what git has of the file as it is now.
+    let mut skills_text: Option<String> = None;
+    let mut skills_json: Option<serde_json::Value> = None;
+    if args.with_skills {
+        let profile = if config_path.exists() {
+            let cfg = ctx.load_config(&repo_root)?;
+            effective_profile(&cfg.repo, &repo_root)
+        } else {
+            detected.profile.clone()
+        };
+        let dests = args.host.resolve_dirs(&repo_root);
+        let mut raw_outcomes = Vec::with_capacity(dests.len());
+        let mut targets = Vec::with_capacity(dests.len());
+        for dest in &dests {
+            let synced =
+                aaf_engine::skills::sync_skills_for_profile(dest, Some(&profile), None, false)
+                    .map_err(|e| CmdError::new(e.to_string()))?;
+            for skill_name in &synced.written {
+                let skill_file = dest.join(skill_name).join("SKILL.md");
+                if let Ok(rel) = skill_file.strip_prefix(&repo_root)
+                    && let Some(rel_str) = rel.to_str()
+                {
+                    commit_paths.push(rel_str.replace('\\', "/"));
+                }
+            }
+            targets.push(json!({
+                "dir": dest.to_string_lossy().into_owned(),
+                "written": synced.written,
+                "skipped_existing": synced.skipped_existing,
+                "unchanged": synced.unchanged,
+                "skipped_modified": synced.skipped_modified,
+            }));
+            raw_outcomes.push(synced);
+        }
+        let merged = merge_outcomes(&raw_outcomes);
+        let dirs: Vec<String> = dests
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        let mut s_text = format!(
+            "\nskills: profile={profile} host={} written={} unchanged={} skipped_modified={} ({})",
+            args.host.as_str(),
+            merged.written.len(),
+            merged.unchanged.len(),
+            merged.skipped_modified.len(),
+            dirs.join(", "),
+        );
+        if profile == "auto" {
+            s_text.push_str(
+                "\nnote: profile is auto (core skills only); run `aaf skills sync --profile <stack>` for stack-specific skills",
+            );
+        }
+        skills_text = Some(s_text);
+        skills_json = Some(json!({
+            "profile": profile,
+            "host": args.host.as_str(),
+            "dirs": dirs,
+            "written": merged.written,
+            "skipped_existing": merged.skipped_existing,
+            "unchanged": merged.unchanged,
+            "skipped_modified": merged.skipped_modified,
+            "targets": targets,
+        }));
+    }
+
+    let commit_outcome = if args.commit {
+        if Tracking::of(&repo_root) == Tracking::Ignored
+            && let Some(updated) =
+                gitignore_unignore_settings(read_optional(&gitignore_path)?.as_deref())
+        {
+            write_file(&gitignore_path, &updated)?;
+            gitignore_changed = true;
+        }
+        Some(commit_init_files(&repo_root, &commit_paths)?)
+    } else {
+        None
+    };
+
+    // After the writes (and optional `--commit`): what git has of the file as it is now.
     let tracking = Tracking::of(&repo_root);
     let commands = &detected.commands;
     // Only a statement about the file this run wrote: a kept config may
     // carry commands of its own.
     let unverified = config_action != "kept"
         && (commands.test_scoped.is_empty() || commands.test_full.is_empty());
-    let gitignore_action = if new_gitignore.is_some() {
+    let gitignore_action = if gitignore_changed {
         "added"
     } else {
         "unchanged"
     };
 
     let mut text = format!(
-        "profile: {} ({})\nconfig: {} {}\nhook: {} in {} -> {} (found {})\ngitignore: {} {}",
+        "profile: {} ({})\nconfig: {} {}\nhook: {} in {} -> {} (found {})\ngitignore: {} {}, {}",
         detected.profile,
         if detected.evidence.is_empty() {
             "no known marker file".to_string()
@@ -323,7 +345,13 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
         },
         gitignore_action,
         LOCAL_CONFIG_REL,
+        LOCAL_SETTINGS_REL,
     );
+    if cleaned_local_settings.is_some() {
+        text.push_str(&format!(
+            "\nlocal settings: removed empty \"hooks\": {{}} from {LOCAL_SETTINGS_REL}"
+        ));
+    }
     for (host_name, rel_path, action) in &extra_hooks {
         text.push_str(&format!("\nhook ({host_name}): {action} in {rel_path}"));
     }
@@ -347,8 +375,25 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
              until [commands] test_scoped and test_full are set in the config",
         );
     }
+    if let Some(s_text) = skills_text {
+        text.push_str(&s_text);
+    }
+    if let Some(outcome) = &commit_outcome {
+        if outcome.committed {
+            let short = outcome
+                .sha
+                .as_deref()
+                .map_or("ok", |s| s.get(..7).unwrap_or(s));
+            text.push_str(&format!(
+                "\ncommit: {short} ({} files)",
+                outcome.files.len()
+            ));
+        } else {
+            text.push_str("\ncommit: unchanged (already committed)");
+        }
+    }
 
-    Ok(CmdOutput::ok("ok", text)
+    let mut out = CmdOutput::ok("ok", text)
         .field("repo_root", json!(repo_root))
         .field("profile", json!(detected.profile))
         .field("evidence", json!(detected.evidence))
@@ -378,5 +423,24 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
             "gitignore",
             json!({"path": gitignore_path, "action": gitignore_action}),
         )
-        .field("gate_unverified_until_commands_set", json!(unverified)))
+        .field(
+            "local_settings_cleaned",
+            json!(cleaned_local_settings.is_some()),
+        )
+        .field("gate_unverified_until_commands_set", json!(unverified));
+
+    if let Some(s_json) = skills_json {
+        out = out.field("skills", s_json);
+    }
+    if let Some(outcome) = commit_outcome {
+        out = out.field(
+            "commit",
+            json!({
+                "committed": outcome.committed,
+                "sha": outcome.sha,
+                "files": outcome.files,
+            }),
+        );
+    }
+    Ok(out)
 }

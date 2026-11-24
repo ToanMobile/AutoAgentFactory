@@ -3,8 +3,8 @@
 //! the machine queue instead: `aaf slot -- <command>`, or the gate, which
 //! queues its own builds.
 
-use crate::Denial;
 use crate::shell::{Cmd, DECLARERS, SHELLS, basename};
+use crate::{Ctx, Denial};
 
 const RULE: &str = "heavy_cmd_guard";
 const REASON: &str = "heavy builds must share the machine queue";
@@ -68,13 +68,34 @@ const SLOT_VAR_REASON: &str =
     "AAF_HEAVY_SLOT is set by aaf slot alone; setting it by hand jumps the machine queue";
 const SLOT_VAR_FIX: &str = "drop the AAF_HEAVY_SLOT assignment and run aaf slot -- <command>";
 
+/// True when `cmd` holds a machine-queue slot opened by bare `aaf` (already
+/// vetted against PATH/alias/function rebinding in `Script::settle`) or by an
+/// explicit `argv[0]` that lexically matches an entry in `trusted_aaf_bins`.
+/// Never canonicalizes `slot_bin` so untrusted symlinks (e.g. `/tmp/aaf`) are
+/// never accepted.
+fn is_trusted_slot(cmd: &Cmd, ctx: &Ctx) -> bool {
+    if cmd.slotted {
+        return true;
+    }
+    cmd.slot_bin.as_deref().is_some_and(|bin| {
+        ctx.env
+            .trusted_aaf_bins
+            .iter()
+            .any(|trusted| trusted.as_os_str() == bin)
+    })
+}
+
 /// Every value is refused, so the format aaf gives the variable does not
 /// matter here. Reading it (`echo $AAF_HEAVY_SLOT`) and `unset` stay free.
-pub fn check(cmd: &Cmd) -> Option<Denial> {
+/// Outside factory runs (`in_factory_run == false`), direct builds are allowed.
+pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
+    if !ctx.env.in_factory_run {
+        return None;
+    }
     if cmd.sets_var(SLOT_VAR) {
         return Some(Denial::new(RULE, SLOT_VAR_REASON, SLOT_VAR_FIX));
     }
-    if cmd.slotted {
+    if is_trusted_slot(cmd, ctx) {
         return None;
     }
     let (program, args) = invoked(cmd);
@@ -87,7 +108,10 @@ pub fn check(cmd: &Cmd) -> Option<Denial> {
 /// Judged on the whole line: `export "$V"=0` hides which variable it sets,
 /// so next to a command the queue vouches for it is taken for the slot
 /// variable. Without a slot on the line it is ordinary shell.
-pub fn check_script(cmds: &[Cmd]) -> Option<Denial> {
+pub fn check_script(cmds: &[Cmd], ctx: &Ctx) -> Option<Denial> {
+    if !ctx.env.in_factory_run {
+        return None;
+    }
     let hidden = |cmd: &Cmd| {
         DECLARERS.contains(&cmd.name())
             && cmd.args().iter().any(|arg| {
@@ -95,7 +119,7 @@ pub fn check_script(cmds: &[Cmd]) -> Option<Denial> {
                 !arg.starts_with('-') && (name.is_empty() || name.contains(['$', '`']))
             })
     };
-    (cmds.iter().any(|cmd| cmd.slotted) && cmds.iter().any(hidden)).then(|| {
+    (cmds.iter().any(|cmd| is_trusted_slot(cmd, ctx)) && cmds.iter().any(hidden)).then(|| {
         Denial::new(
             RULE,
             "a variable named at run time is set next to aaf slot; it could be AAF_HEAVY_SLOT",

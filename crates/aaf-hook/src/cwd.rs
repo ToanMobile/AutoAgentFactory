@@ -8,9 +8,11 @@ use crate::{Ctx, Denial, Line, fallback, heavy_guard, judge, paths, shell};
 
 mod cdpath;
 mod dirstack;
+mod mktemp;
 
 use cdpath::{cdpath, searched_dir};
 use dirstack::apply_dir_builtin;
+use mktemp::update_mktemp_vars;
 
 /// Extracts cumulative working-directory changes from `env -C`/`--chdir` and
 /// `sudo -D`/`--chdir` options present in `wrapped`.
@@ -282,15 +284,15 @@ fn runs_elsewhere(cmd: &shell::Cmd) -> bool {
 }
 
 /// Evaluates each command in `script` in order, tracking subshell/wrapper
-/// scope boundaries and directory-changing builtins (`cd`, `cd -`, `pushd`,
-/// `popd`), and invokes `judge_cmd` on every command in every place the
-/// shell may stand. A move is followed for sure only when the next command
-/// runs because it succeeded in this shell (`cd dir && …`), and only up to
-/// the end of that `&&` chain: past a `;`, a newline, `||`, a pipe or `&`
-/// the `cd` may have failed, so the places it left count again. Otherwise
-/// what follows is judged both where the shell was and where it may be. A
-/// line that defines a function named like a directory builtin has no sure
-/// move at all.
+/// scope boundaries, safe `mktemp -d` bindings, and directory-changing
+/// builtins (`cd`, `cd -`, `pushd`, `popd`), and invokes `judge_cmd` on every
+/// command in every place the shell may stand. A move is followed for sure
+/// only when the next command runs because it succeeded in this shell
+/// (`cd dir && …`), and only up to the end of that `&&` chain: past a `;`, a
+/// newline, `||`, a pipe or `&` the `cd` may have failed, so the places it
+/// left count again. Otherwise what follows is judged both where the shell
+/// was and where it may be. A line that defines a function named like a
+/// directory builtin has no sure move at all.
 pub(crate) fn eval_script<'a, F>(
     script: &shell::Script,
     mut ctx: Ctx<'a>,
@@ -306,7 +308,8 @@ where
     }];
     // The places a sure `cd` of the current `&&` chain left behind.
     let mut left: Vec<Place> = Vec::new();
-    let mut scope_stack: Vec<(Vec<Place>, Vec<Place>)> = Vec::new();
+    type ScopeFrame = (Vec<Place>, Vec<Place>, Vec<String>);
+    let mut scope_stack: Vec<ScopeFrame> = Vec::new();
     let mut scope_at = 0;
     let redefined = script
         .functions
@@ -321,7 +324,11 @@ where
             scope_at += 1;
             match event {
                 shell::ScopeEvent::Enter(wrapped) => {
-                    scope_stack.push((places.clone(), mem::take(&mut left)));
+                    scope_stack.push((
+                        places.clone(),
+                        mem::take(&mut left),
+                        ctx.mktemp_vars.clone(),
+                    ));
                     // A wrapper (`env -C dir sh -c …`) moves the scope it runs.
                     for place in &mut places {
                         ctx.set_cwd(place.cwd.clone());
@@ -331,8 +338,10 @@ where
                     }
                 }
                 shell::ScopeEvent::Exit => {
-                    if let Some(saved) = scope_stack.pop() {
-                        (places, left) = saved;
+                    if let Some((saved_places, saved_left, saved_mktemp)) = scope_stack.pop() {
+                        places = saved_places;
+                        left = saved_left;
+                        ctx.mktemp_vars = saved_mktemp;
                     }
                 }
             }
@@ -404,6 +413,7 @@ where
                  the command into separate calls",
             ));
         }
+        update_mktemp_vars(script, idx, &mut ctx);
     }
     None
 }
@@ -418,7 +428,7 @@ pub(crate) fn bash(command: &str, mut ctx: Ctx) -> Option<Denial> {
             return Some(denial);
         }
     }
-    if let Some(denial) = heavy_guard::check_script(&script.cmds) {
+    if let Some(denial) = heavy_guard::check_script(&script.cmds, &ctx) {
         return Some(denial);
     }
     eval_script(&script, ctx, judge)

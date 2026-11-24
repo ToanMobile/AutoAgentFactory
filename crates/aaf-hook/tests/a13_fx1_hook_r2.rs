@@ -190,6 +190,8 @@ fn r2_e10_1_find_rooted_at_temp_dir() {
         config_dir: Some(base.join("config")),
         home: Some(home.clone()),
         cwd: None,
+        in_factory_run: true,
+        trusted_aaf_bins: Vec::new(),
     };
     let tmpdir_expected = if std::env::var_os("TMPDIR").is_some_and(|dir| !dir.is_empty()) {
         ALLOW

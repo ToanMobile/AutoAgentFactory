@@ -1,6 +1,9 @@
 //! `aaf status`: read-only cost, token, task/run, account and throttle overview.
 
 use std::collections::BTreeMap;
+use std::fs::{self, File, TryLockError};
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 use aaf_domain::gate::LockStatus;
 use aaf_domain::ports::Clock;
@@ -13,8 +16,78 @@ use aaf_engine::telemetry::{
 use serde_json::json;
 
 use super::board::store::{err, open_db_read_only, repo_root};
+use super::run::detach::{RunMeta, run_lock_path, run_meta_path};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RunnerLiveness {
+    alive: bool,
+    pid: Option<u32>,
+    log_path: Option<String>,
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let pid_s = pid.to_string();
+    for bin in ["/bin/kill", "/usr/bin/kill", "kill"] {
+        if let Ok(status) = Command::new(bin)
+            .args(["-0", &pid_s])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            return status.success();
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn pid_alive(pid: u32) -> bool {
+    pid != 0 && pid == std::process::id()
+}
+
+/// Strictly read-only runner liveness check from `<data_dir>/locks/<repo_id>.run.{meta.json,lock}`.
+fn inspect_runner(data_dir: &Path, repo: Option<&str>) -> RunnerLiveness {
+    let Some(repo_str) = repo else {
+        return RunnerLiveness::default();
+    };
+    let repo_path = Path::new(repo_str);
+    let meta_path = run_meta_path(data_dir, repo_path);
+    let meta: Option<RunMeta> = fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let lock_path = run_lock_path(data_dir, repo_path);
+    let lock_held = if lock_path.is_file() {
+        match File::open(&lock_path) {
+            Ok(file) => match file.try_lock_shared() {
+                Ok(()) => {
+                    let _ = file.unlock();
+                    Some(false)
+                }
+                Err(TryLockError::WouldBlock) => Some(true),
+                Err(TryLockError::Error(_)) => None,
+            },
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let alive = match lock_held {
+        Some(held) => held,
+        None => meta.as_ref().is_some_and(|m| pid_alive(m.pid)),
+    };
+    RunnerLiveness {
+        alive,
+        pid: meta.as_ref().map(|m| m.pid),
+        log_path: meta.and_then(|m| m.log_path),
+    }
+}
 
 #[derive(Debug, clap::Args)]
 pub struct StatusArgs {
@@ -233,6 +306,13 @@ pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
         "guest_record_files": summary.throttle.guest_record_files,
     });
 
+    let runner = inspect_runner(&ctx.data_dir, repo.as_deref());
+    let runner_json = json!({
+        "alive": runner.alive,
+        "pid": runner.pid,
+        "log_path": runner.log_path,
+    });
+
     Ok(CmdOutput::ok("ok", lines.join("\n"))
         .field("scope", json!(scope))
         .field("frozen", json!(summary.frozen))
@@ -261,7 +341,8 @@ pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
             "accounts",
             serde_json::to_value(&summary.accounts).map_err(|e| err("accounts", e))?,
         )
-        .field("throttle", throttle_json))
+        .field("throttle", throttle_json)
+        .field("runner", runner_json))
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 //! Strict, fail-closed parsing of the auditor's answer.
 
+use std::borrow::Cow;
+
 use aaf_domain::gate::GoldenScore;
 use serde::Deserialize;
 
@@ -118,15 +120,73 @@ fn balanced_json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+/// Strips ANSI CSI (`\x1b\[[0-9;?]*[ -/]*[@-~]`) and OSC
+/// (`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`) escape sequences from PTY output.
+pub fn strip_ansi_escapes(input: &str) -> Cow<'_, str> {
+    if !input.as_bytes().contains(&0x1b) {
+        return Cow::Borrowed(input);
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut seg_start = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || matches!(bytes[j], b';' | b'?'))
+            {
+                j += 1;
+            }
+            while j < bytes.len() && (0x20..=0x2f).contains(&bytes[j]) {
+                j += 1;
+            }
+            if j < bytes.len() && (0x40..=0x7e).contains(&bytes[j]) {
+                out.push_str(&input[seg_start..i]);
+                i = j + 1;
+                seg_start = i;
+                continue;
+            }
+        } else if i + 1 < bytes.len() && bytes[i + 1] == b']' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != 0x07 && bytes[j] != 0x1b {
+                j += 1;
+            }
+            let end = if j < bytes.len() && bytes[j] == 0x07 {
+                Some(j + 1)
+            } else if j + 1 < bytes.len() && bytes[j] == 0x1b && bytes[j + 1] == b'\\' {
+                Some(j + 2)
+            } else {
+                None
+            };
+            if let Some(next_i) = end {
+                out.push_str(&input[seg_start..i]);
+                i = next_i;
+                seg_start = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&input[seg_start..]);
+    Cow::Owned(out)
+}
+
 /// Extracts the single valid `RawAnswers` JSON object from `text`, tolerating
-/// surrounding non-audit CLI logs, banners, braces, or trailing `[aaf]` lines.
-/// Fails closed if zero or more than one valid `RawAnswers` object is found.
+/// surrounding non-audit CLI logs, ANSI escapes, banners, braces, or trailing
+/// `[aaf]` lines. Fails closed if zero or more than one valid `RawAnswers`
+/// object is found.
 fn extract_answers_json(text: &str) -> Result<RawAnswers, String> {
     if text.len() > MAX_AUDIT_JSON_SCAN_BYTES {
         return Err(format!(
             "audit output exceeds {MAX_AUDIT_JSON_SCAN_BYTES} byte scan limit"
         ));
     }
+    let cleaned = strip_ansi_escapes(text);
+    let text = cleaned.as_ref();
     let bytes = text.as_bytes();
     let mut found: Option<RawAnswers> = None;
     let mut candidates = 0usize;

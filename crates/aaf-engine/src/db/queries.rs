@@ -102,15 +102,25 @@ impl Db {
     pub fn board_enrichment(&self, repo_root: Option<&str>) -> PortResult<BoardEnrichment> {
         let repo_root = repo_root.map(str::to_string);
         self.read(move |conn| {
-            let frozen = conn
-                .prepare_cached("SELECT value FROM meta WHERE key = ?1")
-                .and_then(|mut stmt| {
-                    stmt.query_row(params![META_FACTORY_FROZEN], |row| row.get::<_, String>(0))
-                        .optional()
-                })
-                .map_err(sql_err)?
-                .as_deref()
-                == Some("1");
+            let meta_val = |key: &str| -> PortResult<Option<String>> {
+                conn.prepare_cached("SELECT value FROM meta WHERE key = ?1")
+                    .and_then(|mut stmt| {
+                        stmt.query_row(params![key], |row| row.get::<_, String>(0))
+                            .optional()
+                    })
+                    .map_err(sql_err)
+            };
+            let global_frozen = meta_val(META_FACTORY_FROZEN)?.as_deref() == Some("1");
+            let frozen = if let Some(root) = repo_root.as_deref() {
+                let key = crate::unblocker::ladder::repo_frozen_key(root);
+                match meta_val(&key)?.as_deref() {
+                    Some("1") => true,
+                    Some("probe") => false,
+                    _ => global_frozen,
+                }
+            } else {
+                global_frozen
+            };
 
             let mut deps_by_task: HashMap<String, Vec<String>> = HashMap::new();
             let mut best_run: HashMap<String, (i64, String)> = HashMap::new();
@@ -271,6 +281,69 @@ impl Db {
             Ok(totals)
         })
     }
+
+    /// Counts explicit failing `CrossAudit` events for `task_id` since the
+    /// latest `ReworkRequested` or human-unblock `TaskStateChanged` event,
+    /// scanning newest-first with no 50-event window cap.
+    pub fn audit_fails_since_reset(&self, task_id: &str) -> PortResult<u32> {
+        let task_id = task_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT kind, payload_json FROM events \
+                     WHERE task_id = ?1 AND kind IN (?2, ?3, ?4) \
+                     ORDER BY id DESC",
+                )
+                .map_err(sql_err)?;
+            let mut rows = stmt
+                .query(params![
+                    task_id,
+                    EventKind::CrossAudit.as_str(),
+                    EventKind::ReworkRequested.as_str(),
+                    EventKind::TaskStateChanged.as_str(),
+                ])
+                .map_err(sql_err)?;
+            let mut count: u32 = 0;
+            while let Some(row) = rows.next().map_err(sql_err)? {
+                let kind: String = row.get(0).map_err(sql_err)?;
+                if kind == EventKind::ReworkRequested.as_str() {
+                    break;
+                }
+                let payload: String = row.get(1).map_err(sql_err)?;
+                if kind == EventKind::TaskStateChanged.as_str() {
+                    if is_human_unblock_payload(&payload) {
+                        break;
+                    }
+                    continue;
+                }
+                if is_cross_audit_fail_payload(&payload) {
+                    count = count.saturating_add(1);
+                }
+            }
+            Ok(count)
+        })
+    }
+}
+
+fn is_human_unblock_payload(payload_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()
+        .is_some_and(|p| {
+            p["to"].as_str() == Some("ready")
+                && p["why"]
+                    .as_str()
+                    .is_some_and(|why| why == "unblocked" || why.ends_with(" unblock"))
+        })
+}
+
+fn is_cross_audit_fail_payload(payload_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .ok()
+        .is_some_and(|p| {
+            p["verdict"]
+                .as_str()
+                .is_some_and(|v| v == "fail" || v.starts_with("fail:"))
+        })
 }
 
 fn record_latest_run(best: &mut HashMap<String, (i64, String)>, row: &Row<'_>) -> PortResult<()> {

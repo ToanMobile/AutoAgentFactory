@@ -97,6 +97,7 @@ fn agent(world: &World, script: &str) -> String {
                 enabled: true,
                 ..SandboxPolicy::default()
             },
+            json_schema: None,
         })
         .unwrap()
         .log_tail

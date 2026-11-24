@@ -376,5 +376,6 @@ pub fn request() -> AgentRequest {
         account: None,
         timeout_secs: 60,
         sandbox: SandboxPolicy::default(),
+        json_schema: None,
     }
 }

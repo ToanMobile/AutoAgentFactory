@@ -178,16 +178,14 @@ fn accept_loop(
                 let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
                 let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
                 match read_http_request(&mut stream) {
-                    Ok(req) => {
-                        dispatch_request(
-                            &mut stream,
-                            bound_port,
-                            &cfg_c,
-                            backend_c.as_ref(),
-                            &shutdown_c,
-                            &req,
-                        );
-                    }
+                    Ok(req) => dispatch_request(
+                        &mut stream,
+                        bound_port,
+                        &cfg_c,
+                        backend_c.as_ref(),
+                        &shutdown_c,
+                        &req,
+                    ),
                     Err(ParseError::Closed) => {}
                     Err(ParseError::Status(code, msg)) => {
                         let _ = write_json_error(&mut stream, code, &msg);
@@ -527,17 +525,24 @@ fn handle_action_post(stream: &mut TcpStream, backend: &dyn UiBackend, body: &[u
     let Some(p) = parse_json_body::<ActionBody>(stream, body) else {
         return;
     };
-    let action = p.action.trim().to_ascii_lowercase();
-    if !matches!(action.as_str(), "unblock" | "rework" | "steer" | "unfreeze") {
-        return send_err(stream, 400, "unsupported action");
-    }
-    if action != "unfreeze"
+    let normalized = match p.action.trim().to_ascii_lowercase().as_str() {
+        "unblock" => "unblock",
+        "rework" => "rework",
+        "steer" => "steer",
+        "unfreeze" => "unfreeze",
+        "approve_plan" | "approve-plan" => "approve_plan",
+        "unblock_all" | "unblock-all" => "unblock_all",
+        _ => return send_err(stream, 400, "unsupported action"),
+    };
+    if !matches!(normalized, "unfreeze" | "unblock_all")
         && let Err(e) = validate_task_id(&p.task_id)
     {
         return send_err(stream, 400, &format!("invalid task id: {e}"));
     }
-    let res = backend.mutate_task(&action, p.task_id.trim(), p.note.trim());
-    write_backend_result(stream, res);
+    write_backend_result(
+        stream,
+        backend.mutate_task(normalized, p.task_id.trim(), p.note.trim()),
+    );
 }
 
 fn serve_sse(

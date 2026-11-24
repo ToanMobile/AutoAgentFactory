@@ -159,6 +159,7 @@ fn proposer_parses_prose_around_uppercase_json_fence_and_sanitizes_failure_conte
                 read_only: true,
                 ..SandboxPolicy::default()
             },
+            json_schema: None,
         },
     };
     let reason = BlockedReason::GateFailed {

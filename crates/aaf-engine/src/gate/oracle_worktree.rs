@@ -11,10 +11,16 @@ use std::path::{Component, Path, PathBuf};
 use aaf_domain::gate::ChangeKind;
 
 use super::changes::{self, Change};
-use super::oracle::{is_cfg_test_attr_line, is_oracle_test_path};
+use super::oracle::is_oracle_test_path;
 use super::proc::git_bytes;
 use super::{GIT_TIMEOUT, GateError};
 use crate::git::warm_slot::{SlotKind, WarmSlot};
+
+#[path = "oracle_worktree_lexer.rs"]
+mod lexer;
+
+pub(super) use lexer::inline_cfg_test_spans;
+pub(crate) use lexer::split_inline_cfg_test;
 
 /// Directory under the data dir where earlier builds put one-shot oracle
 /// scratch worktrees (`<common_id>-<pid>-<seq>`); `aaf gc` still sweeps the
@@ -186,49 +192,6 @@ pub(crate) fn overlay_live_changes(repo_root: &Path, scratch: &Path) -> Result<(
     Ok(())
 }
 
-/// Splits a Rust source file at the **last** top-level/indented `#[cfg(test)]`
-/// attribute line outside `/* ... */` block comments so an early dummy
-/// `#[cfg(test)]` cannot shield production code below it.
-pub(crate) fn split_inline_cfg_test(source: &str) -> (&str, Option<&str>) {
-    let mut offset = 0usize;
-    let mut in_block_comment = false;
-    let mut last_match = None;
-    for segment in source.split_inclusive('\n') {
-        let line = segment.trim_end_matches(['\r', '\n']);
-        if !in_block_comment && is_cfg_test_attr_line(line) {
-            last_match = Some(offset);
-        }
-        in_block_comment = update_block_comment(line, in_block_comment);
-        offset += segment.len();
-    }
-    match last_match {
-        Some(idx) => (&source[..idx], Some(&source[idx..])),
-        None => (source, None),
-    }
-}
-
-fn update_block_comment(line: &str, mut in_comment: bool) -> bool {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if !in_comment && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            break;
-        }
-        if !in_comment && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_comment = true;
-            i += 2;
-            continue;
-        }
-        if in_comment && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-            in_comment = false;
-            i += 2;
-            continue;
-        }
-        i += 1;
-    }
-    in_comment
-}
-
 /// Whether `rel_path` is a gitlink (mode 160000, a submodule pointer) in
 /// `base_sha`: `git show` cannot print one, since its commit lives in the
 /// submodule's repository.
@@ -288,9 +251,14 @@ pub(crate) fn revert_prod_files(
     }
     for (rel_path, existed_at_base) in actions {
         let inline_tail = if inline_rust_tests.contains(rel_path) {
-            fs::read_to_string(repo_root.join(rel_path))
-                .ok()
-                .and_then(|s| split_inline_cfg_test(&s).1.map(str::to_string))
+            let head_path = repo_root.join(rel_path);
+            if fs::symlink_metadata(&head_path).is_ok_and(|m| m.is_file()) {
+                fs::read_to_string(&head_path)
+                    .ok()
+                    .and_then(|s| split_inline_cfg_test(&s).1)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -308,7 +276,12 @@ pub(crate) fn revert_prod_files(
             if let Some(tail) = inline_tail {
                 let base_str = String::from_utf8_lossy(&base_bytes);
                 let (base_prod, _) = split_inline_cfg_test(&base_str);
-                fs::write(&dst, format!("{base_prod}{tail}").as_bytes())?;
+                let combined = if !base_prod.is_empty() && !base_prod.ends_with('\n') {
+                    format!("{base_prod}\n{tail}")
+                } else {
+                    format!("{base_prod}{tail}")
+                };
+                fs::write(&dst, combined.as_bytes())?;
             } else {
                 fs::write(&dst, &base_bytes)?;
             }

@@ -3,9 +3,17 @@
 
 use std::fmt::Write as _;
 
+#[path = "lockfile_summary.rs"]
+pub(crate) mod lockfile_summary;
+
 use super::AuditInput;
 use super::checklist::build_checklist;
 use super::scoring::GOLDEN_STANDARDS;
+
+pub use lockfile_summary::{
+    ALLOWLISTED_LOCKFILES, LOCKFILE_SUMMARY_THRESHOLD_BYTES, is_allowlisted_lockfile,
+    summarize_diff_lockfiles, summarize_diff_lockfiles_with_threshold,
+};
 
 /// Largest diff, in bytes, shown to the auditor. Anything longer is cut and
 /// the audit can no longer pass: unseen changes cannot be approved.
@@ -148,15 +156,32 @@ pub const PRIOR_BEGIN: &str = "<<<AAF_UNTRUSTED_PRIOR_BEGIN>>>";
 pub const PRIOR_END: &str = "<<<AAF_UNTRUSTED_PRIOR_END>>>";
 pub const MAX_REPAIR_PRIOR_CHARS: usize = 6000;
 
-/// Builds a 1-shot format-repair prompt when an auditor returned a succeeded
-/// turn whose output failed strict JSON/schema validation (`Inconclusive`).
+fn clip_repair_prior(previous_output: &str, max_chars: usize) -> String {
+    let total = previous_output.chars().count();
+    if total <= max_chars {
+        return previous_output.to_string();
+    }
+    const SEP: &str = "\n...[middle omitted]...\n";
+    let budget = max_chars.saturating_sub(SEP.chars().count());
+    let head_len = budget / 2;
+    let tail_len = budget.saturating_sub(head_len);
+    let head: String = previous_output.chars().take(head_len).collect();
+    let tail: String = previous_output
+        .chars()
+        .skip(total.saturating_sub(tail_len))
+        .collect();
+    format!("{head}{SEP}{tail}")
+}
+
+/// Builds a format/citation-repair prompt when an auditor returned a succeeded
+/// turn whose output failed strict JSON/schema/citation validation (`Inconclusive`).
 ///
 /// The repair is a full repeat of the audit ([`build_scored_prompt`]: spec,
 /// diff and the evidence rule), so a reply that never looked at the change
 /// cannot be turned into a verdict; an item the previous reply did not
 /// clearly answer "no" is answered "yes" with a diff citation, and a blocking
-/// "yes" without one is inconclusive, never a pass (fail closed). The previous reply
-/// and the parse error are untrusted (the auditor wrote them) and are
+/// "yes" without one is inconclusive, never a pass (fail closed). The previous
+/// reply and the parse error are untrusted (the auditor wrote them) and are
 /// neutralised.
 pub fn build_format_repair_prompt(
     input: &AuditInput,
@@ -173,10 +198,7 @@ pub fn build_format_repair_prompt(
         .chars()
         .take(300)
         .collect();
-    let clipped: String = previous_output
-        .chars()
-        .take(MAX_REPAIR_PRIOR_CHARS)
-        .collect();
+    let clipped = clip_repair_prior(previous_output, MAX_REPAIR_PRIOR_CHARS);
     let safe_prior = neutralise(&clipped);
     let mut out = build_scored_prompt(input, require_scores);
     out.reserve(safe_prior.len() + 1024);

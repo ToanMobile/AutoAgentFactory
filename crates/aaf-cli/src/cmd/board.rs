@@ -43,8 +43,10 @@ pub enum BoardCommand {
     List(ListArgs),
     /// Show one task with its dependencies, runs and latest events.
     Show { id: String },
-    /// Put a Blocked task back to Ready with a fresh budget (human action).
-    Unblock { id: String },
+    /// Move Backlog task(s) to Ready.
+    Ready(ReadyArgs),
+    /// Put Blocked task(s) back to Ready with a fresh budget (human action).
+    Unblock(UnblockArgs),
     /// Clear the factory freeze and the consecutive-failure counter.
     Unfreeze,
     /// Send a task in `review` back for rework (to `gating`, or `ready` with --rerun).
@@ -61,12 +63,32 @@ pub enum BoardCommand {
     Dep(dag::DepArgs),
     /// Show the task dependency DAG, critical path and cascade-blocked tasks.
     Graph(dag::GraphArgs),
-    /// Approve a task's generated plan and move it back to Ready.
-    ApprovePlan { id: String },
+    /// Approve generated plan(s) and move them back to Ready (optionally running `aaf run`).
+    ApprovePlan(approve_plan::ApprovePlanArgs),
     /// Roll back a task's worktree to its latest pre-turn snapshot (human action).
-    Undo { id: String },
+    Undo(undo_steer::UndoArgs),
     /// Append a human steering note to a task's context without altering its spec.
     Steer { id: String, note: String },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ReadyArgs {
+    /// Backlog task id to move to Ready (required unless `--all` is set).
+    #[arg(required_unless_present = "all", conflicts_with = "all")]
+    pub id: Option<String>,
+    /// Move every Backlog task in the current repository to Ready.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UnblockArgs {
+    /// Blocked task id to move back to Ready (required unless `--all` is set).
+    #[arg(required_unless_present = "all", conflicts_with = "all")]
+    pub id: Option<String>,
+    /// Unblock every Blocked task in the current repository.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -115,7 +137,8 @@ pub fn run(args: &BoardArgs, ctx: &Ctx) -> CmdResult {
         BoardCommand::Add(add_args) => add(add_args, ctx),
         BoardCommand::List(list_args) => list(list_args, ctx),
         BoardCommand::Show { id } => show(id, ctx),
-        BoardCommand::Unblock { id } => unblock(id, ctx),
+        BoardCommand::Ready(ready_args) => ready(ready_args, ctx),
+        BoardCommand::Unblock(unblock_args) => unblock(unblock_args, ctx),
         BoardCommand::Unfreeze => unfreeze_factory(ctx),
         BoardCommand::Rework(rework_args) => rework::run(rework_args, ctx),
         BoardCommand::Trace(trace_args) => trace::run(trace_args, ctx),
@@ -124,8 +147,8 @@ pub fn run(args: &BoardArgs, ctx: &Ctx) -> CmdResult {
         BoardCommand::Split(split_args) => split::run_split(split_args, ctx),
         BoardCommand::Dep(dep_args) => dag::run_dep(dep_args, ctx),
         BoardCommand::Graph(graph_args) => dag::graph(graph_args, ctx),
-        BoardCommand::ApprovePlan { id } => approve_plan::run(ctx, id),
-        BoardCommand::Undo { id } => undo_steer::undo(ctx, id),
+        BoardCommand::ApprovePlan(ap_args) => approve_plan::run_args(ctx, ap_args),
+        BoardCommand::Undo(undo_args) => undo_steer::undo_args(ctx, undo_args),
         BoardCommand::Steer { id, note } => undo_steer::steer(ctx, id, note),
     }
 }
@@ -368,25 +391,136 @@ fn show(id: &str, ctx: &Ctx) -> CmdResult {
         ))
 }
 
-fn unblock(id: &str, ctx: &Ctx) -> CmdResult {
+fn ready(args: &ReadyArgs, ctx: &Ctx) -> CmdResult {
+    if let Some(refused) = refuse_inside_agent_run(ctx, "aaf board ready") {
+        return Ok(refused);
+    }
+    let db = open_db(ctx)?;
+    let now = SystemClock.now();
+    if let Some(id) = args.id.as_deref() {
+        let task = db.get_task(id).map_err(port)?;
+        if task.state != TaskState::Backlog {
+            let text = format!("{id} is {}, not backlog", task.state.as_str());
+            return Ok(CmdOutput::policy("refused", text)
+                .field("task_id", json!(id))
+                .field("state", json!(task.state)));
+        }
+        db.set_state(id, TaskState::Ready, None, now)
+            .map_err(port)?;
+        let payload = json!({
+            "from": TaskState::Backlog.as_str(),
+            "to": TaskState::Ready.as_str(),
+            "why": "aaf board ready",
+            "by": "human",
+        });
+        db.emit(
+            &FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now).for_task(id),
+        )
+        .map_err(port)?;
+        return Ok(CmdOutput::ok("ok", format!("{id} is ready"))
+            .field("task_id", json!(id))
+            .field("state", json!(TaskState::Ready))
+            .field("moved", json!([id]))
+            .field("count", json!(1)));
+    }
+
+    let repo = repo_root(ctx)?.to_string_lossy().into_owned();
+    let backlog = db
+        .list_tasks(Some(&repo), Some(TaskState::Backlog))
+        .map_err(port)?;
+    let mut moved = Vec::with_capacity(backlog.len());
+    for task in backlog {
+        db.set_state(&task.id, TaskState::Ready, None, now)
+            .map_err(port)?;
+        let payload = json!({
+            "from": TaskState::Backlog.as_str(),
+            "to": TaskState::Ready.as_str(),
+            "why": "aaf board ready --all",
+            "by": "human",
+        });
+        db.emit(
+            &FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now)
+                .for_task(&task.id),
+        )
+        .map_err(port)?;
+        moved.push(task.id);
+    }
+    let text = if moved.is_empty() {
+        "no backlog tasks to move to ready".to_string()
+    } else {
+        format!(
+            "moved {} task(s) to ready: {}",
+            moved.len(),
+            moved.join(", ")
+        )
+    };
+    Ok(CmdOutput::ok("ok", text)
+        .field("all", json!(true))
+        .field("count", json!(moved.len()))
+        .field("moved", json!(moved))
+        .field("task_ids", json!(moved)))
+}
+
+fn unblock(args: &UnblockArgs, ctx: &Ctx) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf board unblock") {
         return Ok(refused);
     }
     let db = open_db(ctx)?;
     let now = SystemClock.now();
-    let out = match unblock_task(&db, id, "aaf board unblock", "human", now) {
-        Ok(out) => out,
-        Err(TaskOpError::WrongState { actual, .. }) => {
-            let text = format!("{id} is {}, not blocked", actual.as_str());
-            return Ok(CmdOutput::policy("refused", text).field("state", json!(actual)));
+    if let Some(id) = args.id.as_deref() {
+        let out = match unblock_task(&db, id, "aaf board unblock", "human", now) {
+            Ok(out) => out,
+            Err(TaskOpError::WrongState { actual, .. }) => {
+                let text = format!("{id} is {}, not blocked", actual.as_str());
+                return Ok(CmdOutput::policy("refused", text).field("state", json!(actual)));
+            }
+            Err(TaskOpError::Port(other)) => return Err(port(other)),
+        };
+        return Ok(CmdOutput::ok("ok", format!("{id} is ready"))
+            .field("task_id", json!(id))
+            .field("state", json!(TaskState::Ready))
+            .field("budget_reset", json!(out.budget_reset))
+            .field("plan_approved", json!(out.plan_approved)));
+    }
+
+    let repo = repo_root(ctx)?.to_string_lossy().into_owned();
+    let blocked = db
+        .list_tasks(Some(&repo), Some(TaskState::Blocked))
+        .map_err(port)?;
+    let mut unblocked = Vec::with_capacity(blocked.len());
+    let mut budget_resets = 0_u32;
+    let mut plans_approved = 0_u32;
+    for task in blocked {
+        match unblock_task(&db, &task.id, "aaf board unblock --all", "human", now) {
+            Ok(out) => {
+                if out.budget_reset {
+                    budget_resets += 1;
+                }
+                if out.plan_approved {
+                    plans_approved += 1;
+                }
+                unblocked.push(task.id);
+            }
+            Err(TaskOpError::WrongState { .. }) => {}
+            Err(TaskOpError::Port(other)) => return Err(port(other)),
         }
-        Err(TaskOpError::Port(other)) => return Err(port(other)),
+    }
+    let text = if unblocked.is_empty() {
+        "no blocked tasks to unblock".to_string()
+    } else {
+        format!(
+            "unblocked {} task(s): {}",
+            unblocked.len(),
+            unblocked.join(", ")
+        )
     };
-    Ok(CmdOutput::ok("ok", format!("{id} is ready"))
-        .field("task_id", json!(id))
-        .field("state", json!(TaskState::Ready))
-        .field("budget_reset", json!(out.budget_reset))
-        .field("plan_approved", json!(out.plan_approved)))
+    Ok(CmdOutput::ok("ok", text)
+        .field("all", json!(true))
+        .field("count", json!(unblocked.len()))
+        .field("unblocked", json!(unblocked))
+        .field("task_ids", json!(unblocked))
+        .field("budget_resets", json!(budget_resets))
+        .field("plans_approved", json!(plans_approved)))
 }
 
 fn unfreeze_factory(ctx: &Ctx) -> CmdResult {

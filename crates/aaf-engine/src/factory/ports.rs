@@ -8,8 +8,9 @@ use std::path::Path;
 
 use aaf_domain::account::AccountProfile;
 use aaf_domain::gate::{HeadLockReport, Receipt};
-use aaf_domain::ports::{LimitHit, PortResult};
+use aaf_domain::ports::{LimitHit, PortError, PortResult};
 
+use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::{GitError, MergeOutcome, PrOutcome, TaskWorktree};
 use crate::unblocker::{QuotaRoute, RerunResult};
 use crate::webhook::WebhookEvent;
@@ -97,6 +98,20 @@ pub trait GitOps: Send + Sync {
         receipt: &Receipt,
         note: Option<&str>,
     ) -> PortResult<PrOutcome>;
+    /// Merges an opened pull request via the locked PR merge gate.
+    /// Must be called only after any `MergeLock` from `merge_with_onto` has dropped.
+    fn merge_pr(
+        &self,
+        _wt: &TaskWorktree,
+        _pr_url: &str,
+        _head_sha: &str,
+    ) -> PortResult<PrMergeOutcome> {
+        Err(PortError::Invalid("merge_pr not supported".to_string()))
+    }
+    /// Best-effort fast-forward of the local base branch after a remote push.
+    fn sync_local_base(&self) -> PortResult<Option<String>> {
+        Ok(None)
+    }
     /// Refreshes the local view of the base after a remote merge.
     fn fetch_base(&self) -> PortResult<()>;
     /// True when the task's branch is contained in the base.

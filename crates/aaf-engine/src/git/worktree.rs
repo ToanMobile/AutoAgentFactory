@@ -12,7 +12,8 @@ mod submodules;
 pub const BRANCH_PREFIX: &str = "aaf/";
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/aaf/snapshots/";
 const BATCH_PREFIX: &str = "batch-";
-const SUBMODULES_REFUSAL: &str = "working trees containing submodules cannot be moved or removed";
+pub(super) const SUBMODULES_REFUSAL: &str =
+    "working trees containing submodules cannot be moved or removed";
 
 /// Fails with [`GitError::Dirty`] when `tree` differs from its `HEAD`
 /// (staged, unstaged or untracked): what the gate reads must be what lands.
@@ -317,14 +318,19 @@ pub fn remove_verified_merged(
     Ok(())
 }
 
-/// Returns the task's existing worktree and its `HEAD` oid (or its local
-/// branch tip if the worktree directory is gone) without creating a worktree.
-pub fn existing_head(
+/// Returns the task's registered worktree and its `HEAD` oid only when the
+/// worktree directory actually exists on disk (`path.is_dir()`). Unlike
+/// [`existing_head`], never falls back to a branch-only ref when the directory
+/// has been removed.
+pub fn existing_registered(
     repo_root: &Path,
     worktrees_dir: &Path,
     task_id: &str,
 ) -> Result<Option<(TaskWorktree, String)>, GitError> {
     let path = worktree_path(repo_root, worktrees_dir, task_id)?;
+    if !path.is_dir() {
+        return Ok(None);
+    }
     let branch = format!("{BRANCH_PREFIX}{task_id}");
     if let Ok(resolved) = fs::canonicalize(&path) {
         let registered = list(repo_root)?.into_iter().any(|entry| {
@@ -336,6 +342,21 @@ pub fn existing_head(
             return Ok(Some((TaskWorktree { path, branch }, head)));
         }
     }
+    Ok(None)
+}
+
+/// Returns the task's existing worktree and its `HEAD` oid (or its local
+/// branch tip if the worktree directory is gone) without creating a worktree.
+pub fn existing_head(
+    repo_root: &Path,
+    worktrees_dir: &Path,
+    task_id: &str,
+) -> Result<Option<(TaskWorktree, String)>, GitError> {
+    if let Some(found) = existing_registered(repo_root, worktrees_dir, task_id)? {
+        return Ok(Some(found));
+    }
+    let path = worktree_path(repo_root, worktrees_dir, task_id)?;
+    let branch = format!("{BRANCH_PREFIX}{task_id}");
     let branch_ref = format!("refs/heads/{branch}");
     let out = git_raw(
         repo_root,
@@ -537,58 +558,4 @@ fn resolved(path: &Path) -> PathBuf {
     }
 }
 
-/// Why a plain (non-`--force`) `git worktree remove` of `wt` would be
-/// refused, mirroring git's own checks: a lock file, or initialised
-/// submodules (`<git-dir>/modules`, or a gitlink checked out with a `.git`).
-/// Lets a dry run report what the real run would keep.
-pub fn removal_refusal(wt: &Path) -> Result<Option<&'static str>, GitError> {
-    let git_dir = PathBuf::from(git(wt, &["rev-parse", "--absolute-git-dir"])?.trim());
-    if git_dir.join("locked").exists() {
-        return Ok(Some("cannot remove a locked working tree"));
-    }
-    if git_dir.join("modules").is_dir() {
-        return Ok(Some(SUBMODULES_REFUSAL));
-    }
-    let index = git(wt, &["ls-files", "--stage", "-z"])?;
-    let populated = index.split('\0').any(|entry| {
-        entry.starts_with("160000 ")
-            && entry
-                .split_once('\t')
-                .is_some_and(|(_, path)| wt.join(path).join(".git").exists())
-    });
-    Ok(populated.then_some(SUBMODULES_REFUSAL))
-}
-
-/// Every worktree of the repository, the main one first.
-pub fn list(repo_root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
-    let args = ["worktree", "list", "--porcelain", "-z"];
-    let out = git_raw(repo_root, &args)?;
-    if !out.success() {
-        return Err(super::cmd::failure(&args, &out));
-    }
-    let mut entries: Vec<WorktreeEntry> = Vec::new();
-    for field in out.stdout.split('\0') {
-        if let Some(path) = field.strip_prefix("worktree ") {
-            entries.push(WorktreeEntry {
-                path: PathBuf::from(path),
-                head: None,
-                branch: None,
-                locked: false,
-            });
-        } else if let Some(entry) = entries.last_mut() {
-            if let Some(head) = field.strip_prefix("HEAD ") {
-                entry.head = Some(head.to_string());
-            } else if let Some(name) = field.strip_prefix("branch refs/heads/") {
-                entry.branch = Some(name.to_string());
-            } else if field == "locked" || field.starts_with("locked ") {
-                entry.locked = true;
-            }
-        }
-    }
-    Ok(entries)
-}
-
-/// Drops the records of worktrees whose directory is gone.
-pub fn prune(repo_root: &Path) -> Result<(), GitError> {
-    git(repo_root, &["worktree", "prune"]).map(|_| ())
-}
+pub use super::worktree_inspect::{list, prune, removal_refusal};

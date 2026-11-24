@@ -11,13 +11,16 @@ pub mod dag;
 pub mod event;
 pub mod gate;
 pub mod head_lock_globs;
+pub mod land_mode;
 pub mod oracle_config;
+pub mod pipeline;
 pub mod ports;
 pub mod proof;
 pub mod run;
 pub mod sop;
 pub mod task;
 pub mod telegram;
+pub mod worktree_config;
 
 /// Errors raised by pure domain rules.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -128,8 +128,8 @@ const BUILTIN_EXECUTORS: [CliDescriptor; 10] = [
         binaries: &["agy", "antigravity"],
         hook_support: HookSupport::SandboxOnly,
         supports_model_flag: true,
-        supports_effort_flag: false,
-        supports_read_only_flag: false,
+        supports_effort_flag: true,
+        supports_read_only_flag: true,
         headless_env: &[],
     },
     CliDescriptor {
@@ -198,6 +198,11 @@ pub fn find_descriptor(id: &str) -> Option<&'static CliDescriptor> {
     BUILTIN_EXECUTORS.iter().find(|desc| desc.id == canonical)
 }
 
+/// Alias for [`find_descriptor`]: looks up a built-in CLI descriptor by id or alias.
+pub fn find_cli(id: &str) -> Option<&'static CliDescriptor> {
+    find_descriptor(id)
+}
+
 /// Validates a CLI flag argument value (such as `model` or `effort`) so it is
 /// a single safe token that cannot inject extra flags or control characters.
 pub fn validate_flag_value(key: &str, value: &str) -> Result<(), String> {
@@ -209,7 +214,8 @@ pub fn validate_flag_value(key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Builds a deterministic, shell-free headless argv for one coding-agent CLI.
+/// Builds a deterministic, shell-free headless argv for one coding-agent CLI
+/// assuming OS sandbox confinement (`sandboxed = true`).
 ///
 /// Rejects empty binaries/prompts and rejects `model` or `effort` values
 /// containing whitespace, control characters, or a leading `-`.
@@ -220,6 +226,22 @@ pub fn build_headless_argv(
     model: Option<&str>,
     effort: Option<&str>,
     read_only: bool,
+) -> Result<Vec<String>, String> {
+    build_headless_argv_confined(desc, binary, prompt, model, effort, read_only, true)
+}
+
+/// Like [`build_headless_argv`], with explicit control over whether OS sandbox
+/// confinement is active. Non-interactive bypass flags (`bypassPermissions`,
+/// `--full-auto`, `--approval-mode yolo`, `--dangerously-skip-permissions`) are
+/// emitted only when `!read_only && sandboxed`.
+pub fn build_headless_argv_confined(
+    desc: &CliDescriptor,
+    binary: &str,
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    read_only: bool,
+    sandboxed: bool,
 ) -> Result<Vec<String>, String> {
     if binary.trim().is_empty() || binary.chars().any(char::is_control) {
         return Err("binary path must be non-empty and free of control characters".to_string());
@@ -246,6 +268,23 @@ pub fn build_headless_argv(
             );
             if read_only {
                 argv.extend(["--permission-mode", "plan"].into_iter().map(String::from));
+            } else if sandboxed {
+                argv.extend(
+                    ["--permission-mode", "bypassPermissions"]
+                        .into_iter()
+                        .map(String::from),
+                );
+            } else {
+                argv.extend(
+                    [
+                        "--permission-mode",
+                        "acceptEdits",
+                        "--permission-prompts",
+                        "none",
+                    ]
+                    .into_iter()
+                    .map(String::from),
+                );
             }
             if let Some(m) = clean_model {
                 argv.extend(["--model".to_string(), m.to_string()]);
@@ -260,6 +299,8 @@ pub fn build_headless_argv(
             argv.push("exec".to_string());
             if read_only {
                 argv.extend(["--sandbox", "read-only"].into_iter().map(String::from));
+            } else if sandboxed {
+                argv.push("--full-auto".to_string());
             }
             if let Some(m) = clean_model {
                 argv.extend(["--model".to_string(), m.to_string()]);
@@ -270,6 +311,8 @@ pub fn build_headless_argv(
         "gemini" => {
             if read_only {
                 argv.extend(["--approval-mode", "plan"].into_iter().map(String::from));
+            } else if sandboxed {
+                argv.extend(["--approval-mode", "yolo"].into_iter().map(String::from));
             }
             if let Some(m) = clean_model {
                 argv.extend(["--model".to_string(), m.to_string()]);
@@ -303,7 +346,28 @@ pub fn build_headless_argv(
             argv.push("-p".to_string());
             argv.push(prompt.to_string());
         }
-        "cursor" | "antigravity" | "codebuddy" | "deepseek" => {
+        "antigravity" => {
+            argv.push("--disable-slash-commands".to_string());
+            if read_only {
+                argv.extend(["--mode".to_string(), "plan".to_string()]);
+            } else if sandboxed {
+                argv.extend(
+                    ["--mode", "auto", "--dangerously-skip-permissions"]
+                        .into_iter()
+                        .map(String::from),
+                );
+            } else {
+                argv.extend(["--mode".to_string(), "accept-edits".to_string()]);
+            }
+            if let Some(m) = clean_model {
+                argv.extend(["--model".to_string(), m.to_string()]);
+            }
+            if let Some(e) = clean_effort {
+                argv.extend(["--effort".to_string(), e.to_string()]);
+            }
+            argv.push(format!("-p={prompt}"));
+        }
+        "cursor" | "codebuddy" | "deepseek" => {
             if let Some(m) = clean_model {
                 argv.extend(["--model".to_string(), m.to_string()]);
             }
@@ -328,10 +392,46 @@ pub fn build_headless_argv(
     Ok(argv)
 }
 
-fn resolve_binary(desc: &CliDescriptor, path_var: &OsStr) -> Option<PathBuf> {
+/// Resolves the first matching binary for `desc` on `path_var`.
+pub fn resolve_binary(desc: &CliDescriptor, path_var: &OsStr) -> Option<PathBuf> {
     desc.binaries
         .iter()
         .find_map(|candidate| find_on_path(path_var, candidate))
+}
+
+/// Resolves a built-in CLI's `{prompt}` command template from `path_var`.
+pub(super) fn resolve_generic_template(
+    exec: &str,
+    model: &str,
+    effort: &str,
+    path_var: Option<&OsStr>,
+) -> aaf_domain::ports::PortResult<Vec<String>> {
+    use aaf_domain::ports::PortError;
+    let desc = BUILTIN_EXECUTORS
+        .iter()
+        .find(|d| d.id == exec)
+        .ok_or_else(|| PortError::Invalid(format!("unknown executor {exec:?}")))?;
+    let bin = path_var
+        .and_then(|p| resolve_binary(desc, p))
+        .ok_or_else(|| {
+            PortError::NotFound(format!(
+                "none of [{}] for executor {:?} found on PATH",
+                desc.binaries.join(", "),
+                desc.id
+            ))
+        })?;
+    let clean_model = (!model.is_empty()).then_some(model);
+    let clean_effort = (!effort.is_empty()).then_some(effort);
+    build_headless_argv_confined(
+        desc,
+        &bin.to_string_lossy(),
+        "{prompt}",
+        clean_model,
+        clean_effort,
+        false,
+        false,
+    )
+    .map_err(PortError::Invalid)
 }
 
 /// Discovers which of the 10 built-in coding-agent CLIs are installed on `path_var`

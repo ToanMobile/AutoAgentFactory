@@ -26,7 +26,7 @@ pub const CODEX_HOOKS_REL: &str = ".codex/hooks.json";
 pub const GEMINI_SETTINGS_REL: &str = ".gemini/settings.json";
 
 /// Codex CLI tools that must be covered by the `PreToolUse` matcher.
-pub const CODEX_TOOLS: [&str; 8] = [
+pub const CODEX_TOOLS: [&str; 11] = [
     "Bash",
     "shell",
     "shell_command",
@@ -34,7 +34,10 @@ pub const CODEX_TOOLS: [&str; 8] = [
     "apply_patch",
     "write_file",
     "edit_file",
+    "create_file",
+    "delete_file",
     "read_file",
+    "view_file",
 ];
 
 /// Gemini CLI tools that must be covered by the `BeforeTool` matcher.
@@ -253,6 +256,7 @@ fn host_entry_problem(hook: &Value, spec: HostSpec) -> Option<String> {
             "command" => {}
             "type" if value == "command" => has_type = true,
             "timeout" if value.as_u64().is_some_and(|val| val >= spec.min_timeout) => {}
+            "name" | "description" | "statusMessage" if value.is_string() => {}
             other => {
                 return Some(format!(
                     "the {HOOK_BINARY} entry sets \"{other}\": {value}, which a plain blocking \

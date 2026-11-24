@@ -150,6 +150,7 @@ mod real {
                     enabled: true,
                     ..SandboxPolicy::default()
                 },
+                json_schema: None,
             })
             .unwrap()
             .log_tail

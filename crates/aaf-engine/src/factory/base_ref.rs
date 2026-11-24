@@ -5,7 +5,7 @@ use std::path::Path;
 use aaf_domain::ports::{PortError, PortResult};
 
 use super::git_real::err;
-use crate::gate::base::{AUTO_FALLBACKS, origin_head_branch};
+use crate::gate::base::{AUTO_FALLBACKS, origin_head_branch, parse_remote_tracking_ref};
 use crate::git::cmd::{git, git_raw};
 use crate::git::has_remote;
 
@@ -86,6 +86,21 @@ pub fn resolve_base(repo: &Path, base_ref: &str) -> PortResult<BaseRef> {
             return Ok(BaseRef {
                 remote: remote.map(|_| DEFAULT_REMOTE.to_string()),
                 branch: branch.unwrap_or(&name).to_string(),
+            });
+        }
+    }
+    // Probe `@{upstream}` (e.g. `refs/remotes/origin/develop`), rejecting
+    // `aaf/*` task branches, before falling back to the current local branch.
+    let upstream =
+        git_raw(repo, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).map_err(err)?;
+    if upstream.success() {
+        let full = upstream.stdout.trim();
+        if let Some((remote, branch)) = parse_remote_tracking_ref(full)
+            && is_commit(repo, full)?
+        {
+            return Ok(BaseRef {
+                remote: Some(remote.to_string()),
+                branch: branch.to_string(),
             });
         }
     }

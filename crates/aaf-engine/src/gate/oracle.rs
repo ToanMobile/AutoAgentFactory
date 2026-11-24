@@ -14,11 +14,12 @@ use std::time::Duration;
 
 use aaf_domain::config::{OracleMode, RepoConfig};
 use aaf_domain::gate::{ChangeKind, GateMode, GateStatus};
+use aaf_domain::oracle_config::OracleCompileRedPolicy;
 
 use super::changes::{AddedLines, Change};
 use super::oracle_classify::{OracleOutcome, classify};
 use super::oracle_worktree::{
-    ScratchWorktree, overlay_live_changes, revert_prod_files, split_inline_cfg_test,
+    ScratchWorktree, inline_cfg_test_spans, overlay_live_changes, revert_prod_files,
 };
 use super::runner::HeavyContext;
 use super::{GIT_TIMEOUT, GateError, static_checks};
@@ -126,17 +127,6 @@ fn is_source_file(path: &str) -> bool {
         .is_some_and(|(_, ext)| SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
-/// True when `line` starts with a `#[cfg(test)]` attribute (ignoring leading
-/// indentation and interior whitespace), never matching comments or strings.
-pub(crate) fn is_cfg_test_attr_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with("#[") {
-        return false;
-    }
-    let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-    compact.starts_with("#[cfg(test)]")
-}
-
 fn is_ignored_non_prod(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     let Some((&name, dirs)) = parts.split_last() else {
@@ -174,36 +164,35 @@ fn is_ignored_non_prod(path: &str) -> bool {
             .any(|d| RUNTIME_DATA_DIRS.contains(&d.to_ascii_lowercase().as_str()))
 }
 
-/// First line (1-based) of the inline `#[cfg(test)]` tail of the current
-/// `repo_root/path`, as [`split_inline_cfg_test`] splits it.
-fn inline_tail_start_line(repo_root: &Path, path: &str) -> Option<u32> {
-    let full = repo_root.join(path);
-    // Symlinks are not followed: their target may be outside the repo.
-    if !fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file()) {
-        return None;
-    }
-    let source = fs::read_to_string(full).ok()?;
-    let (prod, tail) = split_inline_cfg_test(&source);
-    tail?;
-    u32::try_from(prod.matches('\n').count())
-        .ok()?
-        .checked_add(1)
-}
-
-/// Production `.rs` files whose diff adds a `#[cfg(test)]` attribute or adds
-/// any line inside the file's inline `#[cfg(test)]` tail (a new `#[test]` in
-/// an existing `mod tests`).
 fn inline_rust_test_files(repo_root: &Path, added: &[AddedLines]) -> BTreeSet<String> {
-    added
-        .iter()
-        .filter(|f| f.path.ends_with(".rs") && !is_oracle_test_path(&f.path))
-        .filter(|f| {
-            f.lines.iter().any(|(_, text)| is_cfg_test_attr_line(text))
-                || inline_tail_start_line(repo_root, &f.path)
-                    .is_some_and(|start| f.lines.iter().any(|(number, _)| *number >= start))
-        })
-        .map(|f| f.path.clone())
-        .collect()
+    let mut out = BTreeSet::new();
+    for file in added {
+        if !file.path.ends_with(".rs") || is_oracle_test_path(&file.path) {
+            continue;
+        }
+        let full = repo_root.join(&file.path);
+        // Symlinks are not followed: their target may be outside the repo.
+        if !fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        let Ok(src) = fs::read_to_string(&full) else {
+            continue;
+        };
+        let spans = inline_cfg_test_spans(&src);
+        if spans.is_empty() {
+            continue;
+        }
+        let hits_test = file.lines.iter().any(|(line_no, _)| {
+            let line = *line_no as usize;
+            spans
+                .iter()
+                .any(|&(start, end)| line >= start && line <= end)
+        });
+        if hits_test {
+            out.insert(file.path.clone());
+        }
+    }
+    out
 }
 
 /// G6b+G6c: the scratch worktree with the live changes overlaid and the
@@ -287,7 +276,13 @@ fn select_test_command(cfg: &RepoConfig, mode: GateMode) -> Option<(&'static str
     }
 }
 
-fn map_outcome(mode: OracleMode, outcome: OracleOutcome) -> OracleVerdict {
+fn map_outcome(
+    mode: OracleMode,
+    compile_red_policy: OracleCompileRedPolicy,
+    all_prod_added: bool,
+    has_repro: bool,
+    outcome: OracleOutcome,
+) -> OracleVerdict {
     let applied = |status, reason| OracleVerdict::Applied { status, reason };
     match (mode, outcome) {
         (OracleMode::Off, _) => OracleVerdict::Skipped,
@@ -302,20 +297,37 @@ fn map_outcome(mode: OracleMode, outcome: OracleOutcome) -> OracleVerdict {
             "warning: oracle: vacuous test — tests still pass after reverting production changes"
                 .to_string(),
         ),
-        // Goes back to the agent through the unblock ladder; without a
-        // proven red nothing lands either way.
-        (OracleMode::Block, OracleOutcome::CompileRed(msg)) => applied(
-            Some(GateStatus::Blocked),
-            format!(
-                "oracle: compile_red ({msg}): the changed tests do not build against the \
-                 base version, so they cannot show the change fixes anything. Add a test \
-                 that compiles against the base API (call only code that exists before \
-                 your change) and fails there, then passes with your change"
-            ),
-        ),
+        (OracleMode::Block, OracleOutcome::CompileRed(msg)) => {
+            let downgrade_to_warn = match compile_red_policy {
+                OracleCompileRedPolicy::Warn => true,
+                OracleCompileRedPolicy::Blocked => all_prod_added && !has_repro,
+                OracleCompileRedPolicy::Unverified => false,
+            };
+            if downgrade_to_warn {
+                applied(
+                    None,
+                    format!("warning: oracle: compile_red ({msg}); behavioral_red_unproven"),
+                )
+            } else if compile_red_policy == OracleCompileRedPolicy::Blocked {
+                applied(
+                    Some(GateStatus::Blocked),
+                    format!(
+                        "oracle: compile_red ({msg}): the changed tests do not build against the \
+                         base version, so they cannot show the change fixes anything. Add a test \
+                         that compiles against the base API (call only code that exists before \
+                         your change) and fails there, then passes with your change"
+                    ),
+                )
+            } else {
+                applied(
+                    Some(GateStatus::Unverified),
+                    format!("oracle: inconclusive (compile_red: {msg})"),
+                )
+            }
+        }
         (OracleMode::Warn, OracleOutcome::CompileRed(msg)) => applied(
             None,
-            format!("warning: oracle: compile_red ({msg}); not vacuous, behavioral red unproven"),
+            format!("warning: oracle: compile_red ({msg}); behavioral_red_unproven"),
         ),
         (OracleMode::Block, OracleOutcome::Inconclusive(msg)) => applied(
             Some(GateStatus::Unverified),
@@ -376,6 +388,8 @@ pub(crate) fn evaluate_with_options(
     if prod_changes.is_empty() {
         return Ok(OracleVerdict::Skipped);
     }
+    let all_prod_added = prod_changes.iter().all(|ch| ch.kind == ChangeKind::Added);
+    let has_repro = !cfg.commands.repro.trim().is_empty();
     let inline_rust_tests = inline_rust_test_files(repo_root, added);
     if test_files.is_empty() && inline_rust_tests.is_empty() {
         let msg = "oracle: no test changes detected for production diff";
@@ -414,6 +428,9 @@ pub(crate) fn evaluate_with_options(
         Err(err) => {
             return Ok(map_outcome(
                 oracle_mode,
+                cfg.gate.oracle_compile_red_policy,
+                all_prod_added,
+                has_repro,
                 OracleOutcome::Inconclusive(format!("could not prepare reverted tree: {err}")),
             ));
         }
@@ -461,6 +478,9 @@ pub(crate) fn evaluate_with_options(
     let output = String::from_utf8_lossy(&run.output);
     Ok(map_outcome(
         oracle_mode,
+        cfg.gate.oracle_compile_red_policy,
+        all_prod_added,
+        has_repro,
         classify(run.exit_code, run.timed_out, &output),
     ))
 }

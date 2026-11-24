@@ -8,8 +8,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use aaf_domain::config::{GateConfig, MachineConfig, RepoConfig};
-use aaf_domain::gate::{ChangeKind, GateMode, GateStatus, LockStatus, LockedChange, StoreStatus};
+use aaf_domain::config::{GateConfig, GlobalConfig, MachineConfig, RepoConfig};
+use aaf_domain::gate::{
+    ChangeKind, GateMode, GateStatus, LockStatus, LockTier, LockedChange, StoreStatus,
+};
 use aaf_domain::ports::Clock;
 use aaf_engine::gate::changes::{AddedLines, Change};
 use aaf_engine::gate::{
@@ -89,6 +91,7 @@ fn head_lock_blocks_agent_config_dir_symlink_add_modify_delete_rename() {
             vec![LockedChange {
                 path: ".claude".to_string(),
                 change: kind,
+                tier: LockTier::Hard,
             }]
         );
     };
@@ -149,8 +152,7 @@ fn static_checks_closes_star_block_tail_and_non_dash_language_bypass() {
     assert!(scan_one("src/Main.hs", &format!("-- {err}")).is_empty());
 }
 
-#[test]
-fn changes_unquote_keeps_trailing_escaped_quote_so_lockfile_skip_is_not_abused() {
+fn assert_unquote_scans_err001(tricky: &str, msg: &str) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -159,13 +161,16 @@ fn changes_unquote_keeps_trailing_escaped_quote_so_lockfile_skip_is_not_abused()
     git(root, &["commit", "-q", "-m", "init"]);
 
     let err = concat!("try {} catch (e) {", "}");
-    let tricky = "Cargo.lock\"";
-    fs::write(root.join(tricky), format!("{err}\n")).unwrap();
+    let full = root.join(tricky);
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&full, format!("{err}\n")).unwrap();
     git(root, &["add", tricky]);
 
     let added =
         changes::diff_added_tracked(root, "HEAD", &static_checks::skip_path, TIMEOUT).unwrap();
-    assert_eq!(added.len(), 1, "must not be mis-unquoted as Cargo.lock");
+    assert_eq!(added.len(), 1, "{msg}");
     assert_eq!(added[0].path, tricky);
     let report = static_checks::scan(&added).unwrap();
     assert!(
@@ -179,33 +184,15 @@ fn changes_unquote_keeps_trailing_escaped_quote_so_lockfile_skip_is_not_abused()
 }
 
 #[test]
+fn changes_unquote_keeps_trailing_escaped_quote_so_lockfile_skip_is_not_abused() {
+    assert_unquote_scans_err001("Cargo.lock\"", "must not be mis-unquoted as Cargo.lock");
+}
+
+#[test]
 fn changes_unquote_decodes_git_c_escapes_so_backspace_build_is_not_skipped() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    git(root, &["init", "-q", "-b", "main"]);
-    fs::write(root.join("init.txt"), "ok\n").unwrap();
-    git(root, &["add", "-A"]);
-    git(root, &["commit", "-q", "-m", "init"]);
-
-    let err = concat!("try {} catch (e) {", "}");
-    let tricky_dir = "\x08uild";
-    let tricky = "\x08uild/leak.js";
-    fs::create_dir_all(root.join(tricky_dir)).unwrap();
-    fs::write(root.join(tricky), format!("{err}\n")).unwrap();
-    git(root, &["add", tricky]);
-
-    let added =
-        changes::diff_added_tracked(root, "HEAD", &static_checks::skip_path, TIMEOUT).unwrap();
-    assert_eq!(added.len(), 1, "must not decode \\b to 'b' and skip build/");
-    assert_eq!(added[0].path, tricky);
-    let report = static_checks::scan(&added).unwrap();
-    assert!(
-        report
-            .findings
-            .iter()
-            .any(|f| f.rule == "ERR-001" && f.file == tricky),
-        "{:#?}",
-        report.findings
+    assert_unquote_scans_err001(
+        "\x08uild/leak.js",
+        "must not decode \\b to 'b' and skip build/",
     );
 }
 
@@ -273,41 +260,35 @@ fn ios_store_compliance_rejects_absolute_and_symlink_escaping_infoplist_file() {
         );
     };
 
+    let init_pbx = |repo: &Path, setting: &str| {
+        fs::create_dir_all(repo.join("App.xcodeproj")).unwrap();
+        fs::write(
+            repo.join("App.xcodeproj/project.pbxproj"),
+            format!("SDKROOT = iphoneos;\n{setting}\n"),
+        )
+        .unwrap();
+    };
+
     for setting in [
         format!("INFOPLIST_FILE = \"{}\";", outside_plist.display()),
         "INFOPLIST_FILE = \"..\\\\outside\\\\Info.plist\";".to_string(),
     ] {
         let repo = TempDir::new().unwrap();
-        fs::create_dir_all(repo.path().join("App.xcodeproj")).unwrap();
-        fs::write(
-            repo.path().join("App.xcodeproj/project.pbxproj"),
-            format!("SDKROOT = iphoneos;\n{setting}\n"),
-        )
-        .unwrap();
+        init_pbx(repo.path(), &setting);
         assert_ios001_unresolved(repo.path(), &setting);
     }
 
     // Directory symlink escape: `App -> outside`.
     let dir_escape = TempDir::new().unwrap();
-    fs::create_dir_all(dir_escape.path().join("App.xcodeproj")).unwrap();
+    init_pbx(dir_escape.path(), "INFOPLIST_FILE = App/Info.plist;");
     symlink(outside.path(), dir_escape.path().join("App")).unwrap();
-    fs::write(
-        dir_escape.path().join("App.xcodeproj/project.pbxproj"),
-        "SDKROOT = iphoneos;\nINFOPLIST_FILE = App/Info.plist;\n",
-    )
-    .unwrap();
     assert_ios001_unresolved(dir_escape.path(), "dir_symlink_escape");
 
     // File symlink escape: `App/Info.plist -> outside/Info.plist`.
     let file_escape = TempDir::new().unwrap();
-    fs::create_dir_all(file_escape.path().join("App.xcodeproj")).unwrap();
+    init_pbx(file_escape.path(), "INFOPLIST_FILE = App/Info.plist;");
     fs::create_dir_all(file_escape.path().join("App")).unwrap();
     symlink(&outside_plist, file_escape.path().join("App/Info.plist")).unwrap();
-    fs::write(
-        file_escape.path().join("App.xcodeproj/project.pbxproj"),
-        "SDKROOT = iphoneos;\nINFOPLIST_FILE = App/Info.plist;\n",
-    )
-    .unwrap();
     assert_ios001_unresolved(file_escape.path(), "file_symlink_escape");
 }
 
@@ -416,45 +397,51 @@ fn pr_merge_hits_common_receipt_cache_with_auto_base_and_rejects_same_account() 
         global_config: None,
     };
 
+    let push_branch = |branch: &str, file: &str, body: &str| {
+        git(work.path(), &["checkout", "-b", branch, "origin/main"]);
+        fs::write(work.path().join(file), body).unwrap();
+        git(work.path(), &["add", "-A"]);
+        git(work.path(), &["commit", "-m", branch]);
+        let head = git(work.path(), &["rev-parse", "HEAD"]);
+        git(work.path(), &["push", "-u", "origin", branch]);
+        head
+    };
+    let gate_clear = |cfg: &RepoConfig, ts: i64| {
+        let g = run_gate_policy(
+            data.path(),
+            work.path(),
+            cfg,
+            GateMode::Scoped,
+            &FixedClock(ts),
+            &throttle,
+            HiddenPolicy::Remove,
+        )
+        .unwrap();
+        assert_eq!(g.receipt.status, GateStatus::Clear);
+        g
+    };
+    let scratch_dir = data.path().join("merge-scratch");
+    let assert_dry_run_hit =
+        |pr: u64, branch: &str, head: &str, ts: i64, expected_runs: usize, msg: &str| {
+            let gh = mock_pr(pr, branch, head);
+            let out = merge_pr(&make_req(pr, head, true), &gh, &FixedClock(ts), &noop).unwrap();
+            assert!(matches!(out, PrMergeOutcome::DryRunClear { .. }), "{out:?}");
+            assert_eq!(runs(), expected_runs, "{msg}");
+            assert!(!scratch_dir.exists(), "{msg} must not create merge-scratch");
+        };
+
     // 1. Worktree gate with base_ref = "auto" populates common receipt -> merge hits cache!
-    git(
-        work.path(),
-        &["checkout", "-b", "feat/cache-hit", "origin/main"],
-    );
-    fs::write(work.path().join("src/lib.rs"), "pub fn v() -> i32 { 2 }\n").unwrap();
-    git(work.path(), &["add", "-A"]);
-    git(work.path(), &["commit", "-m", "feat"]);
-    let head1 = git(work.path(), &["rev-parse", "HEAD"]);
-    git(work.path(), &["push", "-u", "origin", "feat/cache-hit"]);
-    let g1 = run_gate_policy(
-        data.path(),
-        work.path(),
-        &repo_cfg,
-        GateMode::Scoped,
-        &FixedClock(10),
-        &throttle,
-        HiddenPolicy::Remove,
-    )
-    .unwrap();
-    assert_eq!(g1.receipt.status, GateStatus::Clear);
+    let head1 = push_branch("feat/cache-hit", "src/lib.rs", "pub fn v() -> i32 { 2 }\n");
+    let _ = gate_clear(&repo_cfg, 10);
     assert_eq!(runs(), 1);
     git(work.path(), &["checkout", "main"]);
-
-    let gh1 = mock_pr(101, "feat/cache-hit", &head1);
-    let out1 = merge_pr(&make_req(101, &head1, true), &gh1, &FixedClock(11), &noop).unwrap();
-    assert!(
-        matches!(out1, PrMergeOutcome::DryRunClear { .. }),
-        "{out1:?}"
-    );
-    assert_eq!(
-        runs(),
+    assert_dry_run_hit(
+        101,
+        "feat/cache-hit",
+        &head1,
+        11,
         1,
-        "merge must reuse common receipt without re-running tests"
-    );
-    let scratch_dir = data.path().join("merge-scratch");
-    assert!(
-        !scratch_dir.exists(),
-        "OPT 11.2 fast path must not create merge-scratch"
+        "OPT 11.2 fast path: merge must reuse common receipt without re-running tests",
     );
 
     // 1b. Empty PR (head == base) also blocks immediately with zero scratch worktree.
@@ -474,57 +461,29 @@ fn pr_merge_hits_common_receipt_cache_with_auto_base_and_rejects_same_account() 
     );
 
     // 2. Tier-1 require_different_provider = true receipt ALSO hits merge cache via alt_config_hash!
-    git(
-        work.path(),
-        &["checkout", "-b", "feat/tier1-hit", "origin/main"],
-    );
-    fs::write(work.path().join("src/lib.rs"), "pub fn v() -> i32 { 3 }\n").unwrap();
-    git(work.path(), &["add", "-A"]);
-    git(work.path(), &["commit", "-m", "feat tier1"]);
-    let head2 = git(work.path(), &["rev-parse", "HEAD"]);
-    git(work.path(), &["push", "-u", "origin", "feat/tier1-hit"]);
+    let head2 = push_branch("feat/tier1-hit", "src/lib.rs", "pub fn v() -> i32 { 3 }\n");
     let mut tier1_cfg = repo_cfg.clone();
     tier1_cfg.cross_audit.require_different_provider = true;
-    let g2 = run_gate_policy(
-        data.path(),
-        work.path(),
-        &tier1_cfg,
-        GateMode::Scoped,
-        &FixedClock(20),
-        &throttle,
-        HiddenPolicy::Remove,
-    )
-    .unwrap();
-    assert_eq!(g2.receipt.status, GateStatus::Clear);
+    let _ = gate_clear(&tier1_cfg, 20);
     assert_eq!(runs(), 2);
     git(work.path(), &["checkout", "main"]);
-
-    let gh2 = mock_pr(102, "feat/tier1-hit", &head2);
-    let out2 = merge_pr(&make_req(102, &head2, true), &gh2, &FixedClock(21), &noop).unwrap();
-    assert!(
-        matches!(out2, PrMergeOutcome::DryRunClear { .. }),
-        "{out2:?}"
-    );
-    assert_eq!(runs(), 2, "merge must hit alt_config_hash receipt too");
-    assert!(
-        !scratch_dir.exists(),
-        "alt_config_hash hit must avoid merge-scratch"
+    assert_dry_run_hit(
+        102,
+        "feat/tier1-hit",
+        &head2,
+        21,
+        2,
+        "merge must hit alt_config_hash receipt too",
     );
 
-    // 3. Cached Clear receipt with same_account=true approval MUST miss & block merge!
-    git(
-        work.path(),
-        &["checkout", "-b", "feat/same-acct", "origin/main"],
-    );
-    fs::write(
-        work.path().join("tests/basic_test.rs"),
+    // 3. Cached Clear receipt with same_account=true approval:
+    //    - Under require_different_provider=true -> MUST miss & block merge!
+    //    - Under require_different_provider=false (solo dev, Tier-2 test) -> hits cache & merges!
+    let head3 = push_branch(
+        "feat/same-acct",
+        "tests/basic_test.rs",
         "#[test] fn t() { assert_eq!(2, 2); }\n",
-    )
-    .unwrap();
-    git(work.path(), &["add", "-A"]);
-    git(work.path(), &["commit", "-m", "edit test"]);
-    let head3 = git(work.path(), &["rev-parse", "HEAD"]);
-    git(work.path(), &["push", "-u", "origin", "feat/same-acct"]);
+    );
     head_lock::approve(
         data.path(),
         work.path(),
@@ -534,27 +493,28 @@ fn pr_merge_hits_common_receipt_cache_with_auto_base_and_rejects_same_account() 
         &FixedClock(30),
     )
     .unwrap();
-    let g3 = run_gate_policy(
-        data.path(),
-        work.path(),
-        &repo_cfg,
-        GateMode::Scoped,
-        &FixedClock(31),
-        &throttle,
-        HiddenPolicy::Remove,
-    )
-    .unwrap();
-    assert_eq!(g3.receipt.status, GateStatus::Clear);
+    let g3 = gate_clear(&repo_cfg, 31);
     assert_eq!(g3.receipt.head_lock.status, LockStatus::Approved);
     git(work.path(), &["checkout", "main"]);
 
     let gh3 = mock_pr(103, "feat/same-acct", &head3);
-    let out3 = merge_pr(&make_req(103, &head3, false), &gh3, &FixedClock(32), &noop).unwrap();
-    match out3 {
+    let mut strict_req = make_req(103, &head3, false);
+    let mut global_strict = GlobalConfig::default();
+    global_strict.cross_audit.require_different_provider = Some(true);
+    strict_req.global_config = Some(global_strict);
+    let out3_strict = merge_pr(&strict_req, &gh3, &FixedClock(32), &noop).unwrap();
+    match out3_strict {
         PrMergeOutcome::Blocked { code, .. } => assert_eq!(code, "cross_approval_required"),
         other => panic!("expected Blocked(cross_approval_required), got {other:?}"),
     }
     assert_eq!(gh3.merged.load(Ordering::SeqCst), 0);
+
+    let out3_solo = merge_pr(&make_req(103, &head3, false), &gh3, &FixedClock(33), &noop).unwrap();
+    assert!(
+        matches!(out3_solo, PrMergeOutcome::Merged { pr_number: 103, .. }),
+        "{out3_solo:?}"
+    );
+    assert_eq!(gh3.merged.load(Ordering::SeqCst), 1);
 }
 
 /// The real machine probe with the CPU-load wait disabled, so these tests do
@@ -564,4 +524,47 @@ fn load_free_machine() -> MachineConfig {
         max_load_percent: 0,
         ..MachineConfig::default()
     }
+}
+
+#[test]
+fn probe_git_layout_and_tree_fp_with_layout_match_primary_and_worktree() {
+    let dir = TempDir::new().unwrap();
+    let primary = dir.path();
+    git(primary, &["init", "-q", "-b", "main"]);
+    fs::write(primary.join("a.txt"), "hello\n").unwrap();
+    git(primary, &["add", "-A"]);
+    git(primary, &["commit", "-q", "-m", "init"]);
+
+    let canon_primary = fs::canonicalize(primary).unwrap();
+    let layout = aaf_fp::probe_git_layout(&canon_primary, TIMEOUT).unwrap();
+    assert_eq!(layout.git_dir, canon_primary.join(".git"));
+    assert_eq!(layout.common_dir, canon_primary.join(".git"));
+    assert_eq!(layout.index, canon_primary.join(".git/index"));
+    assert_eq!(layout.objects, canon_primary.join(".git/objects"));
+    assert_eq!(layout.common_repo_root(), canon_primary.as_path());
+    assert_eq!(
+        aaf_fp::tree_fp_with_layout(&canon_primary, &layout, TIMEOUT).unwrap(),
+        aaf_fp::tree_fp(&canon_primary, TIMEOUT).unwrap()
+    );
+
+    let wt_parent = TempDir::new().unwrap();
+    let wt = wt_parent.path().join("linked-wt");
+    git(
+        primary,
+        &["worktree", "add", "--detach", wt.to_str().unwrap(), "HEAD"],
+    );
+    let canon_wt = fs::canonicalize(&wt).unwrap();
+    let wt_layout = aaf_fp::probe_git_layout(&canon_wt, TIMEOUT).unwrap();
+    assert_ne!(wt_layout.git_dir, wt_layout.common_dir);
+    assert_eq!(wt_layout.common_dir, canon_primary.join(".git"));
+    assert_eq!(wt_layout.objects, canon_primary.join(".git/objects"));
+    assert_eq!(wt_layout.common_repo_root(), canon_primary.as_path());
+    assert_eq!(
+        aaf_fp::tree_fp_with_layout(&canon_wt, &wt_layout, TIMEOUT).unwrap(),
+        aaf_fp::tree_fp(&canon_wt, TIMEOUT).unwrap()
+    );
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force", wt.to_str().unwrap()])
+        .current_dir(primary)
+        .output();
 }

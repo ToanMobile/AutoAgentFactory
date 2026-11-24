@@ -347,6 +347,10 @@ pub struct SopCheckpoint {
     pub rework_count: u32,
     pub stage_states: BTreeMap<String, StageRecord>,
     pub history: Vec<SopEvent>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -366,6 +370,8 @@ impl SopCheckpoint {
             rework_count: 0,
             stage_states,
             history: Vec::new(),
+            worktree_path: None,
+            branch: None,
             created_at: now,
             updated_at: now,
         }

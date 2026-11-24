@@ -17,8 +17,9 @@ pub struct MergeRequest {
     pub worktree: TaskWorktree,
     /// Short name of the branch to merge into, e.g. `main`.
     pub base: String,
-    /// Remote to merge through when the repository has it, e.g. `origin`.
-    pub remote: String,
+    /// Remote to merge through when set and configured, e.g. `Some("origin")`.
+    /// `None` forces a strictly local merge and never touches any remote.
+    pub remote: Option<String>,
     /// Directory of the lock files (`<data dir>/locks`).
     pub locks_dir: PathBuf,
     /// How long to wait for another merge of the same repository.
@@ -37,6 +38,15 @@ pub enum MergeOutcome {
     GateFailed,
     /// The base moved after the rebase; nothing was forced. Retry.
     NotFastForward,
+    /// Remote rejected the direct push (branch protection, ruleset, or server hook).
+    PushRejected {
+        reason: String,
+    },
+    /// Local-only merge could not fast-forward because the checked-out base
+    /// working tree has uncommitted changes.
+    BaseCheckoutDirty {
+        path: PathBuf,
+    },
 }
 
 /// `<locks_dir>/<repo_id>.merge.lock`.
@@ -146,11 +156,14 @@ fn merge_locked(
     // Uncommitted work would be neither rebased nor gated nor merged.
     worktree::ensure_clean(tree)?;
 
-    let remote = has_remote(&req.repo_root, &req.remote)?;
-    let onto = if remote {
-        let tracking = format!("refs/remotes/{}/{}", req.remote, req.base);
+    let remote_name = match req.remote.as_deref() {
+        Some(name) if has_remote(&req.repo_root, name)? => Some(name),
+        _ => None,
+    };
+    let onto = if let Some(remote) = remote_name {
+        let tracking = format!("refs/remotes/{remote}/{}", req.base);
         let refspec = format!("+refs/heads/{}:{tracking}", req.base);
-        git(&req.repo_root, &["fetch", &req.remote, &refspec])?;
+        git(&req.repo_root, &["fetch", remote, &refspec])?;
         tracking
     } else {
         format!("refs/heads/{}", req.base)
@@ -173,8 +186,8 @@ fn merge_locked(
         Err(reason) => return Err(GitError::Gate(reason)),
     }
 
-    if remote {
-        push_fast_forward(req, &head)
+    if let Some(remote) = remote_name {
+        push_fast_forward(req, remote, &head)
     } else {
         local_fast_forward(req, &head)
     }
@@ -185,7 +198,15 @@ fn merge_locked(
 /// the task's own (in-tree `core.hooksPath`) would run with the gate's trust
 /// and could rewrite the working tree the gate is about to judge.
 fn rebase(tree: &Path, onto: &str) -> Result<Option<Vec<String>>, GitError> {
-    let args = ["-c", "core.hooksPath=/dev/null", "rebase", onto];
+    let args = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "rebase",
+        "--rebase-merges",
+        onto,
+    ];
     let out = git_raw(tree, &args)?;
     if out.success() {
         return Ok(None);
@@ -222,14 +243,42 @@ fn rebase_in_progress(tree: &Path) -> Result<bool, GitError> {
     Ok(false)
 }
 
-fn push_fast_forward(req: &MergeRequest, head: &str) -> Result<MergeOutcome, GitError> {
+fn is_push_protected_rejection(stdout: &str, stderr: &str) -> bool {
+    let lower_out = stdout.to_ascii_lowercase();
+    let lower_err = stderr.to_ascii_lowercase();
+    stdout
+        .lines()
+        .any(|line| line.starts_with("!\t") && line.contains("[remote rejected]"))
+        || lower_err.contains("gh006")
+        || lower_err.contains("gh013")
+        || lower_err.contains("protected branch hook declined")
+        || lower_err.contains("protected branch update failed")
+        || lower_err.contains("repository rule violations")
+        || lower_err.contains("remote rejected")
+        || lower_out.contains("protected branch hook declined")
+}
+
+fn push_fast_forward(
+    req: &MergeRequest,
+    remote: &str,
+    head: &str,
+) -> Result<MergeOutcome, GitError> {
     let refspec = format!("{head}:refs/heads/{}", req.base);
-    let args = ["push", "--porcelain", &req.remote, &refspec];
+    let args = ["push", "--porcelain", remote, &refspec];
     let out = git_raw(&req.repo_root, &args)?;
     if out.success() {
         return Ok(MergeOutcome::Merged {
             new_base_sha: head.to_string(),
         });
+    }
+    if is_push_protected_rejection(&out.stdout, &out.stderr) {
+        let detail = out.stderr.trim();
+        let reason = if detail.is_empty() {
+            out.stdout.trim().to_string()
+        } else {
+            detail.to_string()
+        };
+        return Ok(MergeOutcome::PushRejected { reason });
     }
     // `!<TAB>src:dst<TAB>[rejected] (...)` is the remote refusing a
     // non-fast-forward; any other failure (network, hook) is an error.
@@ -265,7 +314,7 @@ fn local_fast_forward(req: &MergeRequest, head: &str) -> Result<MergeOutcome, Gi
             // only when no tracked change could get mixed in.
             let status = git(&entry.path, &["status", "--porcelain", "-uno"])?;
             if !status.is_empty() {
-                return Err(GitError::Dirty(entry.path));
+                return Ok(MergeOutcome::BaseCheckoutDirty { path: entry.path });
             }
             git(&entry.path, &["merge", "--ff-only", head])?;
         }
