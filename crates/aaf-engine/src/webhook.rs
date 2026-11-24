@@ -93,8 +93,41 @@ pub fn mask_url(url: &str) -> String {
     format!("{scheme}://{host}{suffix}")
 }
 
+/// Builds a `ureq::Agent` configured with the timeouts and no-redirect policy
+/// from `opts` so callers can reuse one connection/TLS pool across multiple
+/// [`send_with_agent`] calls.
+pub fn build_agent(opts: &WebhookOptions) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(opts.connect_timeout))
+        .timeout_global(Some(opts.timeout))
+        // Statuses are classified below, and a redirect target was never
+        // validated, so it is reported instead of followed.
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .build()
+        .new_agent()
+}
+
 /// Post `event` to `url`. An empty URL means notifications are off.
 pub fn send(url: &str, event: &WebhookEvent, opts: &WebhookOptions) -> Result<(), WebhookError> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Ok(());
+    }
+    validate_url(url)?;
+    let agent = build_agent(opts);
+    send_with_agent(&agent, url, event, opts)
+}
+
+/// Post `event` to `url` using a caller-supplied reusable `ureq::Agent`.
+/// An empty URL means notifications are off.
+pub fn send_with_agent(
+    agent: &ureq::Agent,
+    url: &str,
+    event: &WebhookEvent,
+    opts: &WebhookOptions,
+) -> Result<(), WebhookError> {
     let url = url.trim();
     if url.is_empty() {
         return Ok(());
@@ -110,17 +143,6 @@ pub fn send(url: &str, event: &WebhookEvent, opts: &WebhookOptions) -> Result<()
         ));
     }
     let body = serde_json::to_string(event).map_err(|e| WebhookError::Serialize(e.to_string()))?;
-
-    let agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(opts.connect_timeout))
-        .timeout_global(Some(opts.timeout))
-        // Statuses are classified below, and a redirect target was never
-        // validated, so it is reported instead of followed.
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .max_redirects_will_error(false)
-        .build()
-        .new_agent();
 
     let retries = opts.max_retries.min(MAX_RETRIES);
     let mut attempt: u32 = 0;

@@ -16,6 +16,7 @@ use aaf_domain::task::{ImmutableSpec, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::db::Db;
 use crate::factory::Store;
 use crate::git::worktree::validate_task_id;
 use crate::throttle::Pressure;
@@ -98,23 +99,20 @@ pub fn build_split_prompt(task: &Task, max_subtasks: usize) -> String {
     )
 }
 
-/// Applies a validated split to `store` (or previews with zero DB writes when `dry_run`).
-pub fn apply_split(
+struct PreparedSplit {
+    subtasks: Vec<SpawnedSubtask>,
+    children: Vec<Task>,
+    deps: Vec<(String, String)>,
+    events: Vec<FactoryEvent>,
+    parent_note: String,
+}
+
+fn prepare_split(
     store: &dyn Store,
     parent: &Task,
     plans: &[SplitSubtask],
-    budget_cfg: &UnblockerConfig,
     now: i64,
-    dry_run: bool,
-) -> PortResult<SplitOutcome> {
-    validate_parent_splittable(parent, budget_cfg)?;
-    if has_existing_subtasks(store, parent)? {
-        return Ok(no_split(parent, dry_run, "task already has subtasks"));
-    }
-    if plans.len() < 2 {
-        return Ok(no_split(parent, dry_run, "no valid multi-subtask split"));
-    }
-
+) -> PortResult<PreparedSplit> {
     let validated =
         validate_split_plans(plans.to_vec(), MAX_SPLIT_SUBTASKS).map_err(PortError::Invalid)?;
     let mut ids: Vec<String> = Vec::with_capacity(validated.len());
@@ -144,17 +142,8 @@ pub fn apply_split(
                 .collect(),
         })
         .collect();
-    if dry_run {
-        return Ok(SplitOutcome {
-            parent_id: parent.id.clone(),
-            dry_run: true,
-            split: true,
-            reason: None,
-            subtasks,
-        });
-    }
 
-    ensure_root_budget(store, &parent.root_id, budget_cfg)?;
+    let mut children = Vec::with_capacity(validated.len());
     for (plan, spawned) in validated.iter().zip(&subtasks) {
         let mut description = plan.description.clone();
         if !plan.owned_paths.is_empty() {
@@ -172,35 +161,99 @@ pub fn apply_split(
                 .map_err(|e| PortError::Invalid(e.to_string()))?;
         child.state = parent.state;
         child.scope_paths = plan.owned_paths.clone();
-        store.insert_task(&child)?;
+        children.push(child);
     }
+
+    let mut deps = Vec::new();
+    let mut events = Vec::with_capacity(subtasks.len());
     for spawned in &subtasks {
         for dep_id in &spawned.blocked_by {
-            store.add_dep(&spawned.id, dep_id)?;
+            deps.push((spawned.id.clone(), dep_id.clone()));
         }
-        store.add_dep(&parent.id, &spawned.id)?;
+        deps.push((parent.id.clone(), spawned.id.clone()));
         let payload = json!({
             "parent": parent.id, "key": spawned.key, "title": spawned.title,
             "owned_paths": spawned.owned_paths, "blocked_by": spawned.blocked_by,
         });
-        let ev = FactoryEvent::new(EventKind::TaskCreated, payload.to_string(), now)
-            .for_task(&spawned.id);
-        store.emit(&ev)?;
+        events.push(
+            FactoryEvent::new(EventKind::TaskCreated, payload.to_string(), now)
+                .for_task(&spawned.id),
+        );
     }
+
     let id_list: Vec<&str> = subtasks.iter().map(|s| s.id.as_str()).collect();
-    let note = format!(
+    let parent_note = format!(
         "split: spawned {} subtasks ({})",
         subtasks.len(),
         id_list.join(", ")
     );
-    store.append_context_note(&parent.id, &note, now)?;
+    Ok(PreparedSplit {
+        subtasks,
+        children,
+        deps,
+        events,
+        parent_note,
+    })
+}
+
+/// Applies a validated split to `store` (or previews with zero DB writes when `dry_run`).
+pub fn apply_split(
+    store: &dyn Store,
+    parent: &Task,
+    plans: &[SplitSubtask],
+    budget_cfg: &UnblockerConfig,
+    now: i64,
+    dry_run: bool,
+) -> PortResult<SplitOutcome> {
+    validate_parent_splittable(parent, budget_cfg)?;
+    if has_existing_subtasks(store, parent)? {
+        return Ok(no_split(parent, dry_run, "task already has subtasks"));
+    }
+    if plans.len() < 2 {
+        return Ok(no_split(parent, dry_run, "no valid multi-subtask split"));
+    }
+
+    let prepared = prepare_split(store, parent, plans, now)?;
+    if dry_run {
+        return Ok(SplitOutcome {
+            parent_id: parent.id.clone(),
+            dry_run: true,
+            split: true,
+            reason: None,
+            subtasks: prepared.subtasks,
+        });
+    }
+
+    let budget = RootBudget::new(&parent.root_id, budget_cfg);
+    store.apply_split_atomic(
+        &parent.id,
+        &budget,
+        &prepared.children,
+        &prepared.deps,
+        &prepared.events,
+        &prepared.parent_note,
+        now,
+    )?;
     Ok(SplitOutcome {
         parent_id: parent.id.clone(),
         dry_run: false,
         split: true,
         reason: None,
-        subtasks,
+        subtasks: prepared.subtasks,
     })
+}
+
+/// Applies a validated split atomically on [`Db`] inside a single SQLite write
+/// transaction (or previews with zero DB writes when `dry_run`).
+pub fn apply_split_db(
+    db: &Db,
+    parent: &Task,
+    plans: &[SplitSubtask],
+    budget_cfg: &UnblockerConfig,
+    now: i64,
+    dry_run: bool,
+) -> PortResult<SplitOutcome> {
+    apply_split(db, parent, plans, budget_cfg, now, dry_run)
 }
 
 /// Runs the read-only split planner via `runner` and applies the resulting
@@ -291,10 +344,7 @@ fn no_split(parent: &Task, dry_run: bool, reason: &str) -> SplitOutcome {
 }
 
 fn has_existing_subtasks(store: &dyn Store, parent: &Task) -> PortResult<bool> {
-    let tasks = store.list_tasks(Some(&parent.repo_root), None)?;
-    Ok(tasks
-        .iter()
-        .any(|t| t.parent_id.as_deref() == Some(parent.id.as_str())))
+    Ok(!store.children_of(&parent.id)?.is_empty())
 }
 
 fn ensure_root_budget(store: &dyn Store, root_id: &str, cfg: &UnblockerConfig) -> PortResult<()> {

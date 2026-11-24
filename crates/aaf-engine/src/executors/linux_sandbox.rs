@@ -33,12 +33,8 @@ impl LinuxIsolation {
     /// Returns a concise human-readable summary suitable for `aaf doctor`.
     pub fn summary(&self) -> String {
         match self {
-            Self::Bubblewrap { bwrap_bin } => {
-                format!("bubblewrap ({})", bwrap_bin.display())
-            }
-            Self::HardenedContainer { indicator } => {
-                format!("hardened container ({indicator})")
-            }
+            Self::Bubblewrap { bwrap_bin } => format!("bubblewrap ({})", bwrap_bin.display()),
+            Self::HardenedContainer { indicator } => format!("hardened container ({indicator})"),
             Self::None => {
                 "none (install bubblewrap `bwrap` or run inside a hardened container)".to_string()
             }
@@ -77,20 +73,17 @@ pub fn detect_container(
     }
     if let Some(cgroup) = cgroup_text {
         let lower = cgroup.to_ascii_lowercase();
-        if lower.contains("kubepods") {
-            return Some("kubernetes");
-        }
-        if lower.contains("containerd") {
-            return Some("containerd");
-        }
-        if lower.contains("docker") {
-            return Some("docker");
-        }
-        if lower.contains("podman") || lower.contains("libpod") {
-            return Some("podman");
-        }
-        if lower.contains("lxc") {
-            return Some("lxc");
+        for (needle, label) in [
+            ("kubepods", "kubernetes"),
+            ("containerd", "containerd"),
+            ("docker", "docker"),
+            ("podman", "podman"),
+            ("libpod", "podman"),
+            ("lxc", "lxc"),
+        ] {
+            if lower.contains(needle) {
+                return Some(label);
+            }
         }
     }
     None
@@ -124,14 +117,11 @@ pub fn detect_host_linux_isolation() -> LinuxIsolation {
     let cgroup_text = std::fs::read_to_string("/proc/1/cgroup")
         .or_else(|_| std::fs::read_to_string("/proc/self/cgroup"))
         .ok();
+    let container_env = Path::new("/run/.containerenv").exists();
     let env_container = std::env::var("container")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            Path::new("/run/.containerenv")
-                .exists()
-                .then(|| "podman".to_string())
-        });
+        .or_else(|| container_env.then(|| "podman".to_string()));
 
     linux_sandbox_status(
         bwrap_bin,
@@ -155,6 +145,11 @@ fn find_bwrap_binary() -> Option<PathBuf> {
     }
     None
 }
+
+const BASE_BWRAP_ARGS: &str = concat!(
+    "--die-with-parent --unshare-pid --unshare-ipc --new-session ",
+    "--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp",
+);
 
 /// Builds a least-privilege Bubblewrap (`bwrap`) argument vector for running
 /// `program` with `args` under the confinement described by `paths`.
@@ -185,135 +180,136 @@ pub fn build_bwrap_args(
     }
     validate_sandbox_paths(paths)?;
 
-    let mut argv: Vec<String> = vec![
-        "--die-with-parent".to_string(),
-        "--unshare-pid".to_string(),
-        "--unshare-ipc".to_string(),
-        "--new-session".to_string(),
-        "--ro-bind".to_string(),
-        "/".to_string(),
-        "/".to_string(),
-        "--dev".to_string(),
-        "/dev".to_string(),
-        "--proc".to_string(),
-        "/proc".to_string(),
-        "--tmpfs".to_string(),
-        "/tmp".to_string(),
-    ];
+    let mut argv: Vec<String> = BASE_BWRAP_ARGS
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
 
     let worktrees_root = paths.worktrees_root.as_deref().map(Path::new);
-    let read_denied_paths: Vec<&Path> = paths.read_denied.iter().map(Path::new).collect();
+    let worktrees_root_canon = worktrees_root.map(canonical_or_self);
+    let read_denied_canon: Vec<PathBuf> = paths
+        .read_denied
+        .iter()
+        .map(|raw| canonical_or_self(Path::new(raw)))
+        .collect();
     let mut bound_rw: BTreeSet<String> = BTreeSet::new();
 
+    let tmp_canon = canonical_or_self(Path::new("/tmp"));
     // 1. Existing writable build caches, SDKs, account directories, and non-/tmp temp dirs.
     for raw in &paths.writable {
-        if raw == "/tmp" {
-            continue;
-        }
         let path = Path::new(raw);
-        if worktrees_root.is_some_and(|root| path.starts_with(root)) {
-            continue;
-        }
-        if read_denied_paths
-            .iter()
-            .any(|denied| path.starts_with(denied))
+        let canon = canonical_or_self(path);
+        if path == Path::new("/tmp")
+            || canon == tmp_canon
+            || worktrees_root_canon
+                .as_ref()
+                .is_some_and(|root| canon.starts_with(root))
+            || read_denied_canon.iter().any(|d| canon.starts_with(d))
         {
             continue;
         }
         if path.exists() {
-            push_bind_once(&mut argv, &mut bound_rw, raw);
+            push_flag_pair(&mut argv, &mut bound_rw, "--bind", raw);
         }
     }
 
-    // 2. The run's own worktree and git common directories.
-    if let Some(worktree) = &paths.worktree {
-        push_bind_once(&mut argv, &mut bound_rw, worktree);
+    // 2. Protect `worktrees_root` before opening a task worktree inside it, so
+    //    any writable ancestor cannot expose sibling task worktrees. A worktree
+    //    outside `worktrees_root` is bound first so it cannot re-open the root.
+    let (mut bound_ro, mut pinned) = (BTreeSet::new(), BTreeSet::new());
+    let own_is_task_worktree = match (paths.worktree.as_deref(), worktrees_root_canon.as_ref()) {
+        (Some(wt), Some(root)) => {
+            let wt_canon = canonical_or_self(Path::new(wt));
+            wt_canon != *root && wt_canon.starts_with(root)
+        }
+        _ => false,
+    };
+    if !own_is_task_worktree && let Some(worktree) = &paths.worktree {
+        push_flag_pair(&mut argv, &mut bound_rw, "--bind", worktree);
+    }
+    let mut ro = RoOverlay {
+        argv: &mut argv,
+        bound_rw: &mut bound_rw,
+        bound_ro: &mut bound_ro,
+        pinned: &mut pinned,
+    };
+    if let Some(root) = worktrees_root
+        && root.exists()
+    {
+        ro.bind_with_target(&leaf_resolved(root))?;
+    }
+    if own_is_task_worktree && let Some(worktree) = &paths.worktree {
+        push_flag_pair(ro.argv, ro.bound_rw, "--bind", worktree);
     }
     for git_dir in &paths.git_dirs {
-        push_bind_once(&mut argv, &mut bound_rw, git_dir);
+        push_flag_pair(ro.argv, ro.bound_rw, "--bind", git_dir);
     }
 
     // 3. Read-only overlays for sensitive files/dirs inside writable subtrees.
-    let mut bound_ro: BTreeSet<String> = BTreeSet::new();
     for git_dir in &paths.git_dirs {
-        protect_git_dir(Path::new(git_dir), &mut argv, &mut bound_ro)?;
+        ro.protect_git_dir(Path::new(git_dir))?;
     }
     if let Some(worktree) = &paths.worktree {
         let wt = Path::new(worktree);
         // Protect linked worktree `.git` pointer file without locking normal `.git/` dirs.
         let dot_git = wt.join(".git");
         if dot_git.is_file() {
-            push_ro_bind_path(&mut argv, &mut bound_ro, &dot_git)?;
+            ro.bind_with_target(&dot_git)?;
         }
-        let claude_settings = wt.join(".claude").join("settings.json");
-        if claude_settings.exists() {
-            push_ro_bind_path(&mut argv, &mut bound_ro, &claude_settings)?;
+        for rel in [".claude/settings.json", ".claude/settings.local.json"] {
+            ro.protect_existing(&wt.join(rel))?;
         }
     }
     for denied in &paths.write_denied {
-        if Path::new(denied).exists() {
-            push_ro_bind_once(&mut argv, &mut bound_ro, denied);
-        }
+        ro.protect_existing(Path::new(denied))?;
     }
     for prefix in &paths.write_denied_prefix {
-        protect_write_denied_prefix(Path::new(prefix), &mut argv, &mut bound_ro)?;
+        ro.protect_prefix(Path::new(prefix))?;
     }
     for raw in &paths.path_dirs {
         let dir = Path::new(raw);
         if dir.is_absolute() && dir.exists() {
-            push_ro_bind_once(&mut argv, &mut bound_ro, raw);
+            ro.bind_with_target(dir)?;
         }
     }
 
     // 4. Mask `read_denied` (including `AAF_DATA_DIR`) so the agent can never
     //    read `receipt.key` or forge receipts.
     for denied in &paths.read_denied {
-        if Path::new(denied).is_file() {
-            argv.push("--ro-bind".to_string());
-            argv.push("/dev/null".to_string());
-            argv.push(denied.clone());
-        } else {
-            argv.push("--tmpfs".to_string());
-            argv.push(denied.clone());
-        }
+        ro.mask_read_denied(Path::new(denied))?;
     }
 
     // 5. Re-open minimal throttle queue directories inside `read_denied`.
-    let mut reopened_ro: BTreeSet<String> = BTreeSet::new();
-    let mut reopened_rw: BTreeSet<String> = BTreeSet::new();
-    for raw in &paths.read_reopened {
-        if Path::new(raw).exists() {
-            push_ro_bind_once(&mut argv, &mut reopened_ro, raw);
-        }
-    }
-    for raw in &paths.write_reopened {
-        if Path::new(raw).exists() {
-            push_bind_once(&mut argv, &mut reopened_rw, raw);
+    let (mut reopened_ro, mut reopened_rw) = (BTreeSet::new(), BTreeSet::new());
+    for (list, seen, flag) in [
+        (&paths.read_reopened, &mut reopened_ro, "--ro-bind"),
+        (&paths.write_reopened, &mut reopened_rw, "--bind"),
+    ] {
+        for raw in list.iter().filter(|r| Path::new(r).exists()) {
+            push_flag_pair(&mut argv, seen, flag, raw);
         }
     }
     for denied in &paths.read_denied {
-        let throttle = Path::new(denied).join("throttle");
+        let throttle = leaf_resolved(Path::new(denied)).join("throttle");
         let guest = throttle.join("guest");
         if guest.exists() {
             if throttle.exists() {
-                push_ro_bind_path(&mut argv, &mut reopened_ro, &throttle)?;
+                push_flag_path(&mut argv, &mut reopened_ro, "--ro-bind", &throttle)?;
             }
-            push_bind_path(&mut argv, &mut reopened_rw, &guest)?;
+            push_flag_path(&mut argv, &mut reopened_rw, "--bind", &guest)?;
         }
     }
     if let Some(mark) = &paths.run_mark
         && Path::new(mark).exists()
     {
-        push_bind_once(&mut argv, &mut reopened_rw, mark);
+        push_flag_pair(&mut argv, &mut reopened_rw, "--bind", mark);
     }
 
     // 6. Working directory and target command.
     if let Some(worktree) = &paths.worktree {
-        argv.push("--chdir".to_string());
-        argv.push(worktree.clone());
+        argv.extend(["--chdir".into(), worktree.clone()]);
     }
-    argv.push("--".to_string());
-    argv.push(program.to_string());
+    argv.extend(["--".into(), program.to_string()]);
     argv.extend(args.iter().cloned());
 
     Ok(argv)
@@ -341,31 +337,30 @@ pub fn wrap(
 }
 
 fn validate_sandbox_paths(paths: &SandboxPaths) -> Result<(), String> {
-    if let Some(wt) = &paths.worktree {
-        validate_abs_path(wt, "worktree")?;
+    for (opt, label) in [
+        (&paths.worktree, "worktree"),
+        (&paths.worktrees_root, "worktrees_root"),
+        (&paths.run_mark, "run_mark"),
+    ] {
+        if let Some(path) = opt {
+            validate_abs_path(path, label)?;
+        }
     }
-    if let Some(root) = &paths.worktrees_root {
-        validate_abs_path(root, "worktrees_root")?;
+    for (list, label) in [
+        (&paths.writable, "writable"),
+        (&paths.write_denied, "write_denied"),
+        (&paths.write_denied_prefix, "write_denied_prefix"),
+        (&paths.read_denied, "read_denied"),
+        (&paths.read_reopened, "read_reopened"),
+        (&paths.write_reopened, "write_reopened"),
+        (&paths.git_dirs, "git_dirs"),
+    ] {
+        for (idx, item) in list.iter().enumerate() {
+            validate_abs_path(item, &format!("{label}[{idx}]"))?;
+        }
     }
-    if let Some(mark) = &paths.run_mark {
-        validate_abs_path(mark, "run_mark")?;
-    }
-    validate_abs_list(&paths.writable, "writable")?;
-    validate_abs_list(&paths.write_denied, "write_denied")?;
-    validate_abs_list(&paths.write_denied_prefix, "write_denied_prefix")?;
-    validate_abs_list(&paths.read_denied, "read_denied")?;
-    validate_abs_list(&paths.read_reopened, "read_reopened")?;
-    validate_abs_list(&paths.write_reopened, "write_reopened")?;
-    validate_abs_list(&paths.git_dirs, "git_dirs")?;
     for (idx, entry) in paths.path_dirs.iter().enumerate() {
         validate_no_nul(entry, &format!("path_dirs[{idx}]"))?;
-    }
-    Ok(())
-}
-
-fn validate_abs_list(list: &[String], label: &str) -> Result<(), String> {
-    for (idx, item) in list.iter().enumerate() {
-        validate_abs_path(item, &format!("{label}[{idx}]"))?;
     }
     Ok(())
 }
@@ -392,102 +387,208 @@ fn validate_no_nul(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn protect_git_dir(
-    git_dir: &Path,
-    argv: &mut Vec<String>,
-    bound_ro: &mut BTreeSet<String>,
-) -> Result<(), String> {
-    for rel in ["hooks", "config", "refs/aaf"] {
-        let candidate = git_dir.join(rel);
-        if candidate.exists() {
-            push_ro_bind_path(argv, bound_ro, &candidate)?;
+fn canonical_or_self(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_leaf_symlink(path: &Path) -> bool {
+    let normalized: PathBuf = path.components().collect();
+    std::fs::symlink_metadata(&normalized).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn leaf_resolved(path: &Path) -> PathBuf {
+    if is_leaf_symlink(path) {
+        canonical_or_self(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+struct RoOverlay<'a> {
+    argv: &'a mut Vec<String>,
+    bound_rw: &'a mut BTreeSet<String>,
+    bound_ro: &'a mut BTreeSet<String>,
+    pinned: &'a mut BTreeSet<String>,
+}
+
+fn deepest_enclosing(set: &BTreeSet<String>, target_canon: &Path) -> Option<PathBuf> {
+    let mut best: Option<PathBuf> = None;
+    for entry in set {
+        let candidate = canonical_or_self(Path::new(entry));
+        if target_canon.starts_with(&candidate)
+            && best
+                .as_ref()
+                .is_none_or(|cur| candidate.components().count() > cur.components().count())
+        {
+            best = Some(candidate);
         }
     }
-    let worktrees_dir = git_dir.join("worktrees");
-    if let Ok(entries) = std::fs::read_dir(&worktrees_dir) {
-        let mut children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        children.sort();
-        for child in children {
-            for rel in ["hooks", "config", "config.worktree", "commondir", "gitdir"] {
-                let candidate = child.join(rel);
-                if candidate.exists() {
-                    push_ro_bind_path(argv, bound_ro, &candidate)?;
+    best
+}
+
+fn contains_canon(set: &BTreeSet<String>, target_canon: &Path) -> bool {
+    target_canon.to_str().is_some_and(|text| set.contains(text))
+        || set
+            .iter()
+            .any(|entry| canonical_or_self(Path::new(entry)) == target_canon)
+}
+
+impl RoOverlay<'_> {
+    /// Emits deduplicated self-binds (`--bind <dir> <dir>`) top-down for every
+    /// intermediate directory strictly between a writable bind root and
+    /// `path.parent()` (inclusive), so `mv` on parent directories fails with
+    /// `EBUSY` instead of bypassing read-only overlays on their children.
+    fn pin_ancestors(&mut self, path: &Path) -> Result<(), String> {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let parent_canon = canonical_or_self(parent);
+        let Some(rw_root) = deepest_enclosing(self.bound_rw, &parent_canon) else {
+            return Ok(());
+        };
+        if let Some(ro_root) = deepest_enclosing(self.bound_ro, &parent_canon)
+            && ro_root.components().count() >= rw_root.components().count()
+        {
+            return Ok(());
+        }
+        let Ok(rel) = parent_canon.strip_prefix(&rw_root) else {
+            return Ok(());
+        };
+        let mut cur = rw_root;
+        for comp in rel.components() {
+            cur.push(comp);
+            let cur_canon = canonical_or_self(&cur);
+            if !cur_canon.is_dir()
+                || contains_canon(self.bound_ro, &cur_canon)
+                || contains_canon(self.bound_rw, &cur_canon)
+            {
+                continue;
+            }
+            let text = abs_path_str(&cur_canon, "pin path")?;
+            push_flag_pair(self.argv, self.pinned, "--bind", text);
+        }
+        Ok(())
+    }
+
+    fn mask_one(&mut self, target: &Path, is_dir: bool) -> Result<(), String> {
+        self.pin_ancestors(target)?;
+        let s = abs_path_str(target, "read_denied path")?.to_string();
+        if self.bound_ro.insert(s.clone()) {
+            if is_dir {
+                self.argv.extend(["--tmpfs".into(), s]);
+            } else {
+                self.argv
+                    .extend(["--ro-bind".into(), "/dev/null".into(), s]);
+            }
+        }
+        Ok(())
+    }
+
+    fn mask_read_denied(&mut self, path: &Path) -> Result<(), String> {
+        let leaf_sym = is_leaf_symlink(path);
+        if !leaf_sym && path.exists() {
+            self.mask_one(path, path.is_dir())?;
+        }
+        if let Ok(resolved) = std::fs::canonicalize(path)
+            && (leaf_sym || resolved != path)
+            && resolved.exists()
+        {
+            self.mask_one(&resolved, resolved.is_dir())?;
+        }
+        Ok(())
+    }
+
+    fn bind_with_target(&mut self, path: &Path) -> Result<(), String> {
+        self.pin_ancestors(path)?;
+        push_flag_path(self.argv, self.bound_ro, "--ro-bind", path)?;
+        if let Ok(resolved) = std::fs::canonicalize(path)
+            && resolved != path
+            && resolved.exists()
+        {
+            self.pin_ancestors(&resolved)?;
+            push_flag_path(self.argv, self.bound_ro, "--ro-bind", &resolved)?;
+        }
+        Ok(())
+    }
+
+    fn protect_existing(&mut self, path: &Path) -> Result<(), String> {
+        if path.exists() {
+            self.bind_with_target(path)?;
+        }
+        Ok(())
+    }
+
+    fn protect_git_dir(&mut self, git_dir: &Path) -> Result<(), String> {
+        for rel in ["hooks", "refs/aaf", "config", "config.worktree"] {
+            self.protect_existing(&git_dir.join(rel))?;
+        }
+        let worktrees = git_dir.join("worktrees");
+        if worktrees.is_dir() {
+            self.bind_with_target(&worktrees)?;
+            if let Ok(entries) = std::fs::read_dir(&worktrees) {
+                let mut children: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
+                children.sort();
+                for child in children {
+                    push_flag_path(self.argv, self.bound_rw, "--bind", &child)?;
+                    for rel in ["hooks", "config", "config.worktree", "commondir", "gitdir"] {
+                        self.protect_existing(&child.join(rel))?;
+                    }
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
-}
 
-fn protect_write_denied_prefix(
-    prefix_path: &Path,
-    argv: &mut Vec<String>,
-    bound_ro: &mut BTreeSet<String>,
-) -> Result<(), String> {
-    let Some(parent) = prefix_path.parent() else {
-        return Ok(());
-    };
-    let Some(prefix_name) = prefix_path.file_name().and_then(|n| n.to_str()) else {
-        return Ok(());
-    };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return Ok(());
-    };
-    let mut matches: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(prefix_name))
-        })
-        .map(|entry| entry.path())
-        .collect();
-    matches.sort();
-    for path in matches {
-        push_ro_bind_path(argv, bound_ro, &path)?;
-    }
-    Ok(())
-}
-
-fn push_bind_once(argv: &mut Vec<String>, seen: &mut BTreeSet<String>, path: &str) {
-    if seen.insert(path.to_string()) {
-        argv.push("--bind".to_string());
-        argv.push(path.to_string());
-        argv.push(path.to_string());
+    fn protect_prefix(&mut self, prefix_path: &Path) -> Result<(), String> {
+        let (Some(parent), Some(prefix_name)) = (
+            prefix_path.parent(),
+            prefix_path.file_name().and_then(|n| n.to_str()),
+        ) else {
+            return Ok(());
+        };
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let mut matches: Vec<PathBuf> = entries
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.starts_with(prefix_name))
+                })
+                .map(|e| e.path())
+                .collect();
+            matches.sort();
+            for path in matches {
+                self.protect_existing(&path)?;
+            }
+        }
+        Ok(())
     }
 }
 
-fn push_ro_bind_once(argv: &mut Vec<String>, seen: &mut BTreeSet<String>, path: &str) {
-    if seen.insert(path.to_string()) {
-        argv.push("--ro-bind".to_string());
-        argv.push(path.to_string());
-        argv.push(path.to_string());
-    }
-}
-
-fn push_bind_path(
-    argv: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    path: &Path,
-) -> Result<(), String> {
+fn abs_path_str<'a>(path: &'a Path, label: &str) -> Result<&'a str, String> {
     let text = path
         .to_str()
         .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))?;
-    validate_abs_path(text, "bind path")?;
-    push_bind_once(argv, seen, text);
-    Ok(())
+    validate_abs_path(text, label)?;
+    Ok(text)
 }
 
-fn push_ro_bind_path(
+fn push_flag_pair(argv: &mut Vec<String>, seen: &mut BTreeSet<String>, flag: &str, path: &str) {
+    if seen.insert(path.to_string()) {
+        argv.extend([flag.into(), path.to_string(), path.to_string()]);
+    }
+}
+
+fn push_flag_path(
     argv: &mut Vec<String>,
     seen: &mut BTreeSet<String>,
+    flag: &str,
     path: &Path,
 ) -> Result<(), String> {
-    let text = path
-        .to_str()
-        .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))?;
-    validate_abs_path(text, "ro-bind path")?;
-    push_ro_bind_once(argv, seen, text);
+    push_flag_pair(argv, seen, flag, abs_path_str(path, "bind path")?);
     Ok(())
 }

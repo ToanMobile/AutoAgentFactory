@@ -46,8 +46,9 @@ pub fn lock_path(locks_dir: &Path, repo_root: &Path) -> PathBuf {
 
 /// Holds the exclusive lock until dropped, so it is released on every
 /// return path, panics included.
-struct MergeLock {
+pub struct MergeLock {
     file: File,
+    path: PathBuf,
 }
 
 impl MergeLock {
@@ -63,7 +64,12 @@ impl MergeLock {
         let deadline = Instant::now() + timeout;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(MergeLock { file }),
+                Ok(()) => {
+                    return Ok(MergeLock {
+                        file,
+                        path: path.to_path_buf(),
+                    });
+                }
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(5));
                 }
@@ -84,22 +90,59 @@ impl Drop for MergeLock {
     }
 }
 
+/// Acquires the cross-process merge lock for `req.repo_root` after validating
+/// `req.worktree` and `req.base`. Callers that also hold an in-process mutex
+/// can acquire this lock first so waiting on another process never stalls
+/// sibling worker threads.
+pub fn acquire_lock(req: &MergeRequest) -> Result<MergeLock, GitError> {
+    req.worktree.task_id()?;
+    check_branch_name(&req.repo_root, &req.base)?;
+    let lock = lock_path(&req.locks_dir, &req.repo_root);
+    MergeLock::acquire(&lock, req.lock_timeout)
+}
+
+/// Runs the merge queue with an already-acquired [`MergeLock`].
+pub fn merge_with_lock(
+    req: &MergeRequest,
+    lock: &MergeLock,
+    regate: &dyn Fn(&Path) -> Result<bool, String>,
+) -> Result<MergeOutcome, GitError> {
+    merge_with_lock_onto(req, lock, &|tree, _| regate(tree))
+}
+
+/// Runs the merge queue with an already-acquired [`MergeLock`], passing the
+/// exact resolved `onto_sha` onto which the task branch was rebased to `regate`.
+pub fn merge_with_lock_onto(
+    req: &MergeRequest,
+    lock: &MergeLock,
+    regate: &dyn Fn(&Path, &str) -> Result<bool, String>,
+) -> Result<MergeOutcome, GitError> {
+    let expected = lock_path(&req.locks_dir, &req.repo_root);
+    if lock.path != expected {
+        return Err(GitError::Invalid(format!(
+            "merge lock {} does not match {}",
+            lock.path.display(),
+            expected.display()
+        )));
+    }
+    req.worktree.task_id()?;
+    check_branch_name(&req.repo_root, &req.base)?;
+    merge_locked(req, regate)
+}
+
 /// Merges the task branch into the base. `regate` runs on the rebased
 /// worktree and decides whether the result may land.
 pub fn merge(
     req: &MergeRequest,
     regate: &dyn Fn(&Path) -> Result<bool, String>,
 ) -> Result<MergeOutcome, GitError> {
-    req.worktree.task_id()?;
-    check_branch_name(&req.repo_root, &req.base)?;
-    let lock = lock_path(&req.locks_dir, &req.repo_root);
-    let _lock = MergeLock::acquire(&lock, req.lock_timeout)?;
-    merge_locked(req, regate)
+    let _lock = acquire_lock(req)?;
+    merge_locked(req, &|tree, _| regate(tree))
 }
 
 fn merge_locked(
     req: &MergeRequest,
-    regate: &dyn Fn(&Path) -> Result<bool, String>,
+    regate: &dyn Fn(&Path, &str) -> Result<bool, String>,
 ) -> Result<MergeOutcome, GitError> {
     let tree = req.worktree.path.as_path();
     let branch = req.worktree.branch.as_str();
@@ -124,12 +167,13 @@ fn merge_locked(
         format!("refs/heads/{}", req.base)
     };
 
-    if let Some(files) = rebase(tree, &onto)? {
+    let onto_sha = git(&req.repo_root, &["rev-parse", "--verify", &onto])?;
+    if let Some(files) = rebase(tree, &onto_sha)? {
         return Ok(MergeOutcome::Conflict { files });
     }
     // The exact commit the gate is about to judge is the one that lands.
     let head = git(tree, &["rev-parse", "HEAD"])?;
-    match regate(tree) {
+    match regate(tree, &onto_sha) {
         Ok(true) => {}
         Ok(false) => return Ok(MergeOutcome::GateFailed),
         Err(reason) => return Err(GitError::Gate(reason)),

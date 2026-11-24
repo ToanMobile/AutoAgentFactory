@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, TryLockError};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use aaf_domain::account::AccountState;
 use aaf_domain::ports::{
     AccountStore, Clock, EventSink, KvStore, META_CONSECUTIVE_ROOT_FAILS, META_FACTORY_FROZEN,
     PortResult, RunStore, TaskStore,
@@ -102,7 +103,7 @@ pub struct TelemetrySummary {
 
 /// Probes whether `path` is a regular file currently held under an exclusive
 /// advisory lock. Uses a non-blocking shared lock and unlocks immediately.
-fn is_exclusively_locked(path: &Path) -> bool {
+pub(crate) fn is_exclusively_locked(path: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -122,15 +123,25 @@ fn is_exclusively_locked(path: &Path) -> bool {
     }
 }
 
-/// Inspects `<data_dir>/throttle` read-only using non-blocking shared lock probes.
-pub fn inspect_throttle(data_dir: &Path) -> ThrottleSnapshot {
+/// Raw result of probing a single `heavy.<n>.lock` entry in `<data_dir>/throttle`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeavySlotEntry {
+    pub slot: usize,
+    pub path: PathBuf,
+    pub locked: bool,
+}
+
+/// Scans `<data_dir>/throttle` once (single `read_dir` + `flock` pass) and
+/// returns both the aggregate [`ThrottleSnapshot`] and per-slot probe results.
+pub fn scan_throttle(data_dir: &Path) -> (ThrottleSnapshot, Vec<HeavySlotEntry>) {
     let dir = data_dir.join("throttle");
     if !dir.is_dir() {
-        return ThrottleSnapshot::default();
+        return (ThrottleSnapshot::default(), Vec::new());
     }
     let drain_lock_present = is_exclusively_locked(&dir.join("drain.lock"));
     let mut slot_lock_files = 0usize;
     let mut throttle_slots = 0usize;
+    let mut slot_entries = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -139,20 +150,35 @@ pub fn inspect_throttle(data_dir: &Path) -> ThrottleSnapshot {
             };
             if name.starts_with("heavy.") && name.ends_with(".lock") {
                 slot_lock_files = slot_lock_files.saturating_add(1);
-                if is_exclusively_locked(&entry.path()) {
+                let path = entry.path();
+                let locked = is_exclusively_locked(&path);
+                if locked {
                     throttle_slots = throttle_slots.saturating_add(1);
+                }
+                if let Some(slot) = name
+                    .strip_prefix("heavy.")
+                    .and_then(|s| s.strip_suffix(".lock"))
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
+                    slot_entries.push(HeavySlotEntry { slot, path, locked });
                 }
             }
         }
     }
     let guest_record_files = count_matching(&dir.join("guest"), |name| name.ends_with(".rec"));
-    ThrottleSnapshot {
+    let snap = ThrottleSnapshot {
         throttle_dir_exists: true,
         drain_lock_present,
         throttle_slots,
         slot_lock_files,
         guest_record_files,
-    }
+    };
+    (snap, slot_entries)
+}
+
+/// Inspects `<data_dir>/throttle` read-only using non-blocking shared lock probes.
+pub fn inspect_throttle(data_dir: &Path) -> ThrottleSnapshot {
+    scan_throttle(data_dir).0
 }
 
 fn count_matching(dir: &Path, matches: fn(&str) -> bool) -> u32 {
@@ -175,7 +201,7 @@ fn is_safe_file_stem(s: &str) -> bool {
 
 /// Checks `<data_dir>/leases/<account_id>.lock` (and extra `.slot<n>.lock` files)
 /// read-only via non-blocking shared lock probe.
-fn is_account_leased(leases_dir: &Path, account_id: &str) -> bool {
+pub(crate) fn is_account_leased(leases_dir: &Path, account_id: &str) -> bool {
     if !is_safe_file_stem(account_id) || !leases_dir.is_dir() {
         return false;
     }
@@ -231,12 +257,28 @@ pub fn collect_status(
             totals.tokens_out = totals.tokens_out.saturating_add(run.tokens_out);
         }
     }
-    assemble_status(&all_tasks, totals, kv, accounts, query)
+    let throttle = query
+        .data_dir
+        .map_or_else(ThrottleSnapshot::default, inspect_throttle);
+    assemble_status(&all_tasks, totals, kv, accounts, query, throttle)
 }
 
 /// Collects global/repo status directly from [`Db`] using a single SQL
 /// aggregation for runs/tokens instead of per-task queries.
 pub fn collect_status_from_db(db: &Db, query: &StatusQuery<'_>) -> PortResult<TelemetrySummary> {
+    let throttle = query
+        .data_dir
+        .map_or_else(ThrottleSnapshot::default, inspect_throttle);
+    collect_status_from_db_with_throttle(db, query, throttle)
+}
+
+/// Collects global/repo status from [`Db`] reusing a pre-scanned
+/// [`ThrottleSnapshot`] from [`scan_throttle`].
+pub fn collect_status_from_db_with_throttle(
+    db: &Db,
+    query: &StatusQuery<'_>,
+    throttle: ThrottleSnapshot,
+) -> PortResult<TelemetrySummary> {
     let all_tasks = db.list_tasks(query.repo_root, None)?;
     let mut totals = RunTotals {
         counts: RunCounts::default(),
@@ -252,7 +294,7 @@ pub fn collect_status_from_db(db: &Db, query: &StatusQuery<'_>) -> PortResult<Te
         totals.tokens_in = totals.tokens_in.saturating_add(t_in);
         totals.tokens_out = totals.tokens_out.saturating_add(t_out);
     }
-    assemble_status(&all_tasks, totals, db, Some(db), query)
+    assemble_status(&all_tasks, totals, db, Some(db), query, throttle)
 }
 
 fn assemble_status(
@@ -261,6 +303,7 @@ fn assemble_status(
     kv: &dyn KvStore,
     accounts: Option<&dyn AccountStore>,
     query: &StatusQuery<'_>,
+    throttle: ThrottleSnapshot,
 ) -> PortResult<TelemetrySummary> {
     let frozen = kv.get_meta(META_FACTORY_FROZEN)?.as_deref() == Some("1");
     let consecutive_root_fails = kv
@@ -281,35 +324,12 @@ fn assemble_status(
 
     let leases_dir = query.data_dir.map(|dir| dir.join("leases"));
     let account_list = match accounts {
-        Some(store) => store
-            .list_accounts()?
-            .into_iter()
-            .map(|acct| {
-                let status = if acct.in_cooldown(query.now) {
-                    "cooldown"
-                } else if leases_dir
-                    .as_deref()
-                    .is_some_and(|dir| is_account_leased(dir, &acct.profile.id))
-                {
-                    "leased"
-                } else {
-                    "available"
-                };
-                AccountSummary {
-                    id: acct.profile.id,
-                    name: acct.profile.name,
-                    provider: acct.profile.provider.as_str().to_string(),
-                    status: status.to_string(),
-                    cooldown_until: acct.cooldown_until,
-                }
-            })
-            .collect(),
+        Some(store) => {
+            summarize_accounts(&store.list_accounts()?, leases_dir.as_deref(), query.now)
+        }
         None => Vec::new(),
     };
 
-    let throttle = query
-        .data_dir
-        .map_or_else(ThrottleSnapshot::default, inspect_throttle);
     Ok(TelemetrySummary {
         frozen,
         consecutive_root_fails,
@@ -327,7 +347,33 @@ fn assemble_status(
     })
 }
 
-fn bump_task(counts: &mut TaskCounts, state: TaskState) {
+pub(crate) fn summarize_accounts(
+    states: &[AccountState],
+    leases_dir: Option<&Path>,
+    now: i64,
+) -> Vec<AccountSummary> {
+    states
+        .iter()
+        .map(|acct| {
+            let status = if acct.in_cooldown(now) {
+                "cooldown"
+            } else if leases_dir.is_some_and(|dir| is_account_leased(dir, &acct.profile.id)) {
+                "leased"
+            } else {
+                "available"
+            };
+            AccountSummary {
+                id: acct.profile.id.clone(),
+                name: acct.profile.name.clone(),
+                provider: acct.profile.provider.as_str().to_string(),
+                status: status.to_string(),
+                cooldown_until: acct.cooldown_until,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn bump_task(counts: &mut TaskCounts, state: TaskState) {
     counts.total = counts.total.saturating_add(1);
     match state {
         TaskState::Backlog => counts.backlog = counts.backlog.saturating_add(1),

@@ -118,6 +118,7 @@ pub struct HttpTelegramApi {
     token: String,
     connect_timeout: Duration,
     request_timeout: Duration,
+    agent: ureq::Agent,
 }
 
 impl fmt::Debug for HttpTelegramApi {
@@ -150,23 +151,21 @@ impl HttpTelegramApi {
         let base_url = validate_base_url(api_base_url)?;
         let token = token.into();
         validate_token(&token)?;
+        let agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(connect_timeout))
+            .timeout_global(Some(request_timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .build()
+            .new_agent();
         Ok(Self {
             base_url,
             token,
             connect_timeout,
             request_timeout,
+            agent,
         })
-    }
-
-    fn build_agent(&self, global_timeout: Duration) -> ureq::Agent {
-        ureq::Agent::config_builder()
-            .timeout_connect(Some(self.connect_timeout))
-            .timeout_global(Some(global_timeout))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .max_redirects_will_error(false)
-            .build()
-            .new_agent()
     }
 
     fn post_json<T: for<'de> Deserialize<'de>>(
@@ -179,10 +178,13 @@ impl HttpTelegramApi {
         let masked = mask_url(&url);
         let body =
             serde_json::to_string(payload).map_err(|e| TelegramError::Serialize(e.to_string()))?;
-        let agent = self.build_agent(global_timeout);
 
-        let response = agent
+        let response = self
+            .agent
             .post(&url)
+            .config()
+            .timeout_global(Some(global_timeout))
+            .build()
             .header("Content-Type", "application/json")
             .send(body.as_str())
             .map_err(|err| TelegramError::Transport {

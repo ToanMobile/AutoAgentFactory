@@ -7,6 +7,7 @@ pub mod admit;
 pub mod daemons;
 mod drain;
 pub mod heavy;
+mod heavy_family;
 pub mod idle;
 mod legacy;
 pub mod orphans;
@@ -37,6 +38,7 @@ pub use heavy::{
     unqueued_heavy_tool,
 };
 pub use probe::{GroupState, LoadProbe, Pressure, SystemProbe};
+pub use relay::SignalRelay;
 pub use run::{SLOT_ENV, SlotJob, SlotRun};
 pub use slots::{Admission, Busy, SlotGuard};
 pub use stats::HeavySample;
@@ -148,6 +150,9 @@ pub struct Admitted {
 
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(8);
+/// Shorter polling cap for the head of the FIFO queue and an actively draining
+/// job, so freed slots are claimed within ~1 s instead of sitting idle up to 10 s.
+pub const FRONT_OF_QUEUE_CAP: Duration = Duration::from_secs(1);
 /// How often a running command's memory and the machine's pressure are read.
 pub const SAMPLE_EVERY: Duration = Duration::from_secs(2);
 
@@ -169,11 +174,15 @@ impl Backoff {
     }
 
     pub fn next_delay(&mut self) -> Duration {
+        self.next_delay_capped(BACKOFF_CAP)
+    }
+
+    pub fn next_delay_capped(&mut self, cap: Duration) -> Duration {
         self.state ^= self.state << 13;
         self.state ^= self.state >> 7;
         self.state ^= self.state << 17;
-        let base = self.next;
-        self.next = (base * 2).min(BACKOFF_CAP);
+        let base = self.next.min(cap);
+        self.next = (self.next * 2).min(BACKOFF_CAP);
         // 75 % to 125 % of the base, in steps of 1/512.
         let factor = 768 + u32::try_from(self.state % 513).unwrap_or(0);
         base * factor / 1024

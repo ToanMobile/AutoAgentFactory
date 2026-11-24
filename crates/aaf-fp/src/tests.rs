@@ -249,3 +249,108 @@ fn git_or_none_tells_none_from_no_answer() {
     let error = commit(outside.path(), "HEAD").unwrap_err().to_string();
     assert!(error.contains("rev-parse: exit Some(128)"), "{error}");
 }
+
+#[test]
+fn sweep_memoizes_alive_checks_per_pid() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Multiple entries sharing the same dead pid (4242) and alive pid (5252).
+    for name in [
+        "aaf-index-4242-0",
+        "aaf-index-4242-0.lock",
+        "aaf-objects-4242-0",
+        "aaf-index-4242-1",
+        "aaf-objects-5252-0",
+        "aaf-index-5252-0",
+    ] {
+        fs::write(dir.path().join(name), "x").unwrap();
+    }
+    let calls = AtomicUsize::new(0);
+    let alive = |pid: u32| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        pid == 5252
+    };
+    stale::sweep(dir.path(), 1, &alive);
+    // Only 2 unique non-own PIDs (4242 and 5252) -> at most 2 `alive` calls.
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        names(dir.path()),
+        vec!["aaf-index-5252-0", "aaf-objects-5252-0"]
+    );
+
+    // Same memoization guarantee in `sweep_stale_in` including legacy `aaf-fp-<pid>-*`.
+    let dir2 = tempfile::tempdir().unwrap();
+    for name in [
+        "aaf-index-7777-0",
+        "aaf-objects-7777-0",
+        "aaf-fp-7777-0",
+        "aaf-fp-7777-1",
+        "aaf-index-8888-0",
+        "aaf-fp-8888-0",
+    ] {
+        fs::write(dir2.path().join(name), "x").unwrap();
+    }
+    let calls2 = AtomicUsize::new(0);
+    let alive2 = |pid: u32| {
+        calls2.fetch_add(1, Ordering::Relaxed);
+        pid == 8888
+    };
+    let removed = crate::sweep_stale_in(dir2.path(), 1, &alive2, SystemTime::now()).unwrap();
+    assert_eq!(removed, 4);
+    assert_eq!(calls2.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        names(dir2.path()),
+        vec!["aaf-fp-8888-0", "aaf-index-8888-0"]
+    );
+}
+
+#[test]
+fn load_or_create_key_is_atomic_under_concurrent_callers() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let data = tempfile::tempdir().unwrap();
+    let dir = Arc::new(data.path().to_path_buf());
+    let n = 8;
+    let barrier = Arc::new(Barrier::new(n));
+    let mut handles = Vec::with_capacity(n);
+    for _ in 0..n {
+        let dir = Arc::clone(&dir);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            crate::load_or_create_key(&dir)
+        }));
+    }
+    let mut keys = Vec::with_capacity(n);
+    for h in handles {
+        let key = h.join().unwrap().unwrap();
+        assert_eq!(key.len(), 32);
+        keys.push(key);
+    }
+    for k in &keys[1..] {
+        assert_eq!(
+            k, &keys[0],
+            "every concurrent caller must observe the same key"
+        );
+    }
+    // No temp files remain and key permissions are owner-only (0600).
+    let entries: Vec<String> = fs::read_dir(data.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, vec!["receipt.key"]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(data.path().join("receipt.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}

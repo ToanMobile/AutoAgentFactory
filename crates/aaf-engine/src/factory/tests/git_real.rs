@@ -361,6 +361,7 @@ fn real_auto_merge_round(fx: &Fixture, test_command: &str, files: &[&str]) -> u3
                 worktree: fx.task(&id, file, "x\n"),
                 task_id: id,
                 audited: false,
+                cached_receipt: None,
             }
         })
         .collect();

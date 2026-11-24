@@ -2,94 +2,106 @@
 //! The ladder (`crate::unblocker`) only decides; everything it decides is
 //! carried out here.
 
-use std::sync::{Mutex, PoisonError};
-
 use aaf_domain::blocked::{BlockedReason, SubtaskPlan, UnblockAction};
 use aaf_domain::budget::BudgetCheck;
 use aaf_domain::config::MAX_AUDIT_REWORKS_CAP;
-use aaf_domain::event::EventKind;
-use aaf_domain::ports::{
-    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, LimitHit, PortResult,
-};
+use aaf_domain::event::{EventKind, FactoryEvent};
+use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, LimitHit, PortResult};
+use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
 use aaf_domain::task::{ImmutableSpec, Task, TaskState};
 use serde_json::json;
 
+use super::audit_turn::InfraWatch;
 use super::ports::Grant;
 use super::rework_filter::is_valid_rework_finding;
-use super::worker::{GateJob, Next, ensure_budget, halt_on_infra, hook_problem, request};
+use super::worker::{
+    GateJob, Next, ensure_budget, halt_on_infra, hook_problem, request, status_of,
+};
 use super::{Deps, Store};
 use crate::cross_audit::Finding;
 use crate::git::TaskWorktree;
 use crate::git::worktree::validate_task_id;
-use crate::unblocker::{AgentSubtaskProposer, FailureSignal, Ladder, QuotaRoute, failure_digest};
+use crate::unblocker::{
+    AgentSubtaskProposer, FailureSignal, Ladder, PROPOSER_EXECUTOR, QuotaRoute, failure_digest,
+};
 use crate::webhook::WebhookEvent;
 
-/// Passes a run on to the real runner and captures any infra failure or usage
-/// limit: wrappers like audit and subtask proposer only report their own result.
-pub(super) struct InfraWatch<'a> {
-    runner: &'a dyn AgentRunner,
-    seen: Mutex<Option<InfraFailure>>,
-    limit_hit: Mutex<Option<LimitHit>>,
-    failed_tail: Mutex<Option<String>>,
+/// Records T4 subtask-proposer runs in `runs`, emits `RunStarted`/`RunFinished`,
+/// and adds wall-clock seconds to the root budget (`AgentSubtaskProposer` charges tokens).
+struct ProposerRecorder<'a> {
+    deps: &'a Deps,
+    task: &'a Task,
+    branch: String,
+    account_id: Option<&'a str>,
+    inner: &'a dyn AgentRunner,
 }
 
-impl<'a> InfraWatch<'a> {
-    pub(super) fn new(runner: &'a dyn AgentRunner) -> Self {
-        Self {
-            runner,
-            seen: Mutex::new(None),
-            limit_hit: Mutex::new(None),
-            failed_tail: Mutex::new(None),
-        }
-    }
-
-    pub(super) fn take(self) -> (Option<InfraFailure>, Option<LimitHit>) {
-        let (infra, hit, _) = self.take_with_tail();
-        (infra, hit)
-    }
-
-    pub(super) fn take_with_tail(self) -> (Option<InfraFailure>, Option<LimitHit>, Option<String>) {
-        (
-            self.seen
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-            self.limit_hit
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-            self.failed_tail
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
-    }
-}
-
-impl AgentRunner for InfraWatch<'_> {
+impl AgentRunner for ProposerRecorder<'_> {
     fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome> {
-        let outcome = self.runner.run(request)?;
-        if let Some(infra) = &outcome.infra {
-            *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(infra.clone());
-        }
-        if let Some(hit) = &outcome.limit_hit {
-            *self
-                .limit_hit
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(hit.clone());
-        }
-        if !outcome.succeeded()
-            && outcome.infra.is_none()
-            && outcome.limit_hit.is_none()
-            && !outcome.log_tail.trim().is_empty()
-        {
-            *self
-                .failed_tail
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(outcome.log_tail.clone());
-        }
-        Ok(outcome)
+        let started = self.deps.now();
+        self.deps.store.insert_run(&RunRecord {
+            id: request.run_id.clone(),
+            task_id: self.task.id.clone(),
+            account_id: self.account_id.map(str::to_string),
+            executor: PROPOSER_EXECUTOR.to_string(),
+            worktree_path: request.cwd.clone(),
+            branch: self.branch.clone(),
+            status: RunStatus::Running,
+            exit_code: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            started_at: started,
+            ended_at: None,
+        })?;
+        self.deps.emit(
+            EventKind::RunStarted,
+            &self.task.id,
+            json!({
+                "run_id": request.run_id,
+                "executor": PROPOSER_EXECUTOR,
+                "account": self.account_id,
+            }),
+        )?;
+        let res = self.inner.run(request);
+        let ended = self.deps.now();
+        let wall = u64::try_from(ended - started).unwrap_or(0);
+        let (status, exit_code, tokens_in, tokens_out) = match &res {
+            Ok(outcome) => (
+                status_of(outcome),
+                outcome.exit_code,
+                outcome.tokens_in,
+                outcome.tokens_out,
+            ),
+            Err(_) => (RunStatus::Failed, None, 0, 0),
+        };
+        self.deps.store.finish_run(
+            &request.run_id,
+            &RunFinish {
+                status,
+                exit_code,
+                tokens_in,
+                tokens_out,
+                ended_at: ended,
+            },
+        )?;
+        ensure_budget(self.deps, &self.task.root_id)?;
+        self.deps.store.add_usage(&self.task.root_id, 0, wall, 0)?;
+        self.deps.emit(
+            EventKind::RunFinished,
+            &self.task.id,
+            json!({
+                "run_id": request.run_id,
+                "status": status.as_str(),
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "tokens_measured": self.inner.reports_tokens(),
+            }),
+        )?;
+        res
     }
 
     fn reports_tokens(&self) -> bool {
-        self.runner.reports_tokens()
+        self.inner.reports_tokens()
     }
 }
 
@@ -118,20 +130,16 @@ pub(super) fn report_account_limit(
 /// Decides whether another account may take over after a limit hit or whether
 /// the task must wait for cooldown.
 pub(super) fn route_limit_hit(deps: &Deps, grant: &Grant, hit: &LimitHit) -> PortResult<Next> {
+    let wait = Ok(Next::Wait {
+        until: hit.reset_at,
+    });
     if grant.account_id().is_none() {
-        return Ok(Next::Wait {
-            until: hit.reset_at,
-        });
+        return wait;
     }
     match deps.accounts.after_limit()? {
         Some(QuotaRoute::Switch) => Ok(Next::Switch),
-        Some(QuotaRoute::Wait) => Ok(Next::Wait {
-            until: hit.reset_at,
-        }),
         None if deps.accounts.provider_account_count()? > 1 => Ok(Next::Switch),
-        None => Ok(Next::Wait {
-            until: hit.reset_at,
-        }),
+        Some(QuotaRoute::Wait) | None => wait,
     }
 }
 
@@ -168,22 +176,27 @@ pub(crate) fn one_line(text: &str, max_chars: usize) -> String {
 }
 
 pub(crate) fn ladder(deps: &Deps) -> Ladder<'_> {
-    let store: &dyn Store = &*deps.store;
-    Ladder::new(
-        store,
-        store,
-        store,
-        store,
-        &*deps.clock,
-        &deps.settings.repo.unblocker,
-    )
+    let s: &dyn Store = &*deps.store;
+    Ladder::new(s, s, s, s, &*deps.clock, &deps.settings.repo.unblocker)
+}
+
+fn is_human_unblock_event(event: &FactoryEvent) -> bool {
+    event.kind == EventKind::TaskStateChanged
+        && serde_json::from_str::<serde_json::Value>(&event.payload_json)
+            .ok()
+            .is_some_and(|p| {
+                p["to"].as_str() == Some("ready")
+                    && p["why"]
+                        .as_str()
+                        .is_some_and(|why| why == "unblocked" || why.ends_with(" unblock"))
+            })
 }
 
 /// Consecutive earlier unblock steps of the task with this digest.
 fn prior_same(deps: &Deps, task_id: &str, digest: &str) -> PortResult<u32> {
     let mut count = 0;
     for event in deps.store.events_for_task(task_id, HISTORY_EVENTS)? {
-        if event.kind == EventKind::ReworkRequested {
+        if event.kind == EventKind::ReworkRequested || is_human_unblock_event(&event) {
             break;
         }
         if event.kind != EventKind::UnblockStep {
@@ -200,6 +213,29 @@ fn prior_same(deps: &Deps, task_id: &str, digest: &str) -> PortResult<u32> {
     Ok(count)
 }
 
+/// True when a human unblock event is newer than any `UnblockStep` or
+/// `ReworkRequested` event while stale `unblock[` markers remain after the
+/// latest `rework:`/`unblocked:` note.
+fn has_unrecorded_human_unblock(deps: &Deps, task: &Task) -> PortResult<bool> {
+    let notes = &task.context_notes;
+    let start = notes
+        .iter()
+        .rposition(|n| n.starts_with("rework:") || n.starts_with("unblocked:"))
+        .map_or(0, |idx| idx + 1);
+    if !notes[start..].iter().any(|n| n.starts_with("unblock[")) {
+        return Ok(false);
+    }
+    for event in deps.store.events_for_task(&task.id, HISTORY_EVENTS)? {
+        if is_human_unblock_event(&event) {
+            return Ok(true);
+        }
+        if event.kind == EventKind::UnblockStep || event.kind == EventKind::ReworkRequested {
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
 /// Classifies the failure, asks the ladder and carries out its decision.
 pub(crate) fn handle(
     deps: &Deps,
@@ -212,6 +248,7 @@ pub(crate) fn handle(
         || deps.settings.repo_root.clone(),
         |w| w.path.to_string_lossy().into_owned(),
     );
+    let branch = worktree.map_or_else(String::new, |w| w.branch.clone());
     if let Some(problem) = worktree.and_then(|w| hook_problem(deps, &w.path)) {
         // The run that just failed changed its own guard (or the base lost
         // it): no further agent starts in this worktree, neither a retry
@@ -221,20 +258,35 @@ pub(crate) fn handle(
         return Ok(Next::Blocked);
     }
     for _ in 0..MAX_LADDER_PASSES {
-        let task = deps.store.get_task(task_id)?;
+        let mut task = deps.store.get_task(task_id)?;
+        if has_unrecorded_human_unblock(deps, &task)? {
+            deps.store
+                .append_context_note(&task.id, "unblocked: human unblock", deps.now())?;
+            task = deps.store.get_task(task_id)?;
+        }
         signal.budget = ensure_budget(deps, &task.root_id)?.check();
         signal.same_failure_count = prior_same(deps, task_id, &failure_digest(&signal))? + 1;
         let watch = InfraWatch::new(&*deps.runner);
+        let recorder = ProposerRecorder {
+            deps,
+            task: &task,
+            branch: branch.clone(),
+            account_id: grant.account_id(),
+            inner: &watch,
+        };
+        let mut proposer_base = request(deps, &cwd, grant)?;
+        proposer_base.sandbox.read_only = true;
         let proposer = AgentSubtaskProposer {
-            runner: &watch,
+            runner: &recorder,
             budgets: &*deps.store as &dyn Store,
-            base: request(deps, &cwd, grant)?,
+            base: proposer_base,
         };
         // Asked after the limit was reported, so the account that hit it
         // already counts as cooling down.
         let route = deps.accounts.after_limit()?;
         let decision = ladder(deps).next_action_routed(task_id, &signal, Some(&proposer), route)?;
         drop(proposer);
+        drop(recorder);
         let (proposer_infra, proposer_limit) = watch.take();
         if let Some(hit) = proposer_limit {
             report_account_limit(deps, task_id, grant, &hit)?;
@@ -349,6 +401,7 @@ fn regate(
         task_id: task.id.clone(),
         worktree: worktree.clone(),
         audited: false,
+        cached_receipt: None,
     }))
 }
 
@@ -401,10 +454,10 @@ fn block(
     match deps.notifier.notify(&event) {
         Ok(true) => deps.emit(EventKind::WebhookSent, &task.id, json!({ "ok": true }))?,
         Ok(false) => {}
-        Err(error) => deps.emit(
+        Err(e) => deps.emit(
             EventKind::WebhookSent,
             &task.id,
-            json!({ "ok": false, "error": error }),
+            json!({ "ok": false, "error": e }),
         )?,
     }
     if counts {
@@ -461,17 +514,7 @@ fn sanitize_untrusted_close_tag(text: &str) -> String {
 fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<u32> {
     let mut count = 0;
     for event in deps.store.events_for_task(task_id, HISTORY_EVENTS)? {
-        if event.kind == EventKind::ReworkRequested {
-            break;
-        }
-        if event.kind == EventKind::TaskStateChanged
-            && serde_json::from_str::<serde_json::Value>(&event.payload_json)
-                .ok()
-                .is_some_and(|p| {
-                    p["to"].as_str() == Some("ready")
-                        && matches!(p["why"].as_str(), Some("unblocked" | "aaf board unblock"))
-                })
-        {
+        if event.kind == EventKind::ReworkRequested || is_human_unblock_event(&event) {
             break;
         }
         if event.kind == EventKind::CrossAudit
@@ -507,9 +550,8 @@ pub(crate) fn handle_audit_failure(
     if cap == 0 || prior_audit_fails >= cap {
         return Ok(None);
     }
-    let (valid, dropped): (Vec<&Finding>, Vec<&Finding>) = findings
-        .iter()
-        .partition(|finding| is_valid_rework_finding(finding));
+    let (valid, dropped): (Vec<_>, Vec<_>) =
+        findings.iter().partition(|f| is_valid_rework_finding(f));
     if !dropped.is_empty() {
         let items: Vec<_> = dropped
             .iter()
@@ -522,21 +564,17 @@ pub(crate) fn handle_audit_failure(
                 json!({ "id": f.id, "reason": reason })
             })
             .collect();
-        deps.emit(
-            EventKind::DetectorHit,
-            &task.id,
-            json!({
-                "source": "audit_rework_filter",
-                "dropped_count": items.len(),
-                "dropped": items,
-            }),
-        )?;
+        let payload = json!({
+            "source": "audit_rework_filter",
+            "dropped_count": items.len(),
+            "dropped": items,
+        });
+        deps.emit(EventKind::DetectorHit, &task.id, payload)?;
     }
     if valid.is_empty() {
         return Ok(None);
     }
-    let current = ensure_budget(deps, &task.root_id)?;
-    let mut projected = current.clone();
+    let mut projected = ensure_budget(deps, &task.root_id)?;
     projected.add_usage(0, 0, 1);
     if projected.check() != BudgetCheck::Ok {
         return Ok(None);

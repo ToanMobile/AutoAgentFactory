@@ -42,12 +42,15 @@ fn assignment_expr(segment: &str) -> Option<&str> {
     if key != "targetSdk" && key != "targetSdkVersion" {
         return None;
     }
-    // `ext.targetSdkVersion = 34` and `libs.versions.targetSdk` define or read
-    // a value; they are not the DSL property.
-    if owner
-        .split('.')
-        .any(|p| matches!(p, "ext" | "extra" | "versions" | "libs"))
-    {
+    // `ext.targetSdkVersion = 34`, `libs.versions.targetSdk`, and
+    // `testOptions.targetSdk = 33` / `lint.targetSdk = 33` do not set the app's
+    // release targetSdk.
+    if owner.split('.').any(|p| {
+        matches!(
+            p,
+            "ext" | "extra" | "versions" | "libs" | "testOptions" | "lint" | "lintOptions"
+        )
+    }) {
         return None;
     }
     let after = rest.trim_start();
@@ -72,18 +75,31 @@ fn assignment_expr(segment: &str) -> Option<&str> {
 /// Every `targetSdk` assignment of a build script whose comments were removed.
 fn assignments(stripped: &str) -> Vec<Assignment> {
     let mut found = Vec::new();
-    // Depth of an open `ext { ... }` block: its entries are definitions.
-    let mut ext_depth: i32 = 0;
+    // Depth of an open block whose `targetSdk` entries do not configure the
+    // app's release targetSdk (`ext` defines variables; AGP 8+ `testOptions`,
+    // `lint`, and `lintOptions` configure test-only or lint-only SDK targets).
+    let mut skip_block_depth: i32 = 0;
     for (index, line) in stripped.lines().enumerate() {
         let trimmed = line.trim_start();
-        let opens_ext = ext_depth == 0
-            && ["ext {", "ext{", "buildscript.ext {", "project.ext {"]
-                .iter()
-                .any(|p| trimmed.starts_with(p));
-        if opens_ext || ext_depth > 0 {
+        let opens_skip_block = skip_block_depth == 0
+            && [
+                "ext {",
+                "ext{",
+                "buildscript.ext {",
+                "project.ext {",
+                "testOptions {",
+                "testOptions{",
+                "lint {",
+                "lint{",
+                "lintOptions {",
+                "lintOptions{",
+            ]
+            .iter()
+            .any(|p| trimmed.starts_with(p));
+        if opens_skip_block || skip_block_depth > 0 {
             let opens = i32::try_from(line.matches('{').count()).unwrap_or(i32::MAX);
             let closes = i32::try_from(line.matches('}').count()).unwrap_or(i32::MAX);
-            ext_depth = (ext_depth + opens - closes).max(0);
+            skip_block_depth = (skip_block_depth + opens - closes).max(0);
             continue;
         }
         for segment in line.split(['{', ';']) {
@@ -211,10 +227,14 @@ fn convention(root: &Path, inv: &Inventory, min_sdk: u32, apps: &[String], sink:
     let mut all_ok = true;
     for rel in &inv.convention_sources {
         let file = rel_str(rel);
-        let Ok(raw) = read_text(&root.join(rel)) else {
-            // Unreadable convention source: the apps below stay unresolved.
-            all_ok = false;
-            continue;
+        let raw = match read_text(&root.join(rel)) {
+            Ok(t) => t,
+            Err(err) => {
+                // Unreadable convention source: surface it and keep the apps unresolved.
+                sink.unreadable(&file, &err);
+                all_ok = false;
+                continue;
+            }
         };
         let text = strip_comments(&raw, true);
         // Catalogs and properties are looked up from the directory that holds

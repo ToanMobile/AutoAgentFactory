@@ -11,6 +11,7 @@ pub mod oracle;
 pub mod oracle_classify;
 pub(crate) mod oracle_worktree;
 pub(crate) mod proc;
+pub(crate) mod reuse;
 pub mod runner;
 pub mod static_checks;
 #[cfg(test)]
@@ -19,18 +20,19 @@ mod tests;
 use std::path::Path;
 use std::time::Duration;
 
-use aaf_domain::config::{AuditScope, MachineConfig, RepoConfig};
+use aaf_domain::config::{MachineConfig, RepoConfig};
 use aaf_domain::gate::{
     CommandResult, GateMode, GateStatus, HeadLockReport, LockStatus, RECEIPT_SCHEMA_VERSION,
     Receipt, StoreComplianceReport, StoreStatus,
 };
 use aaf_domain::ports::Clock;
-use sha2::{Digest, Sha256};
 
 use crate::db::private;
 use crate::throttle::{Progress, SystemProbe, Throttle};
+pub use base::GateRunOptions;
 pub use hidden::HiddenPolicy;
 use hidden::When;
+pub use reuse::{config_hash, stats_repo_id};
 
 /// Budget for one git call of the gate. Larger than `aaf_fp::GIT_TIMEOUT`
 /// because fingerprinting or diffing a big tree is not a ten-second job.
@@ -50,26 +52,8 @@ pub enum GateError {
     Config(String),
     #[error("no locked file is changed; there is nothing to approve")]
     NothingLocked,
-}
-
-/// sha256 of the configuration that decides the gate's outcome.
-pub fn config_hash(cfg: &RepoConfig) -> String {
-    // Plain structs of strings and integers always serialise; the fallback
-    // only keeps this function infallible.
-    let json = serde_json::to_string(&(&cfg.gate, &cfg.commands, &cfg.proof)).unwrap_or_default();
-    if cfg.cross_audit.audit_scope == AuditScope::HeadLock && !cfg.cross_audit.score_gate {
-        return aaf_fp::sha256_hex(json.as_bytes());
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(json.as_bytes());
-    hasher.update(b"\0cross_audit\0");
-    hasher.update(cfg.cross_audit.audit_scope.as_str().as_bytes());
-    hasher.update([
-        u8::from(cfg.cross_audit.score_gate),
-        cfg.cross_audit.min_average_score,
-        cfg.cross_audit.min_criterion_score,
-    ]);
-    aaf_fp::hex(&hasher.finalize())
+    #[error("locked files changed since preview (expected {expected}, got {actual})")]
+    LockFpMismatch { expected: String, actual: String },
 }
 
 fn mode_name(mode: GateMode) -> &'static str {
@@ -165,84 +149,6 @@ pub(crate) fn decide(evidence: &Evidence<'_>) -> (GateStatus, Vec<String>) {
     (status, reasons)
 }
 
-fn mode_rank(mode: GateMode) -> u8 {
-    match mode {
-        GateMode::Scoped => 0,
-        GateMode::Full => 1,
-        GateMode::Release => 2,
-    }
-}
-
-/// What a stored receipt must have been made for to stand in for a new run.
-struct Asked<'a> {
-    /// Canonical repo root.
-    repo_root: &'a Path,
-    /// Shared repository id across all worktrees of the same repo.
-    common_repo_id: &'a str,
-    allow_common_cache: bool,
-    tree_fp: &'a str,
-    /// The base as it resolves now.
-    base_sha: Option<&'a str>,
-    config_hash: &'a str,
-    mode: GateMode,
-}
-
-fn receipt_matches(stored: &Receipt, asked: &Asked<'_>, check_repo_root: bool) -> bool {
-    stored.schema_version == RECEIPT_SCHEMA_VERSION
-        && stored.status == GateStatus::Clear
-        && (!check_repo_root || Path::new(&stored.repo_root) == asked.repo_root)
-        && stored.tree_fp == asked.tree_fp
-        && stored.base_sha.as_deref() == asked.base_sha
-        && stored.config_hash == asked.config_hash
-        && mode_rank(stored.mode) >= mode_rank(asked.mode)
-}
-
-/// The stored receipt, when it already proves what is being asked: signed,
-/// `Clear`, for exactly this repo root (or sibling worktree of the same repo
-/// when proof is not required), tree, base and gate configuration, from a mode
-/// at least as strict. Anything else, a tampered file included, is a miss.
-fn reusable_receipt(data_dir: &Path, key: &[u8], asked: &Asked<'_>) -> Option<Receipt> {
-    let local_path = aaf_fp::receipt_path(data_dir, asked.repo_root);
-    if local_path.exists() {
-        // Fail closed on a tampered or foreign local receipt: never fall back
-        // to the cross-worktree cache when this checkout's own receipt is bad.
-        let stored = aaf_fp::read_receipt(data_dir, key, asked.repo_root).ok()?;
-        if Path::new(&stored.repo_root) != asked.repo_root {
-            return None;
-        }
-        if receipt_matches(&stored, asked, true) {
-            return Some(stored);
-        }
-    }
-    if asked.allow_common_cache
-        && let Ok(mut stored) =
-            aaf_fp::read_common_receipt(data_dir, key, asked.common_repo_id, asked.tree_fp)
-        && receipt_matches(&stored, asked, false)
-    {
-        stored.repo_root = asked.repo_root.to_string_lossy().into_owned();
-        // Materialize locally so hooks/handover reading `receipt_path(repo_root)` see it.
-        let _ = aaf_fp::write_receipt(data_dir, key, &stored);
-        return Some(stored);
-    }
-    None
-}
-
-/// Key of the repository in the learned memory statistics. Every worktree
-/// of one repository shares it, so a task's fresh worktree starts with the
-/// measurements of its siblings instead of as "never measured".
-pub fn stats_repo_id(repo_root: &Path) -> String {
-    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
-    let Ok(common) = aaf_fp::git(repo_root, &args, &[], GIT_TIMEOUT) else {
-        return aaf_fp::repo_id(repo_root);
-    };
-    let common = Path::new(&common);
-    let main_root = match common.parent() {
-        Some(parent) if common.file_name().is_some_and(|name| name == ".git") => parent,
-        _ => common,
-    };
-    aaf_fp::repo_id(main_root)
-}
-
 /// A gate verdict and where it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GateRun {
@@ -291,6 +197,33 @@ pub fn run_gate_policy(
     throttle: &Throttle<'_>,
     policy: HiddenPolicy,
 ) -> Result<GateRun, GateError> {
+    run_gate_with_options(
+        data_dir,
+        repo_root,
+        cfg,
+        mode,
+        clock,
+        throttle,
+        GateRunOptions {
+            policy,
+            base_ref_override: None,
+            require_independent_approval: false,
+        },
+    )
+}
+
+/// [`run_gate_reporting`] with explicit [`GateRunOptions`], keeping
+/// [`config_hash`] on the unmutated `cfg` while enforcing an optional base
+/// override or independent head-lock approval requirement.
+pub fn run_gate_with_options(
+    data_dir: &Path,
+    repo_root: &Path,
+    cfg: &RepoConfig,
+    mode: GateMode,
+    clock: &dyn Clock,
+    throttle: &Throttle<'_>,
+    opts: GateRunOptions<'_>,
+) -> Result<GateRun, GateError> {
     let repo_root = std::fs::canonicalize(repo_root)?;
     let repo_root = repo_root.as_path();
     // Receipts, approvals and the signing key are nobody else's to read.
@@ -301,15 +234,60 @@ pub fn run_gate_policy(
     // command and missing from what the receipt signs. First of all, so
     // that what the policy removes is gone before anything is read.
     let release = mode == GateMode::Release;
-    let found = hidden::inspect(repo_root, policy, When::BeforeCommands, release)?;
+    let base_ref = opts.base_ref_override.unwrap_or(&cfg.gate.base_ref);
+    let (found, layout, fp_before, base) = match opts.policy {
+        HiddenPolicy::Warn => {
+            let (hidden_res, base_res, layout_and_fp) = std::thread::scope(|scope| {
+                let hidden_handle = scope.spawn(|| {
+                    hidden::inspect(repo_root, opts.policy, When::BeforeCommands, release)
+                });
+                let base_handle = scope.spawn(|| base::resolve(repo_root, base_ref, GIT_TIMEOUT));
+                let layout_and_fp =
+                    aaf_fp::probe_git_layout(repo_root, GIT_TIMEOUT).map(|layout| {
+                        let fp_res = aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT);
+                        (layout, fp_res)
+                    });
+                let hidden_res = hidden_handle.join().unwrap_or_else(|_| {
+                    Err(GateError::Git("hidden inspect worker panicked".to_string()))
+                });
+                let base_res = base_handle.join().unwrap_or_else(|_| {
+                    Err(GateError::Git("base resolve worker panicked".to_string()))
+                });
+                (hidden_res, base_res, layout_and_fp)
+            });
+            let found = hidden_res?;
+            let (layout, fp_before_res) = layout_and_fp?;
+            let fp_before = fp_before_res?;
+            let base = base_res?;
+            (found, layout, fp_before, base)
+        }
+        HiddenPolicy::Remove => {
+            let (hidden_res, base_res, layout_res) = std::thread::scope(|scope| {
+                let hidden_handle = scope.spawn(|| {
+                    hidden::inspect(repo_root, opts.policy, When::BeforeCommands, release)
+                });
+                let base_handle = scope.spawn(|| base::resolve(repo_root, base_ref, GIT_TIMEOUT));
+                let layout_res = aaf_fp::probe_git_layout(repo_root, GIT_TIMEOUT);
+                let hidden_res = hidden_handle.join().unwrap_or_else(|_| {
+                    Err(GateError::Git("hidden inspect worker panicked".to_string()))
+                });
+                let base_res = base_handle.join().unwrap_or_else(|_| {
+                    Err(GateError::Git("base resolve worker panicked".to_string()))
+                });
+                (hidden_res, base_res, layout_res)
+            });
+            let found = hidden_res?;
+            let layout = layout_res?;
+            let fp_before = aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT)?;
+            let base = base_res?;
+            (found, layout, fp_before, base)
+        }
+    };
     let (mut hidden, mut hidden_notes) = (found.blocks, found.notes);
-    // Taken before anything is read, so an edit made while the checks run
-    // is caught as well as one made by a command.
-    let fp_before = aaf_fp::tree_fp(repo_root, GIT_TIMEOUT)?;
-    let config_hash = config_hash(cfg);
-    // Resolved before the reuse check: a receipt is only as good as the
-    // base it was compared against.
-    let base = base::resolve(repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
+    let common_root = layout.common_repo_root();
+    let common_repo_id = aaf_fp::repo_id(common_root);
+    let cfg_hash = config_hash(cfg);
+    let alt_config_hash = reuse::alt_config_hash(cfg, opts.require_independent_approval);
     let mut proof_block = if cfg.proof.required {
         crate::proof::verify_proof(repo_root, data_dir, &cfg.proof, Some(&fp_before))
             .err()
@@ -317,14 +295,16 @@ pub fn run_gate_policy(
     } else {
         None
     };
-    let common_repo_id = stats_repo_id(repo_root);
-    let asked = Asked {
+    let asked = reuse::Asked {
         repo_root,
         common_repo_id: &common_repo_id,
         allow_common_cache: !cfg.proof.required,
+        strict_hidden: opts.policy == HiddenPolicy::Remove || release,
+        require_independent_approval: opts.require_independent_approval,
         tree_fp: &fp_before,
         base_sha: base.sha.as_deref(),
-        config_hash: &config_hash,
+        config_hash: &cfg_hash,
+        alt_config_hash: alt_config_hash.as_deref(),
         mode,
     };
     // A file behind an index flag does not move the fingerprint, so an
@@ -332,27 +312,55 @@ pub fn run_gate_policy(
     // the policy lets pass are the operator's own environment.
     if hidden.is_empty()
         && proof_block.is_none()
-        && let Some(receipt) = reusable_receipt(data_dir, &key, &asked)
+        && let Some(receipt) = reuse::reusable_receipt(data_dir, &key, &asked)
     {
         return Ok(GateRun {
             receipt,
             reused: true,
         });
     }
-    // A git that could not answer must not sign a receipt saying "no commit".
-    let head_sha = base::head(repo_root, GIT_TIMEOUT)?;
+    let head_sha = base.head_sha;
+    let require_independent =
+        cfg.cross_audit.require_different_provider || opts.require_independent_approval;
 
-    let set = changes::collect(repo_root, &base.diff_target, GIT_TIMEOUT)?;
-    let added = changes::added_lines(
+    let (store_res, tracked_added_res, changes_res) = std::thread::scope(|scope| {
+        let store_handle = scope.spawn(|| crate::store_compliance::scan(repo_root, cfg, release));
+        let diff_handle = scope.spawn(|| {
+            changes::diff_added_tracked(
+                repo_root,
+                &base.diff_target,
+                &static_checks::skip_path,
+                GIT_TIMEOUT,
+            )
+        });
+        let changes_res = changes::collect(repo_root, &base.diff_target, GIT_TIMEOUT);
+        let tracked_added_res = diff_handle
+            .join()
+            .unwrap_or_else(|_| Err(GateError::Git("diff worker panicked".to_string())));
+        let store_res = store_handle
+            .join()
+            .map_err(|_| GateError::Git("store compliance worker panicked".to_string()));
+        (store_res, tracked_added_res, changes_res)
+    });
+    let set = changes_res?;
+    let mut added = tracked_added_res?;
+    changes::append_untracked_lines(
         repo_root,
-        &base.diff_target,
+        &mut added,
         &set.untracked,
         &static_checks::skip_path,
-        GIT_TIMEOUT,
     )?;
     let statics = static_checks::scan(&added)?;
-    let head_lock = head_lock::evaluate_changes(data_dir, repo_root, cfg, &set.changes, &added)?;
-    let store = crate::store_compliance::scan(repo_root, cfg, release);
+    let head_lock = head_lock::evaluate_changes_with_common(
+        data_dir,
+        repo_root,
+        Some(common_root),
+        cfg,
+        &set.changes,
+        &added,
+        require_independent,
+    )?;
+    let store = store_res?;
 
     let verdict = |hidden: &[String],
                    proof_block: Option<&str>,
@@ -417,15 +425,17 @@ pub fn run_gate_policy(
     } else {
         None
     };
-    if (policy == HiddenPolicy::Remove || release) && commands.is_some() {
+    if (opts.policy == HiddenPolicy::Remove || release)
+        && commands.as_ref().is_some_and(|c| !c.is_empty())
+    {
         // A command can leave a file that changes the next run (and a test
         // runner leaves its cache every time): gone before the next gate.
         // A release receipt is not signed beside one either.
-        let after = hidden::inspect(repo_root, policy, When::AfterCommands, release)?;
+        let after = hidden::inspect(repo_root, opts.policy, When::AfterCommands, release)?;
         hidden.extend(after.blocks);
         hidden_notes.extend(after.notes);
     }
-    let tree_fp = aaf_fp::tree_fp(repo_root, GIT_TIMEOUT)?;
+    let tree_fp = aaf_fp::tree_fp_with_layout(repo_root, &layout, GIT_TIMEOUT)?;
     if cfg.proof.required && proof_block.is_none() {
         proof_block = crate::proof::verify_proof(repo_root, data_dir, &cfg.proof, Some(&fp_before))
             .err()
@@ -468,7 +478,7 @@ pub fn run_gate_policy(
         mode,
         status,
         reasons,
-        config_hash,
+        config_hash: cfg_hash,
         commands: commands.unwrap_or_default(),
         static_findings: statics.findings,
         suppressions: statics.suppressions,
@@ -476,12 +486,13 @@ pub fn run_gate_policy(
         store_compliance: store,
         created_at: clock.now(),
     };
-    aaf_fp::write_receipt(data_dir, &key, &receipt)?;
-    if receipt.status == GateStatus::Clear && !cfg.proof.required {
-        let _ = aaf_fp::write_common_receipt(data_dir, &key, &common_repo_id, &receipt);
-    } else {
-        aaf_fp::remove_common_receipt(data_dir, &common_repo_id, &receipt.tree_fp);
-    }
+    reuse::persist_receipt(
+        data_dir,
+        &key,
+        &common_repo_id,
+        cfg.proof.required,
+        &receipt,
+    )?;
     Ok(GateRun {
         receipt,
         reused: false,

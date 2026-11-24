@@ -4,7 +4,6 @@
 //! empty input or EOF) before opening a read-write DB handle or mutating state.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::io::{BufRead, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
@@ -14,7 +13,7 @@ use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::gate::ChangeKind;
 use aaf_domain::ports::{BudgetStore, Clock, EventSink, PortError, RunStore, TaskStore};
 use aaf_domain::task::{Task, TaskState};
-use aaf_engine::db::{Db, TurnSnapshot, private};
+use aaf_engine::db::{Db, RoDbCache, TurnSnapshot, private};
 use aaf_engine::executors::stream_log::read_tail_lines;
 use aaf_engine::factory::adapters::SystemClock;
 use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
@@ -27,6 +26,41 @@ use serde_json::{Value, json};
 
 use crate::ctx::Ctx;
 use crate::output::CmdError;
+
+fn clear_stale_receipts(db: &Db, task: &Task, ctx: &Ctx) {
+    let main_root = Path::new(&task.repo_root);
+    let _ = std::fs::remove_file(aaf_fp::receipt_path(&ctx.data_dir, main_root));
+    let main_id = aaf_fp::repo_id(main_root);
+    let main_approvals_dir = ctx.data_dir.join("approvals").join(&main_id);
+    let mut wt_roots = Vec::new();
+    if let Ok(wt) = worktree_path(main_root, &ctx.worktrees_dir, &task.id) {
+        wt_roots.push(wt);
+    }
+    for r in db.runs_for_task(&task.id).unwrap_or_default() {
+        if !r.worktree_path.is_empty() {
+            wt_roots.push(PathBuf::from(r.worktree_path));
+        }
+    }
+    for root in wt_roots {
+        let _ = std::fs::remove_file(aaf_fp::receipt_path(&ctx.data_dir, &root));
+        let wt_id = aaf_fp::repo_id(&root);
+        if wt_id == main_id {
+            continue;
+        }
+        let wt_approvals = ctx.data_dir.join("approvals").join(&wt_id);
+        for entry in std::fs::read_dir(&wt_approvals)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = entry.file_name();
+            if name.to_str().is_some_and(|s| s.ends_with(".json")) {
+                let _ = std::fs::remove_file(main_approvals_dir.join(name));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&wt_approvals);
+    }
+}
 
 pub(crate) const DB_FILE: &str = "aaf.db";
 const PLAN_APPROVAL_PREFIX: &str = "plan approval required:";
@@ -41,14 +75,8 @@ pub(crate) fn wln(w: &mut dyn Write, line: &str) -> Result<(), CmdError> {
     writeln!(w, "{line}").map_err(|e| io_err("write", e))
 }
 
-pub(crate) fn open_db_ro(ctx: &Ctx) -> Result<Option<Db>, CmdError> {
-    let path = ctx.data_dir.join(DB_FILE);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    Db::open_read_only(&path)
-        .map(Some)
-        .map_err(|e| io_err("database", e))
+pub(crate) fn open_db_ro(ro: &RoDbCache) -> Result<Option<Db>, CmdError> {
+    ro.open().map_err(|e| io_err("database", e))
 }
 
 fn open_db_rw(ctx: &Ctx) -> Result<Db, CmdError> {
@@ -79,7 +107,7 @@ pub(crate) fn confirm(
 }
 
 pub(crate) fn load_ro_task(
-    ctx: &Ctx,
+    ro: &RoDbCache,
     id: &str,
     action: &str,
     w: &mut dyn Write,
@@ -88,7 +116,7 @@ pub(crate) fn load_ro_task(
         wln(w, &format!("invalid task id: {}", san(&e.to_string())))?;
         return Ok(None);
     }
-    let Some(db) = open_db_ro(ctx)? else {
+    let Some(db) = open_db_ro(ro)? else {
         wln(w, "database not found")?;
         return Ok(None);
     };
@@ -130,6 +158,7 @@ fn resolve_task_tree(db: &Db, task: &Task, ctx: &Ctx) -> PathBuf {
 
 pub(crate) fn run_tail_view(
     ctx: &Ctx,
+    ro: &RoDbCache,
     id: &str,
     reader: &mut dyn BufRead,
     w: &mut dyn Write,
@@ -137,7 +166,7 @@ pub(crate) fn run_tail_view(
     if id.is_empty() {
         return wln(w, "usage: tail <id>");
     }
-    let Some((db, _)) = load_ro_task(ctx, id, "tail", w)? else {
+    let Some((db, _)) = load_ro_task(ro, id, "tail", w)? else {
         return Ok(());
     };
     let runs = match db.runs_for_task(id) {
@@ -180,12 +209,13 @@ pub(crate) fn run_tail_view(
 
 pub(crate) fn action_approve(
     ctx: &Ctx,
+    ro: &RoDbCache,
     id: &str,
     reviewer_arg: Option<&str>,
     reader: &mut dyn BufRead,
     w: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    let Some((db, task)) = load_ro_task(ctx, id, "approve", w)? else {
+    let Some((db, task)) = load_ro_task(ro, id, "approve", w)? else {
         return Ok(());
     };
     let target_tree = resolve_task_tree(&db, &task, ctx);
@@ -232,12 +262,13 @@ pub(crate) fn action_approve(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("cockpit");
-    match head_lock::approve(
+    match head_lock::approve_matching(
         &ctx.data_dir,
         &target_tree,
         &cfg.repo,
         reviewer,
         false,
+        &report.lock_fp,
         &SystemClock,
     ) {
         Ok(a) => wln(
@@ -248,7 +279,14 @@ pub(crate) fn action_approve(
                 san(&a.lock_fp)
             ),
         ),
-        Err(GateError::NothingLocked) => wln(w, "no locked file is changed; nothing approved"),
+        Err(GateError::NothingLocked) => wln(
+            w,
+            &format!("refused: no locked file is changed for {safe_id}; nothing approved"),
+        ),
+        Err(GateError::LockFpMismatch { .. }) => wln(
+            w,
+            &format!("refused: lock_fp mismatch for {safe_id}: locked diff changed since preview"),
+        ),
         Err(e) => wln(w, &format!("approve failed: {}", san(&e.to_string()))),
     }
 }
@@ -270,26 +308,9 @@ fn reset_exhausted_budget(db: &Db, root_id: &str) -> Result<bool, PortError> {
     }
 }
 
-fn clear_stale_receipts(db: &Db, task: &Task, ctx: &Ctx) {
-    let mut roots = vec![PathBuf::from(&task.repo_root)];
-    if let Ok(wt) = worktree_path(Path::new(&task.repo_root), &ctx.worktrees_dir, &task.id) {
-        roots.push(wt);
-    }
-    if let Ok(runs) = db.runs_for_task(&task.id) {
-        for run in runs {
-            if !run.worktree_path.is_empty() {
-                roots.push(PathBuf::from(run.worktree_path));
-            }
-        }
-    }
-    for root in roots {
-        let _ = fs::remove_file(aaf_fp::receipt_path(&ctx.data_dir, &root));
-        let _ = fs::remove_dir_all(ctx.data_dir.join("approvals").join(aaf_fp::repo_id(&root)));
-    }
-}
-
 pub(crate) fn action_rework(
     ctx: &Ctx,
+    ro: &RoDbCache,
     id: &str,
     rest: &str,
     reader: &mut dyn BufRead,
@@ -305,7 +326,7 @@ pub(crate) fn action_rework(
     if reason.is_empty() {
         return wln(w, "usage: rework <id> [--rerun] <reason>");
     }
-    let Some((db_ro, task)) = load_ro_task(ctx, id, "rework", w)? else {
+    let Some((db_ro, task)) = load_ro_task(ro, id, "rework", w)? else {
         return Ok(());
     };
     drop(db_ro);
@@ -330,7 +351,8 @@ pub(crate) fn action_rework(
     }
 
     let db = open_db_rw(ctx)?;
-    let fresh = db.get_task(id).map_err(|e| io_err("rework", e))?;
+    let rw_err = |e: PortError| io_err("rework", e);
+    let fresh = db.get_task(id).map_err(rw_err)?;
     if fresh.state != TaskState::Review {
         return wln(
             w,
@@ -341,20 +363,16 @@ pub(crate) fn action_rework(
     let budget_reset =
         reset_exhausted_budget(&db, &fresh.root_id).map_err(|e| io_err("budget", e))?;
     clear_stale_receipts(&db, &fresh, ctx);
-    let note = format!(
-        "rework: {}",
-        reason.split_whitespace().collect::<Vec<_>>().join(" ")
-    );
-    db.append_context_note(id, &note, now)
-        .map_err(|e| io_err("rework", e))?;
-    db.set_state(id, target, None, now)
-        .map_err(|e| io_err("rework", e))?;
+    let clean_reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    db.append_context_note(id, &format!("rework: {clean_reason}"), now)
+        .map_err(rw_err)?;
+    db.set_state(id, target, None, now).map_err(rw_err)?;
     let p1 = json!({ "reason": reason, "to": target.as_str(), "rerun": rerun, "budget_reset": budget_reset, "by": "human" });
     db.emit(&FactoryEvent::new(EventKind::ReworkRequested, p1.to_string(), now).for_task(id))
-        .map_err(|e| io_err("rework", e))?;
+        .map_err(rw_err)?;
     let p2 = json!({ "from": TaskState::Review.as_str(), "to": target.as_str(), "why": "aaf cockpit rework", "by": "human" });
     db.emit(&FactoryEvent::new(EventKind::TaskStateChanged, p2.to_string(), now).for_task(id))
-        .map_err(|e| io_err("rework", e))?;
+        .map_err(rw_err)?;
     wln(w, &format!("{safe_id} sent back to {}", target.as_str()))
 }
 
@@ -386,11 +404,12 @@ pub(crate) fn action_steer(
 
 pub(crate) fn action_undo(
     ctx: &Ctx,
+    ro: &RoDbCache,
     id: &str,
     reader: &mut dyn BufRead,
     w: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    let Some((db_ro, task)) = load_ro_task(ctx, id, "undo", w)? else {
+    let Some((db_ro, task)) = load_ro_task(ro, id, "undo", w)? else {
         return Ok(());
     };
     let snap: TurnSnapshot = match preview_latest_undo(&db_ro, Path::new(&task.repo_root), id) {
@@ -471,11 +490,12 @@ fn maybe_approve_on_unblock(db: &Db, task: &Task, now: i64) -> Result<bool, Port
 
 pub(crate) fn action_unblock(
     ctx: &Ctx,
+    ro: &RoDbCache,
     id: &str,
     reader: &mut dyn BufRead,
     w: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    let Some((db_ro, task)) = load_ro_task(ctx, id, "unblock", w)? else {
+    let Some((db_ro, task)) = load_ro_task(ro, id, "unblock", w)? else {
         return Ok(());
     };
     drop(db_ro);
@@ -490,7 +510,8 @@ pub(crate) fn action_unblock(
         return wln(w, "cancelled");
     }
     let db = open_db_rw(ctx)?;
-    let fresh = db.get_task(id).map_err(|e| io_err("unblock", e))?;
+    let ub_err = |e: PortError| io_err("unblock", e);
+    let fresh = db.get_task(id).map_err(ub_err)?;
     if fresh.state != TaskState::Blocked {
         return wln(
             w,
@@ -503,16 +524,17 @@ pub(crate) fn action_unblock(
     let now = SystemClock.now();
     let budget_reset =
         reset_exhausted_budget(&db, &fresh.root_id).map_err(|e| io_err("budget", e))?;
-    let plan_approved =
-        maybe_approve_on_unblock(&db, &fresh, now).map_err(|e| io_err("unblock", e))?;
+    let plan_approved = maybe_approve_on_unblock(&db, &fresh, now).map_err(ub_err)?;
+    db.append_context_note(id, "unblocked: aaf cockpit unblock", now)
+        .map_err(ub_err)?;
     db.set_state(id, TaskState::Ready, None, now)
-        .map_err(|e| io_err("unblock", e))?;
+        .map_err(ub_err)?;
     let payload = json!({
         "to": "ready", "why": "aaf cockpit unblock", "by": "human",
         "was": fresh.blocked_reason, "budget_reset": budget_reset, "plan_approved": plan_approved,
     });
     db.emit(&FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now).for_task(id))
-        .map_err(|e| io_err("unblock", e))?;
+        .map_err(ub_err)?;
     wln(w, &format!("{safe_id} is ready"))
 }
 
@@ -536,18 +558,18 @@ pub(crate) fn compute_critical_path(topo: &[String], edges: &[(String, String)])
     }
     let mut blockers: HashMap<&str, Vec<&str>> = HashMap::new();
     for (task, blocked_by) in edges {
-        blockers
-            .entry(task.as_str())
-            .or_default()
-            .push(blocked_by.as_str());
+        blockers.entry(task.as_str()).or_default().push(blocked_by);
     }
-    let mut best_len: HashMap<&str, usize> = HashMap::with_capacity(topo.len());
-    let mut pred: HashMap<&str, &str> = HashMap::new();
+    let (mut best_len, mut pred) = (HashMap::with_capacity(topo.len()), HashMap::new());
     let (mut best_end, mut global_max) = (None, 0usize);
     for node in topo {
         let (mut len, mut prev) = (1usize, None);
         for &dep in blockers.get(node.as_str()).into_iter().flatten() {
-            let cand = best_len.get(dep).copied().unwrap_or(0).saturating_add(1);
+            let cand = best_len
+                .get(dep)
+                .copied()
+                .unwrap_or(0usize)
+                .saturating_add(1);
             if cand > len {
                 (len, prev) = (cand, Some(dep));
             }
@@ -564,10 +586,7 @@ pub(crate) fn compute_critical_path(topo: &[String], edges: &[(String, String)])
         return Vec::new();
     }
     let (mut path, mut seen, mut cur) = (Vec::with_capacity(global_max), HashSet::new(), best_end);
-    while let Some(node) = cur {
-        if !seen.insert(node) {
-            break;
-        }
+    while let Some(node) = cur.filter(|n| seen.insert(*n)) {
         path.push(node.to_string());
         cur = pred.get(node).copied();
     }

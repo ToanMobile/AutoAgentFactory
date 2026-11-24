@@ -116,23 +116,32 @@ impl SelectingPool {
         self.inner.acquire_where(&|p| p.id == bound.account.id)
     }
 
+    fn acquire_for_audit(
+        &self,
+        provider: ProviderKind,
+        task_id: &str,
+    ) -> PortResult<Option<Grant>> {
+        let of_task = self.history.last_account_of_task(task_id, provider)?;
+        // The auditor should not be the author where there is a choice.
+        let other = self
+            .inner
+            .acquire_where(&|p| Some(&p.id) != of_task.as_ref())?;
+        match other {
+            Some(grant) => Ok(Some(grant)),
+            None => self.inner.acquire(),
+        }
+    }
+
     fn sticky(
         &self,
         provider: ProviderKind,
         task_id: &str,
         purpose: Purpose,
     ) -> PortResult<Option<Grant>> {
-        let of_task = self.history.last_account_of_task(task_id, provider)?;
         if purpose == Purpose::Audit {
-            // The auditor should not be the author where there is a choice.
-            let other = self
-                .inner
-                .acquire_where(&|p| Some(&p.id) != of_task.as_ref())?;
-            return match other {
-                Some(grant) => Ok(Some(grant)),
-                None => self.inner.acquire(),
-            };
+            return self.acquire_for_audit(provider, task_id);
         }
+        let of_task = self.history.last_account_of_task(task_id, provider)?;
         let repo = self.repo_root.to_string_lossy();
         let of_repo = self.history.last_account_of_repo(&repo, provider)?;
         for preferred in [of_task, of_repo].into_iter().flatten() {
@@ -186,6 +195,9 @@ impl AccountPool for SelectingPool {
             return self.inner.acquire();
         };
         match self.selection {
+            AccountSelection::LeastUsed if purpose == Purpose::Audit => {
+                self.acquire_for_audit(provider, task_id)
+            }
             AccountSelection::LeastUsed => self.inner.acquire(),
             AccountSelection::Pinned => self.pinned(provider),
             AccountSelection::Sticky => self.sticky(provider, task_id, purpose),

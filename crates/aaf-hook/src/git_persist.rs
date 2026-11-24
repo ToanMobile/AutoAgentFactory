@@ -2,7 +2,11 @@
 //! git calls later trust: stored configuration that names a program, hook
 //! templates, and where the protected branches point.
 
-use crate::git_guard::{Verdict, abbrev, is_protected, options, split};
+use std::path::PathBuf;
+
+use crate::git_guard::{
+    GitCall, Verdict, abbrev, current_branch, is_literal, is_protected, options, split,
+};
 use crate::shell::Cmd;
 use crate::{Ctx, Denial};
 
@@ -101,6 +105,134 @@ fn env_names_template(cmd: &Cmd) -> bool {
         })
 }
 
+fn check_program_value(
+    source: &str,
+    key: &str,
+    val: &str,
+    cwd: PathBuf,
+    ctx: &Ctx,
+) -> Option<Denial> {
+    let trimmed = val.trim();
+    if BOOLEANS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    let payload = trimmed.strip_prefix('!').unwrap_or(trimmed).trim();
+    if payload.is_empty() {
+        return None;
+    }
+    if ctx.depth >= crate::shell::MAX_DEPTH {
+        return Some(Denial::new(
+            RULE,
+            format!("{source} {key} execution is nested too deeply to analyse"),
+            FIX_PROGRAM,
+        ));
+    }
+    let nested = ctx.nested().with_cwd(cwd);
+    crate::bash(payload, nested).map(|d| {
+        Denial::new(
+            RULE,
+            format!(
+                "{source} {key} runs blocked command ({}): {}",
+                d.rule, d.reason
+            ),
+            d.fix,
+        )
+    })
+}
+
+fn git_config_param_keys(raw: &str) -> Option<Vec<String>> {
+    let mut keys = Vec::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_whitespace() {
+            chars.next();
+            continue;
+        }
+        let mut tok = String::new();
+        while let Some(&ch) = chars.peek() {
+            if ch.is_ascii_whitespace() {
+                break;
+            }
+            chars.next();
+            match ch {
+                '\'' => loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        q => tok.push(q),
+                    }
+                },
+                '"' => loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => tok.push(chars.next()?),
+                        q => tok.push(q),
+                    }
+                },
+                '\\' => tok.push(chars.next()?),
+                other => tok.push(other),
+            }
+        }
+        let key = tok.split_once('=').map_or(tok.as_str(), |(k, _)| k);
+        if !key.is_empty() {
+            keys.push(key.to_string());
+        }
+    }
+    Some(keys)
+}
+
+fn check_env_program_config(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
+    let deny_prog = |reason: String| Denial::new(RULE, reason, FIX_PROGRAM);
+    let exported = matches!(cmd.name(), "export" | "declare" | "typeset" | "readonly");
+    let assigned = cmd.assigns.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    let exported_words = cmd
+        .words
+        .iter()
+        .filter(|_| exported)
+        .filter_map(|w| w.split_once('='));
+    let direct_git = cmd.name() == "git" || cmd.dynamic_name;
+    let git_cwd = || {
+        if direct_git {
+            split(cmd.args()).resolve_dir(ctx)
+        } else {
+            ctx.cwd.clone()
+        }
+    };
+    for (env_key, env_val) in assigned.chain(exported_words) {
+        if let Some(suffix) = env_key.strip_prefix("GIT_CONFIG_KEY_") {
+            if !runs_program(env_val) {
+                continue;
+            }
+            if direct_git {
+                let value_var = format!("GIT_CONFIG_VALUE_{suffix}");
+                if let Some((_, val)) = cmd.assigns.iter().rev().find(|(k, _)| *k == value_var)
+                    && is_literal(val)
+                {
+                    if let Some(d) = check_program_value(env_key, env_val, val, git_cwd(), ctx) {
+                        return Some(d);
+                    }
+                    continue;
+                }
+            }
+            return Some(deny_prog(format!(
+                "{env_key} sets {env_val}, a key whose value git runs as a program and cannot be verified"
+            )));
+        }
+        if env_key == "GIT_CONFIG_PARAMETERS" {
+            let Some(keys) = git_config_param_keys(env_val) else {
+                return Some(deny_prog(
+                    "GIT_CONFIG_PARAMETERS could not be parsed safely".to_string(),
+                ));
+            };
+            if let Some(key) = keys.into_iter().find(|k| runs_program(k)) {
+                return Some(deny_prog(format!(
+                    "GIT_CONFIG_PARAMETERS sets {key}, a key whose value git runs as a program"
+                )));
+            }
+        }
+    }
+    None
+}
+
 pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let deny = |(reason, fix): (String, &'static str)| Denial::new(RULE, reason, fix);
     if env_names_template(cmd) {
@@ -108,6 +240,9 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             "a template directory is set for git init and clone, which copy its hooks".to_string(),
             FIX_TEMPLATE,
         )));
+    }
+    if let Some(denial) = check_env_program_config(cmd, ctx) {
+        return Some(denial);
     }
     if let Some(denial) = crate::git_files::check_shell_aaf_refs(cmd, ctx) {
         return Some(denial);
@@ -137,6 +272,34 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             FIX_TEMPLATE,
         )));
     }
+    for &(key, val) in &call.config_pairs {
+        if !runs_program(key) {
+            continue;
+        }
+        if let Some(d) = check_program_value("git -c", key, val, call.resolve_dir(ctx), ctx) {
+            return Some(d);
+        }
+    }
+    for &(key, env_var) in &call.config_env_programs {
+        if let Some(var) = env_var
+            && is_literal(var)
+            && let Some((_, val)) = cmd.assigns.iter().rev().find(|(k, _)| k.as_str() == var)
+            && is_literal(val)
+        {
+            if let Some(d) =
+                check_program_value("git --config-env", key, val, call.resolve_dir(ctx), ctx)
+            {
+                return Some(d);
+            }
+            continue;
+        }
+        return Some(deny((
+            format!(
+                "git --config-env sets {key} from the environment, whose value cannot be verified"
+            ),
+            FIX_PROGRAM,
+        )));
+    }
     if call.rest.iter().any(|arg| is_ext(arg)) {
         return Some(deny((
             "an ext:: remote makes git run the command it spells".to_string(),
@@ -154,7 +317,7 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                 )
             }),
         "update-ref" => update_ref(call.rest),
-        "branch" => branch(call.rest),
+        "branch" => branch(&call, ctx),
         "checkout" | "switch" | "worktree" => force_create(call.rest),
         "symbolic-ref" => symbolic_ref(call.rest),
         "fetch" | "pull" | "push" => refspecs(call.sub, call.rest),
@@ -269,7 +432,7 @@ fn moves(what: &str, branch: &str) -> (String, &'static str) {
 /// `update-ref [-m <reason>] <ref> <new>`: the ref is the first word that is
 /// not an option or the reason. Deleting is `git_guard`'s.
 fn update_ref(rest: &[String]) -> Verdict {
-    if options(rest).any(|arg| arg == "--stdin") {
+    if options(rest).any(|arg| abbrev(arg, "--stdin", 3)) {
         return Some((
             "update-ref --stdin takes its refs from input the hook cannot read".to_string(),
             FIX_PROTECTED,
@@ -286,7 +449,8 @@ fn update_ref(rest: &[String]) -> Verdict {
 /// `branch -f <branch> [<start>]` resets the branch; `-m`/`-M [<old>] <new>`
 /// renames one away or onto another; `-c`/`-C [<old>] <new>` writes the new
 /// one. The start point and the copied branch are only read.
-fn branch(rest: &[String]) -> Verdict {
+fn branch(call: &GitCall, ctx: &Ctx) -> Verdict {
+    let rest = call.rest;
     let (mut force, mut rename, mut copy) = (false, false, false);
     for arg in options(rest).filter(|arg| arg.starts_with('-')) {
         if arg.starts_with("--") {
@@ -309,8 +473,26 @@ fn branch(rest: &[String]) -> Verdict {
     } else {
         &[]
     };
-    let target = written.iter().find(|name| protected(name))?;
-    Some(moves("branch -f/-m/-c", target))
+    if let Some(target) = written.iter().find(|name| protected(name)) {
+        return Some(moves("branch -f/-m/-c", target));
+    }
+    // 1-arg `git branch -m <new>` renames the currently checked-out branch.
+    if rename && names.len() == 1 {
+        match current_branch(call, ctx) {
+            Some(current) if protected(&current) => {
+                return Some(moves("branch -f/-m/-c", &current));
+            }
+            None if ctx.line.git_dir_moved || call.explicit_git_dir().is_some() => {
+                return Some((
+                    "cannot tell which branch `git branch -m` would rename because GIT_DIR/--git-dir was moved"
+                        .to_string(),
+                    FIX_PROTECTED,
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `checkout -B <branch>`, `switch -C <branch>`, `worktree add -B <branch>`:
@@ -318,22 +500,33 @@ fn branch(rest: &[String]) -> Verdict {
 fn force_create(rest: &[String]) -> Verdict {
     let mut args = options(rest);
     while let Some(arg) = args.next() {
-        let glued = ["-B", "-C", "--force-create="]
-            .iter()
-            .find_map(|flag| arg.strip_prefix(flag))
-            .filter(|name| !name.is_empty());
-        let named = match glued {
-            Some(name) => Some(name),
-            // Also last in a cluster (`-qB main`).
-            None if (arg.starts_with('-')
-                && !arg.starts_with("--")
-                && arg.ends_with(['B', 'C']))
-                || abbrev(arg, "--force-create", 9) =>
-            {
-                args.next()
+        let mut named = None;
+        if arg.starts_with("--") {
+            if abbrev(arg, "--force-create", 8) {
+                named = match arg.split_once('=') {
+                    Some((_, name)) => (!name.is_empty()).then_some(name),
+                    None => args.next(),
+                };
             }
-            None => None,
-        };
+        } else if arg.starts_with('-') {
+            for (idx, ch) in arg.char_indices().skip(1) {
+                match ch {
+                    'B' | 'C' => {
+                        let rest_in_word = &arg[idx + ch.len_utf8()..];
+                        named = if rest_in_word.is_empty() {
+                            args.next()
+                        } else {
+                            Some(rest_in_word)
+                        };
+                        break;
+                    }
+                    // `-b` / `-c` take a branch name; the tail of the word is
+                    // that name, not further flags.
+                    'b' | 'c' => break,
+                    _ => {}
+                }
+            }
+        }
         if let Some(name) = named.filter(|name| protected(name)) {
             return Some(moves("-B/-C", name));
         }

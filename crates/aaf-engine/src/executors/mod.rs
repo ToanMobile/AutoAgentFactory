@@ -26,7 +26,8 @@ use aaf_domain::config::RunConfig;
 use aaf_domain::ports::{AgentRequest, AgentRunner, PortError, PortResult};
 
 use self::claude::ClaudeCodeRunner;
-pub use self::env::agent_env;
+pub use self::env::{agent_env, env_pass_secrets};
+use self::env::{push_denied_entries, toolchain_home};
 use self::generic::GenericRunner;
 use self::pty::{CommandSpec, DEFAULT_TAIL_BYTES, LineCallback, PtyOutput};
 use self::sandbox::SandboxPaths;
@@ -99,6 +100,8 @@ const CACHE_WRITE_DENIED: [&str; 13] = [
 /// The part of an Android SDK the owner's shell runs (`adb`, `fastboot`);
 /// the rest of the SDK is where builds install platforms and build tools.
 const SDK_WRITE_DENIED: [&str; 1] = ["platform-tools"];
+const CARGO_WRITE_DENIED: [&str; 4] = ["bin", "env", "config*", "credentials*"];
+const GRADLE_WRITE_DENIED: [&str; 3] = ["init.d", "gradle.properties", "init.gradle*"];
 
 /// The parts of the process environment the executors depend on, passed in so
 /// tests never touch the real one.
@@ -118,6 +121,12 @@ pub struct ExecEnv {
     /// Tool installations outside the home directory that builds write to:
     /// the Android SDK of `ANDROID_HOME` / `ANDROID_SDK_ROOT`.
     pub sdk_dirs: Vec<String>,
+    /// Custom toolchain home overrides (`CARGO_HOME`, `RUSTUP_HOME`,
+    /// `GRADLE_USER_HOME`), honored with the same write-denied guards as
+    /// `~/.cargo` and `~/.gradle`.
+    pub cargo_home: Option<String>,
+    pub rustup_home: Option<String>,
+    pub gradle_user_home: Option<String>,
     /// The environment of the process that starts the agent. Only the names
     /// on the allow-list ([`agent_env`]) are handed on.
     pub parent_env: Vec<(String, String)>,
@@ -166,6 +175,9 @@ impl ExecEnv {
                 .map(|dir| dir.to_string_lossy().into_owned()),
             worktrees_root: var("AAF_WORKTREE_DIR"),
             sdk_dirs: SDK_DIR_ENV.iter().filter_map(|name| var(name)).collect(),
+            cargo_home: var("CARGO_HOME"),
+            rustup_home: var("RUSTUP_HOME"),
+            gradle_user_home: var("GRADLE_USER_HOME"),
             // A name or value that is not UTF-8 cannot be on the allow-list.
             parent_env: std::env::vars_os()
                 .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
@@ -219,26 +231,6 @@ pub(crate) struct AccountPaths {
     pub writable: Vec<String>,
     /// Entries inside `writable` that stay closed.
     pub write_denied: Vec<String>,
-}
-
-/// Collects non-empty runtime values for variables named in `env.env_pass`
-/// (and `env.machine_env_pass`) so [`stream_log::StreamLog`] can scrub them
-/// before writing to disk.
-pub fn env_pass_secrets(env: &ExecEnv) -> Vec<String> {
-    let mut values = Vec::new();
-    for name in env.env_pass.iter().chain(&env.machine_env_pass) {
-        if let Some((_, val)) = env.parent_env.iter().find(|(k, _)| k == name)
-            && !val.is_empty()
-        {
-            values.push(val.clone());
-        }
-        if let Ok(val) = std::env::var(name)
-            && !val.is_empty()
-        {
-            values.push(val);
-        }
-    }
-    values
 }
 
 /// Best-effort opens the run's sanitized stream log when `env.data_dir` is set
@@ -376,22 +368,39 @@ pub(crate) fn run_confined_with_tail(
                 _ => Vec::new(),
             }
         };
+        let cargo_home = toolchain_home(env.cargo_home.as_deref(), &env.parent_env, "CARGO_HOME");
+        let rustup_home =
+            toolchain_home(env.rustup_home.as_deref(), &env.parent_env, "RUSTUP_HOME");
+        let gradle_user_home = toolchain_home(
+            env.gradle_user_home.as_deref(),
+            &env.parent_env,
+            "GRADLE_USER_HOME",
+        );
         let mut writable = env.temp_dirs.clone();
         if !read_only {
             if let Some(home) = &env.home {
                 writable.extend(BUILD_CACHE_DIRS.iter().map(|dir| format!("{home}/{dir}")));
             }
             writable.extend(env.sdk_dirs.iter().cloned());
+            for custom in [&cargo_home, &rustup_home, &gradle_user_home]
+                .into_iter()
+                .flatten()
+            {
+                if !writable.contains(custom) {
+                    writable.push(custom.clone());
+                }
+            }
         }
         writable.extend(account.writable);
         let mut write_denied = account.write_denied;
         let mut write_denied_prefix = Vec::new();
-        if let Some(home) = &env.home {
-            for entry in CACHE_WRITE_DENIED {
-                match entry.strip_suffix('*') {
-                    Some(prefix) => write_denied_prefix.push(format!("{home}/{prefix}")),
-                    None => write_denied.push(format!("{home}/{entry}")),
-                }
+        for (base, entries) in [
+            (env.home.as_deref(), CACHE_WRITE_DENIED.as_slice()),
+            (cargo_home.as_deref(), CARGO_WRITE_DENIED.as_slice()),
+            (gradle_user_home.as_deref(), GRADLE_WRITE_DENIED.as_slice()),
+        ] {
+            if let Some(base) = base {
+                push_denied_entries(base, entries, &mut write_denied, &mut write_denied_prefix);
             }
         }
         for sdk in &env.sdk_dirs {
@@ -406,13 +415,15 @@ pub(crate) fn run_confined_with_tail(
             .flat_map(|(_, value)| std::env::split_paths(value).collect::<Vec<_>>())
             .map(|dir| dir.to_string_lossy().into_owned())
             .collect();
-        create_missing_roots(
-            &writable,
-            write_denied
-                .iter()
-                .chain(&write_denied_prefix)
-                .chain(&path_dirs),
-        )?;
+        if cfg!(target_os = "macos") {
+            create_missing_roots(
+                &writable,
+                write_denied
+                    .iter()
+                    .chain(&write_denied_prefix)
+                    .chain(&path_dirs),
+            )?;
+        }
         if !read_only
             && cfg!(target_os = "macos")
             && let Some(vol_tmp) =
@@ -425,6 +436,19 @@ pub(crate) fn run_confined_with_tail(
                 .as_ref()
                 .map(|home| format!("{home}/{DEFAULT_WORKTREES_REL}"))
         });
+        if !read_only {
+            for path in &request.sandbox.writable_paths {
+                if !writable.contains(path) {
+                    writable.push(path.clone());
+                }
+            }
+        }
+        let mut read_denied: Vec<String> = env.data_dir.iter().cloned().collect();
+        for path in &request.sandbox.read_denied_paths {
+            if !read_denied.contains(path) {
+                read_denied.push(path.clone());
+            }
+        }
         let extra = SandboxPaths {
             writable,
             write_denied,
@@ -432,7 +456,7 @@ pub(crate) fn run_confined_with_tail(
             // Not left to the caller's policy: the signing key lives here.
             // `~/.claude` is deliberately not denied, account profiles
             // symlink into it.
-            read_denied: env.data_dir.iter().cloned().collect(),
+            read_denied,
             read_reopened: queue,
             write_reopened: queue_guest,
             worktree: (!read_only).then(|| request.cwd.clone()),
@@ -540,10 +564,9 @@ pub(crate) fn secondary_volume_temp_dir_in(
 ) -> Option<PathBuf> {
     use std::path::Component;
     let mut comps = canonical.components();
-    if comps.next() != Some(Component::RootDir) {
-        return None;
-    }
-    if comps.next() != Some(Component::Normal(OsStr::new("Volumes"))) {
+    if comps.next() != Some(Component::RootDir)
+        || comps.next() != Some(Component::Normal(OsStr::new("Volumes")))
+    {
         return None;
     }
     let Component::Normal(vol) = comps.next()? else {

@@ -57,8 +57,17 @@ fn resolves_inside(text: &str, ctx: &Ctx) -> bool {
     if paths::escapes(&path) {
         return true;
     }
-    let inside = |path: &Path| ctx.data_dirs.iter().any(|dir| path.starts_with(dir));
-    inside(&path) || inside(&paths::real(&path))
+    let inside = |p: &Path| ctx.data_dirs.iter().any(|dir| p.starts_with(dir));
+    if inside(&path) || inside(&ctx.real_of(&path)) {
+        return true;
+    }
+    if text.contains("..") {
+        let real_dd = ctx.expand_real_dotdot(text);
+        if real_dd != path && (inside(&real_dd) || inside(&ctx.real_of(&real_dd))) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The tails of a short-option word that could be a value glued to it:
@@ -124,7 +133,7 @@ fn inside_after_chdir<'a>(mut words: impl Iterator<Item = &'a str>, ctx: &Ctx) -
             if moved.is_some() && points_inside(dir, base) {
                 return true;
             }
-            moved = Some(base.with_cwd(base.expand(dir)));
+            moved = Some(base.with_cwd(base.expand_real_dotdot(dir)));
         }
     }
     false
@@ -307,13 +316,34 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         .filter(|_| !is_aaf)
         .chain(redirects)
         .any(|text| mentions(text, ctx) || points_inside(text, ctx));
-    (named || (!is_aaf && !ctx.data_dirs.is_empty() && inside_after_chdir(argv(), ctx)))
-        .then(|| deny(&format!("`{}`", cmd.words.join(" "))))
+    // Interpreter commands execute their quoted heredoc / piped-heredoc bodies
+    // without shell lexing (so `interp_guard` inspects them); check those bodies
+    // here too so `python3 - <<'EOF'` cannot reference `AAF_DATA_DIR`.
+    let interp_heredoc = !is_aaf
+        && crate::interp_guard::is_interpreter(cmd.name())
+        && (cmd.heredocs.iter().any(|body| mentions(body, ctx))
+            || std::iter::successors(cmd.feeder.as_deref(), |f| f.feeder.as_deref())
+                .any(|f| f.heredocs.iter().any(|body| mentions(body, ctx))));
+    (named
+        || interp_heredoc
+        || (!is_aaf && !ctx.data_dirs.is_empty() && inside_after_chdir(argv(), ctx)))
+    .then(|| deny(&format!("`{}`", cmd.words.join(" "))))
 }
 
 /// `Read|Write|Edit|MultiEdit`: `raw` as given, `path` resolved.
 pub fn check_file(raw: &str, path: &Path, ctx: &Ctx) -> Option<Denial> {
-    let inside = ctx.data_dirs.iter().any(|dir| paths::is_inside(path, dir));
+    let in_data = |p: &Path| {
+        ctx.data_dirs.iter().any(|dir| p.starts_with(dir)) || {
+            let real = ctx.real_of(p);
+            ctx.data_dirs.iter().any(|dir| real.starts_with(dir))
+        }
+    };
+    let inside = !ctx.data_dirs.is_empty()
+        && (in_data(path)
+            || (raw.contains("..") && {
+                let real_dd = ctx.expand_real_dotdot(raw);
+                real_dd != path && in_data(&real_dd)
+            }));
     // Above an unknown working directory: it cannot be shown to stay out.
     let escapes = !ctx.data_dirs.is_empty() && paths::escapes(path);
     (inside || escapes || mentions(raw, ctx)).then(|| deny(&path.display().to_string()))

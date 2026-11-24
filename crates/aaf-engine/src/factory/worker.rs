@@ -6,15 +6,14 @@ use std::path::Path;
 
 use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::event::EventKind;
-use aaf_domain::gate::Receipt;
-use aaf_domain::ports::{
-    AgentOutcome, AgentRequest, InfraFailure, InfraKind, PortError, PortResult,
-};
+use aaf_domain::gate::{GoldenScore, Receipt};
+use aaf_domain::ports::{AgentOutcome, AgentRequest, PortError, PortResult};
 use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
 use super::audit_backend::{self, AuditBackend};
+pub(super) use super::audit_turn::{halt_message, halt_on_infra, infra_words};
 use super::ports::{AccountPool, Grant};
 use super::post_audit;
 pub(crate) use super::prompt::PLAN_EXECUTOR;
@@ -27,12 +26,23 @@ use super::{Deps, unblock};
 use crate::cross_audit::AUDIT_EXECUTOR;
 use crate::git::TaskWorktree;
 use crate::hook_settings;
-use crate::unblocker::FailureSignal;
+use crate::unblocker::{FailureSignal, PROPOSER_EXECUTOR};
 
 const NO_CHANGE: &str = "the agent run ended without changing anything on the branch";
 const EMPTY_PLAN: &str = "the plan run ended without producing a plan";
 const MAX_PLAN_CHARS: usize = 4000;
 const PLAN_EVENTS_LIMIT: u32 = 100;
+
+/// Pre-gate head-lock audit outcome bound to `(tree_fp, base_sha)` for post-gate reuse.
+#[derive(Debug, Clone)]
+pub(crate) struct PreGateAudit {
+    pub tree_fp: String,
+    pub base_sha: Option<String>,
+    pub audit_provider: String,
+    pub reviewer: String,
+    pub same_account: bool,
+    pub scores: Vec<GoldenScore>,
+}
 
 /// A task waiting for the gate.
 #[derive(Debug, Clone)]
@@ -41,6 +51,8 @@ pub(crate) struct GateJob {
     pub worktree: TaskWorktree,
     /// The cross-audit already ran for the current locked changes.
     pub audited: bool,
+    /// Verified `Clear` receipt from before post-gate audit; re-verified before reuse.
+    pub cached_receipt: Option<Box<Receipt>>,
 }
 
 pub(crate) enum Job {
@@ -54,6 +66,7 @@ pub(crate) enum Job {
     PostAudit {
         job: GateJob,
         receipt: Box<Receipt>,
+        pre_audit: Option<Box<PreGateAudit>>,
     },
     Unblock {
         job: GateJob,
@@ -75,10 +88,14 @@ impl Job {
 /// Where the task is after a job.
 pub(crate) enum Next {
     Gate(GateJob),
+    GateAudited(GateJob, Box<PreGateAudit>),
     Ready,
     /// Ready again because the account ran into its usage limit: the task
     /// itself has not been tried yet, and another account may take it.
     Switch,
+    /// Like [`Next::Switch`], re-queueing an in-flight audit/post-audit job
+    /// directly on another account without re-running the gate.
+    SwitchJob(Box<Job>),
     /// Ready again after a usage limit that no other account may take over
     /// (a pinned repository, or every account limited): the task waits for
     /// a cooldown and is not started again in this invocation.
@@ -124,8 +141,19 @@ pub(crate) fn run_job(
         Job::Audit { job, lock_fp } => {
             audit_backend::execute_audit(deps, audit_backend, job, &lock_fp, grant)
         }
-        Job::PostAudit { job, receipt } => {
-            return post_audit::run_post_gate_audit(deps, audit_backend, job, *receipt, grant);
+        Job::PostAudit {
+            job,
+            receipt,
+            pre_audit,
+        } => {
+            return post_audit::run_post_gate_audit(
+                deps,
+                audit_backend,
+                job,
+                *receipt,
+                pre_audit,
+                grant,
+            );
         }
         Job::Unblock { job, signal } => {
             unblock::handle(deps, &job.task_id, Some(&job.worktree), *signal, grant)
@@ -319,7 +347,7 @@ pub(super) fn end_run(
     )
 }
 
-fn status_of(outcome: &AgentOutcome) -> RunStatus {
+pub(super) fn status_of(outcome: &AgentOutcome) -> RunStatus {
     if outcome.limit_hit.is_some() {
         RunStatus::LimitHit
     } else if outcome.timed_out {
@@ -344,11 +372,11 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
         return run_plan_stage(deps, &task, grant);
     }
     let worktree = deps.git.task_worktree(task_id)?;
-    let has_impl_runs = deps
-        .store
-        .runs_for_task(task_id)?
-        .iter()
-        .any(|run| run.executor != PLAN_EXECUTOR && run.executor != AUDIT_EXECUTOR);
+    let has_impl_runs = deps.store.runs_for_task(task_id)?.iter().any(|run| {
+        run.executor != PLAN_EXECUTOR
+            && run.executor != AUDIT_EXECUTOR
+            && run.executor != PROPOSER_EXECUTOR
+    });
     if has_impl_runs {
         // A failed or interrupted run leaves its edits uncommitted, and git
         // refuses to rebase a dirty tree: keep them as a commit, the next
@@ -415,6 +443,7 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
                 task_id: task_id.to_string(),
                 worktree,
                 audited: false,
+                cached_receipt: None,
             }));
         }
         // A fixed text, so repeated empty runs share one failure digest.
@@ -542,57 +571,4 @@ fn run_plan_in_tree(
     run.request.prompt = build_plan_prompt(task, &env_ctx);
     let outcome = invoke_runner(deps, task, &run)?;
     Ok(Some((run.request.run_id, outcome)))
-}
-
-/// The agent CLI could not work for its account or network: the task goes
-/// back to Ready without a ladder step (no note, no cycle, no failed root).
-/// Network failures return [`Next::RetryAfter`]; auth failures halt immediately.
-pub(super) fn halt_on_infra(
-    deps: &Deps,
-    task_id: &str,
-    grant: &Grant,
-    infra: &InfraFailure,
-) -> PortResult<Next> {
-    let (what, fix) = infra_words(grant, infra);
-    let raw = unblock::one_line(&infra.raw, 300);
-    deps.move_to(
-        task_id,
-        TaskState::Ready,
-        None,
-        &format!("agent CLI failed: {what} ({raw}); not counted as an attempt"),
-    )?;
-    let detail = halt_message(task_id, what, infra, &fix);
-    if infra.kind == InfraKind::Network {
-        return Ok(Next::RetryAfter {
-            until: deps.now(),
-            attempt: 1,
-            detail,
-        });
-    }
-    Ok(Next::Halt(detail))
-}
-
-/// What went wrong, and what a person does about it.
-pub(super) fn infra_words(grant: &Grant, infra: &InfraFailure) -> (&'static str, String) {
-    match infra.kind {
-        InfraKind::Auth => (
-            "its login or credentials were refused",
-            format!(
-                "log in again with account {} (or fix its credentials)",
-                grant.account_id().unwrap_or("default")
-            ),
-        ),
-        InfraKind::Network => (
-            "the provider could not be reached (network)",
-            "fix the network, proxy or DNS".to_string(),
-        ),
-    }
-}
-
-pub(super) fn halt_message(task_id: &str, what: &str, infra: &InfraFailure, fix: &str) -> String {
-    format!(
-        "{task_id}: the agent CLI failed: {what}: {}. The run stopped so no \
-         other task fails for the same reason; {fix}, then run aaf run again",
-        unblock::one_line(&infra.raw, 300)
-    )
 }

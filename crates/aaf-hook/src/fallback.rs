@@ -6,7 +6,8 @@ use std::path::Path;
 
 use crate::shell::basename;
 use crate::{
-    Ctx, Denial, data_guard, git_guard, git_persist, heavy_guard, human_guard, paths, store_guard,
+    Ctx, Denial, data_guard, delete_guard, git_files, git_guard, git_persist, heavy_guard,
+    human_guard, interp_guard, paths, store_guard,
 };
 
 const RULE: &str = "unparsable_command";
@@ -35,28 +36,40 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
 
     if has("git") {
         let dangerous = tokens.iter().any(|t| {
-            t.starts_with("--force")
-                || matches!(
-                    *t,
-                    "-f" | "--no-verify" | "--hard" | "--delete" | "-D" | "--mirror"
-                )
+            git_guard::abbrev(t, "--force", 3)
+                || t.starts_with("--force")
+                || git_guard::abbrev(t, "--no-verify", 6)
+                || git_guard::abbrev(t, "--hard", 3)
+                || git_guard::abbrev(t, "--delete", 3)
+                || git_guard::abbrev(t, "--mirror", 3)
+                || matches!(*t, "-f" | "-d" | "-D")
                 || t.to_ascii_lowercase().contains("hookspath")
                 || git_guard::reads_unseen_config(t)
                 || (t.len() > 1 && t.starts_with(['+', ':']))
         });
         if dangerous
+            || cluster_has('f')
+            || cluster_has('d')
+            || cluster_has('D')
             || (has("commit") && cluster_has('n'))
             || (has("clean") && (cluster_has('x') || cluster_has('X')))
         {
             return Some("mixes git with a history- or hook-changing option");
         }
         let persists = tokens.iter().any(|t| {
-            matches!(*t, "-B" | "-M" | "update-ref" | "symbolic-ref")
-                || t.to_ascii_lowercase().contains("template")
+            matches!(
+                *t,
+                "-B" | "-C" | "-M" | "-m" | "update-ref" | "symbolic-ref"
+            ) || t.to_ascii_lowercase().contains("template")
                 || git_persist::is_ext(t)
                 || (has("config") && git_persist::runs_program(t))
         });
-        if persists {
+        if persists
+            || cluster_has('B')
+            || cluster_has('C')
+            || cluster_has('M')
+            || (has("branch") && cluster_has('m'))
+        {
             return Some("mixes git with a ref, template or program setting");
         }
     }
@@ -64,6 +77,7 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
     if [".git/hooks", ".git/config", ".gitconfig", ".git/refs"]
         .iter()
         .any(|file| lower.contains(file))
+        || git_files::is_aaf_ref_text(line)
     {
         return Some("names a git control file");
     }
@@ -85,14 +99,52 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
             return Some("mixes adb/fastboot with a destructive word");
         }
     }
-    if ["rm", "unlink", "truncate", "mv", "shred", "tee"]
+    if (line.contains('>')
+        || [
+            "rm", "unlink", "truncate", "mv", "shred", "tee", "cp", "install", "rsync", "dd",
+        ]
         .iter()
-        .any(|tool| has(tool))
-        && tokens
-            .iter()
-            .any(|t| paths::protected_name(Path::new(t)).is_some())
+        .any(|tool| has(tool)))
+        && tokens.iter().any(|t| {
+            paths::protected_name(Path::new(t)).is_some()
+                || t.split_once('=')
+                    .is_some_and(|(_, val)| paths::protected_name(Path::new(val)).is_some())
+        })
     {
         return Some("mixes a delete/move with a protected file name");
+    }
+    if let Some(rm_idx) = tokens.iter().position(|t| basename(t) == "rm")
+        && (tokens.contains(&"--recursive") || cluster_has('r') || cluster_has('R'))
+        && tokens[rm_idx + 1..].iter().any(|t| {
+            !t.starts_with('-')
+                && (matches!(*t, "." | "./" | "*")
+                    || t.trim_end_matches('/') == "."
+                    || delete_guard::check_recursive_rm_target(t, "rm", ctx).is_some()
+                    || delete_guard::is_guarded_dir(&ctx.expand(t)))
+        })
+    {
+        return Some("mixes recursive rm with a dangerous or out-of-repo target");
+    }
+    if tokens.iter().any(|t| {
+        paths::is_secret_file(Path::new(t)).is_some()
+            || t.split_once('=')
+                .is_some_and(|(_, val)| paths::is_secret_file(Path::new(val)).is_some())
+    }) {
+        return Some("references a secret file");
+    }
+    if (has("gh") && has("pr") && has("merge"))
+        || (lower.contains("/pulls/") && lower.contains("/merge"))
+        || (lower.contains("pulls/") && lower.contains("/merge"))
+        || lower.contains("mergepullrequest")
+    {
+        return Some("attempts a direct GitHub PR merge");
+    }
+    if tokens
+        .iter()
+        .any(|t| interp_guard::is_interpreter(basename(t)))
+        && interp_guard::has_dangerous_api(line)
+    {
+        return Some("runs an inline interpreter script with a dangerous API");
     }
     if human_guard::names_action(&tokens) {
         return Some("runs aaf with a human-only action");

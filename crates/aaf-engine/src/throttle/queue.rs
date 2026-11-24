@@ -45,9 +45,15 @@ impl WaitTicket {
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let name = format!("{ts:016}-{pid:08}-{seq:08}{EXT}");
         let path = dir.join(&name);
-        let file = private::open_file(&path).ok()?;
+        let draft = dir.join(format!("{name}.tmp"));
+        let file = private::open_file(&draft).ok()?;
         if file.try_lock().is_err() {
-            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&draft);
+            return None;
+        }
+        if fs::rename(&draft, &path).is_err() {
+            unlock_all(std::slice::from_ref(&file));
+            let _ = fs::remove_file(&draft);
             return None;
         }
         Some(WaitTicket { name, path, file })
@@ -60,8 +66,8 @@ impl WaitTicket {
 
 impl Drop for WaitTicket {
     fn drop(&mut self) {
-        unlock_all(std::slice::from_ref(&self.file));
         let _ = fs::remove_file(&self.path);
+        unlock_all(std::slice::from_ref(&self.file));
     }
 }
 
@@ -74,11 +80,9 @@ fn queue_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
 
 /// Counts live waiting processes strictly ahead of `mine` (or all live waiters
 /// when `mine` is `None`). Stale unlocked ticket files from crashed processes
-/// are removed opportunistically.
+/// are removed opportunistically by host processes.
 pub fn older_waiters(data_dir: &Path, mine: Option<&WaitTicket>) -> usize {
-    if is_guest(data_dir) {
-        return 0;
-    }
+    let guest = is_guest(data_dir);
     let dir = throttle_dir(data_dir).join(QUEUE_DIR);
     let Ok(entries) = fs::read_dir(&dir) else {
         return 0;
@@ -98,15 +102,23 @@ pub fn older_waiters(data_dir: &Path, mine: Option<&WaitTicket>) -> usize {
             continue;
         }
         let path = entry.path();
-        let Ok(file) = File::options().read(true).write(true).open(&path) else {
+        let Ok(file) = File::open(&path) else {
             continue;
         };
-        match file.try_lock() {
+        match file.try_lock_shared() {
             Err(TryLockError::WouldBlock) => ahead += 1,
             Ok(()) => {
-                // Holder exited or crashed; drop the stale ticket file.
+                // Release shared probe before attempting exclusive cleanup.
                 unlock_all(std::slice::from_ref(&file));
-                let _ = fs::remove_file(&path);
+                drop(file);
+                if !guest
+                    && let Ok(rw) = File::options().read(true).write(true).open(&path)
+                    && rw.try_lock().is_ok()
+                {
+                    // Holder exited or crashed; remove the stale ticket while locked.
+                    let _ = fs::remove_file(&path);
+                    unlock_all(std::slice::from_ref(&rw));
+                }
             }
             Err(TryLockError::Error(_)) => {}
         }

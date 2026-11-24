@@ -85,26 +85,34 @@ fn parse_name_status(raw: &[u8]) -> Result<Vec<Change>, GateError> {
 /// `git diff --name-status -M <base>` (committed and uncommitted work) plus
 /// untracked, non-ignored files.
 pub fn collect(repo_root: &Path, base: &str, timeout: Duration) -> Result<ChangeSet, GateError> {
-    let raw = git_bytes(
-        repo_root,
-        &[
-            "diff",
-            "--name-status",
-            "-M",
-            "-z",
-            "--no-ext-diff",
-            base,
-            "--",
-        ],
-        timeout,
-    )?;
-    let mut changes = parse_name_status(&raw)?;
-    let raw = git_bytes(
-        repo_root,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-        timeout,
-    )?;
-    let untracked = nul_fields(&raw);
+    let (diff_raw, untracked_raw) = std::thread::scope(|scope| {
+        let untracked_handle = scope.spawn(|| {
+            git_bytes(
+                repo_root,
+                &["ls-files", "--others", "--exclude-standard", "-z"],
+                timeout,
+            )
+        });
+        let diff_raw = git_bytes(
+            repo_root,
+            &[
+                "diff",
+                "--name-status",
+                "-M",
+                "-z",
+                "--no-ext-diff",
+                base,
+                "--",
+            ],
+            timeout,
+        );
+        let untracked_raw = untracked_handle
+            .join()
+            .unwrap_or_else(|_| Err(GateError::Git("ls-files worker panicked".to_string())));
+        (diff_raw, untracked_raw)
+    });
+    let mut changes = parse_name_status(&diff_raw?)?;
+    let untracked = nul_fields(&untracked_raw?);
     changes.extend(untracked.iter().map(|path| Change {
         kind: ChangeKind::Added,
         path: path.clone(),
@@ -115,7 +123,10 @@ pub fn collect(repo_root: &Path, base: &str, timeout: Duration) -> Result<Change
 
 /// Undoes git's C-style quoting of unusual path names.
 fn unquote(quoted: &str) -> String {
-    let inner = quoted.trim_matches('"');
+    let inner = quoted
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(quoted);
     let mut bytes = Vec::with_capacity(inner.len());
     let mut chars = inner.bytes().peekable();
     while let Some(byte) = chars.next() {
@@ -124,6 +135,10 @@ fn unquote(quoted: &str) -> String {
             continue;
         }
         match chars.next() {
+            Some(b'a') => bytes.push(0x07),
+            Some(b'b') => bytes.push(0x08),
+            Some(b'f') => bytes.push(0x0c),
+            Some(b'v') => bytes.push(0x0b),
             Some(b'n') => bytes.push(b'\n'),
             Some(b't') => bytes.push(b'\t'),
             Some(b'r') => bytes.push(b'\r'),
@@ -225,11 +240,15 @@ fn untracked_lines(repo_root: &Path, path: &str) -> Result<Option<AddedLines>, G
     if !fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file()) {
         return Ok(None);
     }
-    let bytes = fs::read(&full)?;
-    // Same heuristic git uses to call a file binary.
-    if bytes.iter().take(8000).any(|b| *b == 0) {
+    let mut file = fs::File::open(&full)?;
+    let mut bytes = Vec::new();
+    // Same heuristic git uses to call a file binary: read at most 8000 bytes
+    // first so large untracked binaries are rejected without buffering them.
+    file.by_ref().take(8000).read_to_end(&mut bytes)?;
+    if bytes.contains(&0) {
         return Ok(None);
     }
+    file.read_to_end(&mut bytes)?;
     let lines = String::from_utf8_lossy(&bytes)
         .lines()
         .zip(1u32..)
@@ -315,12 +334,12 @@ fn is_binary(repo_root: &Path, file: &AddedLines, timeout: Duration) -> bool {
     disk_nul && !diffed_as_text(repo_root, &file.path, timeout)
 }
 
-/// Added lines of tracked changes plus the whole content of untracked text
-/// files. `skip` filters paths that are never scanned.
-pub fn added_lines(
+/// Added lines of tracked changes relative to `base`, filtered by `skip` and
+/// excluding real binaries. Independent of [`collect`], so the gate can run it
+/// in parallel with `collect` and `store_compliance::scan`.
+pub fn diff_added_tracked(
     repo_root: &Path,
     base: &str,
-    untracked: &[String],
     skip: &dyn Fn(&str) -> bool,
     timeout: Duration,
 ) -> Result<Vec<AddedLines>, GateError> {
@@ -348,8 +367,32 @@ pub fn added_lines(
     )?;
     let mut files = parse_added(&String::from_utf8_lossy(&raw));
     files.retain(|file| !skip(&file.path) && !is_binary(repo_root, file, timeout));
+    Ok(files)
+}
+
+/// Appends whole-file added lines for untracked text files not filtered by `skip`.
+pub(crate) fn append_untracked_lines(
+    repo_root: &Path,
+    files: &mut Vec<AddedLines>,
+    untracked: &[String],
+    skip: &dyn Fn(&str) -> bool,
+) -> Result<(), GateError> {
     for path in untracked.iter().filter(|path| !skip(path)) {
         files.extend(untracked_lines(repo_root, path)?);
     }
+    Ok(())
+}
+
+/// Added lines of tracked changes plus the whole content of untracked text
+/// files. `skip` filters paths that are never scanned.
+pub fn added_lines(
+    repo_root: &Path,
+    base: &str,
+    untracked: &[String],
+    skip: &dyn Fn(&str) -> bool,
+    timeout: Duration,
+) -> Result<Vec<AddedLines>, GateError> {
+    let mut files = diff_added_tracked(repo_root, base, skip, timeout)?;
+    append_untracked_lines(repo_root, &mut files, untracked, skip)?;
     Ok(files)
 }

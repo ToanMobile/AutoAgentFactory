@@ -132,7 +132,7 @@ const KILL_ROUNDS: u32 = 300;
 /// Name the relay shows in the process table.
 pub(crate) const RELAY_NAME: &str = "aaf-signal-relay";
 
-pub(crate) struct SignalRelay {
+pub struct SignalRelay {
     /// Closing it without [`DONE`] is how the relay learns that `aaf`
     /// ended before the command.
     alive: Option<PipeWriter>,
@@ -141,7 +141,7 @@ pub(crate) struct SignalRelay {
 
 impl SignalRelay {
     /// Starts the relay for the command whose process group is `pgid`.
-    pub(crate) fn start(pgid: u32) -> io::Result<SignalRelay> {
+    pub fn start(pgid: u32) -> io::Result<SignalRelay> {
         SignalRelay::start_with_grace(pgid, GRACE_SECS)
     }
 
@@ -189,7 +189,7 @@ impl SignalRelay {
     }
 
     /// The command is over: lets the relay end and collects it.
-    pub(crate) fn stop(mut self) {
+    pub fn stop(mut self) {
         self.say_done();
         // It exits as soon as it reads the line; the bound is for a shell
         // that does not, which must not hang the command's result.

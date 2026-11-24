@@ -1,12 +1,14 @@
 //! `TaskStore` on SQLite: tasks and their dependency edges.
 
 use aaf_domain::blocked::BlockedReason;
+use aaf_domain::budget::RootBudget;
 use aaf_domain::dag;
+use aaf_domain::event::FactoryEvent;
 use aaf_domain::ports::{PortError, PortResult, TaskStore};
 use aaf_domain::task::{Priority, Task, TaskState};
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
-use super::{Db, corrupt, sql_err};
+use super::{Db, corrupt, sql_err, to_i64};
 
 const TASK_COLS_V3: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
      state, priority, fingerprint, blocked_reason, unblock_cycles, created_at, updated_at";
@@ -345,6 +347,177 @@ impl TaskStore for Db {
         self.read(move |conn| {
             let sql = format!("SELECT {cols} FROM tasks WHERE parent_id = ?1{TASK_ORDER}");
             query_tasks(conn, &sql, params![parent_id], has_scope_paths)
+        })
+    }
+}
+
+impl Db {
+    /// Atomically persists a split (root budget if absent, child tasks, DAG
+    /// edges, creation events, and parent context note) in one `BEGIN IMMEDIATE`
+    /// transaction. Rejects with [`PortError::Conflict`] if `parent_id` already
+    /// has subtasks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_split_atomic(
+        &self,
+        parent_id: &str,
+        budget: &RootBudget,
+        children: &[Task],
+        deps: &[(String, String)],
+        events: &[FactoryEvent],
+        parent_note: &str,
+        now: i64,
+    ) -> PortResult<()> {
+        let parent_id = parent_id.to_string();
+        let budget = budget.clone();
+        let tokens_used = to_i64(budget.tokens_used, "tokens_used")?;
+        let token_limit = to_i64(budget.token_limit, "token_limit")?;
+        let wall_secs_used = to_i64(budget.wall_secs_used, "wall_secs_used")?;
+        let wall_secs_limit = to_i64(budget.wall_secs_limit, "wall_secs_limit")?;
+        let mut encoded_children = Vec::with_capacity(children.len());
+        for child in children {
+            let spec = to_json(&child.spec, "spec")?;
+            let notes = to_json(&child.context_notes, "context_notes")?;
+            let blocked = match &child.blocked_reason {
+                Some(reason) => Some(to_json(reason, "blocked_reason")?),
+                None => None,
+            };
+            let scope_paths = to_json(&child.scope_paths, "scope_paths")?;
+            encoded_children.push((child.clone(), spec, notes, blocked, scope_paths));
+        }
+        let deps = deps.to_vec();
+        let events = events.to_vec();
+        let parent_note = parent_note.to_string();
+
+        self.write(move |tx| {
+            let parent_state: Option<String> = tx
+                .prepare_cached("SELECT state FROM tasks WHERE id = ?1")
+                .and_then(|mut stmt| {
+                    stmt.query_row(params![parent_id], |row| row.get(0))
+                        .optional()
+                })
+                .map_err(sql_err)?;
+            let parent_state = parent_state.ok_or_else(|| task_not_found(&parent_id))?;
+            let parent_state = TaskState::parse(&parent_state)
+                .ok_or_else(|| corrupt("tasks.state", &parent_state))?;
+            if !matches!(parent_state, TaskState::Ready | TaskState::Backlog) {
+                return Err(PortError::Invalid(format!(
+                    "task {parent_id} in state {} cannot be split (must be ready or backlog)",
+                    parent_state.as_str()
+                )));
+            }
+            let has_children = tx
+                .prepare_cached("SELECT 1 FROM tasks WHERE parent_id = ?1 LIMIT 1")
+                .and_then(|mut stmt| stmt.exists(params![parent_id]))
+                .map_err(sql_err)?;
+            if has_children {
+                return Err(PortError::Conflict(format!(
+                    "task {parent_id} already has subtasks"
+                )));
+            }
+            tx.prepare_cached(
+                "INSERT OR IGNORE INTO root_budgets (root_id, tokens_used, token_limit, \
+                 wall_secs_used, wall_secs_limit, cycles_used, cycles_limit, frozen) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )
+            .and_then(|mut stmt| {
+                stmt.execute(params![
+                    budget.root_id,
+                    tokens_used,
+                    token_limit,
+                    wall_secs_used,
+                    wall_secs_limit,
+                    budget.cycles_used,
+                    budget.cycles_limit,
+                    budget.frozen,
+                ])
+            })
+            .map_err(sql_err)?;
+
+            for (task, spec, notes, blocked, scope_paths) in encoded_children {
+                tx.prepare_cached(
+                    "INSERT INTO tasks (id, repo_root, parent_id, root_id, depth, title, spec, \
+                     context_notes, state, priority, fingerprint, blocked_reason, unblock_cycles, \
+                     created_at, updated_at, scope_paths) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                )
+                .and_then(|mut stmt| {
+                    stmt.execute(params![
+                        task.id,
+                        task.repo_root,
+                        task.parent_id,
+                        task.root_id,
+                        task.depth,
+                        task.title,
+                        spec,
+                        notes,
+                        parent_state.as_str(),
+                        task.priority.as_str(),
+                        task.fingerprint,
+                        blocked,
+                        task.unblock_cycles,
+                        task.created_at,
+                        task.updated_at,
+                        scope_paths,
+                    ])
+                })
+                .map_err(sql_err)?;
+            }
+
+            let mut edges: Vec<(String, String)> = tx
+                .prepare_cached("SELECT task_id, blocked_by FROM task_deps")
+                .and_then(|mut stmt| {
+                    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect()
+                })
+                .map_err(sql_err)?;
+            for (task_id, blocked_by) in deps {
+                require_task(tx, &task_id)?;
+                require_task(tx, &blocked_by)?;
+                if dag::would_create_cycle(&edges, &task_id, &blocked_by) {
+                    return Err(PortError::Conflict(format!(
+                        "dependency {task_id} -> {blocked_by} would create a cycle"
+                    )));
+                }
+                tx.prepare_cached(
+                    "INSERT OR IGNORE INTO task_deps (task_id, blocked_by) VALUES (?1, ?2)",
+                )
+                .and_then(|mut stmt| stmt.execute(params![task_id, blocked_by]))
+                .map_err(sql_err)?;
+                edges.push((task_id, blocked_by));
+            }
+
+            for event in events {
+                tx.prepare_cached(
+                    "INSERT INTO events (task_id, run_id, kind, payload_json, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .and_then(|mut stmt| {
+                    stmt.execute(params![
+                        event.task_id,
+                        event.run_id,
+                        event.kind.as_str(),
+                        event.payload_json,
+                        event.created_at,
+                    ])
+                })
+                .map_err(sql_err)?;
+            }
+
+            let stored: Option<String> = tx
+                .prepare_cached("SELECT context_notes FROM tasks WHERE id = ?1")
+                .and_then(|mut stmt| {
+                    stmt.query_row(params![parent_id], |row| row.get(0))
+                        .optional()
+                })
+                .map_err(sql_err)?;
+            let stored = stored.ok_or_else(|| task_not_found(&parent_id))?;
+            let mut notes: Vec<String> = from_json(&stored, "tasks.context_notes")?;
+            notes.push(parent_note);
+            let notes_json = to_json(&notes, "context_notes")?;
+            tx.prepare_cached("UPDATE tasks SET context_notes = ?1, updated_at = ?2 WHERE id = ?3")
+                .and_then(|mut stmt| stmt.execute(params![notes_json, now, parent_id]))
+                .map_err(sql_err)?;
+            Ok(())
         })
     }
 }

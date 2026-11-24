@@ -3,6 +3,7 @@
 //! SIGKILL has no way out: the directory then keeps a blob of every changed
 //! and untracked file for good.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -33,12 +34,13 @@ pub(crate) fn sweep(git_dir: &Path, own_pid: u32, alive: &dyn Fn(u32) -> bool) {
     let Ok(entries) = fs::read_dir(git_dir) else {
         return;
     };
+    let mut alive_cache: HashMap<u32, bool> = HashMap::new();
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(owner) else {
             continue;
         };
-        if pid == own_pid || alive(pid) {
+        if pid == own_pid || *alive_cache.entry(pid).or_insert_with(|| alive(pid)) {
             continue;
         }
         let path = entry.path();

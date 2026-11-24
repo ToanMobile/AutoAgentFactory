@@ -5,12 +5,14 @@
 //! This is a fence against accidents, not a security boundary: the real
 //! boundary is the sandbox and server-side branch protection.
 
+use std::cell::OnceCell;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 
 pub mod adb_guard;
+mod cwd;
 pub mod data_guard;
 pub mod delete_guard;
 pub mod fallback;
@@ -25,8 +27,12 @@ pub mod interp_guard;
 pub mod paths;
 pub mod pr_merge_guard;
 pub mod secret_guard;
+pub(crate) mod sed_script;
 pub mod shell;
 pub mod store_guard;
+mod tool_exec;
+
+pub(crate) use cwd::bash;
 
 /// Everything the guards need from the outside world.
 pub struct HookEnv<'a> {
@@ -106,7 +112,7 @@ pub struct Line {
 }
 
 impl Line {
-    fn of(script: &shell::Script) -> Line {
+    pub(crate) fn of(script: &shell::Script) -> Line {
         let sets = |vars: [&str; 2]| {
             script
                 .cmds
@@ -124,7 +130,13 @@ impl Line {
 /// Per-call state handed to each guard.
 pub struct Ctx<'a> {
     pub env: &'a HookEnv<'a>,
+    /// Original workspace working directory from the hook payload/env before
+    /// any `cd`, `env -C`, or tool `workdir` override.
+    pub workspace_cwd: PathBuf,
     pub cwd: PathBuf,
+    /// Cached `paths::real(&self.cwd)` so non-existent tokens under `cwd` avoid
+    /// repeated ancestor `canonicalize` syscalls.
+    real_cwd: OnceCell<PathBuf>,
     /// The data dir as given and with symlinks resolved.
     pub data_dirs: Vec<PathBuf>,
     /// How many git aliases deep the command being judged is.
@@ -145,7 +157,9 @@ impl<'a> Ctx<'a> {
         }
         Ctx {
             env,
+            workspace_cwd: cwd.clone(),
             cwd,
+            real_cwd: OnceCell::new(),
             data_dirs,
             depth: 0,
             line: Line::default(),
@@ -153,9 +167,16 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn with_cwd(&self, cwd: PathBuf) -> Ctx<'a> {
+        let real_cwd = if cwd == self.cwd {
+            self.real_cwd.clone()
+        } else {
+            OnceCell::new()
+        };
         Ctx {
             env: self.env,
+            workspace_cwd: self.workspace_cwd.clone(),
             cwd,
+            real_cwd,
             data_dirs: self.data_dirs.clone(),
             depth: self.depth,
             line: self.line,
@@ -170,12 +191,51 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    pub(crate) fn set_cwd(&mut self, cwd: PathBuf) {
+        if cwd != self.cwd {
+            self.cwd = cwd;
+            self.real_cwd = OnceCell::new();
+        }
+    }
+
     pub fn expand(&self, raw: &str) -> PathBuf {
         paths::expand(raw, &self.cwd, self.env.home.as_deref())
     }
 
+    pub fn expand_real_dotdot(&self, raw: &str) -> PathBuf {
+        paths::expand_real_dotdot(raw, &self.cwd, self.env.home.as_deref())
+    }
+
+    fn real_cwd(&self) -> &Path {
+        self.real_cwd.get_or_init(|| paths::real(&self.cwd))
+    }
+
+    /// Symlink-free form of `path`, using a cached `real(cwd)` fast path when
+    /// `path` is under `self.cwd` and its first relative component does not exist.
+    pub fn real_of(&self, path: &Path) -> PathBuf {
+        if !self.cwd.as_os_str().is_empty()
+            && let Ok(rel) = path.strip_prefix(&self.cwd)
+        {
+            if rel.as_os_str().is_empty() {
+                return self.real_cwd().to_path_buf();
+            }
+            let mut comps = rel.components();
+            if let Some(Component::Normal(first)) = comps.next()
+                && !comps.any(|c| matches!(c, Component::ParentDir))
+                && self.cwd.join(first).symlink_metadata().is_err()
+            {
+                return self.real_cwd().join(rel);
+            }
+        }
+        paths::real(path)
+    }
+
     pub fn root(&self) -> Option<PathBuf> {
         (self.env.repo_root)(&self.cwd)
+    }
+
+    pub fn workspace_root(&self) -> Option<PathBuf> {
+        (self.env.repo_root)(&self.workspace_cwd)
     }
 
     /// Outside any repository the working directory stands in for the root.
@@ -240,14 +300,23 @@ pub fn decide(input: &[u8], env: &HookEnv) -> Decision {
         },
         "Write" | "Edit" | "MultiEdit" | "Read" => match field("file_path") {
             Some(raw) => {
+                let check_one = |path: &Path| {
+                    data_guard::check_file(raw, path, &ctx).or_else(|| {
+                        if tool == "Read" {
+                            secret_guard::check_read_target(raw, path, &ctx)
+                        } else {
+                            delete_guard::check_file(path, &ctx)
+                                .or_else(|| git_files::check_file(path))
+                        }
+                    })
+                };
                 let path = ctx.expand(raw);
-                data_guard::check_file(raw, &path, &ctx).or_else(|| {
-                    if tool == "Read" {
-                        secret_guard::check_read_target(raw, &path, &ctx)
-                    } else {
-                        delete_guard::check_file(&path, &ctx)
-                            .or_else(|| git_files::check_file(&path))
+                check_one(&path).or_else(|| {
+                    if !raw.contains("..") {
+                        return None;
                     }
+                    let real_dd = ctx.expand_real_dotdot(raw);
+                    (real_dd != path).then(|| check_one(&real_dd)).flatten()
                 })
             }
             None => return bad_input("file tool call without tool_input.file_path"),
@@ -257,46 +326,87 @@ pub fn decide(input: &[u8], env: &HookEnv) -> Decision {
     denial.map_or(Decision::Allow, Decision::Deny)
 }
 
-/// Every guard on one simple command.
-pub(crate) fn judge(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
+/// Applies any leading `-C <dir>` prefix before handing `git` commands to
+/// `delete_guard`, so chained `-C` flags (e.g. `git -C .claude -C . rm ...`)
+/// resolve cumulatively while redirects stay relative to the shell's `cwd`.
+fn check_delete_guard(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
+    if cmd.name() == "git" && !cmd.dynamic_name {
+        let call = git_guard::split(cmd.args());
+        if let Some(prefix) = call.resolve_prefix_dir(ctx) {
+            if !cmd.redirects.is_empty() {
+                let redirects_only = shell::Cmd {
+                    redirects: cmd.redirects.clone(),
+                    ..shell::Cmd::default()
+                };
+                if let Some(denial) = delete_guard::check_cmd(&redirects_only, ctx) {
+                    return Some(denial);
+                }
+                let no_redirects = shell::Cmd {
+                    redirects: Vec::new(),
+                    ..cmd.clone()
+                };
+                let moved = ctx.with_cwd(prefix);
+                return delete_guard::check_cmd(&no_redirects, &moved);
+            }
+            let moved = ctx.with_cwd(prefix);
+            return delete_guard::check_cmd(cmd, &moved);
+        }
+    }
+    delete_guard::check_cmd(cmd, ctx)
+}
+
+fn judge_direct(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
     data_guard::check_cmd(cmd, ctx)
         .or_else(|| human_guard::check(cmd))
         .or_else(|| git_guard::check(cmd, ctx))
         .or_else(|| git_persist::check(cmd, ctx))
         .or_else(|| git_files::check_cmd(cmd, ctx))
         .or_else(|| adb_guard::check(cmd, ctx))
-        .or_else(|| delete_guard::check_cmd(cmd, ctx))
+        .or_else(|| check_delete_guard(cmd, ctx))
         .or_else(|| secret_guard::check_cmd(cmd, ctx))
         .or_else(|| interp_guard::check_cmd(cmd, ctx))
+        .or_else(|| tool_exec::check_cmd(cmd, ctx))
         .or_else(|| pr_merge_guard::check(cmd))
         .or_else(|| store_guard::check(cmd, ctx))
         .or_else(|| heavy_guard::check(cmd))
 }
 
-fn bash(command: &str, mut ctx: Ctx) -> Option<Denial> {
-    let script = shell::parse(command);
-    ctx.line = Line::of(&script);
-    for text in &script.opaque {
-        if let Some(denial) = fallback::check(text, &ctx) {
-            return Some(denial);
+/// Every guard on one simple command. When a wrapper changes the working
+/// directory (`env -C` / `sudo -D`), file redirections are opened by the outer
+/// shell in the original `ctx.cwd` and judged there first, while here-strings
+/// (`<<<`) remain with the command in the moved directory.
+pub(crate) fn judge(cmd: &shell::Cmd, ctx: &Ctx) -> Option<Denial> {
+    if let Some(cwd) = cwd::wrapped_cwd(&cmd.wrapped, ctx) {
+        let has_file_redirects = cmd.redirects.iter().any(|r| r.op != "<<<");
+        if has_file_redirects {
+            let redirects_only = shell::Cmd {
+                redirects: cmd
+                    .redirects
+                    .iter()
+                    .filter(|r| r.op != "<<<")
+                    .cloned()
+                    .collect(),
+                ..shell::Cmd::default()
+            };
+            if let Some(denial) = judge_direct(&redirects_only, ctx) {
+                return Some(denial);
+            }
+            let no_file_redirects = shell::Cmd {
+                redirects: cmd
+                    .redirects
+                    .iter()
+                    .filter(|r| r.op == "<<<")
+                    .cloned()
+                    .collect(),
+                ..cmd.clone()
+            };
+            let moved = ctx.with_cwd(cwd);
+            return judge_direct(&no_file_redirects, &moved);
         }
+        let moved = ctx.with_cwd(cwd);
+        return judge_direct(cmd, &moved);
     }
-    if let Some(denial) = heavy_guard::check_script(&script.cmds) {
-        return Some(denial);
-    }
-    for cmd in &script.cmds {
-        let denial = judge(cmd, &ctx);
-        if denial.is_some() {
-            return denial;
-        }
-        // Later relative paths resolve against the new directory.
-        if matches!(cmd.name(), "cd" | "pushd")
-            && let Some(dir) = cmd.args().iter().find(|arg| !arg.starts_with('-'))
-        {
-            ctx.cwd = ctx.expand(dir);
-        }
-    }
-    None
+    judge_direct(cmd, ctx)
 }
 
 pub fn render(decision: &Decision) -> Outcome {

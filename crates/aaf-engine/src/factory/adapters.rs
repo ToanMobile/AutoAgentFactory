@@ -1,12 +1,12 @@
 //! Production implementations of the factory's ports on the engine modules.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aaf_domain::account::{AccountProfile, AccountState, ProviderKind};
 use aaf_domain::config::{MachineConfig, RepoConfig};
-use aaf_domain::gate::{GateMode, HeadLockReport, Receipt};
+use aaf_domain::gate::{GateMode, GateStatus, HeadLockReport, RECEIPT_SCHEMA_VERSION, Receipt};
 use aaf_domain::ports::{AccountStore, Clock, LimitHit, PortError, PortResult, RunStore};
 
 use super::ports::{AccountPool, GateRunner, Grant, Notifier};
@@ -109,6 +109,70 @@ impl GateRunner for RealGate {
             &self.cfg,
             &base.diff_target,
         ))
+    }
+
+    fn verify_cached_receipt(&self, tree: &Path, receipt: &Receipt) -> bool {
+        if receipt.status != GateStatus::Clear || receipt.schema_version != RECEIPT_SCHEMA_VERSION {
+            return false;
+        }
+        let Ok(canon) = std::fs::canonicalize(tree) else {
+            return false;
+        };
+        if Path::new(&receipt.repo_root) != canon {
+            return false;
+        }
+        let expected_cfg = gate::config_hash(&self.cfg);
+        if receipt.config_hash != expected_cfg {
+            return false;
+        }
+        let Ok(base) = gate::base::resolve(&canon, &self.cfg.gate.base_ref, gate::GIT_TIMEOUT)
+        else {
+            return false;
+        };
+        if receipt.base_sha.as_deref() != base.sha.as_deref() {
+            return false;
+        }
+        let Ok(hidden) = aaf_fp::hidden_files(&canon, gate::GIT_TIMEOUT) else {
+            return false;
+        };
+        if !hidden.flagged.is_empty() || !hidden.ignored.is_empty() {
+            return false;
+        }
+        let Ok(current_fp) = aaf_fp::tree_fp(&canon, gate::GIT_TIMEOUT) else {
+            return false;
+        };
+        if current_fp != receipt.tree_fp {
+            return false;
+        }
+        if self.cfg.proof.required
+            && crate::proof::verify_proof(
+                &canon,
+                &self.data_dir,
+                &self.cfg.proof,
+                Some(&current_fp),
+            )
+            .is_err()
+        {
+            return false;
+        }
+        let Ok(key) = aaf_fp::load_key(&self.data_dir) else {
+            return false;
+        };
+        let Ok(stored) = aaf_fp::read_receipt(&self.data_dir, &key, &canon) else {
+            return false;
+        };
+        stored.status == GateStatus::Clear
+            && stored.schema_version == RECEIPT_SCHEMA_VERSION
+            && Path::new(&stored.repo_root) == canon
+            && stored.tree_fp == current_fp
+            && stored.config_hash == expected_cfg
+            && stored.base_sha == receipt.base_sha
+    }
+
+    fn tree_binding(&self, tree: &Path) -> Option<(String, Option<String>)> {
+        let fp = aaf_fp::tree_fp(tree, gate::GIT_TIMEOUT).ok()?;
+        let base = gate::base::resolve(tree, &self.cfg.gate.base_ref, gate::GIT_TIMEOUT).ok()?;
+        Some((fp, base.sha))
     }
 
     fn rerun_failed_test(&self, tree: &Path, receipt: &Receipt) -> PortResult<Option<RerunResult>> {
@@ -317,9 +381,29 @@ impl AccountPool for RouterPool {
     }
 }
 
-/// Posts T5 escalations to `notifications.webhook_url`.
+/// Posts T5 escalations to `notifications.webhook_url` using a shared reusable
+/// HTTP agent and tighter factory-worker timeouts so dead endpoints do not
+/// stall workers.
 pub struct WebhookNotifier {
     pub url: String,
+}
+
+impl WebhookNotifier {
+    /// Tighter non-blocking-friendly delivery options for factory workers
+    /// (`connect_timeout: 3s`, `timeout: 5s`, `max_retries: 1`).
+    pub fn factory_options() -> WebhookOptions {
+        WebhookOptions {
+            connect_timeout: Duration::from_secs(3),
+            timeout: Duration::from_secs(5),
+            max_retries: 1,
+            ..WebhookOptions::default()
+        }
+    }
+
+    fn shared_agent() -> &'static ureq::Agent {
+        static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+        AGENT.get_or_init(|| webhook::build_agent(&Self::factory_options()))
+    }
 }
 
 impl Notifier for WebhookNotifier {
@@ -327,7 +411,8 @@ impl Notifier for WebhookNotifier {
         if self.url.trim().is_empty() {
             return Ok(false);
         }
-        webhook::send(&self.url, event, &WebhookOptions::default())
+        let opts = Self::factory_options();
+        webhook::send_with_agent(Self::shared_agent(), &self.url, event, &opts)
             .map(|()| true)
             .map_err(|e| e.to_string())
     }

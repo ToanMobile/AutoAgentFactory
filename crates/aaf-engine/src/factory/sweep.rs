@@ -2,6 +2,7 @@
 //! [`super::scheduler::Scheduler`].
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use aaf_domain::event::EventKind;
 use aaf_domain::ports::{PortError, PortResult};
@@ -9,8 +10,10 @@ use aaf_domain::run::{RunFinish, RunStatus};
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
-use super::scheduler::Scheduler;
-use super::{Deps, finish, unblock};
+use super::schedule_order::{MAX_TRANSIENT_RETRIES, transient_backoff_secs};
+use super::scheduler::{DEFAULT_RATE_LIMIT_COOLDOWN_SECS, Scheduler};
+use super::worker::Job;
+use super::{Deps, Mode, finish, unblock};
 use crate::git::{GitError, TaskWorktree};
 
 fn reap_running_runs(
@@ -82,20 +85,225 @@ pub(super) fn startup_sweep(deps: &Deps) -> Vec<String> {
 }
 
 impl<'a> Scheduler<'a> {
+    pub(super) fn is_cooling_down(&self, for_audit: bool) -> bool {
+        let slot = if for_audit {
+            self.state.audit_default_wait_until
+        } else {
+            self.state.work_default_wait_until
+        };
+        slot.is_some_and(|u| self.deps.now() < u)
+    }
+
+    pub(super) fn set_default_wait(&mut self, for_audit: bool, deadline: i64) {
+        let slot = if for_audit {
+            &mut self.state.audit_default_wait_until
+        } else {
+            &mut self.state.work_default_wait_until
+        };
+        *slot = Some(deadline);
+    }
+
+    pub(super) fn handle_switch(&mut self, task_id: String) -> PortResult<()> {
+        let state = self.deps.store.get_task(&task_id)?.state;
+        let is_audit = state == TaskState::Gating;
+        let count = self.pool_for(is_audit).provider_account_count()?;
+        if count == 0 {
+            self.set_default_wait(is_audit, self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
+            self.parked.insert(task_id.clone());
+            self.requeue_if_ready(task_id, state);
+            return Ok(());
+        }
+        let restarts = self.state.restarts.entry(task_id.clone()).or_insert(0);
+        let can_retry = *restarts < count.max(1);
+        if can_retry {
+            *restarts += 1;
+        }
+        if state == TaskState::Gating {
+            if can_retry {
+                self.queue_gating_task(task_id)?;
+            } else {
+                self.parked.insert(task_id);
+            }
+        } else {
+            if can_retry {
+                self.state.started.remove(&task_id);
+            }
+            self.summary.requeued.push(task_id);
+        }
+        Ok(())
+    }
+
+    pub(super) fn handle_switch_job(&mut self, task_id: String, job: Job) -> PortResult<()> {
+        let state = self.deps.store.get_task(&task_id)?.state;
+        let is_audit = matches!(job, Job::Audit { .. } | Job::PostAudit { .. });
+        let count = self.pool_for(is_audit).provider_account_count()?;
+        if count == 0 {
+            self.gating_in_flight.remove(&task_id);
+            self.set_default_wait(is_audit, self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
+            self.parked.insert(task_id.clone());
+            self.requeue_if_ready(task_id, state);
+            return Ok(());
+        }
+        let restarts = self.state.restarts.entry(task_id.clone()).or_insert(0);
+        let can_retry = *restarts < count.max(1);
+        if can_retry {
+            *restarts += 1;
+            self.state.jobs.push_back(job);
+        } else {
+            self.gating_in_flight.remove(&task_id);
+            self.parked.insert(task_id);
+        }
+        Ok(())
+    }
+
+    /// Releases tasks whose wait/cooldown deadlines have elapsed so idle slots
+    /// in `Mode::Auto` can pick them up immediately while sibling workers run.
+    pub(super) fn expire_waits(&mut self) {
+        let now = self.deps.now();
+        let expired: Vec<String> = self
+            .state
+            .task_wait_until
+            .iter()
+            .filter(|(_, u)| **u <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            self.state.task_wait_until.remove(&id);
+            self.parked.remove(&id);
+        }
+        if self.state.work_default_wait_until.is_some_and(|u| u <= now) {
+            self.state.work_default_wait_until = None;
+            self.parked.clear();
+        }
+        if self
+            .state
+            .audit_default_wait_until
+            .is_some_and(|u| u <= now)
+        {
+            self.state.audit_default_wait_until = None;
+            self.parked.clear();
+        }
+    }
+
+    /// Computes how long `Scheduler::drive` waits before waking an idle slot in
+    /// `Mode::Auto`, bounded to `[200ms, 5s]`.
+    pub(super) fn next_wake_duration(&self) -> Duration {
+        const MIN_WAKE: Duration = Duration::from_millis(200);
+        const MAX_WAKE: Duration = Duration::from_secs(5);
+        let now = self.deps.now();
+        let earliest = self
+            .state
+            .task_wait_until
+            .values()
+            .copied()
+            .chain(self.state.work_default_wait_until)
+            .chain(self.state.audit_default_wait_until)
+            .min();
+        match earliest {
+            Some(deadline) => {
+                let secs = deadline.saturating_sub(now);
+                if secs <= 0 {
+                    MIN_WAKE
+                } else {
+                    Duration::from_secs(u64::try_from(secs).unwrap_or(5)).clamp(MIN_WAKE, MAX_WAKE)
+                }
+            }
+            None => MAX_WAKE,
+        }
+    }
+
+    pub(super) fn handle_wait(&mut self, task_id: String, until: Option<i64>) -> PortResult<()> {
+        let state = self.deps.store.get_task(&task_id)?.state;
+        let is_audit = state == TaskState::Gating;
+        let now = self.deps.now();
+        let deadline = until
+            .filter(|&u| u > now)
+            .unwrap_or(now + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
+        let count = self.pool_for(is_audit).provider_account_count()?;
+        if count == 0 {
+            self.set_default_wait(is_audit, deadline);
+        } else {
+            self.state.task_wait_until.insert(task_id.clone(), deadline);
+        }
+        self.parked.insert(task_id.clone());
+        self.requeue_if_ready(task_id, state);
+        Ok(())
+    }
+
+    pub(super) fn handle_retry_after(
+        &mut self,
+        task_id: String,
+        hint_until: i64,
+        hint_attempt: u32,
+        detail: String,
+    ) -> PortResult<()> {
+        let state = self.deps.store.get_task(&task_id)?.state;
+        self.requeue_if_ready(task_id.clone(), state);
+        if self.mode == Mode::Once {
+            self.summary.halted.get_or_insert(detail);
+            return Ok(());
+        }
+        let tries = self
+            .state
+            .transient_retries
+            .entry(task_id.clone())
+            .or_default();
+        *tries = (*tries)
+            .max(hint_attempt.saturating_sub(1))
+            .saturating_add(1);
+        if *tries <= MAX_TRANSIENT_RETRIES {
+            let wait = i64::try_from(transient_backoff_secs(*tries)).unwrap_or(60);
+            let deadline = hint_until.max(self.deps.now() + wait);
+            self.state.task_wait_until.insert(task_id, deadline);
+        } else {
+            self.summary.halted.get_or_insert(detail);
+        }
+        Ok(())
+    }
+
     /// Picks up live `Gating` tasks (e.g. `aaf board rework` without `--rerun`)
     /// in `Mode::Auto` without restarting the daemon.
     pub(super) fn poll_gating(&mut self) -> PortResult<()> {
-        if self.default_cooling_down() {
+        if self.is_cooling_down(true) {
             return Ok(());
         }
+        let now = self.deps.now();
         let repo = Some(self.deps.settings.repo_root.as_str());
         for task in self.deps.store.list_tasks(repo, Some(TaskState::Gating))? {
-            if self.gating_in_flight.contains(&task.id) || self.parked.contains(&task.id) {
+            let waiting = self
+                .state
+                .task_wait_until
+                .get(&task.id)
+                .is_some_and(|&u| u > now);
+            if self.gating_in_flight.contains(&task.id) || self.parked.contains(&task.id) || waiting
+            {
                 continue;
             }
             self.queue_gating_task(task.id)?;
         }
         Ok(())
+    }
+
+    /// Throttled review sweep shared by the review-cap and review-dep waiter paths.
+    pub(super) fn maybe_sweep_review(&mut self, swept: &mut bool) -> PortResult<bool> {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        let secs = INTERVAL.as_secs() as i64;
+        let wall_due = self
+            .state
+            .last_review_sweep
+            .is_none_or(|t| t.elapsed() >= INTERVAL);
+        let clock_due = self
+            .state
+            .last_review_sweep_now
+            .is_some_and(|t| self.deps.now().saturating_sub(t) >= secs);
+        if *swept || !(wall_due || clock_due) {
+            return Ok(false);
+        }
+        *swept = true;
+        self.sweep_review(false)?;
+        self.state.last_review_sweep = Some(std::time::Instant::now());
+        self.state.last_review_sweep_now = Some(self.deps.now());
+        Ok(true)
     }
 
     /// A task in Review whose branch has reached the base is done: this is
@@ -104,9 +312,13 @@ impl<'a> Scheduler<'a> {
         let deps = self.deps;
         let repo = Some(deps.settings.repo_root.as_str());
         let review = deps.store.list_tasks(repo, Some(TaskState::Review))?;
+        if review.is_empty() {
+            return Ok(());
+        }
+        self.state.last_review_sweep = Some(std::time::Instant::now());
         // Offline: the tasks stay in Review and are looked at again on the
         // next sweep.
-        if review.is_empty() || !(base_is_fresh || self.fetch_base()) {
+        if !(base_is_fresh || self.fetch_base()) {
             return Ok(());
         }
         let mut remaining: Vec<Task> = Vec::new();

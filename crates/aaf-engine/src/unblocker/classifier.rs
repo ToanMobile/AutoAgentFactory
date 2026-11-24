@@ -429,3 +429,148 @@ fn push_word(word: &str, out: &mut String) {
         }
     }
 }
+
+const GATE_DIAG_MAX_CHARS: usize = 1200;
+const MAX_DIAG_STATIC_FINDINGS: usize = 5;
+const MAX_DIAG_LOCKED_FILES: usize = 5;
+const MAX_DIAG_ERROR_LINES: usize = 8;
+const FALLBACK_DIAG_TAIL_LINES: usize = 6;
+
+const HIGH_SIGNAL_NEEDLES: &[&str] = &[
+    "error",
+    "failed",
+    "panicked at",
+    "assertion",
+    "cannot find",
+    "mismatched types",
+    "expected ",
+    "thread '",
+    "test result: failed",
+    "traceback",
+    "exception",
+    "syntaxerror",
+    "typeerror",
+    "referenceerror",
+    "--> ",
+];
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                let _ = chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            } else {
+                let _ = chars.next();
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn is_high_signal_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    HIGH_SIGNAL_NEEDLES.iter().any(|n| lower.contains(n))
+}
+
+fn neutralize_untrusted_tags(text: &str) -> String {
+    const TAGS: [&[u8]; 2] = [b"</untrusted-data", b"<untrusted-data"];
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0usize;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let matched = TAGS.iter().copied().find(|tag| {
+            at + tag.len() <= bytes.len() && bytes[at..at + tag.len()].eq_ignore_ascii_case(tag)
+        });
+        if let Some(tag) = matched {
+            out.push_str(&text[copied..at]);
+            if tag.starts_with(b"</") {
+                out.push_str("&lt;/untrusted-data");
+            } else {
+                out.push_str("&lt;untrusted-data");
+            }
+            at += tag.len();
+            copied = at;
+        } else {
+            at += 1;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// Extracts compact, ANSI-stripped, tag-neutralized gate diagnostics (<= 1200
+/// chars) from critical static findings, blocked head-lock paths, and failing
+/// command output so T3/T4 retries know *what* broke without re-running blindly.
+pub(crate) fn extract_gate_diagnostics(signal: &FailureSignal) -> Option<String> {
+    let receipt = signal.gate.as_ref()?;
+    let mut parts: Vec<String> = Vec::new();
+
+    let crit: Vec<String> = receipt
+        .static_findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .take(MAX_DIAG_STATIC_FINDINGS)
+        .map(|f| {
+            let loc = match f.line {
+                Some(line) => format!("{}:{line}", f.file),
+                None => f.file.clone(),
+            };
+            format!("{} @ {loc}: {}", f.rule, one_line(&f.message))
+        })
+        .collect();
+    if !crit.is_empty() {
+        parts.push(format!("static_critical: {}", crit.join("; ")));
+    }
+
+    if receipt.head_lock.status == LockStatus::Blocked
+        && !receipt.head_lock.locked_changes.is_empty()
+    {
+        let locked: Vec<&str> = receipt
+            .head_lock
+            .locked_changes
+            .iter()
+            .take(MAX_DIAG_LOCKED_FILES)
+            .map(|c| c.path.as_str())
+            .collect();
+        parts.push(format!("head_lock: {}", locked.join(", ")));
+    }
+
+    for cmd in receipt.commands.iter().filter(|c| !c.passed()) {
+        let cleaned = strip_ansi(&cmd.log_tail);
+        let non_empty: Vec<String> = cleaned
+            .lines()
+            .map(one_line)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if non_empty.is_empty() {
+            continue;
+        }
+        let mut selected: Vec<String> = non_empty
+            .iter()
+            .filter(|l| is_high_signal_line(l))
+            .take(MAX_DIAG_ERROR_LINES)
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            let start = non_empty.len().saturating_sub(FALLBACK_DIAG_TAIL_LINES);
+            selected = non_empty[start..].to_vec();
+        }
+        parts.push(format!("cmd[{}]: {}", cmd.name, selected.join(" | ")));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    let joined = neutralize_untrusted_tags(&parts.join(" || "));
+    Some(truncate_chars(&joined, GATE_DIAG_MAX_CHARS))
+}

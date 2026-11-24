@@ -60,6 +60,7 @@ pub enum ToolAction {
 pub struct ParsedCall {
     pub resolved_host: HookHost,
     pub cwd: Option<String>,
+    pub cwd_override: Option<String>,
     pub action: ToolAction,
 }
 
@@ -277,7 +278,14 @@ fn detect_host(payload: &Map<String, Value>, tool: &str) -> HookHost {
     }
     if matches!(
         tool,
-        "shell" | "shell_command" | "exec_command" | "apply_patch"
+        "shell"
+            | "shell_command"
+            | "exec_command"
+            | "apply_patch"
+            | "delete_file"
+            | "edit_file"
+            | "create_file"
+            | "view_file"
     ) {
         return HookHost::Codex;
     }
@@ -296,6 +304,26 @@ fn extract_cwd(payload: &Map<String, Value>) -> Option<String> {
                 .filter(|cwd| !cwd.is_empty())
         })
         .map(str::to_string)
+}
+
+fn extract_cwd_override(tool_input: Option<&Value>) -> Result<Option<String>, Denial> {
+    let Some(obj) = tool_input.and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let mut chosen = None;
+    for field in ["workdir", "directory", "dir_path"] {
+        if let Some(val) = obj.get(field) {
+            let Some(dir) = val.as_str() else {
+                return Err(bad_input(format!(
+                    "tool_input.{field} must be a JSON string"
+                )));
+            };
+            if chosen.is_none() && !dir.is_empty() {
+                chosen = Some(dir.to_string());
+            }
+        }
+    }
+    Ok(chosen)
 }
 
 fn parse_action(
@@ -369,6 +397,10 @@ fn parse_payload_with_host(
         requested
     };
     let cwd = extract_cwd(payload);
+    let cwd_override = match extract_cwd_override(payload.get("tool_input")) {
+        Ok(dir) => dir,
+        Err(denial) => return (resolved_host, Err(denial)),
+    };
     let action = match parse_action(resolved_host, tool, payload.get("tool_input")) {
         Ok(action) => action,
         Err(denial) => return (resolved_host, Err(denial)),
@@ -378,6 +410,7 @@ fn parse_payload_with_host(
         Ok(ParsedCall {
             resolved_host,
             cwd,
+            cwd_override,
             action,
         }),
     )
@@ -391,16 +424,34 @@ pub fn parse_payload(input: &[u8], requested: HookHost) -> Result<ParsedCall, De
 }
 
 fn check_read_path(raw: &str, ctx: &Ctx) -> Option<Denial> {
+    let check_one = |path: &std::path::Path| {
+        crate::data_guard::check_file(raw, path, ctx)
+            .or_else(|| crate::secret_guard::check_read_target(raw, path, ctx))
+    };
     let path = ctx.expand(raw);
-    crate::data_guard::check_file(raw, &path, ctx)
-        .or_else(|| crate::secret_guard::check_read_target(raw, &path, ctx))
+    check_one(&path).or_else(|| {
+        if !raw.contains("..") {
+            return None;
+        }
+        let real_dd = ctx.expand_real_dotdot(raw);
+        (real_dd != path).then(|| check_one(&real_dd)).flatten()
+    })
 }
 
 fn check_write_path(raw: &str, ctx: &Ctx) -> Option<Denial> {
+    let check_one = |path: &std::path::Path| {
+        crate::data_guard::check_file(raw, path, ctx)
+            .or_else(|| crate::delete_guard::check_file(path, ctx))
+            .or_else(|| crate::git_files::check_file(path))
+    };
     let path = ctx.expand(raw);
-    crate::data_guard::check_file(raw, &path, ctx)
-        .or_else(|| crate::delete_guard::check_file(&path, ctx))
-        .or_else(|| crate::git_files::check_file(&path))
+    check_one(&path).or_else(|| {
+        if !raw.contains("..") {
+            return None;
+        }
+        let real_dd = ctx.expand_real_dotdot(raw);
+        (real_dd != path).then(|| check_one(&real_dd)).flatten()
+    })
 }
 
 /// Evaluates one normalized [`ToolAction`] against the full `aaf-hook` guard suite.
@@ -422,13 +473,21 @@ pub fn decide_for_host(input: &[u8], env: &HookEnv, host: HookHost) -> (Decision
         Ok(parsed) => parsed,
         Err(denial) => return (Decision::Deny(denial), resolved_host),
     };
-    let cwd = match (parsed.cwd.as_deref(), &env.cwd) {
+    let base_cwd = match (parsed.cwd.as_deref(), &env.cwd) {
         (Some(given), Some(base)) => base.join(given),
         (Some(given), None) => PathBuf::from(given),
         (None, Some(base)) => base.clone(),
         (None, None) => PathBuf::new(),
     };
-    let ctx = Ctx::new(env, cwd);
+    let base_ctx = Ctx::new(env, base_cwd);
+    let ctx = match parsed.cwd_override.as_deref() {
+        Some(override_dir) => {
+            let moved =
+                crate::paths::expand_real_dotdot(override_dir, &base_ctx.cwd, env.home.as_deref());
+            base_ctx.with_cwd(moved)
+        }
+        None => base_ctx,
+    };
     let decision = evaluate(parsed.action, ctx).map_or(Decision::Allow, Decision::Deny);
     (decision, parsed.resolved_host)
 }

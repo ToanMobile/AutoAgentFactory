@@ -327,3 +327,23 @@ fn inspect_mcp_servers_rejects_symlink() {
     let err = inspect_mcp_servers(tmp.path()).unwrap_err();
     assert!(err.contains("symlink"), "{err}");
 }
+
+#[test]
+fn rejects_oversized_system_prompt_and_invalid_skill_slugs() {
+    use super::{MAX_SYSTEM_PROMPT_CHARS, validate_and_normalize_role};
+    let mut role = builtin_roles().remove(0);
+    role.system_prompt = "a".repeat(MAX_SYSTEM_PROMPT_CHARS + 1);
+    let err = validate_and_normalize_role(role, Path::new("r.toml")).unwrap_err();
+    assert!(err.contains("system_prompt"), "{err}");
+
+    for bad in ["", "  ", "../escape", "--flag", "has space", "a/b"] {
+        let mut r = builtin_roles().remove(0);
+        r.skills = vec![bad.to_string()];
+        let err = validate_and_normalize_role(r, Path::new("r.toml")).unwrap_err();
+        assert!(err.contains("invalid skill slug"), "{bad}: {err}");
+    }
+    let mut ok_role = builtin_roles().remove(0);
+    ok_role.skills = vec![" code-review ".to_string(), "qa_v2".to_string()];
+    let norm = validate_and_normalize_role(ok_role, Path::new("r.toml")).unwrap();
+    assert_eq!(norm.skills, vec!["code-review", "qa_v2"]);
+}

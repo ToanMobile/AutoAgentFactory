@@ -74,6 +74,11 @@ fn is_excluded_dir(name: &str, parent_is_unity: bool) -> bool {
         || (parent_is_unity && UNITY_GENERATED.contains(&name))
 }
 
+fn is_cargo_target_dir(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join("CACHEDIR.TAG"))
+        .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+}
+
 pub(crate) fn walk(root: &Path) -> Inventory {
     let mut inv = Inventory::default();
     let mut stack: Vec<(PathBuf, usize)> = vec![(PathBuf::new(), 0)];
@@ -123,6 +128,9 @@ pub(crate) fn walk(root: &Path) -> Inventory {
         }
         for name in dirs.iter().rev() {
             if is_excluded_dir(name, is_unity) {
+                continue;
+            }
+            if name == "target" && is_cargo_target_dir(&dir.join(name)) {
                 continue;
             }
             // The Kotlin of an Apple source set is app code that reaches the

@@ -1,9 +1,11 @@
 //! A git alias is another spelling of a command: its value is judged as the
 //! command it expands to, and refused when that cannot be worked out.
 
+use std::path::PathBuf;
+
 use crate::git_guard::GitCall;
 use crate::shell::{self, Cmd};
-use crate::{Ctx, Denial, fallback, judge};
+use crate::{Ctx, Denial, cwd, fallback, judge};
 
 /// Commands git runs itself whatever the configuration says: an alias can
 /// never take one of these names, so they need no lookup. Only names every
@@ -91,6 +93,7 @@ pub fn check(call: &GitCall, cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             "takes its value from the environment and cannot be analysed",
         ));
     }
+    let shell_cwd = call.resolve_dir(ctx);
     for alias in &call.aliases {
         // The rest of the line belongs to the alias only when it is the one
         // invoked; a defined alias is judged either way.
@@ -105,12 +108,13 @@ pub fn check(call: &GitCall, cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             .filter(|(at, _)| *at < alias.at || *at >= alias.at + alias.width)
             .map(|(_, option)| option.clone())
             .collect();
-        if let Some(why) = expansion(alias.value, &globals, extra, ctx) {
+        if let Some(why) = expansion(alias.value, &globals, extra, ctx, shell_cwd.clone()) {
             return Some(deny(alias.name, &why));
         }
     }
     if call.sub == "config" {
-        return stored(call.rest, ctx);
+        let moved = ctx.with_cwd(shell_cwd);
+        return stored(call.rest, &moved);
     }
     configured(call, cmd, ctx)
 }
@@ -169,12 +173,12 @@ fn configured(call: &GitCall, cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             "the command points git at a repository the hook does not look in",
         ));
     }
-    let dir = call.dir.map_or_else(|| ctx.cwd.clone(), |d| ctx.expand(d));
+    let dir = call.resolve_dir(ctx);
     let Some(listing) = (ctx.env.git_config)(&dir) else {
         return Some(unknown("the git configuration could not be read"));
     };
     let value = alias_value(&listing, name)?;
-    expansion(value, call.globals, call.rest, ctx).map(|why| deny(name, &why))
+    expansion(value, call.globals, call.rest, ctx, dir).map(|why| deny(name, &why))
 }
 
 /// `git config [set|--add|…] alias.<name> <value>`. Later commands could
@@ -187,30 +191,39 @@ fn stored(rest: &[String], ctx: &Ctx) -> Option<Denial> {
         .skip_while(|arg| crate::git_guard::alias_name(arg).is_none());
     let name = positional.next()?;
     let value = positional.next()?;
-    expansion(value, &[], &[], ctx).map(|why| deny(name, &why))
+    expansion(value, &[], &[], ctx, ctx.cwd.clone()).map(|why| deny(name, &why))
 }
 
 /// Why the command an alias value stands for is refused. `extra` are the
-/// arguments the alias is invoked with.
-fn expansion(value: &str, globals: &[String], extra: &[String], ctx: &Ctx) -> Option<String> {
+/// arguments the alias is invoked with; `shell_cwd` is the directory resolved
+/// from any leading `git -C` flags for `!` shell aliases.
+fn expansion(
+    value: &str,
+    globals: &[String],
+    extra: &[String],
+    ctx: &Ctx,
+    shell_cwd: PathBuf,
+) -> Option<String> {
     if ctx.depth >= shell::MAX_DEPTH {
         return Some("is nested too deeply to analyse".to_string());
     }
-    let ctx = ctx.nested();
+    let git_ctx = ctx.nested();
+    let shell_ctx = git_ctx.with_cwd(shell_cwd);
     let refused = |denial: Denial| format!("expands to a refused command ({})", denial.reason);
     let (body, is_shell) = match value.strip_prefix('!') {
         Some(body) => (body, true),
         None => (value, false),
     };
     let mut script = shell::parse(body);
-    if ctx.line.aaf_untrusted {
+    if git_ctx.line.aaf_untrusted {
         // The line that rebinds `aaf` runs this alias in its environment.
         script.distrust_aaf();
     }
+    let opaque_ctx = if is_shell { &shell_ctx } else { &git_ctx };
     if let Some(denial) = script
         .opaque
         .iter()
-        .find_map(|text| fallback::check(text, &ctx))
+        .find_map(|text| fallback::check(text, opaque_ctx))
     {
         return Some(refused(denial));
     }
@@ -220,14 +233,14 @@ fn expansion(value: &str, globals: &[String], extra: &[String], ctx: &Ctx) -> Op
     if is_shell {
         // git appends the arguments to the script. Where they end up inside
         // it (`f() { git push "$@"; }; f`) is unknown, so every command of
-        // the script is also judged with them appended.
-        return script.cmds.iter().find_map(|cmd| {
+        // the script is also judged with them appended, while tracking
+        // `cd`/`pushd`/`popd` and subshell scopes across the alias body.
+        return cwd::eval_script(&script, shell_ctx, |cmd, cur| {
             let mut with_extra = cmd.clone();
             with_extra.words.extend(extra.iter().cloned());
-            judge(cmd, &ctx)
-                .or_else(|| judge(&with_extra, &ctx).filter(|_| !extra.is_empty()))
-                .map(refused)
-        });
+            judge(cmd, cur).or_else(|| judge(&with_extra, cur).filter(|_| !extra.is_empty()))
+        })
+        .map(refused);
     }
     let plain = match script.cmds.as_slice() {
         [cmd] if !cmd.dynamic_name && cmd.assigns.is_empty() && cmd.redirects.is_empty() => cmd,
@@ -241,5 +254,5 @@ fn expansion(value: &str, globals: &[String], extra: &[String], ctx: &Ctx) -> Op
         words,
         ..Cmd::default()
     };
-    judge(&cmd, &ctx).map(refused)
+    judge(&cmd, &git_ctx).map(refused)
 }

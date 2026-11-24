@@ -93,36 +93,57 @@ fn records(listing: &str) -> impl Iterator<Item = &str> {
     listing.split('\0').filter(|record| !record.is_empty())
 }
 
-/// Tracked files that are on disk with a flag that makes git skip them.
-fn flagged(call: &GitCall<'_>) -> Result<Vec<String>, FpError> {
+/// Tracked files on disk with a flag that makes git skip them, plus normal
+/// tracked `.gitignore` paths (already covered by the fingerprint).
+fn flagged(call: &GitCall<'_>) -> Result<(Vec<String>, BTreeSet<String>), FpError> {
     let listing = git_raw(call, &["ls-files", "-v", "-z"], &[], None)
         .map_err(|f| f.into_error("ls-files"))?;
-    Ok(records(&listing)
-        .filter_map(|record| {
-            let (tag, path) = record.split_once(' ')?;
-            // `S` is skip-worktree; a lowercase tag is assume-unchanged.
-            let hidden =
-                tag == "S" || (!tag.is_empty() && tag.chars().all(|c| c.is_ascii_lowercase()));
+    let mut flagged = Vec::new();
+    let mut tracked_gitignores = BTreeSet::new();
+    for record in records(&listing) {
+        let Some((tag, path)) = record.split_once(' ') else {
+            continue;
+        };
+        // `S` is skip-worktree; a lowercase tag is assume-unchanged.
+        let hidden = tag == "S" || (!tag.is_empty() && tag.chars().all(|c| c.is_ascii_lowercase()));
+        if hidden {
             // A file the sparse checkout left out is not on disk: no
             // command can read it, and the index entry stands for it.
-            (hidden && call.repo.join(path).symlink_metadata().is_ok()).then(|| path.to_string())
-        })
-        .collect())
+            if call.repo.join(path).symlink_metadata().is_ok() {
+                flagged.push(path.to_string());
+            }
+        } else if Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == ".gitignore")
+        {
+            tracked_gitignores.insert(path.to_string());
+        }
+    }
+    Ok((flagged, tracked_gitignores))
 }
 
 /// The `.gitignore` files among `sources` that the fingerprint covers:
 /// tracked, or untracked and not ignored themselves.
-fn covered(call: &GitCall<'_>, sources: &BTreeSet<&str>) -> Result<BTreeSet<String>, FpError> {
-    let candidates: Vec<String> = sources
-        .iter()
-        .filter(|source| {
-            let path = Path::new(source);
-            path.is_relative() && path.file_name().is_some_and(|name| name == ".gitignore")
-        })
-        .map(|source| format!(":(literal){source}"))
-        .collect();
+fn covered(
+    call: &GitCall<'_>,
+    sources: &BTreeSet<&str>,
+    tracked_gitignores: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, FpError> {
+    let mut known = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for &source in sources {
+        let path = Path::new(source);
+        if !path.is_relative() || !path.file_name().is_some_and(|name| name == ".gitignore") {
+            continue;
+        }
+        if tracked_gitignores.contains(source) {
+            known.insert(source.to_string());
+        } else {
+            candidates.push(format!(":(literal){source}"));
+        }
+    }
     if candidates.is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok(known);
     }
     let mut args = vec![
         "ls-files",
@@ -134,11 +155,13 @@ fn covered(call: &GitCall<'_>, sources: &BTreeSet<&str>) -> Result<BTreeSet<Stri
     ];
     args.extend(candidates.iter().map(String::as_str));
     let listing = git_raw(call, &args, &[], None).map_err(|f| f.into_error("ls-files"))?;
-    Ok(records(&listing).map(str::to_string).collect())
+    known.extend(records(&listing).map(str::to_string));
+    Ok(known)
 }
 
-/// Files on disk that are ignored by a rule the fingerprint does not cover.
-fn ignored(call: &GitCall<'_>) -> Result<Vec<IgnoredFile>, FpError> {
+/// First half of the ignored-file scan: lists ignored work-tree entries and
+/// maps each to the ignore rule that hid it.
+fn scan_ignored(call: &GitCall<'_>) -> Result<Option<(String, String)>, FpError> {
     // `--directory`: a directory that is ignored as a whole (`target/`,
     // `node_modules/`) is one entry, and git does not walk into it.
     let list = [
@@ -150,9 +173,8 @@ fn ignored(call: &GitCall<'_>) -> Result<Vec<IgnoredFile>, FpError> {
         "-z",
     ];
     let listing = git_raw(call, &list, &[], None).map_err(|f| f.into_error("ls-files"))?;
-    let entries: Vec<&str> = records(&listing).collect();
-    if entries.is_empty() {
-        return Ok(Vec::new());
+    if records(&listing).next().is_none() {
+        return Ok(None);
     }
     let asked = Some(listing.clone().into_bytes());
     let answer = match git_raw(call, &["check-ignore", "-v", "-z", "--stdin"], &[], asked) {
@@ -161,6 +183,20 @@ fn ignored(call: &GitCall<'_>) -> Result<Vec<IgnoredFile>, FpError> {
         Err(Failure::Exit { code: Some(1), .. }) => String::new(),
         Err(failure) => return Err(failure.into_error("check-ignore")),
     };
+    Ok(Some((listing, answer)))
+}
+
+/// Second half of the ignored-file scan: filters out entries ignored by a
+/// `.gitignore` that the fingerprint already covers.
+fn resolve_ignored(
+    call: &GitCall<'_>,
+    scan: Option<(String, String)>,
+    tracked_gitignores: &BTreeSet<String>,
+) -> Result<Vec<IgnoredFile>, FpError> {
+    let Some((listing, answer)) = scan else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<&str> = records(&listing).collect();
     // Per path: source, line number, pattern, path.
     let fields: Vec<&str> = answer.split_terminator('\0').collect();
     if !fields.len().is_multiple_of(4) {
@@ -168,7 +204,7 @@ fn ignored(call: &GitCall<'_>) -> Result<Vec<IgnoredFile>, FpError> {
     }
     let source_of: BTreeMap<&str, &str> = fields.chunks(4).map(|rule| (rule[3], rule[0])).collect();
     let sources: BTreeSet<&str> = source_of.values().copied().collect();
-    let covered = covered(call, &sources)?;
+    let covered = covered(call, &sources, tracked_gitignores)?;
 
     let mut hidden = Vec::new();
     for (at, path) in entries.iter().enumerate() {
@@ -208,10 +244,17 @@ pub fn hidden_files(repo_root: &Path, timeout: Duration) -> Result<HiddenFiles, 
 }
 
 pub(crate) fn hidden_files_using(call: &GitCall<'_>) -> Result<HiddenFiles, FpError> {
-    Ok(HiddenFiles {
-        flagged: flagged(call)?,
-        ignored: ignored(call)?,
-    })
+    let (flagged_res, scan_res) = std::thread::scope(|scope| {
+        let flagged_handle = scope.spawn(|| flagged(call));
+        let scan_res = scan_ignored(call);
+        let flagged_res = flagged_handle
+            .join()
+            .unwrap_or_else(|_| Err(FpError::Git("ls-files worker panicked".to_string())));
+        (flagged_res, scan_res)
+    });
+    let (flagged, tracked_gitignores) = flagged_res?;
+    let ignored = resolve_ignored(call, scan_res?, &tracked_gitignores)?;
+    Ok(HiddenFiles { flagged, ignored })
 }
 
 #[cfg(test)]
@@ -256,5 +299,93 @@ mod tests {
         };
         let found = hidden_files_using(&call).unwrap();
         assert_eq!(found.flagged, vec!["assumed.txt", "sparse.txt"]);
+    }
+
+    #[test]
+    fn tracked_gitignore_skips_covered_subprocess_while_untracked_or_flagged_still_runs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+        let log = dir.path().join("covered.log");
+
+        // Case 1: `.gitignore` is normal tracked (`H .gitignore`) -> `covered()` must NOT run.
+        let fake_git_tracked = dir.path().join("fake-git-tracked");
+        let script_tracked = format!(
+            "#!/bin/sh\n\
+            case \"$*\" in\n\
+              *\"ls-files -v -z\"*)\n\
+                printf 'H .gitignore\\0'\n\
+                exit 0 ;;\n\
+              *\"ls-files --others --ignored\"*)\n\
+                printf 'target/\\0'\n\
+                exit 0 ;;\n\
+              *\"check-ignore -v -z --stdin\"*)\n\
+                printf '%s\\0%s\\0%s\\0%s\\0' '.gitignore' '1' 'target/' 'target/'\n\
+                exit 0 ;;\n\
+              *\"--cached\"*)\n\
+                echo \"$*\" >> '{}'\n\
+                exit 1 ;;\n\
+            esac\n\
+            exit 0\n",
+            log.display()
+        );
+        fs::write(&fake_git_tracked, script_tracked).unwrap();
+        fs::set_permissions(&fake_git_tracked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let call = GitCall {
+            program: Some(OsStr::new(&fake_git_tracked)),
+            repo: &repo,
+            timeout: GIT_TIMEOUT,
+        };
+        let found = hidden_files_using(&call).unwrap();
+        assert!(found.is_empty(), "{found:?}");
+        assert!(
+            !log.exists(),
+            "covered() subprocess must be skipped when all .gitignore sources are tracked"
+        );
+
+        // Case 2: untracked `sub/.gitignore` + flagged `h .gitignore` -> both go through covered().
+        let fake_git_mixed = dir.path().join("fake-git-mixed");
+        let script_mixed = format!(
+            "#!/bin/sh\n\
+            case \"$*\" in\n\
+              *\"ls-files -v -z\"*)\n\
+                printf 'h .gitignore\\0'\n\
+                exit 0 ;;\n\
+              *\"ls-files --others --ignored\"*)\n\
+                printf 'target/\\0sub/out\\0'\n\
+                exit 0 ;;\n\
+              *\"check-ignore -v -z --stdin\"*)\n\
+                printf '%s\\0%s\\0%s\\0%s\\0' '.gitignore' '1' 'target/' 'target/' 'sub/.gitignore' '1' 'out' 'sub/out'\n\
+                exit 0 ;;\n\
+              *\"--cached\"*)\n\
+                echo \"$*\" >> '{}'\n\
+                printf '.gitignore\\0'\n\
+                exit 0 ;;\n\
+            esac\n\
+            exit 0\n",
+            log.display()
+        );
+        fs::write(&fake_git_mixed, script_mixed).unwrap();
+        fs::set_permissions(&fake_git_mixed, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let call_mixed = GitCall {
+            program: Some(OsStr::new(&fake_git_mixed)),
+            repo: &repo,
+            timeout: GIT_TIMEOUT,
+        };
+        let found_mixed = hidden_files_using(&call_mixed).unwrap();
+        assert_eq!(found_mixed.flagged, vec![".gitignore"]);
+        assert_eq!(
+            found_mixed.ignored,
+            vec![IgnoredFile {
+                path: "sub/out".to_string(),
+                source: "sub/.gitignore".to_string(),
+            }]
+        );
+        let invoked = fs::read_to_string(&log).unwrap();
+        assert!(invoked.contains(":(literal).gitignore"), "{invoked}");
+        assert!(invoked.contains(":(literal)sub/.gitignore"), "{invoked}");
     }
 }

@@ -70,15 +70,11 @@ pub fn samples(data_dir: &Path, repo_id: &str, label: &str) -> Vec<HeavySample> 
         .unwrap_or_default()
 }
 
-/// Representative peak among the remembered runs; `None` means "never measured".
-///
-/// Uses the conservative maximum while fewer than 4 samples exist, and drops
-/// the single highest outlier (p75 / 2nd highest) once 4 or more runs are
-/// recorded so one anomalous cold-build spike does not over-reserve memory for
-/// the next 5 runs.
-pub fn recorded_peak(data_dir: &Path, repo_id: &str, label: &str) -> Option<u64> {
-    let mut peaks: Vec<u64> = samples(data_dir, repo_id, label)
-        .into_iter()
+fn peak_in(stats: &StatsFile, repo_id: &str, label: &str) -> Option<u64> {
+    let mut peaks: Vec<u64> = stats
+        .entries
+        .get(&key(repo_id, label))?
+        .iter()
         .map(|sample| sample.peak_rss_bytes)
         .filter(|peak| *peak > 0)
         .collect();
@@ -92,6 +88,17 @@ pub fn recorded_peak(data_dir: &Path, repo_id: &str, label: &str) -> Option<u64>
         peaks.len() - 1
     };
     peaks.get(idx).copied()
+}
+
+/// Representative peak among the remembered runs; `None` means "never measured".
+///
+/// Uses the conservative maximum while fewer than 4 samples exist, and drops
+/// the single highest outlier (p75 / 2nd highest) once 4 or more runs are
+/// recorded so one anomalous cold-build spike does not over-reserve memory for
+/// the next 5 runs.
+pub fn recorded_peak(data_dir: &Path, repo_id: &str, label: &str) -> Option<u64> {
+    let stats = load(data_dir, is_guest(data_dir));
+    peak_in(&stats, repo_id, label)
 }
 
 /// Shared tool-level stats label so runs with custom `--label` (e.g. `red`)
@@ -118,8 +125,9 @@ pub fn recorded_peak_with_tool(
     recorded_peak_for(data_dir, repo_id, label, tool, None)
 }
 
-/// Like [`recorded_peak_with_tool`], also falling back to `<repo_id>/@cmd:<family>`
-/// when a command belongs to a known build/test command family (e.g. `cargo`).
+/// Like [`recorded_peak_with_tool`], falling back to `<repo_id>/@cmd:<family>`
+/// when `tool` is `None` and the command belongs to a known build/test command
+/// family (e.g. `cargo`).
 pub fn recorded_peak_for(
     data_dir: &Path,
     repo_id: &str,
@@ -127,9 +135,11 @@ pub fn recorded_peak_for(
     tool: Option<HeavyTool>,
     cmd_family: Option<&str>,
 ) -> Option<u64> {
-    recorded_peak(data_dir, repo_id, label)
-        .or_else(|| tool.and_then(|t| recorded_peak(data_dir, repo_id, &tool_label(t))))
-        .or_else(|| cmd_family.and_then(|f| recorded_peak(data_dir, repo_id, &cmd_label(f))))
+    let stats = load(data_dir, is_guest(data_dir));
+    peak_in(&stats, repo_id, label).or_else(|| match tool {
+        Some(t) => peak_in(&stats, repo_id, &tool_label(t)),
+        None => cmd_family.and_then(|f| peak_in(&stats, repo_id, &cmd_label(f))),
+    })
 }
 
 fn lock_file(data_dir: &Path, guest: bool, sleeper: &dyn Sleeper) -> io::Result<Option<File>> {

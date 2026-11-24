@@ -44,6 +44,7 @@ fn round(world: &World, count: usize) -> Round {
                 worktree: world.git.task_worktree(&id).unwrap(),
                 task_id: id,
                 audited: false,
+                cached_receipt: None,
             }
         })
         .collect();

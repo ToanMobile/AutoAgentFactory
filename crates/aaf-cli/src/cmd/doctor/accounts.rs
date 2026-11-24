@@ -49,7 +49,10 @@ fn binding(
     // As `tasks.repo_root` holds it.
     let repo = fs::canonicalize(repo).ok()?;
     let db_path = ctx.data_dir.join(DB_FILE);
-    let db = db_path.is_file().then(|| Db::open(&db_path).ok()).flatten();
+    let db = db_path
+        .is_file()
+        .then(|| Db::open_read_only(&db_path).ok())
+        .flatten();
     let history: &dyn RunHistory = match &db {
         Some(db) => db,
         None => &NoHistory,

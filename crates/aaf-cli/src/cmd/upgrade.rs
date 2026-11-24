@@ -76,11 +76,18 @@ pub fn run_with_source(
         return Ok(format_check_output(&plan));
     }
 
-    if plan.is_same && args.version.is_none() && !args.dry_run {
-        let text = format!(
-            "already up to date: aaf {} ({})",
-            plan.current_version, plan.target
-        );
+    if !plan.is_newer && args.version.is_none() && !args.dry_run {
+        let text = if plan.is_same {
+            format!(
+                "already up to date: aaf {} ({})",
+                plan.current_version, plan.target
+            )
+        } else {
+            format!(
+                "already up to date: local aaf {} is newer than {} ({})",
+                plan.current_version, plan.target_version, plan.target
+            )
+        };
         return Ok(attach_plan_fields(CmdOutput::ok("up_to_date", text), &plan));
     }
 
@@ -425,5 +432,29 @@ mod tests {
             err.message
                 .contains("not an AutoAgentFactory source checkout")
         );
+    }
+
+    struct OlderReleaseSource(&'static str);
+    impl ReleaseSource for OlderReleaseSource {
+        fn latest_tag(&self, _repo: &str) -> Result<String, UpdateError> {
+            Ok(self.0.to_string())
+        }
+        fn fetch_text(&self, _url: &str) -> Result<String, UpdateError> {
+            panic!("must not download checksums when local version is newer");
+        }
+        fn fetch_bytes(&self, _url: &str, _max_bytes: usize) -> Result<Vec<u8>, UpdateError> {
+            panic!("must not download archive when local version is newer");
+        }
+    }
+
+    #[test]
+    fn newer_local_build_is_not_silently_downgraded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = base_args();
+        args.dry_run = false;
+        let ctx = make_ctx(tmp.path().to_path_buf(), tmp.path(), None);
+        let out = run_with_source(&args, &ctx, &OlderReleaseSource("v0.4.0"), "0.5.0").unwrap();
+        assert_eq!(out.status, "up_to_date");
+        assert!(out.text.contains("newer"), "{}", out.text);
     }
 }

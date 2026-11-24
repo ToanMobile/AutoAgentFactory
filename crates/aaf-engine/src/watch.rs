@@ -3,17 +3,17 @@
 //! Opens zero network ports, acquires zero exclusive locks, never mutates the
 //! database, and never creates `receipt.key` or any file in `AAF_DATA_DIR`.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::fs::{self, File, TryLockError};
+use std::fs;
 use std::path::Path;
 
-use aaf_domain::account::{AccountProfile, AccountState};
+use aaf_domain::account::{AccountProfile, AccountState, ProviderKind};
 use aaf_domain::blocked::BlockedReason;
 use aaf_domain::config::AccountSelection;
 use aaf_domain::gate::{GateMode, GateStatus, Severity};
 use aaf_domain::ports::{
-    AccountStore, KvStore, META_CONSECUTIVE_ROOT_FAILS, META_FACTORY_FROZEN, PortResult, RunStore,
-    TaskStore,
+    AccountStore, KvStore, META_CONSECUTIVE_ROOT_FAILS, META_FACTORY_FROZEN, PortResult, TaskStore,
 };
 use aaf_domain::task::{Task, TaskState};
 use serde::Serialize;
@@ -21,8 +21,10 @@ use serde::Serialize;
 use crate::accounts::selection;
 use crate::db::Db;
 use crate::factory::adapters::provider_for;
-use crate::telemetry::TaskCounts;
-use crate::throttle::paths::{drain_path, guest_record_path, throttle_dir};
+use crate::telemetry::{
+    AccountSummary, HeavySlotEntry, TaskCounts, bump_task, scan_throttle, summarize_accounts,
+};
+use crate::throttle::paths::guest_record_path;
 use crate::throttle::probe::{self, GroupState};
 use crate::throttle::stats::stats_path;
 use crate::throttle::{LoadProbe, Pressure, SystemProbe};
@@ -113,21 +115,90 @@ pub struct WatchQuery<'a> {
     pub now: i64,
 }
 
+/// Watch-only fields attached to `aaf ui`'s `/api/status` response without
+/// re-querying `list_tasks`, `list_accounts`, or `meta` keys already loaded by
+/// [`crate::telemetry::collect_status_from_db`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WatchOverlay {
+    pub heavy_slots: WatchHeavySlots,
+    pub accounts: WatchAccounts,
+    pub receipt: Option<WatchReceipt>,
+}
+
+/// Collects only `heavy_slots`, `accounts` (reusing pre-loaded telemetry
+/// summaries), and `receipt` so `/api/status` avoids duplicate DB queries.
+pub fn collect_watch_overlay(
+    query: &WatchQuery<'_>,
+    db: Option<&Db>,
+    accounts: &[AccountSummary],
+) -> PortResult<WatchOverlay> {
+    let pressure = SystemProbe::detect().pressure();
+    let (throttle, entries) = scan_throttle(query.data_dir);
+    collect_watch_overlay_with_scan(
+        query,
+        db,
+        accounts,
+        pressure,
+        throttle.drain_lock_present,
+        &entries,
+    )
+}
+
+/// Collects `heavy_slots`, `accounts`, and `receipt` reusing a pre-probed
+/// `pressure` reading and a pre-scanned `<data_dir>/throttle` pass.
+pub fn collect_watch_overlay_with_scan(
+    query: &WatchQuery<'_>,
+    db: Option<&Db>,
+    accounts: &[AccountSummary],
+    pressure: Option<Pressure>,
+    drain_active: bool,
+    slot_entries: &[HeavySlotEntry],
+) -> PortResult<WatchOverlay> {
+    Ok(WatchOverlay {
+        heavy_slots: inspect_heavy_slots_from_scan(
+            query.data_dir,
+            pressure,
+            drain_active,
+            slot_entries,
+        ),
+        accounts: build_accounts_inner(query, db, accounts, None)?,
+        receipt: query
+            .repo_root
+            .and_then(|r| read_receipt(query.data_dir, r)),
+    })
+}
+
 /// Collects a 100% read-only snapshot across tasks, heavy slots, accounts, and receipt.
 pub fn collect_watch_snapshot(
     query: &WatchQuery<'_>,
     db: Option<&Db>,
 ) -> PortResult<WatchSnapshot> {
     let repo_str = query.repo_root.map(|p| p.to_string_lossy().into_owned());
-    let (frozen, fails, all_tasks, states) = match db {
+    let all_tasks = match db {
+        Some(db) => db.list_tasks(repo_str.as_deref(), None)?,
+        None => Vec::new(),
+    };
+    collect_watch_snapshot_with_tasks(query, db, &all_tasks)
+}
+
+/// Collects a read-only watch snapshot reusing pre-loaded `all_tasks` to avoid
+/// redundant `list_tasks` queries.
+pub fn collect_watch_snapshot_with_tasks(
+    query: &WatchQuery<'_>,
+    db: Option<&Db>,
+    all_tasks: &[Task],
+) -> PortResult<WatchSnapshot> {
+    let repo_str = query.repo_root.map(|p| p.to_string_lossy().into_owned());
+    let (frozen, fails, states) = match db {
         Some(db) => {
             let frz = db.get_meta(META_FACTORY_FROZEN)?.as_deref() == Some("1");
-            let fl = db.get_meta(META_CONSECUTIVE_ROOT_FAILS)?;
-            let fl = fl.and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-            let ts = db.list_tasks(repo_str.as_deref(), None)?;
-            (frz, fl, ts, db.list_accounts()?)
+            let fl = db
+                .get_meta(META_CONSECUTIVE_ROOT_FAILS)?
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            (frz, fl, db.list_accounts()?)
         }
-        None => (false, 0, Vec::new(), Vec::new()),
+        None => (false, 0, Vec::new()),
     };
     let pressure = SystemProbe::detect().pressure();
     Ok(WatchSnapshot {
@@ -136,7 +207,7 @@ pub fn collect_watch_snapshot(
         now: query.now,
         frozen,
         consecutive_root_fails: fails,
-        tasks: build_tasks(&all_tasks),
+        tasks: build_tasks(all_tasks),
         heavy_slots: inspect_heavy_slots(query.data_dir, pressure),
         accounts: build_accounts(query, db, &states)?,
         receipt: query
@@ -148,18 +219,7 @@ pub fn collect_watch_snapshot(
 fn build_tasks(all_tasks: &[Task]) -> WatchTasks {
     let (mut counts, mut active) = (TaskCounts::default(), Vec::new());
     for t in all_tasks {
-        counts.total = counts.total.saturating_add(1);
-        let bucket = match t.state {
-            TaskState::Backlog => &mut counts.backlog,
-            TaskState::Ready => &mut counts.ready,
-            TaskState::Running => &mut counts.running,
-            TaskState::Gating => &mut counts.gating,
-            TaskState::Review => &mut counts.review,
-            TaskState::Blocked => &mut counts.blocked,
-            TaskState::Done => &mut counts.done,
-            TaskState::Cancelled => &mut counts.cancelled,
-        };
-        *bucket = bucket.saturating_add(1);
+        bump_task(&mut counts, t.state);
         if !t.state.is_terminal() {
             active.push(WatchTask {
                 id: t.id.clone(),
@@ -174,7 +234,7 @@ fn build_tasks(all_tasks: &[Task]) -> WatchTasks {
     WatchTasks { counts, active }
 }
 
-fn format_blocked(reason: &BlockedReason) -> String {
+pub fn format_blocked(reason: &BlockedReason) -> String {
     let detail = match reason {
         BlockedReason::Quota { reset_at: Some(ts) } => return format!("quota (reset_at={ts})"),
         BlockedReason::Quota { reset_at: None } => return "quota".to_string(),
@@ -195,43 +255,64 @@ fn build_accounts(
     db: Option<&Db>,
     states: &[AccountState],
 ) -> PortResult<WatchAccounts> {
+    let leases = q.data_dir.join("leases");
+    let summaries = summarize_accounts(states, Some(&leases), q.now);
+    build_accounts_inner(q, db, &summaries, Some(states))
+}
+
+fn build_accounts_inner(
+    q: &WatchQuery<'_>,
+    db: Option<&Db>,
+    summaries: &[AccountSummary],
+    states: Option<&[AccountState]>,
+) -> PortResult<WatchAccounts> {
     let pinned_account = if q.selection != AccountSelection::LeastUsed
         && let (Some(db), Some(root), Some(prov)) = (db, q.repo_root, provider_for(q.executor))
     {
-        let profs: Vec<AccountProfile> = states
-            .iter()
-            .filter(|s| s.profile.provider == prov)
-            .map(|s| s.profile.clone())
-            .collect();
+        let profs: Vec<AccountProfile> = match states {
+            Some(st) => st
+                .iter()
+                .filter(|s| s.profile.provider == prov)
+                .map(|s| s.profile.clone())
+                .collect(),
+            None if selection::settings_account(root).is_some() => db
+                .list_accounts()?
+                .into_iter()
+                .filter(|s| s.profile.provider == prov)
+                .map(|s| s.profile)
+                .collect(),
+            None => summaries
+                .iter()
+                .filter(|a| ProviderKind::parse(&a.provider) == Some(prov))
+                .map(|a| AccountProfile {
+                    id: a.id.clone(),
+                    provider: prov,
+                    config_dir: String::new(),
+                    name: a.name.clone(),
+                })
+                .collect(),
+        };
         selection::resolve(root, prov, &profs, db)?.map(|b| b.account.id)
     } else {
         None
     };
-    let leases = q.data_dir.join("leases");
-    let since = q.now.saturating_sub(FIVE_HOURS_SECS);
-    let mut entries = Vec::with_capacity(states.len());
-    for a in states {
-        let cd = a.in_cooldown(q.now);
-        let st = if cd {
-            "cooldown"
-        } else if is_account_leased(&leases, &a.profile.id) {
-            "leased"
-        } else {
-            "available"
-        };
-        let tokens_5h = match db {
-            Some(db) => db.tokens_since(&a.profile.id, since)?,
-            None => 0,
-        };
-        entries.push(WatchAccount {
-            id: a.profile.id.clone(),
-            name: a.profile.name.clone(),
-            provider: a.profile.provider.as_str().to_string(),
-            state: st.to_string(),
-            cooldown_until: cd.then_some(a.cooldown_until).flatten(),
-            tokens_5h,
-        });
-    }
+    let tokens = match db {
+        Some(db) => db.tokens_since_all(q.now.saturating_sub(FIVE_HOURS_SECS))?,
+        None => HashMap::new(),
+    };
+    let entries = summaries
+        .iter()
+        .map(|a| WatchAccount {
+            id: a.id.clone(),
+            name: a.name.clone(),
+            provider: a.provider.clone(),
+            state: a.status.clone(),
+            cooldown_until: (a.status == "cooldown")
+                .then_some(a.cooldown_until)
+                .flatten(),
+            tokens_5h: tokens.get(&a.id).copied().unwrap_or(0),
+        })
+        .collect();
     Ok(WatchAccounts {
         selection_mode: q.selection.as_str().to_string(),
         pinned_account,
@@ -240,6 +321,16 @@ fn build_accounts(
 }
 
 fn inspect_heavy_slots(data_dir: &Path, pressure: Option<Pressure>) -> WatchHeavySlots {
+    let (throttle, entries) = scan_throttle(data_dir);
+    inspect_heavy_slots_from_scan(data_dir, pressure, throttle.drain_lock_present, &entries)
+}
+
+fn inspect_heavy_slots_from_scan(
+    data_dir: &Path,
+    pressure: Option<Pressure>,
+    drain_active: bool,
+    entries: &[HeavySlotEntry],
+) -> WatchHeavySlots {
     let mp = match pressure {
         Some(Pressure::Normal) => "normal",
         Some(Pressure::Warn) => "warn",
@@ -248,56 +339,47 @@ fn inspect_heavy_slots(data_dir: &Path, pressure: Option<Pressure>) -> WatchHeav
     };
     let stats = read_plain(&stats_path(data_dir));
     let val = serde_json::from_str::<serde_json::Value>(&stats).ok();
-    let entries_obj = val.as_ref().and_then(|v| v.get("entries")?.as_object());
-    let measured_commands = entries_obj.map_or(0, |m| {
-        m.values()
-            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
-            .count()
-    });
-    let mut slots = Vec::new();
+    let measured_commands = val
+        .as_ref()
+        .and_then(|v| v.get("entries")?.as_object())
+        .map_or(0, |m| {
+            m.values()
+                .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+                .count()
+        });
+    let mut slots = Vec::with_capacity(entries.len());
     let mut ps_groups: Option<Option<String>> = None;
-    if let Ok(rd) = fs::read_dir(throttle_dir(data_dir)) {
-        for e in rd.flatten() {
-            let name = e.file_name();
-            let Some(n) = name.to_str().and_then(parse_slot_idx) else {
-                continue;
-            };
-            let locked = is_locked(&e.path());
-            let mut text = read_plain(&e.path());
-            if locked && text.trim().is_empty() {
-                text = read_plain(&guest_record_path(data_dir, n));
-            }
-            let rec = parse_slot_record(&text);
-            let (st, keep) = match (locked, rec.pgid) {
-                (true, _) => ("busy", true),
-                (false, Some(pgid)) => {
-                    let ps_out = ps_groups.get_or_insert_with(|| {
-                        probe::tool_output(probe::PS, &["-A", "-o", probe::PS_GROUP_COLUMNS])
-                    });
-                    let alive = ps_out
-                        .as_deref()
-                        .and_then(|out| probe::group_state(out, pgid))
-                        .is_some_and(|gs| is_live_recorded_group(rec.lstart.as_deref(), &gs));
-                    if alive {
-                        ("orphan", true)
-                    } else {
-                        ("stale", true)
-                    }
-                }
-                (false, None) => ("free", false),
-            };
-            slots.push(WatchSlot {
-                slot: n,
-                state: st.to_string(),
-                pgid: keep.then_some(rec.pgid).flatten(),
-                label: keep.then_some(rec.label).flatten(),
-                reserved_ram_mb: keep.then_some(rec.ram_mb).flatten(),
-            });
+    for e in entries {
+        let mut text = read_plain(&e.path);
+        if e.locked && text.trim().is_empty() {
+            text = read_plain(&guest_record_path(data_dir, e.slot));
         }
+        let rec = parse_slot_record(&text);
+        let (st, keep) = match (e.locked, rec.pgid) {
+            (true, _) => ("busy", true),
+            (false, Some(pgid)) => {
+                let ps_out = ps_groups.get_or_insert_with(|| {
+                    probe::tool_output(probe::PS, &["-A", "-o", probe::PS_GROUP_COLUMNS])
+                });
+                let alive = ps_out
+                    .as_deref()
+                    .and_then(|out| probe::group_state(out, pgid))
+                    .is_some_and(|gs| is_live_recorded_group(rec.lstart.as_deref(), &gs));
+                (if alive { "orphan" } else { "stale" }, true)
+            }
+            (false, None) => ("free", false),
+        };
+        slots.push(WatchSlot {
+            slot: e.slot,
+            state: st.to_string(),
+            pgid: keep.then_some(rec.pgid).flatten(),
+            label: keep.then_some(rec.label).flatten(),
+            reserved_ram_mb: keep.then_some(rec.ram_mb).flatten(),
+        });
     }
     slots.sort_by_key(|s| s.slot);
     WatchHeavySlots {
-        drain_active: is_locked(&drain_path(data_dir)),
+        drain_active,
         memory_pressure: mp.to_string(),
         measured_commands,
         slots,
@@ -316,13 +398,6 @@ fn is_live_recorded_group(recorded_start: Option<&str>, state: &GroupState) -> b
         Some(now) => recorded_start.is_none_or(|recorded| recorded == now),
         None => true,
     }
-}
-
-fn parse_slot_idx(name: &str) -> Option<usize> {
-    name.strip_prefix("heavy.")?
-        .strip_suffix(".lock")?
-        .parse()
-        .ok()
 }
 
 fn parse_slot_record(text: &str) -> SlotRecord {
@@ -371,21 +446,6 @@ fn read_receipt(data_dir: &Path, repo_root: &Path) -> Option<WatchReceipt> {
     })
 }
 
-fn is_locked(path: &Path) -> bool {
-    let ok = fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_symlink() && m.is_file());
-    let Some(f) = ok.then(|| File::open(path).ok()).flatten() else {
-        return false;
-    };
-    match f.try_lock_shared() {
-        Ok(()) => {
-            let _ = f.unlock();
-            false
-        }
-        Err(TryLockError::WouldBlock) => true,
-        Err(TryLockError::Error(_)) => false,
-    }
-}
-
 fn read_plain(path: &Path) -> String {
     let ok = fs::symlink_metadata(path)
         .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file() && m.len() <= MAX_READ_BYTES);
@@ -394,27 +454,6 @@ fn read_plain(path: &Path) -> String {
     } else {
         String::new()
     }
-}
-
-fn is_account_leased(leases: &Path, id: &str) -> bool {
-    let ok_ch = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.');
-    if id.is_empty() || id.starts_with('.') || !id.bytes().all(ok_ch) || !leases.is_dir() {
-        return false;
-    }
-    if is_locked(&leases.join(format!("{id}.lock"))) {
-        return true;
-    }
-    let pfx = format!("{id}.slot");
-    let Ok(rd) = fs::read_dir(leases) else {
-        return false;
-    };
-    rd.flatten().any(|e| {
-        let name = e.file_name();
-        let hit = name
-            .to_str()
-            .is_some_and(|n| n.starts_with(&pfx) && n.ends_with(".lock"));
-        hit && is_locked(&e.path())
-    })
 }
 
 /// Strips ANSI CSI/OSC/DCS/APC/PM/SOS escape sequences, standalone ESC
@@ -471,14 +510,14 @@ fn skip_st(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 
 /// Renders a compact, 4-panel plain-text terminal dashboard.
 pub fn render_watch_text(snap: &WatchSnapshot) -> String {
+    let san = sanitize_display;
     let mut out = String::new();
     let (c, hs, ac) = (&snap.tasks.counts, &snap.heavy_slots, &snap.accounts);
     let frz = if snap.frozen { "yes" } else { "no" };
-    let sc = sanitize_display(&snap.scope);
+    let (sc, fails) = (san(&snap.scope), snap.consecutive_root_fails);
     let _ = writeln!(
         out,
-        "== aaf watch | scope: {sc} | frozen: {frz} (fails: {}) ==",
-        snap.consecutive_root_fails
+        "== aaf watch | scope: {sc} | frozen: {frz} (fails: {fails}) =="
     );
     let _ = writeln!(
         out,
@@ -492,25 +531,24 @@ pub fn render_watch_text(snap: &WatchSnapshot) -> String {
         let blk = t
             .blocked_reason
             .as_deref()
-            .map_or(String::new(), |r| format!(" [{}]", sanitize_display(r)));
-        let (id, prio, tt) = (
-            sanitize_display(&t.id),
-            sanitize_display(&t.priority),
-            sanitize_display(&t.title),
+            .map_or(String::new(), |r| format!(" [{}]", san(r)));
+        let (id, pr, st, tt) = (
+            san(&t.id),
+            san(&t.priority),
+            t.state.as_str(),
+            san(&t.title),
         );
         let _ = writeln!(
             out,
-            "  {id}  {prio}  {:<8}  cycles={}  {tt}{blk}",
-            t.state.as_str(),
+            "  {id}  {pr}  {st:<8}  cycles={}  {tt}{blk}",
             t.unblock_cycles
         );
     }
     let drain = if hs.drain_active { "on" } else { "off" };
-    let pressure = sanitize_display(&hs.memory_pressure);
+    let (mp, mc) = (san(&hs.memory_pressure), hs.measured_commands);
     let _ = writeln!(
         out,
-        "\n[Heavy Slots] pressure={pressure} drain={drain} measured={}",
-        hs.measured_commands
+        "\n[Heavy Slots] pressure={mp} drain={drain} measured={mc}"
     );
     if hs.slots.is_empty() {
         let _ = writeln!(out, "  (no slot files)");
@@ -520,17 +558,17 @@ pub fn render_watch_text(snap: &WatchSnapshot) -> String {
         let ram = s
             .reserved_ram_mb
             .map_or(String::new(), |r| format!("  ram={r}MB"));
-        let lbl = s.label.as_deref().map_or(String::new(), |l| {
-            format!("  label={}", sanitize_display(l))
-        });
-        let st = sanitize_display(&s.state);
-        let _ = writeln!(out, "  slot {}  {st:<6}{pg}{ram}{lbl}", s.slot);
+        let lbl = s
+            .label
+            .as_deref()
+            .map_or(String::new(), |l| format!("  label={}", san(l)));
+        let _ = writeln!(out, "  slot {}  {:<6}{pg}{ram}{lbl}", s.slot, san(&s.state));
     }
     let pin = ac
         .pinned_account
         .as_deref()
-        .map_or_else(|| "none".to_string(), sanitize_display);
-    let sel = sanitize_display(&ac.selection_mode);
+        .map_or_else(|| "none".into(), san);
+    let sel = san(&ac.selection_mode);
     let _ = writeln!(out, "\n[Accounts] selection={sel} pinned={pin}");
     if ac.entries.is_empty() {
         let _ = writeln!(out, "  (no accounts)");
@@ -539,13 +577,11 @@ pub fn render_watch_text(snap: &WatchSnapshot) -> String {
         let cd = a
             .cooldown_until
             .map_or(String::new(), |ts| format!(" until={ts}"));
-        let id = sanitize_display(&a.id);
-        let prov = sanitize_display(&a.provider);
-        let st = sanitize_display(&a.state);
+        let (id, prov, st) = (san(&a.id), san(&a.provider), san(&a.state));
         let _ = writeln!(out, "  {id}  {prov}  {st}{cd}  tokens_5h={}", a.tokens_5h);
     }
     if let Some(r) = &snap.receipt {
-        let fp = sanitize_display(&r.tree_fp_short);
+        let fp = san(&r.tree_fp_short);
         let _ = write!(
             out,
             "\n[Receipt] {:?} ({:?}) tree={fp} warnings={} created_at={}",

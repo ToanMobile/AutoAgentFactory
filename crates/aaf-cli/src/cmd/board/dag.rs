@@ -120,7 +120,7 @@ pub fn graph(args: &GraphArgs, ctx: &Ctx) -> CmdResult {
 
     let node_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
     let topo_order = dag::topo_order(&node_ids, &edges).unwrap_or_else(|| node_ids.clone());
-    let critical_path = compute_critical_path(&topo_order, &edges);
+    let critical_path = crate::cmd::cockpit_actions::compute_critical_path(&topo_order, &edges);
     let crit_set: HashSet<&str> = critical_path.iter().map(String::as_str).collect();
 
     let cascade_candidates: Vec<Task> = tasks
@@ -215,62 +215,4 @@ fn empty_graph_output() -> CmdOutput {
         .field("topo_order", json!([]))
         .field("critical_path", json!([]))
         .field("blocked_upstream", json!([]))
-}
-
-/// Longest directed chain (`blocker -> ... -> dependent`) in the DAG.
-/// Returns an empty path when there are no dependency edges.
-fn compute_critical_path(topo: &[String], edges: &[(String, String)]) -> Vec<String> {
-    if edges.is_empty() {
-        return Vec::new();
-    }
-    let mut blockers: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (task, blocked_by) in edges {
-        blockers
-            .entry(task.as_str())
-            .or_default()
-            .push(blocked_by.as_str());
-    }
-    let mut best_len: HashMap<&str, usize> = HashMap::with_capacity(topo.len());
-    let mut pred: HashMap<&str, &str> = HashMap::new();
-    let mut best_end: Option<&str> = None;
-    let mut global_max = 0usize;
-
-    for node in topo {
-        let mut len = 1usize;
-        let mut best_prev: Option<&str> = None;
-        if let Some(deps) = blockers.get(node.as_str()) {
-            for &dep in deps {
-                let dep_len = best_len.get(dep).copied().unwrap_or(0);
-                let cand = dep_len.saturating_add(1);
-                if cand > len {
-                    len = cand;
-                    best_prev = Some(dep);
-                }
-            }
-        }
-        best_len.insert(node.as_str(), len);
-        if let Some(prev) = best_prev {
-            pred.insert(node.as_str(), prev);
-        }
-        if len > global_max {
-            global_max = len;
-            best_end = Some(node.as_str());
-        }
-    }
-
-    if global_max < 2 {
-        return Vec::new();
-    }
-    let mut path = Vec::with_capacity(global_max);
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut cur = best_end;
-    while let Some(node) = cur {
-        if !seen.insert(node) {
-            break;
-        }
-        path.push(node.to_string());
-        cur = pred.get(node).copied();
-    }
-    path.reverse();
-    path
 }

@@ -3,7 +3,11 @@
 
 use std::mem;
 
-use super::{Cmd, DATA_CONSUMERS, Lexer, RESERVED, Redirect, SHELLS, Script, Tok, basename, lex};
+use super::decode::split_env_s;
+use super::stdin::{ShellInput, clears_env, find_execs, shell_input, split_assign, stdin_scripts};
+use super::{
+    Cmd, DATA_CONSUMERS, Lexer, MAX_DEPTH, RESERVED, Redirect, SHELLS, Script, Tok, basename, lex,
+};
 
 pub const DECLARERS: &[&str] = &["export", "declare", "typeset", "readonly", "local"];
 /// Commands that give a value to the variable named as a bare argument.
@@ -114,13 +118,25 @@ impl Lexer<'_, '_> {
             String::new()
         } else {
             let feeder = self.feeder.take();
+            let feeder_idx = self.feeder_idx.take();
             let name = self.emit(assigns, words, redirects, feeder);
             // The heredocs this command reads keep its wrapper's cleared
             // environment (`env -i sh <<EOF`): their bodies are split once
             // the line ends, after `emit` restored the outer state.
+            let cmd_idx = self.out.cmds.len().checked_sub(1);
             let cleared = self.out.cmds.last().is_some_and(|cmd| cmd.env_cleared);
             for doc in self.heredocs.iter_mut().filter(|doc| doc.cleared.is_none()) {
                 doc.cleared = Some(cleared);
+                doc.cmd_idx = cmd_idx;
+            }
+            if let (Some(src_idx), Some(dst_idx)) = (feeder_idx, cmd_idx) {
+                for doc in self
+                    .heredocs
+                    .iter_mut()
+                    .filter(|doc| doc.pipeline.last().copied().or(doc.cmd_idx) == Some(src_idx))
+                {
+                    doc.pipeline.push(dst_idx);
+                }
             }
             name
         };
@@ -143,34 +159,65 @@ impl Lexer<'_, '_> {
         let mut xargs = false;
         let outer_slot = self.out.in_slot;
         let outer_cleared = self.out.env_cleared;
+        let mut env_s_depth = self.depth;
         loop {
             // A wrapper already stripped (`env -i env -S '…'`, `sudo env -S
             // '…'`) clears the environment of what a later one splits.
             self.out.env_cleared |= clears_env(&wrapped);
-            let Some(skip) = self.wrapper_len(&words, &mut assigns) else {
-                break;
-            };
-            if skip >= words.len() {
-                break;
-            }
-            match words.first().map(|w| w.text.as_str()) {
-                // Also for what the payload nests (`aaf slot -- sh -c '…'`).
-                // Only the bare name is the installed aaf: `./aaf` or
-                // `/tmp/x/aaf` is any program, and its payload is judged as
-                // if typed without it.
-                Some("aaf") => {
-                    // The search path given to aaf itself (`PATH=… aaf`,
-                    // `env PATH=… aaf`): the payload's command carries the
-                    // assignment and would hide it as its own.
-                    self.out.rebound |= assigns
-                        .iter()
-                        .any(|(key, _)| key.eq_ignore_ascii_case("PATH"));
-                    self.out.in_slot = true;
+            let saved_assigns = assigns.len();
+            match self.wrapper_len(&words, &wrapped, &mut assigns) {
+                Some(Wrapper::Strip(skip)) => {
+                    if skip >= words.len() {
+                        break;
+                    }
+                    match words.first().map(|w| w.text.as_str()) {
+                        // Also for what the payload nests (`aaf slot -- sh -c '…'`).
+                        // Only the bare name is the installed aaf: `./aaf` or
+                        // `/tmp/x/aaf` is any program, and its payload is judged as
+                        // if typed without it.
+                        Some("aaf") => {
+                            // The search path given to aaf itself (`PATH=… aaf`,
+                            // `env PATH=… aaf`): the payload's command carries the
+                            // assignment and would hide it as its own.
+                            self.out.rebound |= assigns
+                                .iter()
+                                .any(|(key, _)| key.eq_ignore_ascii_case("PATH"));
+                            self.out.in_slot = true;
+                        }
+                        Some(first) if basename(first) == "xargs" => xargs = true,
+                        _ => {}
+                    }
+                    wrapped.extend(words.drain(..skip).map(|tok| tok.text));
                 }
-                Some(first) if basename(first) == "xargs" => xargs = true,
-                _ => {}
+                Some(Wrapper::ExpandEnv { at, step, script }) => {
+                    assigns.truncate(saved_assigns);
+                    let prefix: Vec<String> = words[..=at].iter().map(|w| w.text.clone()).collect();
+                    self.out.env_cleared |= clears_env(&prefix);
+                    let raw_opaque = || {
+                        let mut parts: Vec<&str> = wrapped.iter().map(String::as_str).collect();
+                        parts.extend(words.iter().map(|w| w.text.as_str()));
+                        parts.join(" ")
+                    };
+                    if env_s_depth >= MAX_DEPTH {
+                        self.out.opaque.push(raw_opaque());
+                        break;
+                    }
+                    let Some(parsed) = split_env_s(&script) else {
+                        self.out.opaque.push(raw_opaque());
+                        break;
+                    };
+                    env_s_depth += 1;
+                    let mut combined = Vec::with_capacity(words.len() + parsed.len());
+                    combined.push(words[0].clone());
+                    combined.extend(words[1..at].iter().cloned());
+                    combined.extend(parsed);
+                    if let Some(trailing) = words.get(at + step..) {
+                        combined.extend(trailing.iter().cloned());
+                    }
+                    words = combined;
+                }
+                None => break,
             }
-            wrapped.extend(words.drain(..skip).map(|tok| tok.text));
         }
         let name = words
             .first()
@@ -179,10 +226,16 @@ impl Lexer<'_, '_> {
             .unwrap_or_default();
         if SHELLS.contains(&name.as_str()) {
             match shell_input(&words) {
-                ShellInput::Command(script) => lex(script, self.depth + 1, self.out, None),
+                ShellInput::Command(script) => {
+                    self.out.enter_scope_wrapped(wrapped.clone());
+                    lex(script, self.depth + 1, self.out, None);
+                    self.out.exit_scope();
+                }
                 ShellInput::Stdin => {
                     for script in stdin_scripts(&redirects, feeder.as_deref()) {
+                        self.out.enter_scope_wrapped(wrapped.clone());
                         lex(&script, self.depth + 1, self.out, None);
+                        self.out.exit_scope();
                     }
                 }
                 ShellInput::File => {}
@@ -206,6 +259,7 @@ impl Lexer<'_, '_> {
             arg_dynamic: words.iter().map(|tok| tok.dynamic).collect(),
             words: words.into_iter().map(|tok| tok.text).collect(),
             redirects,
+            heredocs: Vec::new(),
             wrapped,
             xargs,
             feeder,
@@ -219,12 +273,18 @@ impl Lexer<'_, '_> {
         name
     }
 
-    /// Number of leading words that only wrap the real command.
-    fn wrapper_len(&mut self, words: &[Tok], assigns: &mut Vec<(String, String)>) -> Option<usize> {
+    /// Number of leading words that only wrap the real command, or an `env -S`
+    /// expansion to splice into `words` while preserving prior wrappers/xargs.
+    fn wrapper_len(
+        &mut self,
+        words: &[Tok],
+        wrapped: &[String],
+        assigns: &mut Vec<(String, String)>,
+    ) -> Option<Wrapper> {
         let first = words.first().filter(|tok| !tok.dynamic)?;
         let name = basename(&first.text);
         if name == "aaf" {
-            return slot_payload(words);
+            return slot_payload(words).map(Wrapper::Strip);
         }
         // Options of each wrapper that take a separate value: the
         // single-letter ones, then the long ones. Missing one would make its
@@ -236,7 +296,7 @@ impl Lexer<'_, '_> {
             // as the value of `-c` (util-linux).
             "unbuffer" => ("", &[]),
             "script" => (
-                "FtTIOBmEo",
+                "tTIOBmEo",
                 &[
                     "--log-in",
                     "--log-out",
@@ -271,7 +331,7 @@ impl Lexer<'_, '_> {
             "ionice" => ("cn", &["--class", "--classdata"]),
             "caffeinate" => ("tw", &[]),
             "xargs" => (
-                "nIPLdEsJRa",
+                "nIPLdEsSJRa",
                 &[
                     "--max-args",
                     "--max-procs",
@@ -305,25 +365,28 @@ impl Lexer<'_, '_> {
             }
             if let Some(glued) = carried {
                 // `-S 'cmd'`, `-iS 'cmd'`, `-Scmd`, `--split-string=cmd`.
+                let step = if glued.is_empty() { 2 } else { 1 };
                 let script = match glued {
                     "" => words.get(at + 1).map(|next| next.text.as_str()),
                     glued => Some(glued),
                 };
                 if let Some(script) = script {
+                    if name == "env" {
+                        return Some(Wrapper::ExpandEnv {
+                            at,
+                            step,
+                            script: script.to_string(),
+                        });
+                    }
                     let prefix: Vec<String> = words[..=at].iter().map(|w| w.text.clone()).collect();
                     let outer_cleared = self.out.env_cleared;
                     self.out.env_cleared |= clears_env(&prefix);
-                    // `env -S` splits the string into env's own arguments,
-                    // so a leading `-i`, `-u NAME` or `-P dir` in it is an
-                    // option of env, not the command.
-                    let script = match name {
-                        "env" => format!("env {script}"),
-                        _ => script.to_string(),
-                    };
-                    lex(&script, self.depth + 1, self.out, None);
+                    self.out.enter_scope_wrapped(wrapped.to_vec());
+                    lex(script, self.depth + 1, self.out, None);
+                    self.out.exit_scope();
                     self.out.env_cleared = outer_cleared;
                 }
-                at += if glued.is_empty() { 2 } else { 1 };
+                at += step;
             } else if name == "env" && text == "-" {
                 // `env -` is `env -i`; left as the command it hid the real one.
                 at += 1;
@@ -349,8 +412,17 @@ impl Lexer<'_, '_> {
         if matches!(name, "timeout" | "script") {
             at += 1;
         }
-        Some(at)
+        Some(Wrapper::Strip(at))
     }
+}
+
+enum Wrapper {
+    Strip(usize),
+    ExpandEnv {
+        at: usize,
+        step: usize,
+        script: String,
+    },
 }
 
 /// `aaf [--json] slot [options] -- <command>`: where the command starts, so
@@ -413,146 +485,6 @@ fn script_command(text: &str) -> Option<&str> {
     if !text.starts_with('-') || text.starts_with("--") {
         return None;
     }
-    let at = text.find(['c', 'F', 't', 'T', 'I', 'O', 'B', 'm', 'E', 'o'])?;
+    let at = text.find(['c', 't', 'T', 'I', 'O', 'B', 'm', 'E', 'o'])?;
     text[at..].strip_prefix('c')
-}
-
-/// Where a shell (`sh`, `bash`, `zsh`, …) takes the script it runs from.
-enum ShellInput<'a> {
-    /// `-c`: the first word that is not an option, wherever `-c` stands
-    /// (`sh -c -- '…'`, `bash -c -x '…'`, `bash -o pipefail -c '…'`).
-    Command(&'a str),
-    /// `-s`, or no operand: standard input.
-    Stdin,
-    /// The first operand names a script file.
-    File,
-}
-
-fn shell_input(words: &[Tok]) -> ShellInput<'_> {
-    let (mut command, mut stdin) = (false, false);
-    let mut at = 1;
-    while let Some(word) = words.get(at).map(|tok| tok.text.as_str()) {
-        if word == "--" || word == "-" {
-            at += 1;
-            break;
-        }
-        let flags = match word.strip_prefix(['-', '+']) {
-            Some(flags) if !flags.is_empty() => flags,
-            _ => break,
-        };
-        at += 1;
-        if word.starts_with("--") {
-            if matches!(word, "--rcfile" | "--init-file") {
-                at += 1;
-            }
-            continue;
-        }
-        let set = word.starts_with('-');
-        command |= set && flags.contains('c');
-        stdin |= set && flags.contains('s');
-        // `-o pipefail`, `+O extglob`: the option name is the next word.
-        if flags.contains(['o', 'O']) {
-            at += 1;
-        }
-    }
-    match words.get(at) {
-        Some(tok) if command => ShellInput::Command(&tok.text),
-        // `-c` without its string: the shell refuses to start.
-        None if command => ShellInput::File,
-        _ if stdin => ShellInput::Stdin,
-        None => ShellInput::Stdin,
-        Some(_) => ShellInput::File,
-    }
-}
-
-/// The literal script a shell reading standard input gets: a here-string,
-/// or what `echo`/`printf` pipe into it. Heredoc bodies are split on their
-/// own (`finish_bodies`). Other input (`cat x | sh`, `sh < x`) stays unseen,
-/// like the script of `sh x`.
-fn stdin_scripts(redirects: &[Redirect], feeder: Option<&Cmd>) -> Vec<String> {
-    let mut scripts: Vec<String> = redirects
-        .iter()
-        .filter(|redirect| redirect.op == "<<<")
-        .map(|redirect| redirect.target.clone())
-        .collect();
-    let printed = feeder.filter(|cmd| !cmd.dynamic_name).and_then(|cmd| {
-        let args = cmd.args();
-        let echo_flags = |arg: &&String| {
-            arg.len() > 1
-                && arg.starts_with('-')
-                && arg[1..].chars().all(|c| matches!(c, 'n' | 'e' | 'E'))
-        };
-        let text = match cmd.name() {
-            "echo" => args[args.iter().take_while(echo_flags).count()..].join(" "),
-            "printf" => args.join(" "),
-            _ => return None,
-        };
-        // zsh's echo and printf both turn `\n` into a line break.
-        Some(text.replace("\\n", "\n"))
-    });
-    scripts.extend(printed);
-    scripts
-}
-
-fn split_assign(tok: &Tok) -> Option<(String, String)> {
-    let (key, value) = tok.text.split_once('=')?;
-    let key = key.strip_suffix('+').unwrap_or(key);
-    let mut chars = key.chars();
-    let first = chars.next()?;
-    let valid = (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    valid.then(|| (key.to_string(), value.to_string()))
-}
-
-/// True when wrapper words clear or reset the environment (`env -i`, `env -`,
-/// `exec -c`, `sudo`, `doas`).
-fn clears_env(words: &[String]) -> bool {
-    let mut tool = "";
-    words.iter().any(|word| {
-        if !word.starts_with('-') || word == "-" {
-            if matches!(basename(word), "env" | "exec" | "sudo" | "doas") {
-                tool = basename(word);
-            }
-            return matches!(tool, "sudo" | "doas") || (tool == "env" && word == "-");
-        }
-        let cluster = !word.starts_with("--");
-        match tool {
-            "env" => {
-                word == "--ignore-environment"
-                    || (cluster && {
-                        // Stop before any valued option (`u`, `C`, `P`, `S`) so an `i`
-                        // inside a glued value (`-P/tmp/evil`) is not read as `-i`.
-                        let flags = word
-                            .find(['u', 'C', 'P', 'S'])
-                            .map_or(word.as_str(), |at| &word[..at]);
-                        flags.contains('i')
-                    })
-            }
-            "exec" => cluster && word.contains('c'),
-            _ => false,
-        }
-    })
-}
-
-/// The commands `find` would run through `-exec` and friends.
-fn find_execs(words: &[Tok]) -> Vec<Vec<Tok>> {
-    let mut subs = Vec::new();
-    let mut at = 1;
-    while at < words.len() {
-        if matches!(
-            words[at].text.as_str(),
-            "-exec" | "-execdir" | "-ok" | "-okdir"
-        ) {
-            let end = words[at + 1..]
-                .iter()
-                .position(|tok| tok.text == ";" || tok.text == "+")
-                .map_or(words.len(), |offset| at + 1 + offset);
-            if end > at + 1 {
-                subs.push(words[at + 1..end].to_vec());
-            }
-            at = end;
-        }
-        at += 1;
-    }
-    subs
 }

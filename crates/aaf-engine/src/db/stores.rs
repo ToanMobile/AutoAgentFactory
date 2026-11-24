@@ -263,21 +263,27 @@ impl AccountStore for Db {
     }
 
     fn list_accounts(&self) -> PortResult<Vec<AccountState>> {
-        self.read(|conn| {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT id, provider, config_dir, cooldown_until, name FROM accounts ORDER BY id",
-                )
-                .map_err(sql_err)?;
+        let has_name = self.schema_version() >= 3;
+        self.read(move |conn| {
+            let sql = if has_name {
+                "SELECT id, provider, config_dir, cooldown_until, name FROM accounts ORDER BY id"
+            } else {
+                "SELECT id, provider, config_dir, cooldown_until FROM accounts ORDER BY id"
+            };
+            let mut stmt = conn.prepare_cached(sql).map_err(sql_err)?;
             let mut rows = stmt.query([]).map_err(sql_err)?;
             let mut accounts = Vec::new();
             while let Some(row) = rows.next().map_err(sql_err)? {
                 let provider: String = row.get(1).map_err(sql_err)?;
                 let config_dir: String = row.get(2).map_err(sql_err)?;
                 // Rows from before schema v3 have no name until rediscovery.
-                let name = match row.get::<_, String>(4).map_err(sql_err)? {
-                    name if name.is_empty() => default_account_name(&config_dir),
-                    name => name,
+                let name = if has_name {
+                    match row.get::<_, String>(4).map_err(sql_err)? {
+                        name if name.is_empty() => default_account_name(&config_dir),
+                        name => name,
+                    }
+                } else {
+                    default_account_name(&config_dir)
                 };
                 accounts.push(AccountState {
                     profile: AccountProfile {
@@ -460,6 +466,21 @@ impl KvStore for Db {
 }
 
 impl Db {
+    /// Returns the IDs of all runs currently in `running` state.
+    pub fn running_run_ids(&self) -> PortResult<std::collections::HashSet<String>> {
+        self.read(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT id FROM runs WHERE status = 'running'")
+                .map_err(sql_err)?;
+            let mut rows = stmt.query([]).map_err(sql_err)?;
+            let mut ids = std::collections::HashSet::new();
+            while let Some(row) = rows.next().map_err(sql_err)? {
+                ids.insert(row.get(0).map_err(sql_err)?);
+            }
+            Ok(ids)
+        })
+    }
+
     /// Aggregates `(status, run_count, tokens_in, tokens_out)` grouped by `runs.status`,
     /// optionally scoped to tasks under `repo_root`.
     pub fn run_totals_by_repo(
@@ -506,6 +527,47 @@ impl Db {
                 }
             }
             Ok(totals)
+        })
+    }
+
+    /// Returns up to `limit` most recent runs (`ORDER BY started_at DESC, rowid DESC`),
+    /// optionally scoped to tasks under `repo_root`, in a single SQL query.
+    pub fn recent_runs(&self, repo_root: Option<&str>, limit: usize) -> PortResult<Vec<RunRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let repo_root = repo_root.map(str::to_string);
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.read(move |conn| {
+            let mut runs = Vec::new();
+            if let Some(root) = repo_root {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT r.id, r.task_id, r.account_id, r.executor, r.worktree_path, \
+                         r.branch, r.status, r.exit_code, r.tokens_in, r.tokens_out, \
+                         r.started_at, r.ended_at FROM runs r \
+                         INNER JOIN tasks t ON t.id = r.task_id WHERE t.repo_root = ?1 \
+                         ORDER BY r.started_at DESC, r.rowid DESC LIMIT ?2",
+                    )
+                    .map_err(sql_err)?;
+                let mut rows = stmt.query(params![root, limit_i64]).map_err(sql_err)?;
+                while let Some(row) = rows.next().map_err(sql_err)? {
+                    runs.push(run_from_row(row)?);
+                }
+            } else {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT id, task_id, account_id, executor, worktree_path, branch, status, \
+                         exit_code, tokens_in, tokens_out, started_at, ended_at FROM runs \
+                         ORDER BY started_at DESC, rowid DESC LIMIT ?1",
+                    )
+                    .map_err(sql_err)?;
+                let mut rows = stmt.query(params![limit_i64]).map_err(sql_err)?;
+                while let Some(row) = rows.next().map_err(sql_err)? {
+                    runs.push(run_from_row(row)?);
+                }
+            }
+            Ok(runs)
         })
     }
 }

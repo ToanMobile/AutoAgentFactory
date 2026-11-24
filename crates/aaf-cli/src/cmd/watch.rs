@@ -1,6 +1,5 @@
 //! `aaf watch`: 100% read-only live terminal dashboard (zero network ports).
 
-use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +12,8 @@ use aaf_engine::db::Db;
 use aaf_engine::watch::{WatchQuery, WatchSnapshot, collect_watch_snapshot, render_watch_text};
 use serde_json::json;
 
-use super::board::store::{DB_FILE, err, open_db_read_only};
+use super::board::store::{SharedRoDb, err};
+use super::scope::resolve_scope;
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -33,40 +33,6 @@ pub struct WatchArgs {
     /// Collect and print a single snapshot, then exit 0 (no sleep).
     #[arg(long)]
     pub once: bool,
-}
-
-fn resolve_scope(
-    args: &WatchArgs,
-    ctx: &Ctx,
-) -> Result<(String, Option<PathBuf>, PathBuf), CmdError> {
-    if args.all {
-        return Ok(("all".to_string(), None, ctx.cwd.clone()));
-    }
-    if let Some(repo) = &args.repo {
-        let candidate = if repo.is_absolute() {
-            repo.clone()
-        } else {
-            ctx.cwd.join(repo)
-        };
-        if !candidate.exists() {
-            return Err(CmdError::new(format!(
-                "--repo {} does not exist",
-                candidate.display()
-            )));
-        }
-        let root = aaf_fp::repo_root(&candidate).unwrap_or(candidate);
-        let canonical = fs::canonicalize(&root).unwrap_or(root);
-        let scope = canonical.display().to_string();
-        return Ok((scope, Some(canonical.clone()), canonical));
-    }
-    match aaf_fp::repo_root(&ctx.cwd) {
-        Ok(root) => {
-            let canonical = fs::canonicalize(&root).unwrap_or(root);
-            let scope = canonical.display().to_string();
-            Ok((scope, Some(canonical.clone()), canonical))
-        }
-        Err(_) => Ok(("all (outside git repo)".to_string(), None, ctx.cwd.clone())),
-    }
 }
 
 fn snapshot_output(snap: &WatchSnapshot) -> CmdResult {
@@ -118,12 +84,13 @@ fn spawn_quit_listener(quit: Arc<AtomicBool>) {
 }
 
 pub fn run(args: &WatchArgs, ctx: &Ctx, json_mode: bool) -> CmdResult {
-    let (scope, scoped_repo, config_root) = resolve_scope(args, ctx)?;
+    let (scope, scoped_repo, config_root) = resolve_scope(args.repo.as_deref(), args.all, ctx)?;
     let cfg = ctx.load_config(&config_root)?;
-    let db_path = ctx.data_dir.join(DB_FILE);
     // Strictly read-only: never create `data_dir` or `aaf.db` if absent,
-    // and open SQLite read-only (`SQLITE_OPEN_READ_ONLY` + `query_only = ON`).
-    let mut db = open_db_read_only(ctx)?;
+    // and open SQLite read-only (`SQLITE_OPEN_READ_ONLY` + `query_only = ON`)
+    // via `SharedRoDb` so recreated/replaced `aaf.db` inodes are picked up
+    // automatically and `immutable=1` handles are never stuck cached.
+    let ro_db = SharedRoDb::for_ctx(ctx);
 
     let collect = |db: Option<&Db>| -> Result<WatchSnapshot, CmdError> {
         let query = WatchQuery {
@@ -138,6 +105,7 @@ pub fn run(args: &WatchArgs, ctx: &Ctx, json_mode: bool) -> CmdResult {
     };
 
     if args.once || json_mode {
+        let db = ro_db.get()?;
         let snap = collect(db.as_ref())?;
         return snapshot_output(&snap);
     }
@@ -151,9 +119,7 @@ pub fn run(args: &WatchArgs, ctx: &Ctx, json_mode: bool) -> CmdResult {
     let ticks = interval_secs.saturating_mul(10);
 
     loop {
-        if db.is_none() && db_path.is_file() {
-            db = Db::open_read_only(&db_path).ok();
-        }
+        let db = ro_db.get()?;
         let snap = collect(db.as_ref())?;
         let text = render_watch_text(&snap);
         let mut stdout = io::stdout();

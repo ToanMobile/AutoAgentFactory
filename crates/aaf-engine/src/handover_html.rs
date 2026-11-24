@@ -267,16 +267,18 @@ fn render_proof_html(html: &mut String, data: &HandoverData, data_dir: &Path) {
     let _ = writeln!(html, "  </section>");
 }
 
-/// Re-verifies HMAC + policy + live image SHA-256 via [`crate::proof::verify_proof`],
-/// opens the image safely as a regular non-symlink file `<= 4 MiB`, confirms its
-/// digest again, and base64-encodes it.
+/// Re-verifies HMAC + policy + live image SHA-256 via
+/// [`crate::proof::verify_proof_for_archived_root`], opens the image safely as a
+/// regular non-symlink file `<= 4 MiB`, confirms its digest again, and
+/// base64-encodes it.
 fn load_verified_proof_png(
     proof: &HandoverProof,
     data: &HandoverData,
     data_dir: &Path,
 ) -> Result<String, String> {
-    let verified = crate::proof::verify_proof(
+    let verified = crate::proof::verify_proof_for_archived_root(
         Path::new(&proof.repo_root),
+        Path::new(&data.repo_root),
         data_dir,
         &data.proof_config,
         Some(&proof.tree_fp),

@@ -2,9 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// Resolves `raw` the way the shell would for a literal word: `~`, `$HOME`,
-/// `$PWD`, `$TMPDIR` and relative paths, then `.`/`..` without touching the file system.
-pub fn expand(raw: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
+fn expand_unnormalized(raw: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     // `$HOMEWORK` is not `$HOME`: the prefix must end at a separator.
     let home_rest = ["~", "$HOME", "${HOME}"]
         .iter()
@@ -30,10 +28,50 @@ pub fn expand(raw: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
         PathBuf::from(raw)
     };
     if path.is_absolute() {
-        normalize(&path)
+        path
     } else {
-        normalize(&cwd.join(path))
+        cwd.join(path)
     }
+}
+
+/// Resolves `raw` the way the shell would for a literal word: `~`, `$HOME`,
+/// `$PWD`, `$TMPDIR` and relative paths, then `.`/`..` without touching the file system.
+pub fn expand(raw: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
+    normalize(&expand_unnormalized(raw, cwd, home))
+}
+
+/// Like [`expand`], but when a `..` component is present, resolves symlinks in
+/// the preceding path left-to-right BEFORE applying `..` (matching OS kernel
+/// lookup semantics for `symlink/../target`).
+pub fn expand_real_dotdot(raw: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
+    let unnorm = expand_unnormalized(raw, cwd, home);
+    if !unnorm
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return normalize(&unnorm);
+    }
+    let mut cur = PathBuf::new();
+    for component in unnorm.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !cur.as_os_str().is_empty()
+                    && !matches!(cur.components().next_back(), Some(Component::ParentDir))
+                {
+                    cur = real(&cur);
+                }
+                match cur.components().next_back() {
+                    None | Some(Component::ParentDir) => cur.push(".."),
+                    Some(_) => {
+                        cur.pop();
+                    }
+                }
+            }
+            other => cur.push(other.as_os_str()),
+        }
+    }
+    cur
 }
 
 /// True when `raw` starts with `~`, `$HOME`, or `${HOME}` (whole path or prefix).

@@ -30,6 +30,7 @@ use crate::db::private;
 
 const DIR: &str = "throttle";
 const GUEST: &str = "guest";
+const POOLS: &str = "pools";
 /// The closed directory; also where the slot and drain locks themselves
 /// lived before they got a directory of their own ([`super::legacy`]).
 const CLOSED_DIR: &str = "locks";
@@ -42,6 +43,13 @@ pub fn throttle_dir(data_dir: &Path) -> PathBuf {
 
 pub fn guest_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(DIR).join(GUEST)
+}
+
+/// Shared directory for Layer-1 correctness pool locks (`tool.unity.*.lock`,
+/// `worktree.*.lock`), writable by both host and sandboxed guests so both
+/// acquire advisory locks on the exact same inode.
+pub fn pools_dir(data_dir: &Path) -> PathBuf {
+    guest_dir(data_dir).join(POOLS)
 }
 
 pub(super) fn closed_dir(data_dir: &Path) -> PathBuf {
@@ -115,7 +123,82 @@ pub fn is_guest(data_dir: &Path) -> bool {
 /// the drain lock.
 pub(super) fn prepare(data_dir: &Path) -> io::Result<()> {
     locks_dir(data_dir)?;
+    ensure_pools_dir(data_dir)?;
     private::open_file(&drain_path(data_dir)).map(|_| ())
+}
+
+/// Ensures [`pools_dir`] exists as a real (non-symlink) directory.
+///
+/// Outside the sandbox this also creates `<data_dir>/throttle/guest` (`0700`);
+/// inside the sandbox it leaves the read-only parent alone and refuses any
+/// symlink planted at `pools/`.
+pub(super) fn ensure_pools_dir(data_dir: &Path) -> io::Result<PathBuf> {
+    if !is_guest(data_dir) {
+        locks_dir(data_dir)?;
+    }
+    let dir = pools_dir(data_dir);
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) => {
+            if !meta.is_dir() {
+                return Err(not_plain(&dir));
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&dir) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    if !fs::symlink_metadata(&dir)?.is_dir() {
+                        return Err(not_plain(&dir));
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(err) => return Err(err),
+    }
+    Ok(dir)
+}
+
+#[cfg(unix)]
+fn same_real_dir(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    before.is_dir()
+        && !before.file_type().is_symlink()
+        && after.is_dir()
+        && !after.file_type().is_symlink()
+        && before.dev() == after.dev()
+        && before.ino() == after.ino()
+}
+
+#[cfg(not(unix))]
+fn same_real_dir(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.is_dir()
+        && !before.file_type().is_symlink()
+        && after.is_dir()
+        && !after.file_type().is_symlink()
+}
+
+/// Opens a Layer-1 pool lock file under [`pools_dir`], verifying via
+/// `symlink_metadata` both before and after the open that `pools/` itself
+/// remained the exact same real (non-symlink) directory.
+pub(crate) fn open_pool_file(data_dir: &Path, filename: &str) -> io::Result<File> {
+    let dir = ensure_pools_dir(data_dir)?;
+    let before = fs::symlink_metadata(&dir)?;
+    if !before.is_dir() || before.file_type().is_symlink() {
+        return Err(not_plain(&dir));
+    }
+    let file = open_guest_file(&dir.join(filename))?;
+    let after = fs::symlink_metadata(&dir)?;
+    if !same_real_dir(&before, &after) {
+        return Err(not_plain(&dir));
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]

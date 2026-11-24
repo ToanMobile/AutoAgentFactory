@@ -2,11 +2,11 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aaf_domain::config::CommandsConfig;
 use aaf_domain::gate::{ChangeKind, CommandResult, GateMode};
@@ -18,6 +18,7 @@ use super::proc::capture;
 use crate::throttle::{HeavyJob, Throttle, heavy_tool};
 
 static DIFF_ENV_SEQ: AtomicU64 = AtomicU64::new(0);
+const DIFF_ENV_MAX_ATTEMPTS: usize = 16;
 
 /// Temp files exposing the verified gate change set to `lint` / `test_scoped`
 /// commands via `AAF_GATE_MODE`, `AAF_BASE_SHA`, `AAF_CHANGED_FILES_FILE`,
@@ -53,16 +54,44 @@ impl DiffEnvFiles {
                 }
             }
         }
-        let seq = DIFF_ENV_SEQ.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
         let dir = std::env::temp_dir();
-        let changed_path = dir.join(format!("aaf-changed-{pid}-{seq}.txt"));
-        let deleted_path = dir.join(format!("aaf-deleted-{pid}-{seq}.txt"));
-        write_lines_private(&changed_path, &changed)?;
-        if let Err(err) = write_lines_private(&deleted_path, &deleted) {
-            let _ = fs::remove_file(&changed_path);
-            return Err(err.into());
+        let mut allocated = None;
+        for _ in 0..DIFF_ENV_MAX_ATTEMPTS {
+            let seq = DIFF_ENV_SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let candidate_changed = dir.join(format!("aaf-changed-{pid}-{nanos:x}-{seq}.txt"));
+            let candidate_deleted = dir.join(format!("aaf-deleted-{pid}-{nanos:x}-{seq}.txt"));
+            match write_lines_private(&candidate_changed, &changed) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err.into()),
+            }
+            match write_lines_private(&candidate_deleted, &deleted) {
+                Ok(()) => {
+                    allocated = Some((candidate_changed, candidate_deleted));
+                    break;
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&candidate_changed);
+                    continue;
+                }
+                Err(err) => {
+                    let _ = fs::remove_file(&candidate_changed);
+                    return Err(err.into());
+                }
+            }
         }
+        let Some((changed_path, deleted_path)) = allocated else {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "failed to allocate unique diff env files after retries",
+            )
+            .into());
+        };
         let mode_str = match mode {
             GateMode::Scoped => "scoped",
             GateMode::Full => "full",
@@ -360,4 +389,35 @@ pub fn run_one_heavy(
     run_heavy(
         repo_root, name, command, timeout, heavy, extra_env, &mut notes,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diff_env_files_unique_nonce_and_cleanup() {
+        let changes = vec![
+            Change {
+                path: "src/a.rs".to_string(),
+                kind: ChangeKind::Modified,
+                old_path: None,
+            },
+            Change {
+                path: "src/old.rs".to_string(),
+                kind: ChangeKind::Deleted,
+                old_path: None,
+            },
+        ];
+        let first = DiffEnvFiles::write(GateMode::Scoped, Some("abc"), &changes).unwrap();
+        let second = DiffEnvFiles::write(GateMode::Scoped, Some("abc"), &changes).unwrap();
+        assert_ne!(first.changed_path, second.changed_path);
+        assert_ne!(first.deleted_path, second.deleted_path);
+        let p1 = first.changed_path.clone();
+        let p2 = first.deleted_path.clone();
+        assert!(p1.exists() && p2.exists());
+        drop(first);
+        assert!(!p1.exists() && !p2.exists());
+    }
 }

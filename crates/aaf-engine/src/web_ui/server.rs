@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -30,15 +30,29 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const SSE_PUSH_INTERVAL: Duration = Duration::from_millis(1500);
-const SSE_POLL_SLICE: Duration = Duration::from_millis(100);
 const DEFAULT_STREAM_LINES: usize = 120;
 const MAX_STREAM_LINES: usize = 500;
 const INDEX_HTML: &str = include_str!("index.html");
 
+type ShutdownState = Arc<(Mutex<bool>, Condvar)>;
+
+fn is_shutdown(state: &ShutdownState) -> bool {
+    *state.0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn wait_for_shutdown(state: &ShutdownState, timeout: Duration) -> bool {
+    let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let (guard, _) = state
+        .1
+        .wait_timeout_while(guard, timeout, |stopped| !*stopped)
+        .unwrap_or_else(|e| e.into_inner());
+    *guard
+}
+
 /// Running Web UI server handle supporting deterministic shutdown and join.
 pub struct UiServerHandle {
     addr: SocketAddr,
-    shutdown: Arc<AtomicBool>,
+    shutdown: ShutdownState,
     accept_thread: Option<JoinHandle<()>>,
 }
 
@@ -49,7 +63,14 @@ impl UiServerHandle {
 
     /// Signals the accept loop and all active SSE streams to stop cleanly.
     pub fn shutdown(&self) {
-        if !self.shutdown.swap(true, Ordering::SeqCst) {
+        let changed = {
+            let mut flag = self.shutdown.0.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = *flag;
+            *flag = true;
+            !prev
+        };
+        if changed {
+            self.shutdown.1.notify_all();
             let wake = wake_addr(self.addr);
             let _ = TcpStream::connect_timeout(&wake, Duration::from_millis(200));
         }
@@ -75,7 +96,7 @@ pub fn start_server(cfg: UiConfig, backend: Arc<dyn UiBackend>) -> Result<UiServ
     validate_ui_config(&cfg)?;
     let listener = TcpListener::bind((cfg.host.as_str(), cfg.port))?;
     let addr = listener.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown: ShutdownState = Arc::new((Mutex::new(false), Condvar::new()));
     let active = Arc::new(AtomicUsize::new(0));
     let cfg = Arc::new(cfg);
 
@@ -126,22 +147,22 @@ fn accept_loop(
     bound_port: u16,
     cfg: Arc<UiConfig>,
     backend: Arc<dyn UiBackend>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: ShutdownState,
     active: Arc<AtomicUsize>,
 ) {
     loop {
         let Ok((mut stream, _)) = listener.accept() else {
-            if shutdown.load(Ordering::SeqCst) {
+            if is_shutdown(&shutdown) {
                 break;
             }
             thread::sleep(Duration::from_millis(20));
             continue;
         };
-        if shutdown.load(Ordering::SeqCst) {
+        if is_shutdown(&shutdown) {
             break;
         }
         let Some(guard) = try_reserve_conn(&active) else {
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
             let _ = write_json_error(&mut stream, 503, "server connection limit reached");
             continue;
         };
@@ -176,7 +197,7 @@ fn accept_loop(
     }
 }
 
-struct HttpRequest {
+pub(super) struct HttpRequest {
     method: String,
     raw_path: String,
     query: HashMap<String, String>,
@@ -184,7 +205,7 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-enum ParseError {
+pub(super) enum ParseError {
     Status(u16, String),
     Closed,
 }
@@ -197,7 +218,13 @@ fn read_chunk(
     stream: &mut TcpStream,
     buf: &mut [u8],
     empty_is_closed: bool,
+    deadline: Instant,
 ) -> Result<usize, ParseError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| parse_err(408, "request timed out"))?;
+    let _ = stream.set_read_timeout(Some(remaining));
     match stream.read(buf) {
         Ok(0) if empty_is_closed => Err(ParseError::Closed),
         Ok(0) => Err(parse_err(400, "truncated HTTP request")),
@@ -210,6 +237,14 @@ fn read_chunk(
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ParseError> {
+    read_http_request_with_timeout(stream, IO_TIMEOUT)
+}
+
+pub(super) fn read_http_request_with_timeout(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> Result<HttpRequest, ParseError> {
+    let deadline = Instant::now() + timeout;
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     let header_end = loop {
@@ -220,7 +255,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ParseError> 
             return Err(parse_err(413, "headers exceed 16 KiB limit"));
         }
         let max_read = (MAX_HEADER_BYTES - buf.len()).min(chunk.len());
-        let n = read_chunk(stream, &mut chunk[..max_read], buf.is_empty())?;
+        let n = read_chunk(stream, &mut chunk[..max_read], buf.is_empty(), deadline)?;
         buf.extend_from_slice(&chunk[..n]);
     };
 
@@ -280,7 +315,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, ParseError> 
     }
     while body.len() < content_len {
         let need = (content_len - body.len()).min(chunk.len());
-        let n = read_chunk(stream, &mut chunk[..need], false)?;
+        let n = read_chunk(stream, &mut chunk[..need], false, deadline)?;
         body.extend_from_slice(&chunk[..n]);
     }
 
@@ -310,6 +345,10 @@ enum Route {
     MethodNotAllowed,
     BadRequest(&'static str),
     NotFound,
+}
+
+fn send_err(stream: &mut TcpStream, code: u16, msg: &str) {
+    let _ = write_json_error(stream, code, msg);
 }
 
 fn match_route(method: &str, path: &str) -> Route {
@@ -360,7 +399,7 @@ fn dispatch_request(
     bound_port: u16,
     cfg: &UiConfig,
     backend: &dyn UiBackend,
-    shutdown: &AtomicBool,
+    shutdown: &ShutdownState,
     req: &HttpRequest,
 ) {
     let route = match_route(&req.method, &req.raw_path);
@@ -387,13 +426,8 @@ fn dispatch_request(
     match route {
         Route::Index => {
             let csp = format!("Content-Security-Policy: {HTML_CSP}\r\n");
-            let _ = write_http_response(
-                stream,
-                200,
-                "text/html; charset=utf-8",
-                &csp,
-                INDEX_HTML.as_bytes(),
-            );
+            let ct = "text/html; charset=utf-8";
+            let _ = write_http_response(stream, 200, ct, &csp, INDEX_HTML.as_bytes());
         }
         Route::Health => {
             let _ = write_json_response(stream, 200, &json!({ "ok": true }));
@@ -426,31 +460,21 @@ fn dispatch_request(
                     .map(|lines| json!({ "ok": true, "run_id": run_id, "lines": lines }));
                 write_backend_result(stream, res);
             }
-            Err(e) => {
-                let _ = write_json_error(stream, 400, &format!("invalid run id: {e}"));
-            }
+            Err(e) => send_err(stream, 400, &format!("invalid run id: {e}")),
         },
         Route::Events => serve_sse(stream, backend, shutdown, req.query.get("run_id")),
         Route::ApproveCommit => handle_approve_post(stream, backend, &req.body),
         Route::Action => handle_action_post(stream, backend, &req.body),
-        Route::BadRequest(msg) => {
-            let _ = write_json_error(stream, 400, msg);
-        }
-        Route::MethodNotAllowed => {
-            let _ = write_json_error(stream, 405, "method not allowed");
-        }
-        Route::NotFound => {
-            let _ = write_json_error(stream, 404, "not found");
-        }
+        Route::BadRequest(msg) => send_err(stream, 400, msg),
+        Route::MethodNotAllowed => send_err(stream, 405, "method not allowed"),
+        Route::NotFound => send_err(stream, 404, "not found"),
     }
 }
 
 fn with_task_id(stream: &mut TcpStream, id: &str, f: impl FnOnce(&str) -> Result<Value, String>) {
     match validate_task_id(id) {
         Ok(()) => write_backend_result(stream, f(id)),
-        Err(e) => {
-            let _ = write_json_error(stream, 400, &format!("invalid task id: {e}"));
-        }
+        Err(e) => send_err(stream, 400, &format!("invalid task id: {e}")),
     }
 }
 
@@ -458,7 +482,7 @@ fn parse_json_body<T: DeserializeOwned>(stream: &mut TcpStream, body: &[u8]) -> 
     match serde_json::from_slice(body) {
         Ok(v) => Some(v),
         Err(e) => {
-            let _ = write_json_error(stream, 400, &format!("invalid JSON body: {e}"));
+            send_err(stream, 400, &format!("invalid JSON body: {e}"));
             None
         }
     }
@@ -477,22 +501,17 @@ fn handle_approve_post(stream: &mut TcpStream, backend: &dyn UiBackend, body: &[
         return;
     };
     if let Err(e) = validate_task_id(&p.task_id) {
-        let _ = write_json_error(stream, 400, &format!("invalid task id: {e}"));
-        return;
+        return send_err(stream, 400, &format!("invalid task id: {e}"));
     }
     let lock_fp = p.lock_fp.trim();
     if lock_fp.is_empty() {
-        let _ = write_json_error(stream, 400, "lock_fp is required");
-        return;
+        return send_err(stream, 400, "lock_fp is required");
     }
-    let reviewer = match p.reviewer.trim() {
+    let rev = match p.reviewer.trim() {
         "" => "web-ui",
         other => other,
     };
-    write_backend_result(
-        stream,
-        backend.approve_commit(&p.task_id, lock_fp, reviewer),
-    );
+    write_backend_result(stream, backend.approve_commit(&p.task_id, lock_fp, rev));
 }
 
 #[derive(Deserialize)]
@@ -510,25 +529,21 @@ fn handle_action_post(stream: &mut TcpStream, backend: &dyn UiBackend, body: &[u
     };
     let action = p.action.trim().to_ascii_lowercase();
     if !matches!(action.as_str(), "unblock" | "rework" | "steer" | "unfreeze") {
-        let _ = write_json_error(stream, 400, "unsupported action");
-        return;
+        return send_err(stream, 400, "unsupported action");
     }
     if action != "unfreeze"
         && let Err(e) = validate_task_id(&p.task_id)
     {
-        let _ = write_json_error(stream, 400, &format!("invalid task id: {e}"));
-        return;
+        return send_err(stream, 400, &format!("invalid task id: {e}"));
     }
-    write_backend_result(
-        stream,
-        backend.mutate_task(&action, p.task_id.trim(), p.note.trim()),
-    );
+    let res = backend.mutate_task(&action, p.task_id.trim(), p.note.trim());
+    write_backend_result(stream, res);
 }
 
 fn serve_sse(
     stream: &mut TcpStream,
     backend: &dyn UiBackend,
-    shutdown: &AtomicBool,
+    shutdown: &ShutdownState,
     run_id_param: Option<&String>,
 ) {
     let run_id = run_id_param
@@ -541,28 +556,28 @@ fn serve_sse(
         return;
     }
 
-    let mut last_push = Instant::now()
-        .checked_sub(SSE_PUSH_INTERVAL)
-        .unwrap_or_else(Instant::now);
-    while !shutdown.load(Ordering::SeqCst) {
-        if last_push.elapsed() >= SSE_PUSH_INTERVAL {
-            if let Ok(status) = backend.status_json()
-                && write_sse_event(stream, "status", &wrap_ok(status)).is_err()
-            {
-                break;
-            }
-            if let Some(rid) = run_id
-                && let Ok(lines) = backend.stream_tail_lines(rid, DEFAULT_STREAM_LINES)
-                && write_sse_event(stream, "stream", &json!({ "run_id": rid, "lines": lines }))
-                    .is_err()
-            {
-                break;
-            }
-            if stream.write_all(b": keepalive\n\n").is_err() || stream.flush().is_err() {
-                break;
-            }
-            last_push = Instant::now();
+    let mut last_stream: Option<Vec<String>> = None;
+    while !is_shutdown(shutdown) {
+        if let Ok(status) = backend.status_json()
+            && write_sse_event(stream, "status", &wrap_ok(status)).is_err()
+        {
+            break;
         }
-        thread::sleep(SSE_POLL_SLICE);
+        if let Some(rid) = run_id
+            && let Ok(lines) = backend.stream_tail_lines(rid, DEFAULT_STREAM_LINES)
+            && last_stream.as_ref() != Some(&lines)
+        {
+            let ev = json!({ "run_id": rid, "lines": &lines });
+            if write_sse_event(stream, "stream", &ev).is_err() {
+                break;
+            }
+            last_stream = Some(lines);
+        }
+        if stream.write_all(b": keepalive\n\n").is_err() || stream.flush().is_err() {
+            break;
+        }
+        if wait_for_shutdown(shutdown, SSE_PUSH_INTERVAL) {
+            break;
+        }
     }
 }

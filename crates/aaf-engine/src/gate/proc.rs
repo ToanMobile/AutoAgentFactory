@@ -5,6 +5,7 @@ use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -80,13 +81,24 @@ impl Sink {
     }
 }
 
-fn drain(mut pipe: impl Read + Send + 'static, sink: Arc<Mutex<Sink>>, done: mpsc::Sender<()>) {
+fn drain(
+    mut pipe: impl Read + Send + 'static,
+    sink: Arc<Mutex<Sink>>,
+    done: mpsc::Sender<()>,
+    stop: Arc<AtomicBool>,
+) {
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             match pipe.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     // A poisoned lock means another reader panicked; the
                     // caller then sees whatever was collected before.
                     if let Ok(mut sink) = sink.lock() {
@@ -334,7 +346,8 @@ pub(crate) fn capture_supervised(
         cap,
     }));
     let (done_tx, done_rx) = mpsc::channel();
-    drain(reader, Arc::clone(&sink), done_tx);
+    let stop = Arc::new(AtomicBool::new(false));
+    drain(reader, Arc::clone(&sink), done_tx, Arc::clone(&stop));
 
     let (
         Waited {
@@ -344,7 +357,13 @@ pub(crate) fn capture_supervised(
             paused: paused_total,
         },
         unkilled,
-    ) = wait_supervised(&mut child, started, timeout, supervisor)?;
+    ) = match wait_supervised(&mut child, started, timeout, supervisor) {
+        Ok(res) => res,
+        Err(err) => {
+            stop.store(true, Ordering::Relaxed);
+            return Err(err);
+        }
+    };
     exited.mark();
 
     // The reader now ends once it has read everything the child wrote, even
@@ -355,7 +374,10 @@ pub(crate) fn capture_supervised(
     let complete = match done_rx.recv_timeout(DRAIN_LIMIT) {
         // Sent, or the sender is gone: nothing more will arrive.
         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => true,
-        Err(mpsc::RecvTimeoutError::Timeout) => false,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            stop.store(true, Ordering::Relaxed);
+            false
+        }
     };
     let mut output = sink.lock().map(|mut s| s.take()).unwrap_or_default();
     // The log is where a person reads what the timeout left behind.
@@ -414,4 +436,32 @@ pub(crate) fn git_bytes(
         )));
     }
     Ok(done.output)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    struct EndlessReader;
+    impl Read for EndlessReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            thread::sleep(Duration::from_millis(5));
+            buf[0] = b'x';
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn drain_exits_when_stop_is_set() {
+        let sink = Arc::new(Mutex::new(Sink {
+            data: Vec::new(),
+            cap: Some(64),
+        }));
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        drain(EndlessReader, sink, tx, Arc::clone(&stop));
+        stop.store(true, Ordering::Relaxed);
+        assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
+    }
 }

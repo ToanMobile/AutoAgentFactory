@@ -127,19 +127,10 @@ pub struct RealGit {
     /// `<data dir>/locks`.
     locks_dir: PathBuf,
     base: BaseRef,
-    /// Serialises every git command that writes or enumerates the
-    /// repository's worktree entries. Git itself does not: a `worktree add`
-    /// (and a rebase, which checks where a branch is checked out) dies with
-    /// "failed to read .git/worktrees/<other>/commondir" when it reads the
-    /// entry another `worktree add` is still writing. Workers and the gate
-    /// thread hit that with `--max-parallel` above 1.
-    /// ponytail: in-process lock (one `aaf run` per repository holds the run
-    /// lock); a git command an agent runs itself is outside it.
+    /// Serialises git commands that write or enumerate worktree entries.
     admin: Mutex<()>,
-    /// Queues this process's commits, so only one thread at a time polls
-    /// the repository's commit lock file (which keeps other processes out).
-    /// Not `admin`: a pre-commit hook can run for minutes and must not keep
-    /// workers from creating their worktrees.
+    /// Queues in-process commits separately from `admin` so slow hooks never
+    /// stall sibling worktree creation.
     commit: Mutex<()>,
     commit_lock_timeout: Duration,
     last_squash_poll: Mutex<Option<Instant>>,
@@ -196,8 +187,6 @@ impl RealGit {
     }
 
     fn admin(&self) -> MutexGuard<'_, ()> {
-        // The lock guards git's files, not data of ours: a panic while it
-        // was held leaves nothing to distrust.
         self.admin.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -341,9 +330,7 @@ impl GitOps for RealGit {
         {
             return Ok(());
         }
-        // One `git commit` per repository at a time: each one fires the
-        // repository's pre-commit hook, and `--max-parallel N` would start
-        // N of them (N builds) at once. Hooks stay on.
+        // One `git commit` per repository at a time so pre-commit hooks serialize.
         let _queue = self.commit.lock().unwrap_or_else(PoisonError::into_inner);
         let lock = commit_lock::lock_path(&self.locks_dir, &self.repo_root);
         let _lock = CommitLock::acquire(&lock, self.commit_lock_timeout)?;
@@ -428,9 +415,7 @@ impl GitOps for RealGit {
         if out.success() {
             return Ok(Vec::new());
         }
-        // When the rebase never started (a dirty tree, say) there is
-        // nothing to abort, and the abort's own complaint would hide why:
-        // the rebase's error is the one to report.
+        // Aborting a rebase that never started hides the original rebase error.
         match abort_rebase(tree) {
             Ok(files) if !files.is_empty() => Ok(files),
             _ => Err(PortError::Io(format!(
@@ -449,6 +434,14 @@ impl GitOps for RealGit {
         worktree: &TaskWorktree,
         regate: &dyn Fn(&Path) -> Result<bool, String>,
     ) -> PortResult<MergeOutcome> {
+        self.merge_with_onto(worktree, &|tree, _| regate(tree))
+    }
+
+    fn merge_with_onto(
+        &self,
+        worktree: &TaskWorktree,
+        regate: &dyn Fn(&Path, &str) -> Result<bool, String>,
+    ) -> PortResult<MergeOutcome> {
         let request = MergeRequest {
             repo_root: self.repo_root.clone(),
             worktree: worktree.clone(),
@@ -457,17 +450,19 @@ impl GitOps for RealGit {
             locks_dir: self.locks_dir.clone(),
             lock_timeout: MERGE_LOCK_TIMEOUT,
         };
-        // The merge queue rebases and lists worktrees, so it runs under the
-        // admin lock; except while the gate judges the rebased tree, which
-        // can take minutes and must not keep workers from creating theirs.
+        // Acquire cross-process merge lock before `admin` so waiting on
+        // another process never stalls sibling worker threads.
+        let lock = crate::git::merge_queue::acquire_lock(&request).map_err(err)?;
+        // Release `admin` while the gate judges the rebased tree.
         let admin = RefCell::new(Some(self.admin()));
-        let regate_unlocked = |tree: &Path| {
+        let regate_unlocked = |tree: &Path, onto_sha: &str| {
             drop(admin.borrow_mut().take());
-            let verdict = regate(tree);
+            let verdict = regate(tree, onto_sha);
             *admin.borrow_mut() = Some(self.admin());
             verdict
         };
-        crate::git::merge(&request, &regate_unlocked).map_err(err)
+        crate::git::merge_queue::merge_with_lock_onto(&request, &lock, &regate_unlocked)
+            .map_err(err)
     }
 
     fn open_pr(

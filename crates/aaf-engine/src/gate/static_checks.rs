@@ -312,17 +312,123 @@ pub fn contains_allow_marker(line: &str) -> Result<bool, GateError> {
     Ok(rules()?.allow.is_match(line))
 }
 
-fn is_comment_line(text: &str) -> bool {
+fn is_pure_c_comment(mut s: &str) -> bool {
+    loop {
+        s = s.trim_start();
+        if s.is_empty() || s.starts_with("//") {
+            return true;
+        }
+        if let Some(rest) = s.strip_prefix("/*") {
+            let Some((_, after)) = rest.split_once("*/") else {
+                return true;
+            };
+            s = after;
+        } else {
+            return false;
+        }
+    }
+}
+
+fn is_hash_comment_file(path: &str) -> bool {
+    let lower = file_name(path).to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "makefile"
+            | "gnumakefile"
+            | "dockerfile"
+            | "containerfile"
+            | "gemfile"
+            | "rakefile"
+            | "podfile"
+            | "fastfile"
+            | "justfile"
+            | ".gitignore"
+            | ".gitattributes"
+            | ".dockerignore"
+            | ".env"
+            | ".bashrc"
+            | ".zshrc"
+            | ".profile"
+    ) || lower.starts_with("dockerfile.")
+        || lower.starts_with("makefile.")
+        || lower.starts_with(".env.")
+    {
+        return true;
+    }
+    lower.rsplit_once('.').is_some_and(|(_, ext)| {
+        matches!(
+            ext,
+            "py" | "pyi"
+                | "sh"
+                | "bash"
+                | "zsh"
+                | "fish"
+                | "rb"
+                | "pl"
+                | "pm"
+                | "yml"
+                | "yaml"
+                | "toml"
+                | "ini"
+                | "cfg"
+                | "conf"
+                | "mk"
+                | "r"
+                | "tf"
+                | "tfvars"
+                | "hcl"
+                | "nix"
+                | "ps1"
+                | "cmake"
+                | "awk"
+                | "sed"
+                | "properties"
+        )
+    })
+}
+
+fn is_dash_comment_file(path: &str) -> bool {
+    let lower = file_name(path).to_ascii_lowercase();
+    lower.rsplit_once('.').is_some_and(|(_, ext)| {
+        matches!(
+            ext,
+            "sql"
+                | "lua"
+                | "hs"
+                | "lhs"
+                | "elm"
+                | "ada"
+                | "adb"
+                | "ads"
+                | "vhd"
+                | "vhdl"
+                | "applescript"
+        )
+    })
+}
+
+fn is_comment_line(path: &str, text: &str) -> bool {
     let trimmed = text.trim_start();
-    trimmed.starts_with("//")
-        || trimmed.starts_with("/*")
-        || trimmed == "*"
-        || trimmed.starts_with("* ")
-        || trimmed.starts_with("*\t")
-        || trimmed.starts_with("*/")
-        || (trimmed.starts_with('#') && !trimmed.starts_with("#[") && !trimmed.starts_with("#!["))
-        || trimmed.starts_with("-- ")
-        || trimmed == "--"
+    if trimmed.starts_with("//") {
+        return true;
+    }
+    if trimmed.starts_with("/*") {
+        return is_pure_c_comment(trimmed);
+    }
+    if let Some(after) = trimmed.strip_prefix("*/") {
+        return is_pure_c_comment(after);
+    }
+    if trimmed == "*" {
+        return true;
+    }
+    if trimmed.starts_with("* ") || trimmed.starts_with("*\t") {
+        return match trimmed.split_once("*/") {
+            Some((_, after)) => is_pure_c_comment(after),
+            None => true,
+        };
+    }
+    (trimmed.starts_with('#') && is_hash_comment_file(path))
+        || ((trimmed.starts_with("-- ") || trimmed == "--") && is_dash_comment_file(path))
 }
 
 fn is_doc_path(path: &str) -> bool {
@@ -330,7 +436,7 @@ fn is_doc_path(path: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, ext)| {
         matches!(
             ext.to_ascii_lowercase().as_str(),
-            "md" | "mdx" | "rst" | "txt" | "adoc"
+            "md" | "markdown" | "rst" | "txt" | "adoc"
         )
     })
 }
@@ -355,7 +461,7 @@ pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
         let is_doc = is_doc_path(&file.path);
         let mut previous: Option<(u32, &str)> = None;
         for (number, text) in &file.lines {
-            let is_comment = is_comment_line(text);
+            let is_comment = is_comment_line(&file.path, text);
             let mut hits: Vec<(usize, u32, bool)> = Vec::new();
             for (index, patterns) in rules.rules.iter().enumerate() {
                 let spec = &SPECS[index];
@@ -380,7 +486,7 @@ pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
             if !is_doc
                 && !is_comment
                 && let Some((prev_number, prev_text)) = previous
-                && !is_comment_line(prev_text)
+                && !is_comment_line(&file.path, prev_text)
                 && prev_number.checked_add(1) == Some(*number)
                 && rules
                     .two_line

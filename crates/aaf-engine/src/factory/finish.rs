@@ -46,17 +46,31 @@ pub(super) fn judge_round(
         worktree: job.worktree.clone(),
     };
 
-    let solo_required = deps.settings.repo.proof.required
+    let always_solo = deps.settings.repo.proof.required
         || deps.settings.repo.cross_audit.score_gate
-        || deps.settings.repo.cross_audit.audit_scope != AuditScope::HeadLock;
+        || deps.settings.repo.cross_audit.audit_scope == AuditScope::Always;
+    let large_scope =
+        !always_solo && deps.settings.repo.cross_audit.audit_scope == AuditScope::Large;
+    let mut cached_ready: Vec<(GateJob, Receipt)> = Vec::new();
     let mut batch: Vec<GateJob> = Vec::new();
     let mut alone: Vec<GateJob> = Vec::new();
-    for job in jobs {
+    for mut job in jobs {
+        if let Some(receipt) = job.cached_receipt.take()
+            && receipt.status == GateStatus::Clear
+            && deps
+                .gate
+                .verify_cached_receipt(&job.worktree.path, &receipt)
+        {
+            cached_ready.push((job, *receipt));
+            continue;
+        }
         match deps.gate.head_lock(&job.worktree.path) {
             Ok(lock) if lock.status == LockStatus::Clear => {
                 // Proof artifacts and post-gate audit verdicts are bound to
                 // each task worktree's own tree_fp; never share a batch receipt.
-                if solo_required {
+                let needs_solo = always_solo
+                    || (large_scope && post_audit::is_large_worktree_diff(deps, &job.worktree));
+                if needs_solo {
                     alone.push(job);
                 } else {
                     batch.push(job);
@@ -106,6 +120,15 @@ pub(super) fn judge_round(
             continue;
         };
         let judged = outcome.verdicts.swap_remove(at);
+        let resolution = settle(deps, &job, judged, &mut round).map_err(|e| e.to_string());
+        answer(job, resolution);
+    }
+    for (job, receipt) in cached_ready {
+        let judged = Judged {
+            task_id: job.task_id.clone(),
+            verdict: Verdict::Clear(receipt),
+            batch_group: None,
+        };
         let resolution = settle(deps, &job, judged, &mut round).map_err(|e| e.to_string());
         answer(job, resolution);
     }
@@ -402,11 +425,16 @@ fn merge(
         .and_then(|group| group.base.take());
     let gated_here = AtomicBool::new(false);
     let gate_runs = round.gate_runs;
-    let regate = |tree: &Path| -> Result<bool, String> {
-        if let Some(covered) = &covered
-            && deps.git.base_sha().map_err(|e| e.to_string())? == *covered
-        {
-            return Ok(true);
+    let regate = |tree: &Path, onto_sha: &str| -> Result<bool, String> {
+        if let Some(covered) = &covered {
+            let matches_covered = if !onto_sha.is_empty() {
+                onto_sha == *covered
+            } else {
+                deps.git.base_sha().map_err(|e| e.to_string())? == *covered
+            };
+            if matches_covered {
+                return Ok(true);
+            }
         }
         gated_here.store(true, Ordering::Relaxed);
         gate_runs.fetch_add(1, Ordering::Relaxed);
@@ -418,7 +446,7 @@ fn merge(
         Ok(clear)
     };
     for _ in 0..MERGE_ATTEMPTS {
-        match deps.git.merge(&job.worktree, &regate)? {
+        match deps.git.merge_with_onto(&job.worktree, &regate)? {
             MergeOutcome::Merged { new_base_sha } => {
                 // Move to Done before fetching or deleting the worktree/branch so
                 // a transient post-merge fetch failure or crash cannot block a
@@ -435,6 +463,11 @@ fn merge(
                 // Done tasks must not pile up worktrees on disk. A failed
                 // cleanup does not undo the merge; it is recorded with it.
                 let leftover = deps.git.cleanup(&task.id).err().map(|e| e.to_string());
+                if let Some(ref err) = leftover
+                    && let Ok(mut warnings) = round.warnings.lock()
+                {
+                    warnings.push(format!("{}: post-merge cleanup: {err}", task.id));
+                }
                 deps.emit(
                     EventKind::MergeResult,
                     &task.id,
@@ -469,8 +502,22 @@ fn merge(
                 return Ok(Resolution::Failed(Box::new(signal)));
             }
             MergeOutcome::GateFailed => {
+                let receipt = last_receipt.lock().ok().and_then(|mut slot| slot.take());
+                if let Some(ref receipt) = receipt {
+                    deps.emit(
+                        EventKind::GateResult,
+                        &task.id,
+                        gate_payload(deps, &job.worktree.path, receipt, None),
+                    )?;
+                    if receipt.status == GateStatus::Unverified {
+                        let why =
+                            format!("the gate could not verify: {}", receipt.reasons.join("; "));
+                        unblock::block_untried(deps, &task.id, &why)?;
+                        return Ok(Resolution::Settled(TaskState::Blocked));
+                    }
+                }
                 let mut signal = FailureSignal::empty();
-                signal.gate = last_receipt.lock().ok().and_then(|mut slot| slot.take());
+                signal.gate = receipt;
                 return Ok(Resolution::Failed(Box::new(signal)));
             }
             MergeOutcome::NotFastForward => {}

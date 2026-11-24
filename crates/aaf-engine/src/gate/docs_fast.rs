@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use aaf_domain::config::AGENT_CONFIG_GLOBS;
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
 
 use super::GateError;
 use super::changes::Change;
@@ -47,8 +47,16 @@ const DENIED_DIRS: &[&str] = &[
 /// Markers (case-insensitive ERE) on a tracked non-doc line that compile a file
 /// into a build or run it as a test. Each hit is read with 4 trailing lines,
 /// since rustfmt and TOML arrays wrap the path onto the next lines.
-const EMBED_PATTERN: &str =
-    "include_str!|include_bytes!|include_dir!|doctest|mdbook[[:space:]]+test";
+/// Assembled with `concat!` so this file never self-matches `git grep`.
+const EMBED_PATTERN: &str = concat!(
+    "include_",
+    "str!|include_",
+    "bytes!|include_",
+    "dir!|go:",
+    "embed|doc",
+    "test|md",
+    "book[[:space:]]+test"
+);
 
 /// Basenames (lowercase) that end in `.txt` or similar but affect builds,
 /// dependency resolution, or site security policies.
@@ -135,29 +143,184 @@ pub fn is_docs_only(
     Ok(true)
 }
 
+fn dir_referenced(block: &str, dir: &str) -> bool {
+    [
+        format!("\"{dir}\""),
+        format!("\"{dir}/"),
+        format!("/{dir}\""),
+        format!("/{dir}/"),
+        format!("'{dir}'"),
+        format!("'{dir}/"),
+        format!("/{dir}'"),
+    ]
+    .iter()
+    .any(|needle| block.contains(needle.as_str()))
+}
+
+/// Parses pattern tokens on a Go embed directive line after the marker.
+/// Returns `None` to fail closed on malformed quotes or double-quoted
+/// backslash escapes.
+fn parse_go_embed_patterns(rest: &str) -> Option<Vec<&str>> {
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    let mut patterns = Vec::new();
+    while i < bytes.len() {
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let token = match bytes[i] {
+            b'"' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        return None;
+                    }
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return None;
+                }
+                let tok = &rest[start..i];
+                i += 1;
+                if i < bytes.len() && !matches!(bytes[i], b' ' | b'\t') {
+                    return None;
+                }
+                tok
+            }
+            b'`' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'`' {
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return None;
+                }
+                let tok = &rest[start..i];
+                i += 1;
+                if i < bytes.len() && !matches!(bytes[i], b' ' | b'\t') {
+                    return None;
+                }
+                tok
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t') {
+                    i += 1;
+                }
+                &rest[start..i]
+            }
+        };
+        let pat = token.strip_prefix("all:").unwrap_or(token);
+        let pat = pat.trim_end_matches('/');
+        if !pat.is_empty() {
+            patterns.push(pat);
+        }
+    }
+    Some(patterns)
+}
+
+/// True when `matcher` matches any path suffix of `doc` (e.g. `docs/sub/g.md`,
+/// `sub/g.md`, `g.md`) or any ancestor directory suffix (`docs/sub`, `sub`,
+/// `docs`).
+fn doc_suffixes_match(matcher: &GlobMatcher, doc: &str) -> bool {
+    let trimmed = doc.trim_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut segs: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start = 0;
+    for (idx, b) in trimmed.bytes().enumerate() {
+        if b == b'/' {
+            if seg_start < idx {
+                segs.push((seg_start, idx));
+            }
+            seg_start = idx + 1;
+        }
+    }
+    if seg_start < trimmed.len() {
+        segs.push((seg_start, trimmed.len()));
+    }
+    for (end_idx, &(_, end)) in segs.iter().enumerate() {
+        for &(start, _) in &segs[..=end_idx] {
+            if matcher.is_match(&trimmed[start..end]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when any Go embed directive line in `block` has a pattern that matches
+/// `doc` (or any of its suffixes / ancestor dir suffixes), or fails to parse.
+fn go_embed_matches_doc(block: &str, doc: &str) -> bool {
+    let marker = concat!("go:", "embed");
+    for raw_line in block.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        for (pos, _) in line.match_indices(marker) {
+            let rest = &line[pos + marker.len()..];
+            if !rest.starts_with([' ', '\t']) {
+                continue;
+            }
+            let Some(patterns) = parse_go_embed_patterns(rest) else {
+                return true;
+            };
+            for pat in patterns {
+                if pat == "." {
+                    return true;
+                }
+                let Ok(glob) = GlobBuilder::new(pat).literal_separator(true).build() else {
+                    return true;
+                };
+                if doc_suffixes_match(&glob.compile_matcher(), doc) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// True when a lowercased grep hunk (marker + context) may pull the lowercased
 /// `doc` into a build or a test run. Paths the hunk cannot spell out
 /// (`concat!`, macro `$var`, `"."`, the crate root) count as embedding.
 fn block_embeds(block: &str, doc: &str) -> bool {
     let has = |needle: &str| block.contains(needle);
+    let has_include_dir = has(concat!("include_", "dir!"));
+    let has_go_embed = has(concat!("go:", "embed"));
     let mut parts = doc.rsplit('/');
     let file = parts.next().unwrap_or(doc);
-    if has(file) || parts.any(|dir| !dir.is_empty() && has(dir)) {
+    let dirs: Vec<&str> = parts.filter(|dir| !dir.is_empty()).collect();
+    if has(file)
+        || (has_include_dir && dirs.iter().any(|dir| dir_referenced(block, dir)))
+        || (has_go_embed && go_embed_matches_doc(block, doc))
+    {
         return true;
     }
     let dynamic = has("concat!(") || has("$");
     let ext = file.rsplit_once('.').map(|(_, ext)| format!(".{ext}"));
-    ((has("include_str!") || has("include_bytes!")) && dynamic)
-        || (has("include_dir!")
-            && (dynamic || has("\".\"") || has("\"./\"") || has("cargo_manifest_dir")))
-        || (has("doctest") && ext.is_some_and(|ext| has(&ext)))
-        || (has("sphinx-build") && has("doctest"))
+    ((has(concat!("include_", "str!")) || has(concat!("include_", "bytes!"))) && dynamic)
+        || (has_include_dir
+            && (dynamic
+                || has("\".\"")
+                || has("\"./\"")
+                || has("\"..\"")
+                || has("\"../\"")
+                || has("/..\"")
+                || has("/../\"")
+                || has("cargo_manifest_dir")))
+        || (has(concat!("doc", "test")) && ext.as_deref().is_some_and(has))
+        || (has("sphinx-build") && has(concat!("doc", "test")))
         || has("mdbook")
-        || has("doc_comment::doctest!")
+        || has(concat!("doc_comment::doc", "test!"))
 }
 
 /// [`is_docs_only`], plus a scan of the tracked non-doc files of `repo_root`:
-/// a changed doc named on an embed or doctest line is not docs-only. A scan
+/// a changed doc named on an embed or doc-test line is not docs-only. A scan
 /// git cannot answer is taken as "embedded" (fail-closed: tests still run).
 pub fn is_docs_only_in_repo(
     repo_root: &Path,
@@ -324,12 +487,16 @@ mod tests {
     }
 
     /// Rows: (tracked non-doc body, changed doc, may take fast path), one repo
-    /// each. `@` and `%` stand for the include_str!/include_dir! macros.
+    /// each. `@` and `%` stand for the include-str/include-dir macros.
     #[test]
     fn docs_in_repo_blocks_wrapped_macro_cased_and_whole_dir_embeds() {
         let rows = [
             ("#![doc = @(\n    \"../docs/g.md\"\n)]", "docs/g.md", false),
-            ("doc_comment::doctest!(\n    \"../g.md\"\n);", "g.md", false),
+            (
+                concat!("doc_comment::doc", "test!(\n    \"../g.md\"\n);"),
+                "g.md",
+                false,
+            ),
             (
                 "($n:literal) => { @(concat!(\"fx/\", $n)) };",
                 "docs/a.md",
@@ -337,11 +504,19 @@ mod tests {
             ),
             ("($p:expr) => { @($p) };", "docs/a.md", false),
             ("($p:expr) => { %($p) };", "docs/a.md", false),
-            ("doctest_glob = [\n    \"*.rst\",\n]", "book/a.rst", false),
-            ("sphinx-build -b doctest src out", "docs/a.md", false),
-            ("mdbook  test", "docs/a.md", false),
+            (
+                concat!("doc", "test_glob = [\n    \"*.rst\",\n]"),
+                "book/a.rst",
+                false,
+            ),
+            (
+                concat!("sphinx-build -b doc", "test src out"),
+                "docs/a.md",
+                false,
+            ),
+            (concat!("md", "book  test"), "docs/a.md", false),
             ("#![doc = @(\"../readme.md\")]", "README.md", false),
-            ("doctest_glob = *.rst", "docs/GUIDE.RST", false),
+            (concat!("doc", "test_glob = *.rst"), "docs/GUIDE.RST", false),
             ("static D: Dir = %(\".\");", "README.md", false),
             (
                 "static D: Dir = %(\"$CARGO_MANIFEST_DIR\");",
@@ -351,12 +526,12 @@ mod tests {
             ("static D: Dir = %(\"docs\");", "docs/g.md", false),
             ("static D: Dir = %(\"./\");", "README.md", false),
             (
-                "include_bytes!(concat!(\"fx/\", \"b\"))",
+                concat!("include_", "bytes!(concat!(\"fx/\", \"b\"))"),
                 "docs/a.md",
                 false,
             ),
             (
-                "doc_comment::doctest!(\n    \"../x.txt\"\n);",
+                concat!("doc_comment::doc", "test!(\n    \"../x.txt\"\n);"),
                 "g.md",
                 false,
             ),
@@ -366,16 +541,40 @@ mod tests {
                 true,
             ),
             ("static D: Dir = %(\"web\");", "docs/g.md", true),
+            ("#![doc = @(\"../docs/other.md\")]", "docs/g.md", true),
+            ("static D: Dir = %(\"mydocs\");", "docs/g.md", true),
         ];
         let wrong: Vec<_> = rows
             .iter()
             .filter(|(body, doc, fast)| {
                 let body = body
-                    .replace('@', "include_str!")
-                    .replace('%', "include_dir!");
+                    .replace('@', concat!("include_", "str!"))
+                    .replace('%', concat!("include_", "dir!"));
                 in_repo(repo_with(&[("t.cfg", body)]).path(), doc) != *fast
             })
             .collect();
         assert!(wrong.is_empty(), "wrong verdict: {wrong:#?}");
+    }
+
+    #[test]
+    fn docs_in_repo_blocks_go_embed_tab_backtick_and_quoted_wildcards() {
+        let marker = concat!("//go:", "embed");
+        let rows = [
+            (format!("{marker}\tdocs\n"), "docs/g.md", false),
+            (format!("{marker} `docs`\n"), "docs/g.md", false),
+            (format!("{marker} `docs/sub`\n"), "docs/sub/g.md", false),
+            (format!("{marker}\t*\n"), "docs/g.md", false),
+            (format!("{marker} \"*\"\n"), "docs/g.md", false),
+            (format!("{marker} `*`\n"), "docs/g.md", false),
+            (format!("{marker}\tall:*\n"), "docs/g.md", false),
+            (format!("{marker} \"all:*\"\n"), "docs/g.md", false),
+            (format!("{marker} `all:*`\n"), "docs/g.md", false),
+            (format!("{marker}\tweb\n"), "docs/g.md", true),
+            (format!("{marker} `web`\n"), "docs/g.md", true),
+        ];
+        for (body, doc, fast) in rows {
+            let repo = repo_with(&[("embed.go", format!("package p\n{body}var f string\n"))]);
+            assert_eq!(in_repo(repo.path(), doc), fast, "body={body:?}, doc={doc}");
+        }
     }
 }

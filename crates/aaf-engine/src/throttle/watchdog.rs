@@ -388,7 +388,8 @@ impl Supervise for Watchdog<'_> {
             return self.paused;
         }
         self.next_sample = elapsed + self.sample_every;
-        if self.pgid != Some(pgid) {
+        let first_seen = self.pgid != Some(pgid);
+        if first_seen {
             self.pgid = Some(pgid);
             // First, before the slower `ps` runs below: an interrupt that
             // arrives now already has somebody to pass it on. Without the
@@ -397,20 +398,30 @@ impl Supervise for Watchdog<'_> {
             // From here on an admission to another slot can see how much
             // of this command's reservation is already in use.
             self.slot.record_pgid(pgid);
-            // Then with the leader's start time (one `ps` run later): if
-            // this process is killed, the record is how the next command
-            // recognises the one left running.
-            let started = self
-                .control
-                .group_state(pgid)
-                .and_then(|state| state.leader_started);
-            self.slot.record_group(pgid, started);
         }
         // The whole tree, not the group: a Unity or Gradle command keeps most
         // of its memory in helpers that run in groups of their own (measured
         // on a real Unity run: 1.29 GB in the group, 3.96 GB in the tree),
         // and the figure learned here decides what is admitted next to it.
-        let rss = match self.control.tree(pgid, &self.tracked) {
+        let tree_sample = self.control.tree(pgid, &self.tracked);
+        if first_seen {
+            // Reuse the leader's start time from the tree scan so tick 0 does
+            // not issue a second `ps -A`; fall back to `group_state` only when
+            // `tree()` returned `None`.
+            let started = match &tree_sample {
+                Some(sample) => sample
+                    .members
+                    .iter()
+                    .find(|m| m.pid == pgid && !m.started.is_empty())
+                    .map(|m| m.started.clone()),
+                None => self
+                    .control
+                    .group_state(pgid)
+                    .and_then(|state| state.leader_started),
+            };
+            self.slot.record_group(pgid, started);
+        }
+        let rss = match tree_sample {
             Some(sample) => {
                 self.tracked = sample.members;
                 Some(sample.rss_bytes)

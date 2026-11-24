@@ -252,6 +252,11 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let stateFilter = "all";
   let selectedReviewId = null;
   let activeRunId = "";
+  let lastRunsSig = null;
+  let lastBoardSig = null;
+  let boardRefreshInFlight = false;
+  let boardRefreshQueued = false;
+  let lastStreamSig = null;
   let sse = null;
   let modalHandler = null;
 
@@ -320,6 +325,43 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     setSseState("", "Disconnected");
   }
 
+  function boardSigFromStatus(s) {
+    if (!s) return "";
+    const c = s.counts || (s.tasks && s.tasks.counts) || {};
+    const br = s.blocked_reasons || {};
+    const brKey = Object.keys(br).sort().map((k) => `${k}:${br[k]}`).join(",");
+    const r = s.runs || {};
+    return [
+      s.frozen ? 1 : 0,
+      c.total ?? 0, c.backlog ?? 0, c.ready ?? 0, c.running ?? 0,
+      c.gating ?? 0, c.review ?? 0, c.blocked ?? 0, c.done ?? 0, c.cancelled ?? 0,
+      brKey,
+      r.total ?? 0,
+    ].join("|");
+  }
+
+  async function refreshBoard() {
+    if (!token) return;
+    if (boardRefreshInFlight) {
+      boardRefreshQueued = true;
+      return;
+    }
+    boardRefreshInFlight = true;
+    try {
+      const b = await api("/api/board");
+      boardTasks = b.tasks || [];
+      renderBoard();
+      renderReviewQueue();
+    } catch (_) {
+    } finally {
+      boardRefreshInFlight = false;
+      if (boardRefreshQueued) {
+        boardRefreshQueued = false;
+        refreshBoard();
+      }
+    }
+  }
+
   function startSse() {
     stopSse();
     if (!token) return;
@@ -333,6 +375,11 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         statusData = JSON.parse(ev.data);
         renderStatusChrome();
         if (activeTab === "machine") renderMachine();
+        const sig = boardSigFromStatus(statusData);
+        if (sig !== lastBoardSig) {
+          lastBoardSig = sig;
+          refreshBoard();
+        }
       } catch (_) {}
     });
     sse.addEventListener("stream", (ev) => {
@@ -386,12 +433,16 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("frozenBanner").classList.toggle("hidden", !frozen);
     $("unfreezeBtn").disabled = Boolean(meta.read_only);
     const runs = (statusData && statusData.recent_runs) || [];
+    const runsSig = runs.map((r) => `${r.id}:${r.status}`).join("|");
     const sel = $("runSelect");
-    const prev = sel.value || activeRunId;
-    sel.innerHTML = `<option value="">Select recent run…</option>` + runs.map((r) =>
-      `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.task_id)} (${esc(r.status)})</option>`
-    ).join("");
-    if (prev && runs.some((r) => r.id === prev)) sel.value = prev;
+    if (runsSig !== lastRunsSig) {
+      lastRunsSig = runsSig;
+      const prev = sel.value || activeRunId;
+      sel.innerHTML = `<option value="">Select recent run…</option>` + runs.map((r) =>
+        `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.task_id)} (${esc(r.status)})</option>`
+      ).join("");
+      if (prev && runs.some((r) => r.id === prev)) sel.value = prev;
+    }
   }
 
   function renderBoard() {
@@ -569,7 +620,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           <div class="score-box"><div class="stat-label">LLM Avg</div><div class="stat-val">${esc(ho.llm_average ?? "—")}</div></div>
         </div>
         ${scores.length ? `<div class="kv-section"><div class="kv-title">7 Golden Standards</div><div class="score-grid">${scores.map((s) =>
-          `<div class="score-box"><div class="stat-label">${esc(s.criterion || s.name || "Standard")}</div><div><strong>${esc(s.score ?? "—")}</strong>/100</div></div>`
+          `<div class="score-box"><div class="stat-label">${esc(s.id || s.criterion || s.name || "Standard")}</div><div><strong>${esc(s.score ?? "—")}</strong>/100</div></div>`
         ).join("")}</div></div>` : ""}
         <div class="kv-section"><div class="kv-title">Handover Summary</div>
           <p style="margin:4px 0"><strong>What done:</strong> ${esc(ho.what_done)}</p>
@@ -642,13 +693,17 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function closeModal() { $("modalBg").classList.remove("open"); modalHandler = null; }
 
   function renderStreamLines(runId, lines) {
-    $("streamStatus").textContent = `Run ${runId} · ${lines.length} scrubbed line(s)`;
+    const safeLines = Array.isArray(lines) ? lines : [];
+    const sig = runId + "\0" + safeLines.length + "\0" + safeLines.join("\n");
+    if (sig === lastStreamSig) return;
+    lastStreamSig = sig;
+    $("streamStatus").textContent = `Run ${runId} · ${safeLines.length} scrubbed line(s)`;
     const box = $("streamBox");
-    if (!lines.length) {
+    if (!safeLines.length) {
       box.innerHTML = `<div class="muted">(no stream lines yet for ${esc(runId)})</div>`;
       return;
     }
-    box.innerHTML = lines.map((line) => {
+    box.innerHTML = safeLines.map((line) => {
       try {
         const o = JSON.parse(line);
         const kind = esc(o.type || "event");
@@ -670,6 +725,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const d = await api("/api/streams/" + encodeURIComponent(activeRunId));
       renderStreamLines(activeRunId, d.lines || []);
     } catch (e) {
+      lastStreamSig = null;
       $("streamStatus").textContent = "Stream error: " + e.message;
     }
     startSse();
@@ -719,6 +775,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const [m, s, b] = await Promise.all([api("/api/meta"), api("/api/status"), api("/api/board")]);
     meta = m;
     statusData = s;
+    lastBoardSig = boardSigFromStatus(s);
     boardTasks = b.tasks || [];
     renderStatusChrome();
     renderBoard();

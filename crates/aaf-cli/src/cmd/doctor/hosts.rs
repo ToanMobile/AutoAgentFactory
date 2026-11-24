@@ -1,15 +1,19 @@
 //! Advisory checks for multi-host hook adapters (Codex, Gemini), Linux
 //! bubblewrap/container isolation, and Tier-1 Telegram remote companion.
 
+use std::fs;
 use std::path::Path;
 
 use aaf_domain::config::RepoConfig;
 use aaf_domain::telegram::TelegramConfig;
+use aaf_engine::config::EffectiveConfig;
 use aaf_engine::executors::linux_sandbox;
 use aaf_engine::factory::configured_audit_provider;
+use aaf_engine::github_board::has_trusted_login;
 use aaf_engine::hook_settings::multi_host::{
     HookHostTarget, HostHookStatus, check_host_if_present,
 };
+use serde_json::Value;
 
 /// Reports Codex and Gemini hook registrations when configured in `repo_root`.
 pub(super) fn multi_host_hooks(repo_root: &Path) -> Result<String, String> {
@@ -115,6 +119,46 @@ pub(super) fn mcp_hygiene(repo_root: &Path) -> Result<String, String> {
             "{} server(s), no inline secret warnings",
             report.servers.len()
         ))
+    }
+}
+
+/// Validates `.mcp.json` configures `mobile-mcp` with telemetry disabled.
+pub(super) fn check_mcp_mobile(root: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(root.join(".mcp.json"))
+        .map_err(|_| "missing .mcp.json with mobile-mcp".to_string())?;
+    let val: Value =
+        serde_json::from_str(&text).map_err(|e| format!(".mcp.json is invalid JSON: {e}"))?;
+    let srv = val
+        .pointer("/mcpServers/mobile-mcp")
+        .ok_or_else(|| ".mcp.json does not configure mobile-mcp".to_string())?;
+    if srv
+        .pointer("/env/MOBILEMCP_DISABLE_TELEMETRY")
+        .and_then(Value::as_str)
+        != Some("1")
+    {
+        return Err(".mcp.json mobile-mcp lacks MOBILEMCP_DISABLE_TELEMETRY=\"1\"".to_string());
+    }
+    Ok(())
+}
+
+/// Checks GitHub board integration readiness when enabled for the repository.
+pub(super) fn github_board_status(cfg: &EffectiveConfig) -> Result<String, String> {
+    if !cfg.repo.github.enabled {
+        return Ok("disabled".to_string());
+    }
+    let allow = &cfg.global.safety.owner_github_allowlist;
+    let mut issues = Vec::new();
+    if !has_trusted_login(allow) {
+        issues.push("safety.owner_github_allowlist has no valid owner login".to_string());
+    }
+    if let Err(err) = aaf_fp::program("gh") {
+        issues.push(format!("gh CLI unavailable: {err}"));
+    }
+    if issues.is_empty() {
+        let n = allow.iter().filter(|s| !s.trim().is_empty()).count();
+        Ok(format!("enabled ({n} allowlisted owner(s), gh ready)"))
+    } else {
+        Err(issues.join("; "))
     }
 }
 

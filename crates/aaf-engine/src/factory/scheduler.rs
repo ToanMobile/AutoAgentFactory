@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::Scope;
+use std::time::Instant;
 
 use aaf_domain::ports::{PortError, PortResult};
 use aaf_domain::task::{Task, TaskState};
@@ -21,11 +22,11 @@ pub use super::schedule_order::{
 };
 use super::sweep;
 pub use super::sweep::recover;
-use super::worker::{self, GateJob, Job, Next, Outcome};
+use super::worker::{self, GateJob, Job, Next, Outcome, PreGateAudit};
 use super::{Deps, Mode, RunSummary, is_frozen, unblock};
 
 const MAX_GATE_RETRIES: u32 = 3;
-const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: i64 = 300;
+pub(super) const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: i64 = 300;
 
 /// What the caller supplies besides the ports.
 pub struct Hooks<'a> {
@@ -37,10 +38,7 @@ pub struct Hooks<'a> {
 
 enum Msg {
     Worker(Outcome),
-    Gate {
-        job: GateJob,
-        resolution: Result<Resolution, String>,
-    },
+    Gate(GateJob, Result<Resolution, String>),
 }
 
 /// Runs the factory for `deps.settings` until idle ([`Mode::Once`]), stopped, or frozen.
@@ -93,28 +91,48 @@ pub fn run_with_audit(
 }
 
 #[derive(Default)]
-struct LoopState {
-    jobs: VecDeque<Job>,
+pub(super) struct LoopState {
+    pub(super) jobs: VecDeque<Job>,
     active: usize,
     in_gate: usize,
-    started: HashSet<String>,
-    restarts: HashMap<String, usize>,
+    pub(super) started: HashSet<String>,
+    pub(super) restarts: HashMap<String, usize>,
     gate_retries: HashMap<String, u32>,
-    transient_retries: HashMap<String, u32>,
-    default_wait_until: Option<i64>,
-    task_wait_until: HashMap<String, i64>,
+    pub(super) transient_retries: HashMap<String, u32>,
+    pub(super) work_default_wait_until: Option<i64>,
+    pub(super) audit_default_wait_until: Option<i64>,
+    pub(super) task_wait_until: HashMap<String, i64>,
+    pub(super) last_review_sweep: Option<Instant>,
+    pub(super) last_review_sweep_now: Option<i64>,
+    pre_audits: HashMap<String, Box<PreGateAudit>>,
+}
+
+struct TickBoard {
+    candidates: Vec<Task>,
+    open_review: usize,
+    active_scopes: Vec<Vec<String>>,
+    has_review_dep_waiter: bool,
+}
+
+fn next_runnable(board: &TickBoard) -> Option<usize> {
+    board.candidates.iter().position(|t| {
+        !board
+            .active_scopes
+            .iter()
+            .any(|s| schedule_order::scopes_overlap(&t.scope_paths, s))
+    })
 }
 
 pub(super) struct Scheduler<'a> {
     pub(super) deps: &'a Deps,
     audit: Option<&'a AuditBackend>,
-    mode: Mode,
+    pub(super) mode: Mode,
     msg_tx: Sender<Msg>,
     msg_rx: Receiver<Msg>,
     gate_tx: Sender<GateJob>,
     pub(super) parked: HashSet<String>,
     pub(super) gating_in_flight: HashSet<String>,
-    state: LoopState,
+    pub(super) state: LoopState,
     pub(super) summary: RunSummary,
 }
 
@@ -130,41 +148,54 @@ impl<'a> Scheduler<'a> {
     {
         let fresh = self.fetch_base();
         self.sweep_review(fresh)?;
-        for task_id in resumed {
-            self.queue_gating_task(task_id)?;
-        }
+        self.state.last_review_sweep = Some(Instant::now());
+        self.state.last_review_sweep_now = Some(self.deps.now());
+        resumed
+            .into_iter()
+            .try_for_each(|id| self.queue_gating_task(id))?;
+        let closed = || PortError::Io("factory message channel closed".to_string());
         loop {
             let frozen = is_frozen(&*self.deps.store)?;
             let halted = self.summary.halted.is_some();
             if !frozen && !halted {
                 if self.mode == Mode::Auto {
+                    self.expire_waits();
                     self.poll_gating()?;
                 }
                 self.start_jobs(scope)?;
             }
+            let limit = self.deps.settings.max_parallel.max(1) as usize;
             if self.state.active > 0 || self.state.in_gate > 0 {
-                let msg = self
-                    .msg_rx
-                    .recv()
-                    .map_err(|_| PortError::Io("factory message channel closed".to_string()))?;
+                let msg =
+                    if self.mode == Mode::Auto && !frozen && !halted && self.state.active < limit {
+                        match self.msg_rx.recv_timeout(self.next_wake_duration()) {
+                            Ok(msg) => Some(msg),
+                            Err(mpsc::RecvTimeoutError::Timeout) => None,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(closed()),
+                        }
+                    } else {
+                        Some(self.msg_rx.recv().map_err(|_| closed())?)
+                    };
                 match msg {
-                    Msg::Worker(outcome) => self.handle_worker(outcome)?,
-                    Msg::Gate { job, resolution } => self.handle_gate(job, resolution)?,
+                    Some(Msg::Worker(outcome)) => self.handle_worker(outcome)?,
+                    Some(Msg::Gate(job, resolution)) => self.handle_gate(job, resolution)?,
+                    None => {}
                 }
                 continue;
             }
             self.summary.frozen = frozen;
-            let startable = self.startable()?;
-            let capped = !startable.is_empty()
+            let board = self.load_tick_board()?;
+            let capped = !board.candidates.is_empty()
                 && self
                     .review_cap()
-                    .is_some_and(|cap| self.open_review_and_scopes().is_ok_and(|(o, _)| o >= cap));
+                    .is_some_and(|cap| board.open_review >= cap);
             let parked = self
                 .parked
                 .iter()
-                .filter(|id| !startable.iter().any(|t| t.id == **id))
+                .filter(|id| !board.candidates.iter().any(|t| t.id == **id))
                 .count();
-            let waiting = self.state.jobs.len() + parked + if capped { 0 } else { startable.len() };
+            let waiting =
+                self.state.jobs.len() + parked + if capped { 0 } else { board.candidates.len() };
             if !halted {
                 self.summary.waiting_for_account = u32::try_from(waiting).unwrap_or(u32::MAX);
             }
@@ -173,18 +204,9 @@ impl<'a> Scheduler<'a> {
             }
             self.parked.clear();
             self.sweep_review(false)?;
+            self.state.last_review_sweep = Some(Instant::now());
+            self.state.last_review_sweep_now = Some(self.deps.now());
         }
-    }
-
-    pub(super) fn default_cooling_down(&mut self) -> bool {
-        let cooling = self
-            .state
-            .default_wait_until
-            .is_some_and(|u| self.deps.now() < u);
-        if !cooling {
-            self.state.default_wait_until = None;
-        }
-        cooling
     }
 
     pub(super) fn queue_gating_task(&mut self, task_id: String) -> PortResult<()> {
@@ -193,6 +215,7 @@ impl<'a> Scheduler<'a> {
                 task_id,
                 worktree,
                 audited: false,
+                cached_receipt: None,
             }),
             Err(err) => {
                 let outcome = worker::block_infra(self.deps, &task_id, &err.to_string());
@@ -208,22 +231,17 @@ impl<'a> Scheduler<'a> {
             .then_some(self.deps.settings.repo.run.max_open_review as usize)
     }
 
-    fn open_review_and_scopes(&self) -> PortResult<(usize, Vec<Vec<String>>)> {
-        let repo = Some(self.deps.settings.repo_root.as_str());
-        let tasks = self.deps.store.list_tasks(repo, None)?;
-        Ok(schedule_order::open_review_and_scopes(&tasks))
-    }
-
-    /// Ready tasks whose dependencies are Done, ordered by priority then critical path.
-    fn startable(&mut self) -> PortResult<Vec<Task>> {
+    /// Single-snapshot board view: ready candidates (deps Done, priority + critical
+    /// path order), open-review count, and active (`Running | Gating`) scopes.
+    fn load_tick_board(&mut self) -> PortResult<TickBoard> {
         let now = self.deps.now();
-        self.state.task_wait_until.retain(|_, &mut u| u > now);
         let store = &*self.deps.store;
         let can_settle = self.summary.halted.is_none() && !is_frozen(store)?;
         let repo = Some(self.deps.settings.repo_root.as_str());
         loop {
             let all_tasks = store.list_tasks(repo, None)?;
             let all_deps = store.all_deps()?;
+            let (open_review, active_scopes) = schedule_order::open_review_and_scopes(&all_tasks);
             let mut ready: Vec<Task> = all_tasks
                 .iter()
                 .filter(|t| t.state == TaskState::Ready)
@@ -241,107 +259,144 @@ impl<'a> Scheduler<'a> {
                     |s| s == TaskState::Done,
                 )
             };
-            let (mut out, mut settled_parent) = (Vec::new(), false);
+            let (mut candidates, mut settled_parent, mut has_review_dep_waiter) =
+                (Vec::new(), false, false);
             for task in ready {
                 let waiting = self
                     .state
                     .task_wait_until
                     .get(&task.id)
                     .is_some_and(|&u| u > now);
-                let blocked_dep = deps_map
-                    .get(task.id.as_str())
-                    .is_some_and(|ds| ds.iter().any(|d| !dep_done(d)));
                 if (self.mode == Mode::Once && self.state.started.contains(&task.id))
                     || self.parked.contains(&task.id)
                     || waiting
-                    || blocked_dep
                 {
+                    continue;
+                }
+                if let Some(ds) = deps_map.get(task.id.as_str())
+                    && ds.iter().any(|d| !dep_done(d))
+                {
+                    if ds
+                        .iter()
+                        .any(|&d| states.get(d).copied() == Some(TaskState::Review))
+                    {
+                        has_review_dep_waiter = true;
+                    }
                     continue;
                 }
                 if can_settle && self.try_auto_complete_split_parent(&task)? {
                     settled_parent = true;
                     continue;
                 }
-                out.push(task);
+                candidates.push(task);
             }
             if !settled_parent {
-                return Ok(out);
+                return Ok(TickBoard {
+                    candidates,
+                    open_review,
+                    active_scopes,
+                    has_review_dep_waiter,
+                });
             }
         }
     }
 
-    fn pool_for(&self, for_audit: bool) -> &dyn AccountPool {
+    pub(super) fn pool_for(&self, for_audit: bool) -> &dyn AccountPool {
         match (for_audit, self.audit) {
             (true, Some(backend)) => &*backend.accounts,
             _ => &*self.deps.accounts,
         }
     }
 
-    fn pick_next_agent(&mut self, swept_for_cap: &mut bool) -> PortResult<Option<String>> {
-        let candidates = self.startable()?;
-        if candidates.is_empty() {
-            return Ok(None);
+    fn pick_next_agent(
+        &mut self,
+        board_slot: &mut Option<TickBoard>,
+        swept_for_cap: &mut bool,
+    ) -> PortResult<Option<Task>> {
+        if board_slot.is_none() {
+            *board_slot = Some(self.load_tick_board()?);
         }
-        let (mut open, mut scopes) = self.open_review_and_scopes()?;
-        if let Some(cap) = self.review_cap()
-            && open >= cap
-        {
-            if !*swept_for_cap {
-                *swept_for_cap = true;
-                self.sweep_review(false)?;
-                (open, scopes) = self.open_review_and_scopes()?;
+        let Some(board) = board_slot.as_mut() else {
+            return Ok(None);
+        };
+        if next_runnable(board).is_none() {
+            if self.mode == Mode::Auto
+                && board.has_review_dep_waiter
+                && self.maybe_sweep_review(swept_for_cap)?
+            {
+                *board = self.load_tick_board()?;
             }
-            if open >= cap {
+            if next_runnable(board).is_none() {
+                return Ok(None);
+            }
+        }
+        if let Some(cap) = self.review_cap()
+            && board.open_review >= cap
+        {
+            if self.maybe_sweep_review(swept_for_cap)? {
+                *board = self.load_tick_board()?;
+            }
+            if board.open_review >= cap {
                 self.summary.waiting_for_review_cap =
                     self.summary.waiting_for_review_cap.saturating_add(1);
                 return Ok(None);
             }
         }
-        Ok(candidates
-            .into_iter()
-            .find(|t| {
-                !scopes
-                    .iter()
-                    .any(|s| schedule_order::scopes_overlap(&t.scope_paths, s))
-            })
-            .map(|t| t.id))
+        Ok(next_runnable(board).map(|idx| board.candidates.remove(idx)))
     }
 
     fn start_jobs<'scope>(&mut self, scope: &'scope Scope<'scope, '_>) -> PortResult<()>
     where
         'a: 'scope,
     {
-        if self.default_cooling_down() {
-            return Ok(());
-        }
         let limit = self.deps.settings.max_parallel.max(1) as usize;
-        let mut swept_for_cap = false;
+        let (mut board, mut swept_for_cap) = (None, false);
+        let (mut work_exhausted, mut audit_exhausted) =
+            (self.is_cooling_down(false), self.is_cooling_down(true));
+        let mut deferred: VecDeque<Job> = VecDeque::new();
         while self.state.active < limit {
-            let job = match self.state.jobs.pop_front() {
-                Some(job) => job,
-                None => match self.pick_next_agent(&mut swept_for_cap)? {
-                    Some(task_id) => Job::Agent { task_id },
-                    None => break,
-                },
+            let (job, picked_scopes) = match self.state.jobs.pop_front() {
+                Some(job) => (job, None),
+                None => {
+                    if work_exhausted {
+                        break;
+                    }
+                    match self.pick_next_agent(&mut board, &mut swept_for_cap)? {
+                        Some(task) => (Job::Agent { task_id: task.id }, Some(task.scope_paths)),
+                        None => break,
+                    }
+                }
             };
             let is_audit = matches!(job, Job::Audit { .. } | Job::PostAudit { .. });
-            let purpose = if is_audit {
-                Purpose::Audit
+            let (exhausted, purpose) = if is_audit {
+                (&mut audit_exhausted, Purpose::Audit)
             } else {
-                Purpose::Work
+                (&mut work_exhausted, Purpose::Work)
             };
-            let Some(grant) = self
-                .pool_for(is_audit)
-                .acquire_for(job.task_id(), purpose)?
-            else {
+            let grant = if *exhausted {
+                None
+            } else {
+                self.pool_for(is_audit)
+                    .acquire_for(job.task_id(), purpose)?
+            };
+            let Some(grant) = grant else {
+                *exhausted = true;
                 if !matches!(job, Job::Agent { .. }) {
-                    self.state.jobs.push_front(job);
+                    deferred.push_back(job);
                 }
-                break;
+                continue;
             };
             if let Job::Agent { task_id } = &job {
                 self.deps
                     .move_to(task_id, TaskState::Running, None, "picked by aaf run")?;
+                if let Some(ref mut snap) = board {
+                    snap.open_review += 1;
+                    if let Some(scopes) = picked_scopes
+                        && !scopes.is_empty()
+                    {
+                        snap.active_scopes.push(scopes);
+                    }
+                }
                 self.state.started.insert(task_id.clone());
                 self.parked.remove(task_id);
                 self.summary.requeued.retain(|id| id != task_id);
@@ -359,6 +414,9 @@ impl<'a> Scheduler<'a> {
                 let _ = tx.send(Msg::Worker(outcome));
             });
         }
+        while let Some(job) = deferred.pop_back() {
+            self.state.jobs.push_front(job);
+        }
         Ok(())
     }
 
@@ -374,7 +432,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn requeue_if_ready(&mut self, task_id: String, state: TaskState) {
+    pub(super) fn requeue_if_ready(&mut self, task_id: String, state: TaskState) {
         if state == TaskState::Ready && !self.summary.requeued.contains(&task_id) {
             self.summary.requeued.push(task_id);
         }
@@ -383,16 +441,28 @@ impl<'a> Scheduler<'a> {
     fn clear_gating(&mut self, task_id: &str) {
         self.gating_in_flight.remove(task_id);
         self.state.gate_retries.remove(task_id);
+        self.state.pre_audits.remove(task_id);
     }
 
     fn handle_worker(&mut self, outcome: Outcome) -> PortResult<()> {
         self.state.active -= 1;
         self.summary.errors.extend(outcome.error);
-        if !matches!(outcome.next, Next::Gate(_) | Next::Unblock { .. }) {
+        if !matches!(
+            outcome.next,
+            Next::Gate(_) | Next::GateAudited(..) | Next::Unblock { .. } | Next::SwitchJob(_)
+        ) {
             self.gating_in_flight.remove(&outcome.task_id);
+        }
+        if !matches!(outcome.next, Next::GateAudited(..) | Next::SwitchJob(_)) {
+            self.state.pre_audits.remove(&outcome.task_id);
         }
         match outcome.next {
             Next::Gate(job) => {
+                self.state.transient_retries.remove(&outcome.task_id);
+                self.queue_gate(job)?;
+            }
+            Next::GateAudited(job, pre) => {
+                self.state.pre_audits.insert(outcome.task_id.clone(), pre);
                 self.state.transient_retries.remove(&outcome.task_id);
                 self.queue_gate(job)?;
             }
@@ -405,6 +475,7 @@ impl<'a> Scheduler<'a> {
                     task_id,
                     worktree,
                     audited: false,
+                    cached_receipt: None,
                 },
                 signal,
             }),
@@ -413,6 +484,7 @@ impl<'a> Scheduler<'a> {
                 self.summary.requeued.push(outcome.task_id);
             }
             Next::Switch => self.handle_switch(outcome.task_id)?,
+            Next::SwitchJob(job) => self.handle_switch_job(outcome.task_id, *job)?,
             Next::Wait { until } => self.handle_wait(outcome.task_id, until)?,
             Next::RetryAfter {
                 until,
@@ -428,88 +500,6 @@ impl<'a> Scheduler<'a> {
                 self.state.transient_retries.remove(&outcome.task_id);
                 self.summary.blocked.push(outcome.task_id);
             }
-        }
-        Ok(())
-    }
-
-    fn handle_switch(&mut self, task_id: String) -> PortResult<()> {
-        let state = self.deps.store.get_task(&task_id)?.state;
-        let count = self
-            .pool_for(state == TaskState::Gating)
-            .provider_account_count()?;
-        if count == 0 {
-            self.state.default_wait_until =
-                Some(self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
-            self.parked.insert(task_id.clone());
-            self.requeue_if_ready(task_id, state);
-            return Ok(());
-        }
-        let restarts = self.state.restarts.entry(task_id.clone()).or_insert(0);
-        let can_retry = *restarts < count.max(1);
-        if can_retry {
-            *restarts += 1;
-        }
-        if state == TaskState::Gating {
-            if can_retry {
-                self.queue_gating_task(task_id)?;
-            } else {
-                self.parked.insert(task_id);
-            }
-        } else {
-            if can_retry {
-                self.state.started.remove(&task_id);
-            }
-            self.summary.requeued.push(task_id);
-        }
-        Ok(())
-    }
-
-    fn handle_wait(&mut self, task_id: String, until: Option<i64>) -> PortResult<()> {
-        let state = self.deps.store.get_task(&task_id)?.state;
-        let now = self.deps.now();
-        let count = self
-            .pool_for(state == TaskState::Gating)
-            .provider_account_count()?;
-        if count == 0 {
-            let deadline = until
-                .filter(|&u| u > now)
-                .unwrap_or(now + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
-            self.state.default_wait_until = Some(deadline);
-        } else if let Some(deadline) = until.filter(|&u| u > now) {
-            self.state.task_wait_until.insert(task_id.clone(), deadline);
-        }
-        self.parked.insert(task_id.clone());
-        self.requeue_if_ready(task_id, state);
-        Ok(())
-    }
-
-    fn handle_retry_after(
-        &mut self,
-        task_id: String,
-        hint_until: i64,
-        hint_attempt: u32,
-        detail: String,
-    ) -> PortResult<()> {
-        let state = self.deps.store.get_task(&task_id)?.state;
-        self.requeue_if_ready(task_id.clone(), state);
-        if self.mode == Mode::Once {
-            self.summary.halted.get_or_insert(detail);
-            return Ok(());
-        }
-        let tries = self
-            .state
-            .transient_retries
-            .entry(task_id.clone())
-            .or_default();
-        *tries = (*tries)
-            .max(hint_attempt.saturating_sub(1))
-            .saturating_add(1);
-        if *tries <= MAX_TRANSIENT_RETRIES {
-            let wait = i64::try_from(transient_backoff_secs(*tries)).unwrap_or(60);
-            let deadline = hint_until.max(self.deps.now() + wait);
-            self.state.task_wait_until.insert(task_id, deadline);
-        } else {
-            self.summary.halted.get_or_insert(detail);
         }
         Ok(())
     }
@@ -531,12 +521,19 @@ impl<'a> Scheduler<'a> {
                 }
             }
             Ok(Resolution::NeedsAudit { lock_fp }) => {
+                self.state.pre_audits.remove(&job.task_id);
                 self.state.jobs.push_back(Job::Audit { job, lock_fp });
             }
             Ok(Resolution::NeedsPostAudit { receipt }) => {
-                self.state.jobs.push_back(Job::PostAudit { job, receipt });
+                let pre_audit = self.state.pre_audits.remove(&job.task_id);
+                self.state.jobs.push_back(Job::PostAudit {
+                    job,
+                    receipt,
+                    pre_audit,
+                });
             }
             Ok(Resolution::Failed(signal)) => {
+                self.state.pre_audits.remove(&job.task_id);
                 self.state.jobs.push_back(Job::Unblock { job, signal });
             }
             Ok(Resolution::Retry) => {
@@ -577,16 +574,13 @@ fn gate_loop(deps: &Deps, queue: &Receiver<GateJob>, tx: &Sender<Msg>, stats: &G
                 if let Ok(mut pending) = pending.lock() {
                     pending.retain(|p| p.task_id != job.task_id);
                 }
-                let _ = tx.send(Msg::Gate { job, resolution });
+                let _ = tx.send(Msg::Gate(job, resolution));
             });
         }));
         if round.is_err() {
             let left = pending.lock().map(|mut p| std::mem::take(&mut *p));
             for job in left.unwrap_or_default() {
-                let _ = tx.send(Msg::Gate {
-                    job,
-                    resolution: Err("the gate thread panicked".to_string()),
-                });
+                let _ = tx.send(Msg::Gate(job, Err("the gate thread panicked".to_string())));
             }
         }
     }

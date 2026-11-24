@@ -86,7 +86,52 @@ pub fn verify_proof(
 ) -> Result<ProofRecord, ProofError> {
     let canon_root = fs::canonicalize(repo_root)?;
     let tree_fp = resolve_tree_fp(&canon_root, expected_tree_fp)?;
-    let record = aaf_fp::read_proof(data_dir, &canon_root, &tree_fp)?;
+    verify_proof_inner(&canon_root, &canon_root, data_dir, cfg, &tree_fp)
+}
+
+/// Verifies a signed proof bound to `proof_repo_root` (which may be a cleaned-up
+/// worktree path that no longer exists on disk) while reading repository
+/// denylist/allowlist policy from `policy_repo_root`.
+pub fn verify_proof_for_archived_root(
+    proof_repo_root: &Path,
+    policy_repo_root: &Path,
+    data_dir: &Path,
+    cfg: &ProofConfig,
+    expected_tree_fp: Option<&str>,
+) -> Result<ProofRecord, ProofError> {
+    let proof_root = canonicalize_archived_root(proof_repo_root);
+    let policy_root = fs::canonicalize(policy_repo_root)?;
+    let tree_fp = resolve_tree_fp(&proof_root, expected_tree_fp)?;
+    verify_proof_inner(&proof_root, &policy_root, data_dir, cfg, &tree_fp)
+}
+
+fn canonicalize_archived_root(path: &Path) -> PathBuf {
+    if let Ok(canon) = fs::canonicalize(path) {
+        return canon;
+    }
+    let mut missing = Vec::new();
+    let mut cur = path;
+    while let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) {
+        missing.push(name);
+        if let Ok(mut canon) = fs::canonicalize(parent) {
+            for part in missing.into_iter().rev() {
+                canon.push(part);
+            }
+            return canon;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
+}
+
+fn verify_proof_inner(
+    proof_root: &Path,
+    policy_root: &Path,
+    data_dir: &Path,
+    cfg: &ProofConfig,
+    tree_fp: &str,
+) -> Result<ProofRecord, ProofError> {
+    let record = aaf_fp::read_proof(data_dir, proof_root, tree_fp)?;
 
     if record.schema_version != PROOF_SCHEMA_VERSION {
         return Err(ProofError::Invalid(format!(
@@ -94,13 +139,13 @@ pub fn verify_proof(
             record.schema_version
         )));
     }
-    let expected_repo = canon_root.to_string_lossy();
+    let expected_repo = proof_root.to_string_lossy();
     if record.repo_root != expected_repo || record.tree_fp != tree_fp {
         return Err(ProofError::Invalid(
             "proof does not match repository or tree fingerprint".to_string(),
         ));
     }
-    validate_tool_and_device(&canon_root, cfg, &record.source_tool, &record.device_serial)?;
+    validate_tool_and_device(policy_root, cfg, &record.source_tool, &record.device_serial)?;
     if record.byte_len < cfg.min_bytes
         || record.width < cfg.min_width
         || record.height < cfg.min_height

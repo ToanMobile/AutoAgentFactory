@@ -166,10 +166,28 @@ fn location(file: &str, line: Option<u32>) -> String {
     }
 }
 
-fn human(receipt: &Receipt, status: &str, receipt_path: &Path, warnings: &[String]) -> String {
-    let mut text = format!("{status} ({})", mode_word(receipt.mode));
+fn human(
+    receipt: &Receipt,
+    status: &str,
+    receipt_path: &Path,
+    warnings: &[String],
+    reused: bool,
+) -> String {
+    let mut text = if reused {
+        format!(
+            "{status} ({}) (reused receipt from {}; nothing run now)",
+            mode_word(receipt.mode),
+            receipt.created_at
+        )
+    } else {
+        format!("{status} ({})", mode_word(receipt.mode))
+    };
     for reason in &receipt.reasons {
-        text.push_str(&format!("\n  reason: {reason}"));
+        if reused && reason.starts_with("throttle:") {
+            text.push_str(&format!("\n  cached throttle note: {reason}"));
+        } else {
+            text.push_str(&format!("\n  reason: {reason}"));
+        }
     }
     for f in &receipt.static_findings {
         text.push_str(&format!(
@@ -281,7 +299,7 @@ pub fn run(args: &GateArgs, ctx: &Ctx) -> CmdResult {
     };
     // The receipt carries the canonical root the engine filed it under.
     let receipt_path = aaf_fp::receipt_path(&ctx.data_dir, Path::new(&receipt.repo_root));
-    let mut text = human(&receipt, status, &receipt_path, &cfg.warnings);
+    let mut text = human(&receipt, status, &receipt_path, &cfg.warnings, reused);
     if reused {
         text.push_str(
             "\n  reused receipt: same tree, base and gate configuration as a stored Clear \
@@ -338,4 +356,54 @@ pub fn run(args: &GateArgs, ctx: &Ctx) -> CmdResult {
         .field("store_compliance", json!(receipt.store_compliance))
         .field("commands", json!(receipt.commands))
         .field("config_warnings", json!(cfg.warnings)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use aaf_domain::gate::{HeadLockReport, LockStatus, StoreComplianceReport};
+
+    #[test]
+    fn reused_receipt_human_output_clarifies_header_and_cached_throttle_notes() {
+        let receipt = Receipt {
+            schema_version: 1,
+            repo_root: "/repo".into(),
+            tree_fp: "git-tree:abc".into(),
+            head_sha: None,
+            base_sha: None,
+            mode: GateMode::Scoped,
+            status: GateStatus::Clear,
+            reasons: vec![
+                "throttle: waited 70s for heavy slot".into(),
+                "warning: work tree dirty".into(),
+            ],
+            config_hash: "cfg".into(),
+            commands: Vec::new(),
+            static_findings: Vec::new(),
+            suppressions: 0,
+            head_lock: HeadLockReport {
+                status: LockStatus::Clear,
+                lock_fp: String::new(),
+                locked_changes: Vec::new(),
+                approval: None,
+            },
+            store_compliance: StoreComplianceReport::not_applicable(),
+            created_at: 1_700_000_000,
+        };
+        let path = Path::new("/tmp/receipt.json");
+        let warm = human(&receipt, "CLEAR", path, &[], true);
+        let first_line = warm.lines().next().unwrap();
+        assert_eq!(
+            first_line,
+            "CLEAR (scoped) (reused receipt from 1700000000; nothing run now)"
+        );
+        assert!(warm.contains("cached throttle note: throttle: waited 70s for heavy slot"));
+        assert!(warm.contains("reason: warning: work tree dirty"));
+
+        let fresh = human(&receipt, "CLEAR", path, &[], false);
+        assert_eq!(fresh.lines().next().unwrap(), "CLEAR (scoped)");
+        assert!(fresh.contains("reason: throttle: waited 70s for heavy slot"));
+        assert!(!fresh.contains("cached throttle note:"));
+    }
 }

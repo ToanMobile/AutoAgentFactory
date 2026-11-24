@@ -9,20 +9,21 @@
 
 mod history;
 pub mod private;
+mod queries;
 mod schema;
 pub mod snapshots;
 mod stores;
 mod tasks;
 
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use aaf_domain::ports::{PortError, PortResult};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 
+pub use queries::BoardEnrichment;
 pub use schema::SCHEMA_VERSION;
 pub use snapshots::TurnSnapshot;
 
@@ -58,6 +59,7 @@ struct Inner {
     jobs: Option<mpsc::Sender<Job>>,
     writer: Option<JoinHandle<()>>,
     schema_version: i64,
+    immutable: bool,
 }
 
 impl Drop for Inner {
@@ -142,6 +144,7 @@ impl Db {
                 jobs: Some(jobs),
                 writer: Some(writer),
                 schema_version: SCHEMA_VERSION,
+                immutable: false,
             }),
         })
     }
@@ -155,7 +158,7 @@ impl Db {
     /// open/probe fails with `ReadOnly`/`CannotOpen`), falls back to a
     /// `file:<path>?mode=ro&immutable=1` URI so zero `-shm`/`-wal` files are created.
     pub fn open_read_only(path: &Path) -> Result<Db, DbError> {
-        let (mut conn, schema_version) = open_read_only_conn(path)?;
+        let (mut conn, schema_version, immutable) = open_read_only_conn(path)?;
         let (jobs, queue) = mpsc::channel::<Job>();
         let writer = std::thread::Builder::new()
             .name("aaf-db-reader".to_string())
@@ -170,6 +173,7 @@ impl Db {
                 jobs: Some(jobs),
                 writer: Some(writer),
                 schema_version,
+                immutable,
             }),
         })
     }
@@ -178,6 +182,12 @@ impl Db {
     /// handles, or the on-disk `PRAGMA user_version` for read-only handles).
     pub fn schema_version(&self) -> i64 {
         self.inner.schema_version
+    }
+
+    /// True when this read-only handle used SQLite's `immutable=1` URI fallback
+    /// (such handles assume the file never changes and must not be cached).
+    pub fn is_immutable(&self) -> bool {
+        self.inner.immutable
     }
 
     /// Runs `f` on the writer thread and waits for its result.
@@ -227,21 +237,25 @@ impl Db {
     }
 }
 
-fn open_read_only_conn(path: &Path) -> Result<(Connection, i64), DbError> {
+fn open_read_only_conn(path: &Path) -> Result<(Connection, i64, bool), DbError> {
     let can_use_immutable = path.is_file() && !wal_sidecar_exists(path);
     if can_use_immutable && parent_dir_read_only(path) {
-        return open_immutable_ro(path);
+        let (conn, version) = open_immutable_ro(path)?;
+        return Ok((conn, version, true));
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let first = Connection::open_with_flags(path, flags)
         .map_err(DbError::from)
         .and_then(|conn| {
             let version = configure_read_only(&conn)?;
-            Ok((conn, version))
+            Ok((conn, version, false))
         });
     match first {
-        Ok(pair) => Ok(pair),
-        Err(err) if can_use_immutable && is_ro_fallback_error(&err) => open_immutable_ro(path),
+        Ok(triple) => Ok(triple),
+        Err(err) if can_use_immutable && is_ro_fallback_error(&err) => {
+            let (conn, version) = open_immutable_ro(path)?;
+            Ok((conn, version, true))
+        }
         Err(err) => Err(err),
     }
 }
@@ -384,6 +398,57 @@ fn corrupt(what: &str, value: &str) -> PortError {
     PortError::Io(format!("corrupt row: {what} = {value:?}"))
 }
 
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    meta.is_file().then(|| (meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    meta.is_file().then(|| (meta.len(), 0))
+}
+
+/// Caches a single read-only [`Db`] handle keyed by `(dev, ino)` so long-lived
+/// loops (`aaf ui`, `aaf cockpit`, `aaf telegram`) reuse one reader thread and
+/// connection. Never caches `immutable=1` fallback handles and automatically
+/// drops the cached handle if the file disappears or its inode changes.
+#[derive(Debug)]
+pub struct RoDbCache {
+    path: PathBuf,
+    cached: Mutex<Option<((u64, u64), Db)>>,
+}
+
+impl RoDbCache {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            cached: Mutex::new(None),
+        }
+    }
+
+    pub fn open(&self) -> Result<Option<Db>, DbError> {
+        let mut guard = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(id) = file_identity(&self.path) else {
+            *guard = None;
+            return Ok(None);
+        };
+        if let Some((cached_id, db)) = guard.as_ref()
+            && *cached_id == id
+        {
+            return Ok(Some(db.clone()));
+        }
+        *guard = None;
+        let db = Db::open_read_only(&self.path)?;
+        if !db.is_immutable() && file_identity(&self.path) == Some(id) {
+            *guard = Some((id, db.clone()));
+        }
+        Ok(Some(db))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -409,5 +474,30 @@ mod tests {
             ),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn ro_db_cache_reuses_handle_and_drops_on_delete_or_replace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("aaf.db");
+        let cache = RoDbCache::new(db_path.clone());
+        assert!(cache.open().unwrap().is_none());
+
+        drop(Db::open(&db_path).unwrap());
+        let first = cache.open().unwrap().unwrap();
+        assert!(!first.is_immutable());
+        let second = cache.open().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first.inner, &second.inner));
+
+        // Replacing the file with a new inode drops the old handle and opens a fresh one.
+        let replacement = tmp.path().join("replacement.db");
+        drop(Db::open(&replacement).unwrap());
+        std::fs::rename(&replacement, &db_path).unwrap();
+        let third = cache.open().unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&first.inner, &third.inner));
+
+        // Removing the file clears the cache and returns None.
+        std::fs::remove_file(&db_path).unwrap();
+        assert!(cache.open().unwrap().is_none());
     }
 }

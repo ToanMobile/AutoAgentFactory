@@ -11,4 +11,6 @@ pub mod proposer;
 
 pub use classifier::{FailureSignal, RerunResult, classify, failure_digest, is_pure_test_failure};
 pub use ladder::{Ladder, QuotaRoute, UnblockDecision};
-pub use proposer::{AgentSubtaskProposer, SubtaskProposer, parse_plans, validate_plans};
+pub use proposer::{
+    AgentSubtaskProposer, PROPOSER_EXECUTOR, SubtaskProposer, parse_plans, validate_plans,
+};

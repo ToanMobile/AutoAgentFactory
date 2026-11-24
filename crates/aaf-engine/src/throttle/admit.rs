@@ -8,7 +8,7 @@ use aaf_domain::ports::Clock;
 use super::heavy::HeavyTool;
 use super::queue::{self, WaitTicket};
 use super::slots::{self, Admission, Busy, DrainGuard, MachineView};
-use super::{Admitted, Backoff, Pressure, Progress, Throttle, stats};
+use super::{Admitted, Backoff, FRONT_OF_QUEUE_CAP, Pressure, Progress, Throttle, stats};
 
 /// A waiting command reports at most this often while nothing changes.
 const PROGRESS_EVERY_SECS: i64 = 10;
@@ -193,6 +193,7 @@ impl Throttle<'_> {
             let mut slot_backoff = Backoff::new(self.jitter_seed);
             let mut drain: Option<DrainGuard> = None;
             let mut ticket: Option<WaitTicket> = None;
+            let mut slot_waited = false;
             let slot = loop {
                 // Read again on every attempt: a sibling task of the same repo
                 // may record the first measurement while this one waits.
@@ -223,9 +224,10 @@ impl Throttle<'_> {
                 // queued ahead and there are not enough free slots for them plus
                 // us, take our own ticket and yield so newcomers polling at 250 ms
                 // never starve long-waiting processes.
+                let mut ahead_now = 0usize;
                 let attempt = if admission != Admission::Unmeasured {
-                    let ahead = queue::older_waiters(data_dir, ticket.as_ref());
-                    if ahead > 0 && slots::free_slot_count(data_dir, ceiling) <= ahead {
+                    ahead_now = queue::older_waiters(data_dir, ticket.as_ref());
+                    if ahead_now > 0 && slots::free_slot_count(data_dir, ceiling) <= ahead_now {
                         Ok(Err(Busy::SlotsTaken))
                     } else {
                         let view = MachineView {
@@ -298,7 +300,17 @@ impl Throttle<'_> {
                         };
                         ever_waited = true;
                         self.report(&mut reporter, now, &event);
-                        self.sleeper.sleep(slot_backoff.next_delay());
+                        slot_waited = true;
+                        let fast_wakeup = (admission != Admission::Unmeasured
+                            && ahead_now == 0
+                            && matches!(reason, Busy::SlotsTaken | Busy::Draining))
+                            || drain.is_some();
+                        let delay = if fast_wakeup {
+                            slot_backoff.next_delay_capped(FRONT_OF_QUEUE_CAP)
+                        } else {
+                            slot_backoff.next_delay()
+                        };
+                        self.sleeper.sleep(delay);
                     }
                 }
             };
@@ -306,14 +318,17 @@ impl Throttle<'_> {
             drop(ticket);
             drop(drain);
 
-            // Phase C: re-check memory pressure right after acquiring the slot.
-            // If pressure spiked while waiting for a slot, drop the slot so we
-            // never hold-and-wait on a pressured machine.
-            let pressure_now = self.probe.pressure();
-            if matches!(pressure_now, Some(Pressure::Warn | Pressure::Critical)) {
-                ever_waited = true;
-                drop(slot);
-                continue;
+            // Phase C: re-check memory pressure right after acquiring the slot
+            // if we actually waited in Phase B. If pressure spiked while waiting
+            // for a slot, drop the slot so we never hold-and-wait on a pressured
+            // machine.
+            if slot_waited {
+                let pressure_now = self.probe.pressure();
+                if matches!(pressure_now, Some(Pressure::Warn | Pressure::Critical)) {
+                    ever_waited = true;
+                    drop(slot);
+                    continue;
+                }
             }
             return Ok(Some(Admitted {
                 slot,

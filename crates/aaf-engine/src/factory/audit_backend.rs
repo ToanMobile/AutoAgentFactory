@@ -4,21 +4,19 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use aaf_domain::config::CrossAuditConfig;
+use aaf_domain::config::{AuditScope, CrossAuditConfig};
 use aaf_domain::event::EventKind;
-use aaf_domain::ports::{AgentOutcome, AgentRunner, InfraFailure, InfraKind, LimitHit, PortResult};
-use aaf_domain::run::RunStatus;
-use aaf_domain::task::Task;
+use aaf_domain::ports::{AgentOutcome, AgentRunner, LimitHit, PortResult};
 use serde_json::json;
 
+pub(crate) use super::audit_turn::run_auditor_turn;
+use super::audit_turn::short_circuit_audit_reason;
 use super::ports::{AccountPool, Grant};
 use super::rework_filter;
-use super::unblock::InfraWatch;
-use super::worker::{self, GateJob, Next, PLAN_EXECUTOR};
+use super::worker::{GateJob, Job, Next, PLAN_EXECUTOR, PreGateAudit};
 use super::{Deps, unblock};
-use crate::cross_audit::{self, AUDIT_EXECUTOR, AuditInput, AuditReport, AuditVerdict};
-use crate::git::TaskWorktree;
-use crate::unblocker::{FailureSignal, QuotaRoute};
+use crate::cross_audit::{self, AUDIT_EXECUTOR, AuditInput, AuditVerdict};
+use crate::unblocker::{FailureSignal, PROPOSER_EXECUTOR, QuotaRoute};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
 
@@ -320,82 +318,6 @@ pub(crate) fn audit_rejection_signal(log_tail: &str) -> FailureSignal {
     signal
 }
 
-fn has_status_code(lower: &str, code: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "http ",
-        "http/1.1 ",
-        "http/2 ",
-        "status ",
-        "status: ",
-        "status=",
-        "code ",
-        "code: ",
-        "code=",
-        "error ",
-        "error: ",
-    ];
-    PREFIXES
-        .iter()
-        .any(|p| lower.contains(&format!("{p}{code}")))
-}
-
-fn classify_auditor_log_tail(
-    tail: &str,
-    infra: &mut Option<InfraFailure>,
-    limit_hit: &mut Option<LimitHit>,
-) {
-    let lower = tail.to_ascii_lowercase();
-    let raw = unblock::one_line(tail, 300);
-    let has_any = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
-    let quota_hit = has_status_code(&lower, "429")
-        || has_any(&[
-            "429 too many",
-            "too many requests",
-            "rate limit",
-            "rate_limit",
-            "quota",
-        ]);
-    let auth_hit = has_status_code(&lower, "401")
-        || has_status_code(&lower, "403")
-        || has_any(&[
-            "401 unauthorized",
-            "403 forbidden",
-            "unauthorized",
-            "invalid api key",
-            "invalid_api_key",
-            "authentication failed",
-        ]);
-    let net_hit = has_any(&[
-        "econnrefused",
-        "etimedout",
-        "econnreset",
-        "enotfound",
-        "ehostunreach",
-        "connection refused",
-        "connection timed out",
-        "503 service unavailable",
-        "529 overloaded",
-    ]) || ["502", "503", "504", "529"]
-        .iter()
-        .any(|c| has_status_code(&lower, c));
-    if quota_hit {
-        *limit_hit = Some(LimitHit {
-            reset_at: None,
-            raw,
-        });
-    } else if auth_hit {
-        *infra = Some(InfraFailure {
-            kind: InfraKind::Auth,
-            raw,
-        });
-    } else if net_hit {
-        *infra = Some(InfraFailure {
-            kind: InfraKind::Network,
-            raw,
-        });
-    }
-}
-
 pub(crate) fn verdict_text(verdict: &AuditVerdict) -> String {
     match verdict {
         AuditVerdict::Pass { .. } => "pass".to_string(),
@@ -423,7 +345,11 @@ pub(crate) fn resolve_task_audit_context(
         .runs_for_task(task_id)?
         .into_iter()
         .rev()
-        .find(|run| run.executor != AUDIT_EXECUTOR && run.executor != PLAN_EXECUTOR)
+        .find(|run| {
+            run.executor != AUDIT_EXECUTOR
+                && run.executor != PLAN_EXECUTOR
+                && run.executor != PROPOSER_EXECUTOR
+        })
         .and_then(|run| run.account_id);
     let run_provider = &deps.settings.repo.run.executor;
     let custom_cmd = deps.settings.repo.cross_audit.executor_cmd.trim();
@@ -440,58 +366,6 @@ pub(crate) fn resolve_task_audit_context(
         deps.settings.repo.cross_audit.require_different_provider,
     )
     .map(|(reviewer, same_account)| (audit_provider.to_string(), reviewer, same_account)))
-}
-
-/// One recorded auditor run in `tree`, plus any infra failure or rate limit.
-pub(crate) fn run_auditor_turn(
-    deps: &Deps,
-    audit_backend: Option<&AuditBackend>,
-    task: &Task,
-    input: &AuditInput,
-    tree: &TaskWorktree,
-    grant: &Grant,
-    require_scores: bool,
-) -> PortResult<(AuditReport, Option<InfraFailure>, Option<LimitHit>)> {
-    let custom_cmd = deps.settings.repo.cross_audit.executor_cmd.trim();
-    let hook_required = audit_backend.map_or(deps.settings.hook_required, |a| a.hook_required)
-        || (!custom_cmd.is_empty() && audit_cmd_is_claude(custom_cmd));
-    let accounts: &dyn AccountPool = audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
-    let runner = audit_backend.map_or(&*deps.runner, |a| &*a.runner);
-    let run = worker::begin_run_with(
-        deps,
-        task,
-        tree,
-        AUDIT_EXECUTOR,
-        grant,
-        hook_required,
-        accounts,
-    )?;
-    let watch = InfraWatch::new(runner);
-    let report = match cross_audit::run_scored_audit(input, &watch, &run.request, require_scores) {
-        Ok(report) => report,
-        Err(err) => {
-            worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0), false)?;
-            return Err(err);
-        }
-    };
-    let tokens_measured = watch.reports_tokens();
-    let (mut infra, mut limit_hit, failed_tail) = watch.take_with_tail();
-    if limit_hit.is_none()
-        && infra.is_none()
-        && let Some(tail) = failed_tail.as_deref()
-    {
-        classify_auditor_log_tail(tail, &mut infra, &mut limit_hit);
-    }
-    let status = if limit_hit.is_some() {
-        RunStatus::LimitHit
-    } else if report.verdict.is_pass() {
-        RunStatus::Succeeded
-    } else {
-        RunStatus::Failed
-    };
-    let tokens = (report.tokens_in, report.tokens_out);
-    worker::end_run(deps, task, &run, status, None, tokens, tokens_measured)?;
-    Ok((report, infra, limit_hit))
 }
 
 /// Cross-audit of a task whose locked files changed. A pass signs the
@@ -513,11 +387,40 @@ pub(crate) fn execute_audit(
                 return Ok(Next::Blocked);
             }
         };
+    let cfg = &deps.settings.repo.cross_audit;
+    let binding = if cfg.audit_scope != AuditScope::HeadLock || cfg.score_gate {
+        deps.gate.tree_binding(&job.worktree.path)
+    } else {
+        None
+    };
     let input = AuditInput {
         spec: task.spec.clone(),
         diff: deps.git.diff(&job.worktree)?,
         mobile: deps.settings.mobile,
     };
+    if let Some(reason) = short_circuit_audit_reason(&input.diff) {
+        deps.emit(
+            EventKind::CrossAudit,
+            &task.id,
+            json!({
+                "verdict": reason,
+                "provider": audit_provider,
+                "reviewer": reviewer,
+                "same_account": same_account,
+                "lock_fp": lock_fp,
+                "short_circuited": true,
+            }),
+        )?;
+        let note = format!("cross-audit rejected the changes to locked files ({reason})");
+        deps.store
+            .append_context_note(&task.id, &unblock::one_line(&note, 400), deps.now())?;
+        let signal = audit_rejection_signal("cross-audit rejected the changes to locked files");
+        return Ok(Next::Unblock {
+            task_id: task.id,
+            worktree: job.worktree,
+            signal: Box::new(signal),
+        });
+    }
 
     // The auditor gets the changes as text in its prompt and works in a
     // clean tree of the base. Started in the author's worktree it would load
@@ -531,20 +434,26 @@ pub(crate) fn execute_audit(
         &input,
         &clean.tree,
         grant,
-        false,
+        cfg.score_gate,
     );
     let _ = deps.git.discard(&clean);
     let (report, infra, limit_hit) = audited?;
     if let Some(hit) = limit_hit {
         let accounts: &dyn AccountPool = audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
         report_audit_limit(deps, accounts, &task.id, grant, &hit)?;
-        return route_audit_limit(accounts, grant, &hit);
+        let next = route_audit_limit(accounts, grant, &hit)?;
+        return Ok(match next {
+            Next::Switch => Next::SwitchJob(Box::new(Job::Audit {
+                job,
+                lock_fp: lock_fp.to_string(),
+            })),
+            other => other,
+        });
     }
     if let Some(infra) = infra {
-        let (what, fix) = worker::infra_words(grant, &infra);
-        return Ok(Next::Halt(worker::halt_message(
-            &task.id, what, &infra, &fix,
-        )));
+        return Ok(super::post_audit::audit_infra_next(
+            deps, &task.id, grant, &infra,
+        ));
     }
 
     let approval = cross_audit::approve_if_pass(
@@ -569,10 +478,23 @@ pub(crate) fn execute_audit(
         }),
     )?;
     if approval.is_some() {
-        return Ok(Next::Gate(GateJob {
+        let next_job = GateJob {
             audited: true,
+            cached_receipt: None,
             ..job
-        }));
+        };
+        if let Some((tree_fp, base_sha)) = binding {
+            let pre = PreGateAudit {
+                tree_fp,
+                base_sha,
+                audit_provider,
+                reviewer,
+                same_account,
+                scores: report.scores,
+            };
+            return Ok(Next::GateAudited(next_job, Box::new(pre)));
+        }
+        return Ok(Next::Gate(next_job));
     }
     if !report.diff_truncated
         && let AuditVerdict::Fail { findings, .. } = &report.verdict

@@ -4,12 +4,32 @@
 use std::fs;
 use std::path::PathBuf;
 
-use aaf_engine::db::Db;
+use aaf_engine::db::{Db, RoDbCache};
 
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput};
 
 pub(crate) const DB_FILE: &str = "aaf.db";
+
+/// Reuses a single read-only [`Db`] handle across polls/requests while `aaf.db`
+/// keeps the same `(dev, ino)` identity. Drops automatically if the file is
+/// deleted or replaced, and never caches `immutable=1` fallback handles.
+#[derive(Debug)]
+pub(crate) struct SharedRoDb {
+    inner: RoDbCache,
+}
+
+impl SharedRoDb {
+    pub(crate) fn for_ctx(ctx: &Ctx) -> Self {
+        Self {
+            inner: RoDbCache::new(ctx.data_dir.join(DB_FILE)),
+        }
+    }
+
+    pub(crate) fn get(&self) -> Result<Option<Db>, CmdError> {
+        self.inner.open().map_err(|e| err("database", e))
+    }
+}
 
 pub(crate) fn err(context: &str, error: impl std::fmt::Display) -> CmdError {
     CmdError::new(format!("{context}: {error}"))
@@ -48,4 +68,37 @@ pub(crate) fn refuse_inside_agent_run(ctx: &Ctx, what: &str) -> Option<CmdOutput
         let text = format!("{what} is a human action: refused inside agent run {run_id}");
         CmdOutput::policy("refused", text)
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_ro_db_tracks_creation_reuse_and_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+            home: tmp.path().join("home"),
+            data_dir: data_dir.clone(),
+            config_dir: tmp.path().join("config"),
+            worktrees_dir: tmp.path().join("worktrees"),
+            path_var: std::ffi::OsString::new(),
+            run_id: None,
+            stdin_is_tty: false,
+            aaf_env: Vec::new(),
+        };
+        let shared = SharedRoDb::for_ctx(&ctx);
+        assert!(shared.get().unwrap().is_none());
+
+        drop(open_db(&ctx).unwrap());
+        let first = shared.get().unwrap().unwrap();
+        assert!(!first.is_immutable());
+        assert!(shared.get().unwrap().is_some());
+
+        fs::remove_file(data_dir.join(DB_FILE)).unwrap();
+        assert!(shared.get().unwrap().is_none());
+    }
 }

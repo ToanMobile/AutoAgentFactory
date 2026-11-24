@@ -12,7 +12,7 @@ use std::path::{Component, Path};
 
 use crate::git_guard::is_protected;
 use crate::shell::{Cmd, DECLARERS, SHELLS};
-use crate::{Ctx, Denial, paths};
+use crate::{Ctx, Denial, paths, sed_script};
 
 const RULE: &str = "git_guard";
 const FIX: &str = "leave git's configuration, hooks, directory and protected refs alone: read them with \
@@ -174,6 +174,24 @@ fn hit(path: &Path) -> Option<&'static str> {
     guarded(path).or_else(|| guarded(&paths::real(path)))
 }
 
+/// Like [`hit`], using [`Ctx::real_of`] so non-existent tokens under `ctx.cwd`
+/// resolve with a single `lstat` instead of walking ancestors.
+fn hit_ctx(path: &Path, ctx: &Ctx) -> Option<&'static str> {
+    guarded(path).or_else(|| guarded(&ctx.real_of(path)))
+}
+
+/// Like [`hit_ctx`], also resolving symlinks before `..` when `raw` contains
+/// `..` (e.g. `link/../hooks/pre-commit` where `link -> .git/objects`).
+fn hit_raw(raw: &str, path: &Path, ctx: &Ctx) -> Option<&'static str> {
+    hit_ctx(path, ctx).or_else(|| {
+        if !raw.contains("..") {
+            return None;
+        }
+        let real_dd = paths::expand_real_dotdot(raw, &ctx.cwd, ctx.env.home.as_deref());
+        (real_dd != path).then(|| hit_ctx(&real_dd, ctx)).flatten()
+    })
+}
+
 fn deny(what: &str, path: &Path, kind: &str) -> Denial {
     Denial::new(
         RULE,
@@ -187,14 +205,11 @@ pub fn check_file(path: &Path) -> Option<Denial> {
     hit(path).map(|kind| deny("writing", path, kind))
 }
 
-/// `sed -i`, `perl -i`: the only forms of these two that write their input.
+/// `sed -i`/`-I`, `perl -i`: the only forms of these two that write their input.
 fn edits_in_place(cmd: &Cmd) -> bool {
     let short = |arg: &String| arg.starts_with('-') && !arg.starts_with("--");
     match cmd.name() {
-        "sed" => cmd
-            .args()
-            .iter()
-            .any(|arg| arg.starts_with("-i") || arg.starts_with("--in-place")),
+        "sed" => sed_script::edits_in_place(cmd.args()),
         "perl" => cmd.args().iter().any(|arg| short(arg) && arg.contains('i')),
         _ => false,
     }
@@ -249,19 +264,27 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     for redirect in &cmd.redirects {
         let path = ctx.expand(&redirect.target);
         if redirect.op.contains('>')
-            && let Some(kind) = hit(&path)
+            && let Some(kind) = hit_raw(&redirect.target, &path, ctx)
         {
             return Some(deny("the redirect to", &path, kind));
         }
     }
     let name = cmd.name();
+    if !cmd.dynamic_name && name == "sed" {
+        for target in sed_script::script_files(cmd.args(), &['w', 'W']) {
+            let path = ctx.expand(&target);
+            if let Some(kind) = hit_raw(&target, &path, ctx) {
+                return Some(deny(name, &path, kind));
+            }
+        }
+    }
     if cmd.words.is_empty() || (!cmd.dynamic_name && reads_only(cmd)) {
         return None;
     }
     // git's own arguments are judged by `git_guard`; here it is only kept
     // from writing a file into a hooks directory (`format-patch -o`).
     let is_git = name == "git" && !cmd.dynamic_name;
-    if !is_git && let Some(kind) = hit(&ctx.cwd) {
+    if !is_git && let Some(kind) = hit_ctx(&ctx.cwd, ctx) {
         // No path needs naming from inside (`cd .git/hooks && curl -O …`).
         return Some(deny(&format!("`{name}` run inside"), &ctx.cwd, kind));
     }
@@ -296,7 +319,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             let kind = if by_spelling {
                 guarded(&path)
             } else {
-                hit(&path)
+                hit_raw(text, &path, ctx)
             };
             if let Some(kind) = kind
                 && (!source || kind == GIT_DIR)
@@ -357,6 +380,13 @@ pub(crate) fn check_shell_aaf_refs(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                 || is_aaf_ref_text(&ctx.expand(&redirect.target).to_string_lossy()))
         {
             return Some(Denial::new(RULE, AAF_REF_REASON, FIX));
+        }
+    }
+    if !cmd.dynamic_name && cmd.name() == "sed" {
+        for target in sed_script::script_files(cmd.args(), &['w', 'W']) {
+            if is_aaf_ref_text(&target) || is_aaf_ref_text(&ctx.expand(&target).to_string_lossy()) {
+                return Some(Denial::new(RULE, AAF_REF_REASON, FIX));
+            }
         }
     }
     if cmd.words.is_empty() || (!cmd.dynamic_name && reads_only(cmd)) {

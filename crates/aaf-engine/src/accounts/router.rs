@@ -99,9 +99,12 @@ impl<'a> Router<'a> {
     }
 
     pub fn report_limit(&self, account_id: &str, hit: &LimitHit) -> Result<(), AccountsError> {
-        let until = hit
-            .reset_at
-            .unwrap_or_else(|| self.clock.now() + FIVE_HOURS);
+        let now = self.clock.now();
+        let until = match hit.reset_at {
+            Some(ts) if ts > now => ts,
+            Some(_) => now + 60,
+            None => now + FIVE_HOURS,
+        };
         self.accounts.set_cooldown(account_id, Some(until))?;
         Ok(())
     }

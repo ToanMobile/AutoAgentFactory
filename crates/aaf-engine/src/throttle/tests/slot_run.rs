@@ -293,3 +293,98 @@ fn measured_build_tool_shares_slots_when_exclusive_build_tools_is_false() {
     };
     assert!(run(&rig, data.path(), &unmeasured_job).is_none());
 }
+
+#[test]
+fn layer1_wait_counts_toward_waited_secs_and_subtracts_from_layer2_wait_limit() {
+    use super::super::heavy::HeavyTool;
+    use super::super::pools::{CorrectnessAsk, acquire_correctness};
+
+    let data = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    let gradlew = work.path().join("gradlew");
+    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut rig = Rig::calm();
+    rig.machine.max_heavy_parallel = 1;
+    rig.machine.exclusive_build_tools = false;
+    let sample = HeavySample {
+        peak_rss_bytes: 1024,
+        duration_ms: 1,
+    };
+    record(data.path(), REPO, "job", sample, &rig.sleeper).unwrap();
+
+    // Part 1: Layer 1 waits 2 polls, then Layer 2 admits immediately -> `waited_secs` includes Layer 1.
+    let wt_lock = acquire_correctness(
+        data.path(),
+        &CorrectnessAsk {
+            tool: Some(HeavyTool::Gradle),
+            cwd: work.path(),
+            max_unity_parallel: 1,
+            wait_limit_secs: None,
+            jitter_seed: 1,
+        },
+        &*rig.clock,
+        &rig.sleeper,
+    )
+    .unwrap()
+    .unwrap();
+    let wt_lock = Arc::new(Mutex::new(Some(wt_lock)));
+    let release = Arc::clone(&wt_lock);
+    rig.sleeper.on_sleep(move |count| {
+        if count == 2 {
+            release.lock().unwrap().take();
+        }
+    });
+    let command = argv(&["./gradlew", "lint"]);
+    let done = run(&rig, data.path(), &job(work.path(), &command, Some(10))).unwrap();
+    assert!(done.status.success());
+    assert!(
+        done.waited_secs >= 2,
+        "expected waited_secs to include Layer-1 wait, got {}",
+        done.waited_secs
+    );
+
+    // Part 2: Layer 1 consumes the entire wait budget (3 s) while Layer 2 slot 0 is busy ->
+    // Layer 2 receives remaining budget 0 and times out immediately with zero extra sleeps.
+    let work2 = TempDir::new().unwrap();
+    let gradlew2 = work2.path().join("gradlew");
+    fs::write(&gradlew2, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&gradlew2, fs::Permissions::from_mode(0o755)).unwrap();
+    let rig2 = {
+        let mut r = Rig::calm();
+        r.machine.max_heavy_parallel = 1;
+        r.machine.exclusive_build_tools = false;
+        r
+    };
+    let _slot0 = try_acquire(data.path(), 1, SMALL, &plenty)
+        .unwrap()
+        .unwrap();
+    let wt_lock2 = acquire_correctness(
+        data.path(),
+        &CorrectnessAsk {
+            tool: Some(HeavyTool::Gradle),
+            cwd: work2.path(),
+            max_unity_parallel: 1,
+            wait_limit_secs: Some(0),
+            jitter_seed: 2,
+        },
+        &*rig2.clock,
+        &rig2.sleeper,
+    )
+    .unwrap()
+    .unwrap();
+    let wt_lock2 = Arc::new(Mutex::new(Some(wt_lock2)));
+    let release2 = Arc::clone(&wt_lock2);
+    rig2.sleeper.on_sleep(move |count| {
+        if count == 3 {
+            release2.lock().unwrap().take();
+        }
+    });
+    let outcome = run(&rig2, data.path(), &job(work2.path(), &command, Some(3)));
+    assert_eq!(outcome, None);
+    assert_eq!(
+        rig2.sleeper.count(),
+        3,
+        "Layer 2 must not sleep past the remaining budget after Layer 1"
+    );
+}

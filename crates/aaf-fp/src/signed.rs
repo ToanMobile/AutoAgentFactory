@@ -52,6 +52,9 @@ pub fn load_or_create_key(data_dir: &Path) -> Result<Vec<u8>, FpError> {
     private_dir(data_dir)?;
     let mut key = [0u8; KEY_LEN];
     fs::File::open("/dev/urandom")?.read_exact(&mut key)?;
+    let key_path = data_dir.join(KEY_FILE);
+    let seq = TEMP_SIGNED_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = data_dir.join(format!("{KEY_FILE}.tmp-{}-{seq}", std::process::id()));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -59,12 +62,26 @@ pub fn load_or_create_key(data_dir: &Path) -> Result<Vec<u8>, FpError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    match options.open(data_dir.join(KEY_FILE)) {
-        Ok(mut file) => {
-            file.write_all(&key)?;
-            Ok(key.to_vec())
+    let mut file = options.open(&tmp)?;
+    let write_res = (|| -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
-        // Another process created it first: use theirs.
+        file.write_all(&key)
+    })();
+    drop(file);
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    // Publish atomically without overwriting a key another process just created:
+    // any concurrent reader seeing AlreadyExists is guaranteed a complete 32-byte key.
+    let linked = fs::hard_link(&tmp, &key_path);
+    let _ = fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(key.to_vec()),
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => load_key(data_dir),
         Err(err) => Err(err.into()),
     }

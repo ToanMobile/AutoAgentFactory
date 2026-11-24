@@ -258,7 +258,11 @@ pub fn sync_board(
     .to_string();
     let planned = plan_sync_tasks(store.list_tasks(Some(&repo_str), None)?, cfg);
 
-    let has_linked_issue = planned.iter().any(|(_, num, _, _)| num.is_some());
+    let linked_issue_count = planned
+        .iter()
+        .filter(|(_, num, _, _)| num.is_some())
+        .count();
+    let has_linked_issue = linked_issue_count > 0;
     let mut project_meta = match cfg.project_number {
         Some(project_num) if !dry_run && has_linked_issue => {
             let owner = resolve_project_owner(cfg);
@@ -273,6 +277,12 @@ pub fn sync_board(
         _ => None,
     };
     let truncated_project_items = project_meta.as_ref().is_some_and(|meta| meta.truncated);
+    let batch_labels =
+        if !dry_run && project_meta.is_none() && linked_issue_count >= BATCH_ISSUE_LIST_MIN {
+            fetch_issue_labels_batch(runner, &canon_root, cfg)
+        } else {
+            HashMap::new()
+        };
 
     let mut items = Vec::with_capacity(planned.len());
     let mut skipped_no_issue = Vec::new();
@@ -289,7 +299,14 @@ pub fn sync_board(
                 let res = if let Some(meta) = project_meta.as_mut() {
                     sync_project_v2_item(runner, &canon_root, meta, cfg, num, &column)
                 } else {
-                    sync_issue_label(runner, &canon_root, cfg, num, &column)
+                    sync_issue_label(
+                        runner,
+                        &canon_root,
+                        cfg,
+                        num,
+                        &column,
+                        batch_labels.get(&num).map(Vec::as_slice),
+                    )
                 };
                 match res {
                     Ok(ProjectSyncStatus::Synced) => (true, false, None),
@@ -399,6 +416,54 @@ fn other_column_labels(columns: &GithubColumnMap, current: &str) -> Vec<String> 
     labels
 }
 
+/// Minimum linked issues before issuing one batched `gh issue list` instead of
+/// per-issue `gh issue view` calls.
+const BATCH_ISSUE_LIST_MIN: usize = 3;
+
+fn parse_label_names(labels: &[Value]) -> Vec<String> {
+    labels
+        .iter()
+        .filter_map(|label| label["name"].as_str().map(str::trim))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn fetch_issue_labels_batch(
+    runner: &dyn CommandRunner,
+    cwd: &Path,
+    cfg: &GithubBoardConfig,
+) -> HashMap<u64, Vec<String>> {
+    let mut args = vec![
+        "issue",
+        "list",
+        "--state",
+        "all",
+        "--limit",
+        "200",
+        "--json",
+        "number,labels",
+    ];
+    if !cfg.repo.trim().is_empty() {
+        args.extend(["--repo", cfg.repo.trim()]);
+    }
+    let Ok(out) = runner.run("gh", &args, cwd) else {
+        return HashMap::new();
+    };
+    let rows = out
+        .success()
+        .then(|| serde_json::from_str::<Vec<Value>>(&out.stdout).ok())
+        .flatten()
+        .unwrap_or_default();
+    let mut cache = HashMap::with_capacity(rows.len());
+    for row in rows {
+        if let (Some(num), Some(labels)) = (row["number"].as_u64(), row["labels"].as_array()) {
+            cache.insert(num, parse_label_names(labels));
+        }
+    }
+    cache
+}
+
 fn fetch_issue_labels(
     runner: &dyn CommandRunner,
     cwd: &Path,
@@ -430,12 +495,7 @@ fn fetch_issue_labels(
             "gh issue view #{issue_number} response missing labels array"
         ))
     })?;
-    Ok(labels
-        .iter()
-        .filter_map(|label| label["name"].as_str().map(str::trim))
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(parse_label_names(labels))
 }
 
 fn sync_issue_label(
@@ -444,8 +504,12 @@ fn sync_issue_label(
     cfg: &GithubBoardConfig,
     issue_number: u64,
     column: &str,
+    cached_labels: Option<&[String]>,
 ) -> PortResult<ProjectSyncStatus> {
-    let current = fetch_issue_labels(runner, cwd, cfg, issue_number)?;
+    let current = match cached_labels {
+        Some(labels) => labels.to_vec(),
+        None => fetch_issue_labels(runner, cwd, cfg, issue_number)?,
+    };
     let add_label = format!("status:{column}");
     let has_target = current
         .iter()

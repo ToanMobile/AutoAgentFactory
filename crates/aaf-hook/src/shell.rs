@@ -4,13 +4,14 @@
 //! the guards can look at the real argv instead of raw text. Anything it
 //! cannot split is reported in [`Script::opaque`] and judged conservatively.
 
-use std::mem;
-
 mod command;
+mod decode;
 mod scan;
+mod stdin;
 
 pub use command::{DECLARERS, NAME_SETTERS};
-use scan::{find_close, heredoc_data_sink};
+use scan::{decode_ansi_c, find_close};
+pub(crate) use stdin::{shell_quote, stdin_scripts};
 
 /// Nesting of `$(…)`, backticks, `sh -c` and `eval` that is still analysed.
 pub const MAX_DEPTH: usize = 8;
@@ -25,6 +26,12 @@ pub const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh"];
 /// Commands that treat an argument as plain data, so the body of
 /// `$(cat <<'EOF' … EOF)` passed to them cannot run.
 const DATA_CONSUMERS: &[&str] = &["git", "gh"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeEvent {
+    Enter(Vec<String>),
+    Exit,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Redirect {
@@ -43,6 +50,8 @@ pub struct Cmd {
     /// Per-word dynamic flag parallel to `words` (`true` on `$VAR`, `$(…)`, backtick, or unquoted glob).
     pub arg_dynamic: Vec<bool>,
     pub redirects: Vec<Redirect>,
+    /// Raw heredoc bodies attached to this command (e.g. `python3 - <<'EOF'`).
+    pub heredocs: Vec<String>,
     /// The wrapper words stripped from the front (`env -C dir`, `xargs -a
     /// file`): no longer the command, but still paths the line names.
     pub wrapped: Vec<String>,
@@ -77,6 +86,9 @@ impl Cmd {
 #[derive(Debug, Default)]
 pub struct Script {
     pub cmds: Vec<Cmd>,
+    /// Subshell scope boundaries `(cmd_index, event)` for `(...)`, `$(...)`,
+    /// backticks, and nested shells so `bash()` restores `cwd` on exit.
+    pub scopes: Vec<(usize, ScopeEvent)>,
     /// Text that could not be split into commands.
     pub opaque: Vec<String>,
     /// Names of the shell functions the line defines.
@@ -87,6 +99,22 @@ pub struct Script {
     rebound: bool,
     /// Commands being split right now run under an environment-clearing wrapper.
     env_cleared: bool,
+}
+
+impl Script {
+    pub(super) fn enter_scope(&mut self) {
+        self.scopes
+            .push((self.cmds.len(), ScopeEvent::Enter(Vec::new())));
+    }
+
+    pub(super) fn enter_scope_wrapped(&mut self, wrapped: Vec<String>) {
+        self.scopes
+            .push((self.cmds.len(), ScopeEvent::Enter(wrapped)));
+    }
+
+    pub(super) fn exit_scope(&mut self) {
+        self.scopes.push((self.cmds.len(), ScopeEvent::Exit));
+    }
 }
 
 pub fn basename(word: &str) -> &str {
@@ -133,6 +161,18 @@ struct Heredoc {
     /// The command reading it runs with a cleared environment; `None` until
     /// that command ends.
     cleared: Option<bool>,
+    /// Index of the command in `out.cmds` that owns this heredoc.
+    cmd_idx: Option<usize>,
+    /// Downstream pipeline consumer command indices fed by the owning command, in order.
+    pipeline: Vec<usize>,
+}
+
+struct HeredocBody {
+    body: String,
+    quoted: bool,
+    cleared: bool,
+    is_interp: bool,
+    wrapped: Vec<String>,
 }
 
 struct Lexer<'o, 'd> {
@@ -149,11 +189,14 @@ struct Lexer<'o, 'd> {
     redirects: Vec<Redirect>,
     pending: Option<String>,
     heredocs: Vec<Heredoc>,
-    /// Body, delimiter quoted, read under a cleared environment.
-    bodies: Vec<(String, bool, bool)>,
+    /// Deferred heredoc bodies (potential lone `cat <<'EOF'`) resolved in `finish_bodies`.
+    bodies: Vec<HeredocBody>,
+    /// Top-level quoted heredocs to allowlisted data sinks, resolved after scanning the full line.
+    data_sink_bodies: Vec<HeredocBody>,
     cmd_deferred: Vec<String>,
     /// The command before the `|` just passed, for the next command.
     feeder: Option<Box<Cmd>>,
+    feeder_idx: Option<usize>,
     /// Any pipe, command chaining (`;`, `&&`, `||`, `&`, `(`, `)`), process
     /// substitution (`<(` / `>(`), or `$(…)` / backtick appeared at this level.
     compound: bool,
@@ -167,7 +210,7 @@ fn lex(src: &str, depth: usize, out: &mut Script, defer: Option<&mut Vec<String>
     }
     let mut lexer = Lexer::new(src, depth, out, defer);
     lexer.run();
-    lexer.finish_bodies();
+    lexer.finish_all_bodies();
 }
 
 impl<'o, 'd> Lexer<'o, 'd> {
@@ -190,8 +233,10 @@ impl<'o, 'd> Lexer<'o, 'd> {
             pending: None,
             heredocs: Vec::new(),
             bodies: Vec::new(),
+            data_sink_bodies: Vec::new(),
             cmd_deferred: Vec::new(),
             feeder: None,
+            feeder_idx: None,
             compound: false,
             failed: false,
         }
@@ -231,13 +276,25 @@ impl Lexer<'_, '_> {
                 '\n' => {
                     self.pos += 1;
                     self.end_cmd();
-                    self.read_heredocs();
+                    self.read_heredocs_or_defer();
                 }
-                ';' | '(' | ')' => {
+                ';' => {
+                    self.compound = true;
+                    self.pos += 1;
+                    self.end_cmd();
+                }
+                '(' => {
                     self.compound = true;
                     self.note_function();
                     self.pos += 1;
                     self.end_cmd();
+                    self.out.enter_scope();
+                }
+                ')' => {
+                    self.compound = true;
+                    self.pos += 1;
+                    self.end_cmd();
+                    self.out.exit_scope();
                 }
                 '|' => self.pipe(),
                 '&' if self.chars.get(self.pos + 1) == Some(&'>') => self.redirect(),
@@ -306,6 +363,7 @@ impl Lexer<'_, '_> {
                 // The command itself is stored last, after any it nests.
                 // Nothing stored: the pipe comes out of a `( … )` group.
                 let ended = self.out.cmds.len() > before;
+                self.feeder_idx = ended.then(|| self.out.cmds.len() - 1);
                 self.feeder = self
                     .out
                     .cmds
@@ -411,63 +469,26 @@ impl Lexer<'_, '_> {
     fn substitute(&mut self, inner: &str) {
         self.compound = true;
         let mut deferred = Vec::new();
+        self.out.enter_scope();
         lex(inner, self.depth + 1, self.out, Some(&mut deferred));
+        self.out.exit_scope();
         self.cmd_deferred.append(&mut deferred);
-        self.word_mut().dynamic = true;
+        let word = self.word_mut();
+        word.dynamic = true;
+        word.text.push('$');
     }
 
     /// `$'…'`: decoded so `$'\x67it'` is seen as `git`.
     fn ansi_c(&mut self) {
         self.word_mut().quoted = true;
-        loop {
-            let decoded = match self.take() {
-                None => return self.fail(),
-                Some('\'') => return,
-                Some('\\') => match self.take() {
-                    None => return self.fail(),
-                    Some('n') => Some('\n'),
-                    Some('t') => Some('\t'),
-                    Some('r') => Some('\r'),
-                    Some('a') => Some('\u{7}'),
-                    Some('b') => Some('\u{8}'),
-                    Some('e' | 'E') => Some('\u{1b}'),
-                    Some('f') => Some('\u{c}'),
-                    Some('v') => Some('\u{b}'),
-                    Some('x') => self.code_point(2, 16),
-                    Some('u') => self.code_point(4, 16),
-                    Some('U') => self.code_point(8, 16),
-                    Some('0'..='7') => {
-                        // Re-read the first digit as part of the number.
-                        self.pos -= 1;
-                        self.code_point(3, 8)
-                    }
-                    Some(c) => Some(c),
-                },
-                Some(c) => Some(c),
-            };
-            match decoded {
-                Some(c) => self.word_mut().text.push(c),
-                // An escape that names no character: the word is not literal.
-                None => self.word_mut().dynamic = true,
+        match decode_ansi_c(&self.chars, &mut self.pos) {
+            Some((text, dynamic)) => {
+                let word = self.word_mut();
+                word.text.push_str(&text);
+                word.dynamic |= dynamic;
             }
+            None => self.fail(),
         }
-    }
-
-    fn code_point(&mut self, max_digits: usize, radix: u32) -> Option<char> {
-        let mut value: u32 = 0;
-        let mut digits = 0;
-        while digits < max_digits {
-            let Some(digit) = self.peek().and_then(|c| c.to_digit(radix)) else {
-                break;
-            };
-            value = value.saturating_mul(radix).saturating_add(digit);
-            self.pos += 1;
-            digits += 1;
-        }
-        if digits == 0 {
-            return None;
-        }
-        char::from_u32(value)
     }
 
     fn redirect(&mut self) {
@@ -523,67 +544,14 @@ impl Lexer<'_, '_> {
                 strip_tabs: op == "<<-",
                 quoted: tok.quoted,
                 cleared: None,
+                cmd_idx: None,
+                pipeline: Vec::new(),
             }),
             Some(op) => self.redirects.push(Redirect {
                 op,
                 target: tok.text,
             }),
             None => self.toks.push(tok),
-        }
-    }
-
-    fn read_heredocs(&mut self) {
-        for doc in mem::take(&mut self.heredocs) {
-            let mut body = String::new();
-            while self.pos < self.chars.len() {
-                let end = self.chars[self.pos..]
-                    .iter()
-                    .position(|c| *c == '\n')
-                    .map_or(self.chars.len(), |offset| self.pos + offset);
-                let line: String = self.chars[self.pos..end].iter().collect();
-                self.pos = (end + 1).min(self.chars.len());
-                let probe = if doc.strip_tabs {
-                    line.trim_start_matches('\t')
-                } else {
-                    line.as_str()
-                };
-                if probe == doc.delim {
-                    break;
-                }
-                body.push_str(&line);
-                body.push('\n');
-            }
-            self.bodies
-                .push((body, doc.quoted, doc.cleared.unwrap_or(false)));
-        }
-    }
-
-    /// Heredoc bodies are commands unless proven to be data: a body can feed
-    /// `bash`, and an unquoted one runs its own `$(…)`.
-    fn finish_bodies(&mut self) {
-        let single = !self.failed && !self.compound && self.out.cmds.len() == self.first_cmd + 1;
-        let lone_cat = single
-            && self.out.cmds.last().is_some_and(|c| {
-                c.words == ["cat"] && c.assigns.is_empty() && c.redirects.is_empty()
-            });
-        // Top-level single-command quoted heredoc to an allowlisted data sink;
-        // the owning command's words, assigns, and redirects still hit every guard.
-        let data_sink =
-            single && self.depth == 0 && self.out.cmds.last().is_some_and(heredoc_data_sink);
-        for (body, quoted, cleared) in mem::take(&mut self.bodies) {
-            if quoted && lone_cat {
-                // `cat <<'EOF'` alone only prints. Inside a substitution the
-                // consumer of that output decides; at statement level it is
-                // just output.
-                if let Some(defer) = self.defer.as_deref_mut() {
-                    defer.push(body);
-                }
-            } else if !(quoted && data_sink) {
-                let outer_cleared = self.out.env_cleared;
-                self.out.env_cleared |= cleared;
-                lex(&body, self.depth + 1, self.out, None);
-                self.out.env_cleared = outer_cleared;
-            }
         }
     }
 }

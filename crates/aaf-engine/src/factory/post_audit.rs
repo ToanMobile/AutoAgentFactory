@@ -5,17 +5,18 @@ use std::path::Path;
 
 use aaf_domain::config::{AuditScope, CrossAuditConfig};
 use aaf_domain::event::EventKind;
-use aaf_domain::gate::{PostGateAuditRecord, Receipt};
-use aaf_domain::ports::{PortError, PortResult};
+use aaf_domain::gate::{PostGateAuditRecord, Receipt, Severity};
+use aaf_domain::ports::{InfraFailure, InfraKind, PortError, PortResult};
 use serde_json::json;
 
 use super::audit_backend::{self, AuditBackend};
+use super::audit_turn::short_circuit_audit_reason;
 use super::ports::{AccountPool, Grant};
 use super::rework_filter;
-use super::worker::{self, GateJob, Next, Outcome};
+use super::worker::{self, GateJob, Job, Next, Outcome, PreGateAudit};
 use super::{Deps, unblock};
 use crate::cross_audit::{
-    AuditInput, AuditVerdict, Finding, MechanicalScoreReport, compute_mechanical_score,
+    AuditInput, AuditVerdict, Finding, GOLDEN_IDS, MechanicalScoreReport, compute_mechanical_score,
     evaluate_score_gate,
 };
 use crate::git::TaskWorktree;
@@ -223,6 +224,100 @@ pub(crate) fn collect_rework_findings(
     actionable
 }
 
+fn collect_mechanical_findings(
+    receipt: &Receipt,
+    mech: &MechanicalScoreReport,
+    min_average: u8,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for item in &receipt.static_findings {
+        if !matches!(item.severity, Severity::Warn | Severity::Critical) {
+            continue;
+        }
+        let loc = match item.line {
+            Some(line) => format!("{}:{line}", item.file),
+            None => item.file.clone(),
+        };
+        let evidence = if item.fix.trim().is_empty() {
+            loc
+        } else {
+            format!("{loc}; fix: {}", item.fix)
+        };
+        findings.push(Finding {
+            id: item.rule.clone(),
+            question: item.message.clone(),
+            evidence,
+        });
+    }
+    for unresolved in &receipt.store_compliance.unresolved {
+        findings.push(Finding {
+            id: "score_gate".to_string(),
+            question: "unresolved store compliance item".to_string(),
+            evidence: unresolved.clone(),
+        });
+    }
+    for reason in &mech.reasons {
+        findings.push(Finding {
+            id: "score_gate".to_string(),
+            question: format!(
+                "mechanical score {}/100 (min average {min_average})",
+                mech.score
+            ),
+            evidence: reason.clone(),
+        });
+    }
+    if findings.is_empty() {
+        findings.push(Finding {
+            id: "score_gate".to_string(),
+            question: format!(
+                "mechanical score {}/100 (min average {min_average})",
+                mech.score
+            ),
+            evidence: "mechanical score below configured threshold".to_string(),
+        });
+    }
+    findings
+}
+
+fn reject_post_audit(
+    deps: &Deps,
+    task_id: String,
+    worktree: TaskWorktree,
+    reason: &str,
+) -> PortResult<Next> {
+    let note = format!("post-gate cross-audit rejected the changes ({reason})");
+    deps.store
+        .append_context_note(&task_id, &unblock::one_line(&note, 400), deps.now())?;
+    let signal =
+        audit_backend::audit_rejection_signal("post-gate cross-audit rejected the changes");
+    Ok(Next::Unblock {
+        task_id,
+        worktree,
+        signal: Box::new(signal),
+    })
+}
+
+/// Maps an auditor infrastructure failure to [`Next::RetryAfter`] for transient
+/// network faults and [`Next::Halt`] for authentication failures.
+pub(crate) fn audit_infra_next(
+    deps: &Deps,
+    task_id: &str,
+    grant: &Grant,
+    infra: &InfraFailure,
+) -> Next {
+    let (what, fix) = worker::infra_words(grant, infra);
+    let detail = worker::halt_message(task_id, what, infra, &fix);
+    if infra.kind == InfraKind::Network {
+        Next::RetryAfter {
+            until: deps.now(),
+            attempt: 1,
+            detail,
+        }
+    } else {
+        Next::Halt(detail)
+    }
+}
+
 /// Runs the post-gate cross-audit worker job and maps any infrastructure error
 /// to [`worker::block_infra`].
 pub(crate) fn run_post_gate_audit(
@@ -230,10 +325,11 @@ pub(crate) fn run_post_gate_audit(
     audit_backend: Option<&AuditBackend>,
     job: GateJob,
     receipt: Receipt,
+    pre_audit: Option<Box<PreGateAudit>>,
     grant: &Grant,
 ) -> Outcome {
     let task_id = job.task_id.clone();
-    match execute_post_gate_audit(deps, audit_backend, job, receipt, grant) {
+    match execute_post_gate_audit(deps, audit_backend, job, receipt, pre_audit, grant) {
         Ok(next) => Outcome {
             task_id,
             next,
@@ -243,72 +339,164 @@ pub(crate) fn run_post_gate_audit(
     }
 }
 
+fn mech_score(deps: &Deps, tree: &Path, receipt: &Receipt, same: bool) -> MechanicalScoreReport {
+    let cfg = &deps.settings.repo.cross_audit;
+    let proof_ok = proof_verified(deps, tree, receipt);
+    compute_mechanical_score(receipt, proof_ok, cfg.require_different_provider, same)
+}
+
 fn execute_post_gate_audit(
     deps: &Deps,
     audit_backend: Option<&AuditBackend>,
     job: GateJob,
     receipt: Receipt,
+    pre_audit: Option<Box<PreGateAudit>>,
     grant: &Grant,
 ) -> PortResult<Next> {
     let task = deps.store.get_task(&job.task_id)?;
-    let (audit_provider, reviewer, same_account) =
-        match audit_backend::resolve_task_audit_context(deps, audit_backend, &task.id, grant)? {
-            Ok(ctx) => ctx,
-            Err(why) => {
-                unblock::block_untried(deps, &task.id, &why)?;
-                return Ok(Next::Blocked);
-            }
-        };
-    let input = AuditInput {
-        spec: task.spec.clone(),
-        diff: deps.git.diff(&job.worktree)?,
-        mobile: deps.settings.mobile,
-    };
     let cfg = &deps.settings.repo.cross_audit;
+    let reusable = pre_audit.filter(|pre| {
+        !pre.tree_fp.is_empty()
+            && pre.tree_fp == receipt.tree_fp
+            && pre.base_sha == receipt.base_sha
+            && (!cfg.score_gate || pre.scores.len() == GOLDEN_IDS.len())
+    });
 
-    let clean = deps.git.integrate(&[])?;
-    let audited = audit_backend::run_auditor_turn(
-        deps,
-        audit_backend,
-        &task,
-        &input,
-        &clean.tree,
-        grant,
-        cfg.score_gate,
-    );
-    let _ = deps.git.discard(&clean);
-    let (report, infra, limit_hit) = audited?;
-    if let Some(hit) = limit_hit {
-        let accounts: &dyn AccountPool = audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
-        audit_backend::report_audit_limit(deps, accounts, &task.id, grant, &hit)?;
-        return audit_backend::route_audit_limit(accounts, grant, &hit);
-    }
-    if let Some(infra) = infra {
-        let (what, fix) = worker::infra_words(grant, &infra);
-        return Ok(Next::Halt(worker::halt_message(
-            &task.id, what, &infra, &fix,
-        )));
-    }
+    let (audit_provider, reviewer, same_account, pre_mech, verdict, diff_truncated, scores) =
+        if let Some(pre) = reusable {
+            (
+                pre.audit_provider,
+                pre.reviewer,
+                pre.same_account,
+                None,
+                AuditVerdict::Pass { warnings: vec![] },
+                false,
+                pre.scores,
+            )
+        } else {
+            let ctx =
+                audit_backend::resolve_task_audit_context(deps, audit_backend, &task.id, grant)?;
+            let (audit_provider, reviewer, same_account) = match ctx {
+                Ok(ctx) => ctx,
+                Err(why) => {
+                    unblock::block_untried(deps, &task.id, &why)?;
+                    return Ok(Next::Blocked);
+                }
+            };
+            let input = AuditInput {
+                spec: task.spec.clone(),
+                diff: deps.git.diff(&job.worktree)?,
+                mobile: deps.settings.mobile,
+            };
+            if let Some(reason) = short_circuit_audit_reason(&input.diff) {
+                deps.emit(
+                    EventKind::CrossAudit,
+                    &task.id,
+                    json!({
+                        "phase": "post_gate",
+                        "verdict": reason,
+                        "provider": audit_provider,
+                        "reviewer": reviewer,
+                        "same_account": same_account,
+                        "tree_fp": receipt.tree_fp,
+                        "config_hash": receipt.config_hash,
+                        "short_circuited": true,
+                    }),
+                )?;
+                return reject_post_audit(deps, task.id, job.worktree, &reason);
+            }
+            let pre_mech = cfg
+                .score_gate
+                .then(|| mech_score(deps, &job.worktree.path, &receipt, same_account));
+            if let Some(ref mech) = pre_mech
+                && mech.score < cfg.min_average_score
+            {
+                let mut reasons = mech.reasons.clone();
+                reasons.push(format!(
+                    "mechanical score {} is below minimum {}",
+                    mech.score, cfg.min_average_score
+                ));
+                let event_verdict = format!("fail: {}", reasons.join("; "));
+                deps.emit(
+                    EventKind::CrossAudit,
+                    &task.id,
+                    json!({
+                        "phase": "post_gate",
+                        "verdict": event_verdict,
+                        "provider": audit_provider,
+                        "reviewer": reviewer,
+                        "same_account": same_account,
+                        "mechanical_score": mech.score,
+                        "llm_average": Option::<u8>::None,
+                        "effective_score": mech.score,
+                        "scores": serde_json::Value::Array(Vec::new()),
+                        "reasons": reasons,
+                        "tree_fp": receipt.tree_fp,
+                        "config_hash": receipt.config_hash,
+                        "short_circuited": true,
+                    }),
+                )?;
+                let findings = collect_mechanical_findings(&receipt, mech, cfg.min_average_score);
+                if let Some(next) = unblock::handle_audit_failure(deps, &task, &findings)? {
+                    return Ok(next);
+                }
+                return reject_post_audit(deps, task.id, job.worktree, &event_verdict);
+            }
+            let clean = deps.git.integrate(&[])?;
+            let audited = audit_backend::run_auditor_turn(
+                deps,
+                audit_backend,
+                &task,
+                &input,
+                &clean.tree,
+                grant,
+                cfg.score_gate,
+            );
+            let _ = deps.git.discard(&clean);
+            let (report, infra, limit_hit) = audited?;
+            if let Some(hit) = limit_hit {
+                let accounts: &dyn AccountPool =
+                    audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
+                audit_backend::report_audit_limit(deps, accounts, &task.id, grant, &hit)?;
+                let next = audit_backend::route_audit_limit(accounts, grant, &hit)?;
+                return Ok(match next {
+                    Next::Switch => Next::SwitchJob(Box::new(Job::PostAudit {
+                        job,
+                        receipt: Box::new(receipt),
+                        pre_audit: None,
+                    })),
+                    other => other,
+                });
+            }
+            if let Some(infra) = infra {
+                return Ok(audit_infra_next(deps, &task.id, grant, &infra));
+            }
+            (
+                audit_provider,
+                reviewer,
+                same_account,
+                pre_mech,
+                report.verdict,
+                report.diff_truncated,
+                report.scores,
+            )
+        };
 
-    let proof_ok = proof_verified(deps, &job.worktree.path, &receipt);
-    let mech = compute_mechanical_score(
-        &receipt,
-        proof_ok,
-        cfg.require_different_provider,
-        same_account,
-    );
+    let mech =
+        pre_mech.unwrap_or_else(|| mech_score(deps, &job.worktree.path, &receipt, same_account));
     let eval = cfg.score_gate.then(|| {
         evaluate_score_gate(
             &mech,
-            &report.scores,
+            &scores,
             cfg.min_average_score,
             cfg.min_criterion_score,
         )
     });
     let llm_average = eval.as_ref().and_then(|e| e.llm_average).or_else(|| {
-        (report.scores.len() == 7).then(|| {
-            let sum: u32 = report.scores.iter().map(|s| u32::from(s.score)).sum();
-            u8::try_from(sum / 7).unwrap_or(100)
+        let n = u32::try_from(GOLDEN_IDS.len()).unwrap_or(7);
+        (scores.len() == GOLDEN_IDS.len()).then(|| {
+            let sum: u32 = scores.iter().map(|s| u32::from(s.score)).sum();
+            u8::try_from(sum / n).unwrap_or(100)
         })
     });
     let effective_score = eval.as_ref().map_or_else(
@@ -320,11 +508,9 @@ fn execute_post_gate_audit(
         reasons.extend(e.reasons.iter().cloned());
     }
 
-    let passed = report.verdict.is_pass()
-        && !report.diff_truncated
-        && eval.as_ref().is_none_or(|e| e.passed);
-    let score_gate_failed = report.verdict.is_pass()
-        && !report.diff_truncated
+    let passed = verdict.is_pass() && !diff_truncated && eval.as_ref().is_none_or(|e| e.passed);
+    let score_gate_failed = verdict.is_pass()
+        && !diff_truncated
         && eval
             .as_ref()
             .is_some_and(|e| !e.passed && e.llm_average.is_some());
@@ -333,7 +519,7 @@ fn execute_post_gate_audit(
     } else if score_gate_failed {
         format!("fail: {}", reasons.join("; "))
     } else {
-        audit_backend::verdict_text(&report.verdict)
+        audit_backend::verdict_text(&verdict)
     };
 
     deps.emit(
@@ -348,7 +534,7 @@ fn execute_post_gate_audit(
             "mechanical_score": mech.score,
             "llm_average": llm_average,
             "effective_score": effective_score,
-            "scores": report.scores,
+            "scores": scores,
             "reasons": reasons,
             "tree_fp": receipt.tree_fp,
             "config_hash": receipt.config_hash,
@@ -360,15 +546,15 @@ fn execute_post_gate_audit(
             std::fs::canonicalize(&job.worktree.path).unwrap_or_else(|_| job.worktree.path.clone());
         let record = PostGateAuditRecord {
             repo_root: canon.to_string_lossy().into_owned(),
-            tree_fp: receipt.tree_fp,
-            config_hash: receipt.config_hash,
+            tree_fp: receipt.tree_fp.clone(),
+            config_hash: receipt.config_hash.clone(),
             verdict: "PASS".to_string(),
             reviewer,
             same_account,
             mechanical_score: mech.score,
             llm_average,
             effective_score,
-            scores: report.scores,
+            scores,
             created_at: deps.now(),
         };
         let io = |err: aaf_fp::FpError| PortError::Io(err.to_string());
@@ -377,34 +563,28 @@ fn execute_post_gate_audit(
             .map_err(io)?;
         return Ok(Next::Gate(GateJob {
             audited: true,
+            cached_receipt: Some(Box::new(receipt)),
             ..job
         }));
     }
 
-    let explicit_fail = !report.diff_truncated
-        && (matches!(report.verdict, AuditVerdict::Fail { .. }) || score_gate_failed);
+    let explicit_fail =
+        !diff_truncated && (matches!(verdict, AuditVerdict::Fail { .. }) || score_gate_failed);
     if explicit_fail {
-        let findings = collect_rework_findings(
-            &report.verdict,
-            &report.scores,
-            &reasons,
-            effective_score,
-            cfg,
-        );
+        let mut findings =
+            collect_rework_findings(&verdict, &scores, &reasons, effective_score, cfg);
+        if cfg.score_gate && mech.score < cfg.min_average_score {
+            findings.extend(collect_mechanical_findings(
+                &receipt,
+                &mech,
+                cfg.min_average_score,
+            ));
+        }
         if let Some(next) = unblock::handle_audit_failure(deps, &task, &findings)? {
             return Ok(next);
         }
     }
 
-    let summary = rework_filter::fallback_verdict_summary(&report.verdict, &event_verdict);
-    let note = format!("post-gate cross-audit rejected the changes ({summary})");
-    deps.store
-        .append_context_note(&task.id, &unblock::one_line(&note, 400), deps.now())?;
-    let signal =
-        audit_backend::audit_rejection_signal("post-gate cross-audit rejected the changes");
-    Ok(Next::Unblock {
-        task_id: task.id,
-        worktree: job.worktree,
-        signal: Box::new(signal),
-    })
+    let summary = rework_filter::fallback_verdict_summary(&verdict, &event_verdict);
+    reject_post_audit(deps, task.id, job.worktree, &summary)
 }

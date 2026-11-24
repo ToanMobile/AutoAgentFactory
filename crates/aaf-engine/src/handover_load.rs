@@ -37,7 +37,7 @@ pub fn load_handover(
         .collect();
     let repo_path = PathBuf::from(&task.repo_root);
     if !roots.iter().any(|r| r == &repo_path) {
-        roots.push(repo_path);
+        roots.push(repo_path.clone());
     }
 
     let expected_fp = cg.as_ref().and_then(|g| non_empty(&g.tree_fp));
@@ -89,9 +89,16 @@ pub fn load_handover(
         _ => None,
     };
     let proof = tree_fp.as_deref().and_then(|fp| {
-        roots
-            .iter()
-            .find_map(|r| crate::proof::verify_proof(r, data_dir, &cfg.proof, Some(fp)).ok())
+        roots.iter().find_map(|r| {
+            crate::proof::verify_proof_for_archived_root(
+                r,
+                &repo_path,
+                data_dir,
+                &cfg.proof,
+                Some(fp),
+            )
+            .ok()
+        })
     });
     let mut data = build_handover_from_parts(
         &task,

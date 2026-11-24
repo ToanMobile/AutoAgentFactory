@@ -49,11 +49,29 @@ pub struct DiscoveredSop {
 
 /// Loads, parses, and validates a single SOP TOML file (refusing symlinks).
 pub fn load_sop_file(path: &Path) -> Result<SopSpec, SopError> {
+    reject_parent_dir(path)?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
-        && !check_existing_real_dir(parent)?
     {
-        return Err(SopError::NotFound(format!("SOP file {}", path.display())));
+        if is_repo_sops_dir(parent) {
+            if !check_existing_real_dir(parent)? {
+                return Err(SopError::NotFound(format!("SOP file {}", path.display())));
+            }
+        } else {
+            match fs::metadata(parent) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => {
+                    return Err(SopError::InvalidPath(format!(
+                        "{} is not a directory",
+                        parent.display()
+                    )));
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Err(SopError::NotFound(format!("SOP file {}", path.display())));
+                }
+                Err(e) => return Err(SopError::Io(format!("stat {}: {e}", parent.display()))),
+            }
+        }
     }
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -105,9 +123,17 @@ pub fn load_repo_sops(repo_root: &Path) -> Result<Vec<DiscoveredSop>, SopError> 
     }
     paths.sort();
 
+    let mut seen_names = HashSet::with_capacity(paths.len());
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
         let spec = load_sop_file(&path)?;
+        if !seen_names.insert(spec.name.clone()) {
+            return Err(SopError::InvalidInput(format!(
+                "duplicate SOP {:?} declared in {}",
+                spec.name,
+                path.display()
+            )));
+        }
         out.push(DiscoveredSop {
             spec,
             source: SopSource::Repo(path),
@@ -268,16 +294,6 @@ pub fn init_sop_file(
     Ok(dest)
 }
 
-#[cfg(target_os = "macos")]
-fn is_macos_system_symlink(path: &Path) -> bool {
-    matches!(path.to_str(), Some("/var" | "/tmp" | "/etc"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_macos_system_symlink(_path: &Path) -> bool {
-    false
-}
-
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> Result<(), SopError> {
     use std::os::unix::fs::PermissionsExt;
@@ -290,118 +306,157 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), SopError> {
     Ok(())
 }
 
-/// Verifies `dir` and all ancestors contain no `..` and no symlinks (except macOS system links).
-/// Returns `Ok(true)` if `dir` exists as a real directory, `Ok(false)` if any component is missing.
-pub(crate) fn check_existing_real_dir(dir: &Path) -> Result<bool, SopError> {
-    if dir.as_os_str().is_empty() {
+fn reject_parent_dir(path: &Path) -> Result<(), SopError> {
+    if path.as_os_str().is_empty() {
         return Err(SopError::InvalidPath("directory path is empty".to_string()));
     }
-    let mut cur = PathBuf::new();
-    for comp in dir.components() {
-        match comp {
-            Component::Prefix(p) => cur.push(p.as_os_str()),
-            Component::RootDir => cur.push(comp.as_os_str()),
-            Component::CurDir => continue,
-            Component::ParentDir => {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(SopError::InvalidPath(format!(
+            "path {} must not contain `..`",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn is_repo_sops_dir(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n == "sops")
+        && dir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == ".autofactory")
+}
+
+/// Splits `dir` into `(base_ancestor, managed_tail)` so OS/user symlink ancestors
+/// above `repo_root` or `data_dir` are allowed, while managed subpath components
+/// (`.autofactory`, `.autofactory/sops`, `sops`) are strictly checked via `symlink_metadata`.
+fn split_managed_dir(dir: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
+    let Some(leaf) = dir.file_name() else {
+        return (dir.to_path_buf(), Vec::new());
+    };
+    let Some(parent) = dir.parent() else {
+        return (PathBuf::new(), vec![leaf.to_os_string()]);
+    };
+    if is_repo_sops_dir(dir)
+        && let Some(grandparent) = parent.parent()
+    {
+        return (
+            grandparent.to_path_buf(),
+            vec![
+                std::ffi::OsString::from(".autofactory"),
+                std::ffi::OsString::from("sops"),
+            ],
+        );
+    }
+    (parent.to_path_buf(), vec![leaf.to_os_string()])
+}
+
+/// Verifies `dir` has no `..` and its managed subpath components are real non-symlink directories.
+/// Returns `Ok(true)` if `dir` exists as a real directory, `Ok(false)` if any component is missing.
+pub(crate) fn check_existing_real_dir(dir: &Path) -> Result<bool, SopError> {
+    reject_parent_dir(dir)?;
+    let (base, managed) = split_managed_dir(dir);
+    if !base.as_os_str().is_empty() {
+        match fs::metadata(&base) {
+            Ok(meta) if !meta.is_dir() => {
                 return Err(SopError::InvalidPath(format!(
-                    "path {} must not contain `..`",
-                    dir.display()
+                    "{} is not a directory",
+                    base.display()
                 )));
             }
-            Component::Normal(part) => {
-                cur.push(part);
-                match fs::symlink_metadata(&cur) {
-                    Ok(meta) if meta.file_type().is_symlink() => {
-                        if !is_macos_system_symlink(&cur) {
-                            return Err(SopError::InvalidPath(format!(
-                                "{} is a symlink",
-                                cur.display()
-                            )));
-                        }
-                    }
-                    Ok(meta) if !meta.is_dir() => {
-                        return Err(SopError::InvalidPath(format!(
-                            "{} is not a directory",
-                            cur.display()
-                        )));
-                    }
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-                    Err(e) => return Err(SopError::Io(format!("stat {}: {e}", cur.display()))),
-                }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(SopError::Io(format!("stat {}: {e}", base.display()))),
+        }
+    }
+    let mut cur = base;
+    for part in managed {
+        cur.push(part);
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(SopError::InvalidPath(format!(
+                    "{} is a symlink",
+                    cur.display()
+                )));
             }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(SopError::InvalidPath(format!(
+                    "{} is not a directory",
+                    cur.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(SopError::Io(format!("stat {}: {e}", cur.display()))),
         }
     }
     Ok(true)
 }
 
-/// Ensures `dir` exists as a real non-symlink directory, optionally applying POSIX `mode`.
+/// Ensures `dir` exists as a real non-symlink managed directory, optionally applying POSIX `mode`.
 pub(crate) fn ensure_real_dir_mode(dir: &Path, mode: Option<u32>) -> Result<(), SopError> {
-    if dir.as_os_str().is_empty() {
-        return Err(SopError::InvalidPath("directory path is empty".to_string()));
-    }
-    let mut cur = PathBuf::new();
-    for comp in dir.components() {
-        match comp {
-            Component::Prefix(p) => cur.push(p.as_os_str()),
-            Component::RootDir => cur.push(comp.as_os_str()),
-            Component::CurDir => continue,
-            Component::ParentDir => {
+    reject_parent_dir(dir)?;
+    let (base, managed) = split_managed_dir(dir);
+    if !base.as_os_str().is_empty() {
+        match fs::metadata(&base) {
+            Ok(meta) if !meta.is_dir() => {
                 return Err(SopError::InvalidPath(format!(
-                    "path {} must not contain `..`",
-                    dir.display()
+                    "{} is not a directory",
+                    base.display()
                 )));
             }
-            Component::Normal(part) => {
-                cur.push(part);
-                match fs::symlink_metadata(&cur) {
-                    Ok(meta) if meta.file_type().is_symlink() => {
-                        if !is_macos_system_symlink(&cur) {
-                            return Err(SopError::InvalidPath(format!(
-                                "{} is a symlink",
-                                cur.display()
-                            )));
-                        }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(&base)
+                    .map_err(|err| SopError::Io(format!("create {}: {err}", base.display())))?;
+            }
+            Err(e) => return Err(SopError::Io(format!("stat {}: {e}", base.display()))),
+        }
+    }
+    let mut cur = base;
+    let last_idx = managed.len().saturating_sub(1);
+    for (idx, part) in managed.into_iter().enumerate() {
+        cur.push(part);
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(SopError::InvalidPath(format!(
+                    "{} is a symlink",
+                    cur.display()
+                )));
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(SopError::InvalidPath(format!(
+                    "{} is not a directory",
+                    cur.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut builder = fs::DirBuilder::new();
+                #[cfg(unix)]
+                if let Some(m) = mode
+                    && idx == last_idx
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    builder.mode(m);
+                }
+                match builder.create(&cur) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(err) => {
+                        return Err(SopError::Io(format!("create {}: {err}", cur.display())));
                     }
-                    Ok(meta) if !meta.is_dir() => {
-                        return Err(SopError::InvalidPath(format!(
-                            "{} is not a directory",
-                            cur.display()
-                        )));
-                    }
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                        let mut builder = fs::DirBuilder::new();
-                        #[cfg(unix)]
-                        if let Some(m) = mode
-                            && cur == dir
-                        {
-                            use std::os::unix::fs::DirBuilderExt;
-                            builder.mode(m);
-                        }
-                        match builder.create(&cur) {
-                            Ok(()) => {}
-                            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-                            Err(err) => {
-                                return Err(SopError::Io(format!(
-                                    "create {}: {err}",
-                                    cur.display()
-                                )));
-                            }
-                        }
-                        let meta = fs::symlink_metadata(&cur).map_err(|err| {
-                            SopError::Io(format!("stat {}: {err}", cur.display()))
-                        })?;
-                        if meta.file_type().is_symlink() || !meta.is_dir() {
-                            return Err(SopError::InvalidPath(format!(
-                                "{} is a symlink or not a directory",
-                                cur.display()
-                            )));
-                        }
-                    }
-                    Err(e) => return Err(SopError::Io(format!("stat {}: {e}", cur.display()))),
+                }
+                let meta = fs::symlink_metadata(&cur)
+                    .map_err(|err| SopError::Io(format!("stat {}: {err}", cur.display())))?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(SopError::InvalidPath(format!(
+                        "{} is a symlink or not a directory",
+                        cur.display()
+                    )));
                 }
             }
+            Err(e) => return Err(SopError::Io(format!("stat {}: {e}", cur.display()))),
         }
     }
     if let Some(m) = mode {
@@ -462,4 +517,75 @@ pub(crate) fn atomic_write_bytes(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod regression_tests {
+    use super::runner::{list_checkpoints, load_checkpoint, save_checkpoint};
+    use super::*;
+    use aaf_domain::sop::SopCheckpoint;
+
+    #[test]
+    fn load_repo_sops_rejects_duplicate_spec_name() {
+        let repo = tempfile::tempdir().unwrap();
+        let first = init_sop_file(repo.path(), "bugfix", Some("dup-sop"), false).unwrap();
+        let copy = first.with_file_name("dup-sop-copy.toml");
+        fs::copy(&first, &copy).unwrap();
+        let err = load_repo_sops(repo.path()).unwrap_err();
+        assert!(matches!(err, SopError::InvalidInput(msg) if msg.contains("duplicate SOP")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_symlinked_ancestors_while_refusing_managed_symlinks() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real_work = tmp.path().join("real_work");
+        let real_repo = real_work.join("repo");
+        let real_data = real_work.join("data");
+        fs::create_dir_all(&real_repo).unwrap();
+        fs::create_dir_all(&real_data).unwrap();
+        let link_work = tmp.path().join("work_link");
+        symlink(&real_work, &link_work).unwrap();
+
+        let linked_repo = link_work.join("repo");
+        let linked_data = link_work.join("data");
+        let sop_path = init_sop_file(&linked_repo, "bugfix", None, false).unwrap();
+        assert!(sop_path.is_file());
+        assert_eq!(load_repo_sops(&linked_repo).unwrap().len(), 1);
+
+        let spec = find_builtin("bugfix").unwrap();
+        let cp = SopCheckpoint::new("run-sym-anc".into(), &spec, "/repo".into(), 10);
+        save_checkpoint(&linked_data, &cp).unwrap();
+        assert_eq!(
+            load_checkpoint(&linked_data, "run-sym-anc").unwrap().run_id,
+            "run-sym-anc"
+        );
+        assert_eq!(list_checkpoints(&linked_data).unwrap().len(), 1);
+
+        // Managed `.autofactory/sops` symlink MUST still be rejected.
+        let bad_repo = tmp.path().join("bad_repo");
+        fs::create_dir_all(bad_repo.join(".autofactory")).unwrap();
+        let outside_dir = tmp.path().join("outside_sops");
+        fs::create_dir_all(&outside_dir).unwrap();
+        symlink(&outside_dir, bad_repo.join(REPO_SOPS_REL)).unwrap();
+        assert!(matches!(
+            load_repo_sops(&bad_repo),
+            Err(SopError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            init_sop_file(&bad_repo, "bugfix", None, false),
+            Err(SopError::InvalidPath(_))
+        ));
+
+        // Managed `<data_dir>/sops` symlink MUST still be rejected.
+        let bad_data = tmp.path().join("bad_data");
+        fs::create_dir_all(&bad_data).unwrap();
+        symlink(&outside_dir, bad_data.join("sops")).unwrap();
+        assert!(matches!(
+            save_checkpoint(&bad_data, &cp),
+            Err(SopError::InvalidPath(_))
+        ));
+    }
 }

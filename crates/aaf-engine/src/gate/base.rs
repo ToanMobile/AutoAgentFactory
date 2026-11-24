@@ -1,9 +1,22 @@
 //! Base ref resolution: what the current work is compared against.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
 use super::GateError;
+use super::hidden::HiddenPolicy;
+
+/// Optional per-run overrides that keep `config_hash(cfg)` aligned with the
+/// committed repository config so callers such as `aaf merge` can reuse a
+/// signed common receipt while enforcing an explicit base or independent
+/// approval requirement.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateRunOptions<'a> {
+    pub policy: HiddenPolicy,
+    pub base_ref_override: Option<&'a str>,
+    pub require_independent_approval: bool,
+}
 
 /// Trunks `auto` tries after `origin/HEAD`, as full ref names: a short
 /// name would let a tag or local branch called `origin/main` stand in.
@@ -13,6 +26,9 @@ pub(crate) const AUTO_FALLBACKS: [&str; 4] = [
     "refs/heads/main",
     "refs/heads/master",
 ];
+
+const ORIGIN_HEAD: &str = "refs/remotes/origin/HEAD";
+const AUTO_REFS_FORMAT: &str = "--format=%(refname)%09%(symref)%09%(objecttype)%09%(objectname)%09%(*objecttype)%09%(*objectname)%09end";
 
 /// The branch of `origin` the `origin/HEAD` symref names, if it may be a
 /// base. A direct ref, a symref leaving `refs/remotes/origin/` or naming a
@@ -25,17 +41,57 @@ pub(crate) fn origin_head_branch(target: &str) -> Option<&str> {
     (parts_ok && branch != "HEAD" && !task).then_some(branch)
 }
 
-/// `None` without a `refs/remotes/origin/HEAD`, `Some(None)` with one that
-/// is not usable (dangling or not a commit is caught by the caller).
-fn origin_head(repo_root: &Path, timeout: Duration) -> Result<Option<Option<String>>, GateError> {
-    let name = "refs/remotes/origin/HEAD";
-    let args = ["symbolic-ref", "--quiet", name];
-    if let Some(target) = aaf_fp::git_or_none(repo_root, &args, timeout)? {
-        let usable = origin_head_branch(&target).is_some();
-        return Ok(Some(usable.then_some(target)));
+/// Probes `refs/remotes/origin/HEAD` and [`AUTO_FALLBACKS`] in a single
+/// `git for-each-ref` call. Returns `(origin_head_seen, candidate_commits)` in
+/// priority order.
+fn resolve_auto_candidates(
+    repo_root: &Path,
+    timeout: Duration,
+) -> Result<(bool, Vec<String>), GateError> {
+    let mut args = vec!["for-each-ref", AUTO_REFS_FORMAT, ORIGIN_HEAD];
+    args.extend(AUTO_FALLBACKS);
+    let out = aaf_fp::git(repo_root, &args, &[], timeout)?;
+    let mut origin_head_seen = false;
+    let mut origin_head_commit: Option<String> = None;
+    let mut fallbacks: HashMap<&str, String> = HashMap::new();
+    for line in out.lines().filter(|line| !line.is_empty()) {
+        let parts: Vec<&str> = line.split('\t').collect();
+        let Some(refname) = parts.first().copied() else {
+            continue;
+        };
+        let symref = parts.get(1).copied().unwrap_or("");
+        let obj_type = parts.get(2).copied().unwrap_or("");
+        let obj_name = parts.get(3).copied().unwrap_or("");
+        let peeled_type = parts.get(4).copied().unwrap_or("");
+        let peeled_name = parts.get(5).copied().unwrap_or("");
+        let commit_sha = if obj_type == "commit" && !obj_name.is_empty() {
+            Some(obj_name.to_string())
+        } else if peeled_type == "commit" && !peeled_name.is_empty() {
+            Some(peeled_name.to_string())
+        } else {
+            None
+        };
+        if refname == ORIGIN_HEAD {
+            origin_head_seen = true;
+            if !symref.is_empty() && origin_head_branch(symref).is_some() {
+                origin_head_commit = commit_sha;
+            }
+        } else if let Some(sha) = commit_sha {
+            fallbacks.insert(refname, sha);
+        }
     }
-    let args = ["rev-parse", "--verify", "--quiet", name];
-    Ok(aaf_fp::git_or_none(repo_root, &args, timeout)?.map(|_| None))
+    let mut candidates = Vec::with_capacity(1 + AUTO_FALLBACKS.len());
+    if let Some(sha) = origin_head_commit {
+        candidates.push(sha);
+    }
+    for name in AUTO_FALLBACKS {
+        if let Some(sha) = fallbacks.remove(name)
+            && !candidates.contains(&sha)
+        {
+            candidates.push(sha);
+        }
+    }
+    Ok((origin_head_seen, candidates))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +100,8 @@ pub struct Base {
     pub sha: Option<String>,
     /// What to diff against: `sha`, or the empty tree when there is no commit.
     pub diff_target: String,
+    /// `HEAD` commit at resolution time; `None` in a repo with no commit yet.
+    pub head_sha: Option<String>,
 }
 
 /// `None` only when `name` resolves to no commit. A git that could not
@@ -82,26 +140,34 @@ pub fn resolve(repo_root: &Path, base_ref: &str, timeout: Duration) -> Result<Ba
         return Ok(Base {
             sha: None,
             diff_target: empty_tree,
+            head_sha: None,
         });
     };
     let wanted = base_ref.trim();
-    let target = if wanted.is_empty() || wanted == "auto" {
-        let origin_head = origin_head(repo_root, timeout)?;
-        let first = origin_head.clone().flatten();
+    let merge_base = if wanted.is_empty() || wanted == "auto" {
+        let (origin_head_seen, candidates) = resolve_auto_candidates(repo_root, timeout)?;
         let mut found = None;
-        for name in first.iter().map(String::as_str).chain(AUTO_FALLBACKS) {
-            let Some(target) = commit_of(repo_root, name, timeout)? else {
-                continue;
-            };
+        for target in candidates {
             // An orphan branch (say `origin/gh-pages`) is no base: try on.
             found = aaf_fp::git_or_none(repo_root, &["merge-base", &target, &head], timeout)?;
             if found.is_some() {
                 break;
             }
         }
-        if found.is_none() && origin_head.is_some() {
-            let msg = "origin/HEAD is set but no base shares history with HEAD";
-            return Err(GateError::Config(format!("{msg}; set gate.base_ref")));
+        if found.is_none() {
+            // `for-each-ref` omits a dangling symref; check explicitly before
+            // allowing a fallback to `HEAD`.
+            let has_origin_head = origin_head_seen
+                || aaf_fp::git_or_none(
+                    repo_root,
+                    &["symbolic-ref", "--quiet", ORIGIN_HEAD],
+                    timeout,
+                )?
+                .is_some();
+            if has_origin_head {
+                let msg = "origin/HEAD is set but no base shares history with HEAD";
+                return Err(GateError::Config(format!("{msg}; set gate.base_ref")));
+            }
         }
         found
     } else {
@@ -111,21 +177,19 @@ pub fn resolve(repo_root: &Path, base_ref: &str, timeout: Duration) -> Result<Ba
                 "invalid gate.base_ref {wanted:?}"
             )));
         }
-        Some(commit_of(repo_root, wanted, timeout)?.ok_or_else(|| {
+        let target = commit_of(repo_root, wanted, timeout)?.ok_or_else(|| {
             GateError::Config(format!(
                 "gate.base_ref {wanted:?} does not resolve to a commit"
             ))
-        })?)
-    };
-    let merge_base = match target {
+        })?;
         // Unrelated histories have no merge-base (git says so with exit 1
         // and no message): fall back to HEAD. A failed git is an error.
-        Some(target) => aaf_fp::git_or_none(repo_root, &["merge-base", &target, &head], timeout)?,
-        None => None,
+        aaf_fp::git_or_none(repo_root, &["merge-base", &target, &head], timeout)?
     };
-    let sha = merge_base.unwrap_or(head);
+    let sha = merge_base.unwrap_or_else(|| head.clone());
     Ok(Base {
         diff_target: sha.clone(),
         sha: Some(sha),
+        head_sha: Some(head),
     })
 }

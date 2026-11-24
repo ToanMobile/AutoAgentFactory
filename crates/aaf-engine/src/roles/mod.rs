@@ -20,6 +20,9 @@ pub const MCP_CONFIG_REL: &str = ".mcp.json";
 /// Maximum accepted size of a single role TOML file (256 KiB).
 pub const MAX_ROLE_FILE_BYTES: usize = 256 * 1024;
 
+/// Maximum accepted length of a role `system_prompt` in Unicode scalar values.
+pub const MAX_SYSTEM_PROMPT_CHARS: usize = 8_000;
+
 /// Maximum accepted size of `.mcp.json` (1 MiB).
 pub const MAX_MCP_JSON_BYTES: usize = 1024 * 1024;
 
@@ -103,62 +106,65 @@ impl McpAuditReport {
 /// Returns the 4 built-in starter role profiles (`architect`, `implementer`,
 /// `reviewer`, `qa-tester`).
 pub fn builtin_roles() -> Vec<RoleProfile> {
+    let mk = |name: &str,
+              desc: &str,
+              exec: &str,
+              fbs: &[&str],
+              effort: Option<&str>,
+              ro: bool,
+              skills: &[&str],
+              prompt: &str| RoleProfile {
+        name: name.into(),
+        description: desc.into(),
+        executor: exec.into(),
+        fallback_executors: fbs.iter().map(|s| (*s).into()).collect(),
+        model: None,
+        effort: effort.map(Into::into),
+        read_only: ro,
+        skills: skills.iter().map(|s| (*s).into()).collect(),
+        system_prompt: prompt.into(),
+    };
     vec![
-        RoleProfile {
-            name: "architect".to_string(),
-            description: "Read-only architecture analysis, risk review, and implementation planning"
-                .to_string(),
-            executor: "claude".to_string(),
-            fallback_executors: vec!["codex".to_string(), "gemini".to_string()],
-            model: None,
-            effort: Some("high".to_string()),
-            read_only: true,
-            skills: vec!["planning".to_string()],
-            system_prompt:
-                "Inspect the codebase read-only and produce a minimal, verifiable plan with clear acceptance criteria."
-                    .to_string(),
-        },
-        RoleProfile {
-            name: "implementer".to_string(),
-            description: "Focused feature implementation, refactoring, and deterministic unit tests"
-                .to_string(),
-            executor: "claude".to_string(),
-            fallback_executors: vec!["codex".to_string(), "opencode".to_string()],
-            model: None,
-            effort: None,
-            read_only: false,
-            skills: vec!["testing".to_string()],
-            system_prompt:
-                "Implement the assigned scope cleanly, keep diffs minimal, and add deterministic unit tests for every invariant."
-                    .to_string(),
-        },
-        RoleProfile {
-            name: "reviewer".to_string(),
-            description: "Read-only security, correctness, and regression code review".to_string(),
-            executor: "codex".to_string(),
-            fallback_executors: vec!["claude".to_string(), "gemini".to_string()],
-            model: None,
-            effort: None,
-            read_only: true,
-            skills: vec!["code-review".to_string(), "security".to_string()],
-            system_prompt:
-                "Review the diff strictly read-only, prioritizing security boundaries, edge cases, and test coverage gaps."
-                    .to_string(),
-        },
-        RoleProfile {
-            name: "qa-tester".to_string(),
-            description: "Verification, adversarial edge-case testing, and regression checks"
-                .to_string(),
-            executor: "claude".to_string(),
-            fallback_executors: vec!["gemini".to_string(), "codex".to_string()],
-            model: None,
-            effort: None,
-            read_only: false,
-            skills: vec!["qa".to_string(), "testing".to_string()],
-            system_prompt:
-                "Verify acceptance criteria with deterministic tests covering both allow and deny paths."
-                    .to_string(),
-        },
+        mk(
+            "architect",
+            "Read-only architecture analysis, risk review, and implementation planning",
+            "claude",
+            &["codex", "gemini"],
+            Some("high"),
+            true,
+            &["planning"],
+            "Inspect the codebase read-only and produce a minimal, verifiable plan with clear acceptance criteria.",
+        ),
+        mk(
+            "implementer",
+            "Focused feature implementation, refactoring, and deterministic unit tests",
+            "claude",
+            &["codex", "opencode"],
+            None,
+            false,
+            &["testing"],
+            "Implement the assigned scope cleanly, keep diffs minimal, and add deterministic unit tests for every invariant.",
+        ),
+        mk(
+            "reviewer",
+            "Read-only security, correctness, and regression code review",
+            "codex",
+            &["claude", "gemini"],
+            None,
+            true,
+            &["code-review", "security"],
+            "Review the diff strictly read-only, prioritizing security boundaries, edge cases, and test coverage gaps.",
+        ),
+        mk(
+            "qa-tester",
+            "Verification, adversarial edge-case testing, and regression checks",
+            "claude",
+            &["gemini", "codex"],
+            None,
+            false,
+            &["qa", "testing"],
+            "Verify acceptance criteria with deterministic tests covering both allow and deny paths.",
+        ),
     ]
 }
 
@@ -223,6 +229,14 @@ fn validate_executor_name(raw: &str, field: &str, role_name: &str) -> Result<Str
     ))
 }
 
+fn is_valid_skill_slug(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
 fn validate_and_normalize_role(
     mut role: RoleProfile,
     source: &Path,
@@ -241,16 +255,11 @@ fn validate_and_normalize_role(
     }
     role.name = name.to_string();
     role.executor = validate_executor_name(&role.executor, "executor", &role.name)?;
-    let mut normalized_fallbacks = Vec::with_capacity(role.fallback_executors.len());
-    for fb in &role.fallback_executors {
-        normalized_fallbacks.push(validate_executor_name(
-            fb,
-            "fallback_executors",
-            &role.name,
-        )?);
-    }
-    role.fallback_executors = normalized_fallbacks;
-
+    role.fallback_executors = role
+        .fallback_executors
+        .iter()
+        .map(|fb| validate_executor_name(fb, "fallback_executors", &role.name))
+        .collect::<Result<_, _>>()?;
     if let Some(model) = &role.model {
         validate_flag_value("model", model)
             .map_err(|err| format!("{}: {err}", source.display()))?;
@@ -259,6 +268,27 @@ fn validate_and_normalize_role(
         validate_flag_value("effort", effort)
             .map_err(|err| format!("{}: {err}", source.display()))?;
     }
+    if role.system_prompt.chars().count() > MAX_SYSTEM_PROMPT_CHARS {
+        return Err(format!(
+            "{}: system_prompt exceeds maximum of {MAX_SYSTEM_PROMPT_CHARS} chars",
+            source.display()
+        ));
+    }
+    role.skills = role
+        .skills
+        .iter()
+        .map(|raw| {
+            let slug = raw.trim();
+            if !is_valid_skill_slug(slug) {
+                return Err(format!(
+                    "{}: invalid skill slug {:?} (use ASCII [A-Za-z0-9][A-Za-z0-9_-]*, <= 64 chars)",
+                    source.display(),
+                    raw
+                ));
+            }
+            Ok(slug.to_string())
+        })
+        .collect::<Result<_, _>>()?;
     Ok(role)
 }
 
@@ -318,21 +348,6 @@ pub fn load_roles(repo_root: &Path) -> Result<Vec<RoleProfile>, String> {
     Ok(roles)
 }
 
-const CREDENTIAL_EXACT_KEYS: &[&str] = &[
-    "TOKEN",
-    "SECRET",
-    "PASSWORD",
-    "PASSWD",
-    "API_KEY",
-    "APIKEY",
-    "AUTHORIZATION",
-    "AUTH",
-    "COOKIE",
-    "CREDENTIAL",
-    "CREDENTIALS",
-    "DATABASE_URL",
-];
-
 const CREDENTIAL_SUBSTRINGS: &[&str] = &[
     "_TOKEN",
     "_KEY",
@@ -350,27 +365,37 @@ const CREDENTIAL_SUBSTRINGS: &[&str] = &[
     "AUTHORIZATION",
 ];
 
-const BENIGN_EXACT_KEYS: &[&str] = &[
-    "SSH_AUTH_SOCK",
-    "COLORTERM",
-    "TERM_SESSION_ID",
-    "KEYMAP",
-    "CONTENT_TYPE",
-    "USER_AGENT",
-    "ACCEPT",
-];
-
-const BENIGN_SUBSTRINGS: &[&str] = &["PUBLIC_KEY", "KEYMAP"];
-
 fn is_credential_key(key: &str) -> bool {
     let normalized = key.trim().to_ascii_uppercase().replace('-', "_");
-    if BENIGN_EXACT_KEYS.contains(&normalized.as_str())
-        || BENIGN_SUBSTRINGS.iter().any(|s| normalized.contains(s))
-    {
+    let benign = matches!(
+        normalized.as_str(),
+        "SSH_AUTH_SOCK"
+            | "COLORTERM"
+            | "TERM_SESSION_ID"
+            | "KEYMAP"
+            | "CONTENT_TYPE"
+            | "USER_AGENT"
+            | "ACCEPT"
+    ) || normalized.contains("PUBLIC_KEY")
+        || normalized.contains("KEYMAP");
+    if benign {
         return false;
     }
-    CREDENTIAL_EXACT_KEYS.contains(&normalized.as_str())
-        || CREDENTIAL_SUBSTRINGS.iter().any(|s| normalized.contains(s))
+    matches!(
+        normalized.as_str(),
+        "TOKEN"
+            | "SECRET"
+            | "PASSWORD"
+            | "PASSWD"
+            | "API_KEY"
+            | "APIKEY"
+            | "AUTHORIZATION"
+            | "AUTH"
+            | "COOKIE"
+            | "CREDENTIAL"
+            | "CREDENTIALS"
+            | "DATABASE_URL"
+    ) || CREDENTIAL_SUBSTRINGS.iter().any(|s| normalized.contains(s))
 }
 
 fn is_env_ident(s: &str) -> bool {

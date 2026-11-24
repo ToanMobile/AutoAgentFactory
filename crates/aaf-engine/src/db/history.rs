@@ -9,6 +9,7 @@ use super::{Db, sql_err};
 use crate::accounts::RunHistory;
 use crate::cross_audit::AUDIT_EXECUTOR;
 use crate::factory::prompt::PLAN_EXECUTOR;
+use crate::unblocker::PROPOSER_EXECUTOR;
 
 /// Newest first; `rowid` orders runs that started in the same second. The
 /// join on `accounts` keeps only accounts of the asked provider (a run of a
@@ -16,12 +17,12 @@ use crate::factory::prompt::PLAN_EXECUTOR;
 const LAST_OF_REPO: &str = "SELECT r.account_id FROM tasks t \
      JOIN runs r ON r.task_id = t.id \
      JOIN accounts a ON a.id = r.account_id \
-     WHERE t.repo_root = ?1 AND a.provider = ?2 AND r.executor NOT IN (?3, ?4) \
+     WHERE t.repo_root = ?1 AND a.provider = ?2 AND r.executor NOT IN (?3, ?4, ?5) \
      ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1";
 
 const LAST_OF_TASK: &str = "SELECT r.account_id FROM runs r \
      JOIN accounts a ON a.id = r.account_id \
-     WHERE r.task_id = ?1 AND a.provider = ?2 AND r.executor NOT IN (?3, ?4) \
+     WHERE r.task_id = ?1 AND a.provider = ?2 AND r.executor NOT IN (?3, ?4, ?5) \
      ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1";
 
 impl Db {
@@ -36,7 +37,13 @@ impl Db {
             conn.prepare_cached(sql)
                 .and_then(|mut stmt| {
                     stmt.query_row(
-                        params![key, provider.as_str(), AUDIT_EXECUTOR, PLAN_EXECUTOR],
+                        params![
+                            key,
+                            provider.as_str(),
+                            AUDIT_EXECUTOR,
+                            PLAN_EXECUTOR,
+                            PROPOSER_EXECUTOR
+                        ],
                         |row| row.get(0),
                     )
                     .optional()

@@ -61,7 +61,11 @@ fn without_variables(value: &str) -> (String, bool) {
     let mut out = String::new();
     let mut rest = value;
     let mut had = false;
-    while let Some(at) = rest.find("$(").or_else(|| rest.find("${")) {
+    while let Some(at) = [rest.find("$("), rest.find("${")]
+        .into_iter()
+        .flatten()
+        .min()
+    {
         let close = if rest[at..].starts_with("$(") {
             ')'
         } else {
@@ -259,7 +263,12 @@ pub(crate) fn scan(root: &Path, inv: &Inventory, sink: &mut Sink) {
                 .unwrap_or(&value);
                 // A path that leaves the project directory is not followed:
                 // the scanner only reads inside the repository.
-                if path.contains("$(") || path.contains("${") || path.split('/').any(|p| p == "..")
+                if path.contains("$(")
+                    || path.contains("${")
+                    || path.starts_with('/')
+                    || path.starts_with('\\')
+                    || Path::new(path).is_absolute()
+                    || path.split(['/', '\\']).any(|p| p == "..")
                 {
                     if seen_settings.insert((file.clone(), key.to_string(), value.clone())) {
                         sink.unresolved(
@@ -335,15 +344,32 @@ fn judge_localized(
 fn scan_plist(root: &Path, job: &PlistJob, localized: &str, sink: &mut Sink) {
     let file = rel_str(&job.rel);
     let path = root.join(&job.rel);
-    if job.referenced && !path.is_file() {
-        sink.unresolved(
-            &IOS_001,
-            &file,
-            None,
-            "The Xcode project names this Info.plist but the file does not exist in the repository.".to_string(),
-            "Commit the Info.plist or fix INFOPLIST_FILE.",
-        );
-        return;
+    if job.referenced {
+        if !path.is_file() {
+            sink.unresolved(
+                &IOS_001,
+                &file,
+                None,
+                "The Xcode project names this Info.plist but the file does not exist in the repository.".to_string(),
+                "Commit the Info.plist or fix INFOPLIST_FILE.",
+            );
+            return;
+        }
+        let inside = std::fs::canonicalize(root)
+            .and_then(|canon_root| {
+                std::fs::canonicalize(&path).map(|canon_path| canon_path.starts_with(&canon_root))
+            })
+            .unwrap_or(false);
+        if !inside {
+            sink.unresolved(
+                &IOS_001,
+                &file,
+                None,
+                "INFOPLIST_FILE resolves outside the repository root, so the scanner will not read it.".to_string(),
+                "Keep Info.plist inside the repository instead of linking outside it.",
+            );
+            return;
+        }
     }
     let bytes = match read_bytes(&path) {
         Ok(b) => b,

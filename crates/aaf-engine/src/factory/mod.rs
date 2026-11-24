@@ -14,6 +14,7 @@
 
 pub mod adapters;
 pub mod audit_backend;
+mod audit_turn;
 pub mod batch;
 mod commit_lock;
 mod finish;
@@ -75,6 +76,38 @@ pub trait Store:
     ) -> PortResult<()> {
         Ok(())
     }
+
+    /// Persists a task split (budget if absent, child tasks, DAG deps, creation
+    /// events, and parent context note). [`crate::db::Db`] executes all steps
+    /// in a single SQLite write transaction; in-memory stores fall back to
+    /// sequential port calls.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_split_atomic(
+        &self,
+        parent_id: &str,
+        budget: &aaf_domain::budget::RootBudget,
+        children: &[aaf_domain::task::Task],
+        deps: &[(String, String)],
+        events: &[FactoryEvent],
+        parent_note: &str,
+        now: i64,
+    ) -> PortResult<()> {
+        match self.get_budget(&budget.root_id) {
+            Ok(_) => {}
+            Err(aaf_domain::ports::PortError::NotFound(_)) => self.put_budget(budget)?,
+            Err(err) => return Err(err),
+        }
+        for child in children {
+            self.insert_task(child)?;
+        }
+        for (task_id, blocked_by) in deps {
+            self.add_dep(task_id, blocked_by)?;
+        }
+        for ev in events {
+            self.emit(ev)?;
+        }
+        self.append_context_note(parent_id, parent_note, now)
+    }
 }
 
 impl Store for crate::db::Db {
@@ -88,6 +121,28 @@ impl Store for crate::db::Db {
     ) -> PortResult<()> {
         self.insert_snapshot(task_id, run_id, ref_name, commit_oid, now)
             .map(|_| ())
+    }
+
+    fn apply_split_atomic(
+        &self,
+        parent_id: &str,
+        budget: &aaf_domain::budget::RootBudget,
+        children: &[aaf_domain::task::Task],
+        deps: &[(String, String)],
+        events: &[FactoryEvent],
+        parent_note: &str,
+        now: i64,
+    ) -> PortResult<()> {
+        crate::db::Db::apply_split_atomic(
+            self,
+            parent_id,
+            budget,
+            children,
+            deps,
+            events,
+            parent_note,
+            now,
+        )
     }
 }
 

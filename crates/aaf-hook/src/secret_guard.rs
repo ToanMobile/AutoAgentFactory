@@ -33,14 +33,16 @@ pub fn check_read(path: &Path) -> Option<Denial> {
 
 /// Commands whose non-option operands are file paths being read, copied, or printed.
 const READERS: &[&str] = &[
-    "cat", "head", "tail", "less", "more", "bat", "sed", "awk", "gawk", "mawk", "grep", "egrep",
-    "fgrep", "rg", "strings", "base64", "xxd", "hexdump", "od", "nl", "tac", "rev", "pbcopy",
-    "tee", "cp", "dd", "cut", "sort", "uniq", "wc", "diff", "cmp", "source", ".",
+    "cat", "head", "tail", "less", "more", "bat", "sed", "awk", "gawk", "mawk", "nawk", "grep",
+    "egrep", "fgrep", "rg", "strings", "base64", "xxd", "hexdump", "od", "nl", "tac", "rev",
+    "pbcopy", "tee", "cp", "dd", "cut", "sort", "uniq", "wc", "diff", "cmp", "source", ".",
 ];
 
 /// Commands whose first positional operand is a pattern/script rather than a file
 /// unless `-e`/`-f`/`--regexp`/`--file` was supplied.
-const FIRST_POS_IS_EXPR: &[&str] = &["grep", "egrep", "fgrep", "rg", "sed", "awk", "gawk", "mawk"];
+const FIRST_POS_IS_EXPR: &[&str] = &[
+    "grep", "egrep", "fgrep", "rg", "sed", "awk", "gawk", "mawk", "nawk",
+];
 
 /// Options of file-reading commands that take a separate non-file argument value.
 /// Short options of commands with a [`Spec`] are parsed by [`Spec::classify`].
@@ -110,7 +112,7 @@ fn spec(cmd: &str) -> Option<Spec> {
         "sed" => s("e", "f", "", "iI", &["expression"], &["file"]),
         // BSD awk ignores unknown flags (`-e x` leaves `x` as an operand), so
         // awk program text is checked like a file too.
-        "awk" | "gawk" | "mawk" => s(
+        "awk" | "gawk" | "mawk" | "nawk" => s(
             "",
             "efEiFv",
             "",
@@ -264,15 +266,20 @@ fn glob_secret(raw: &str, ctx: &Ctx) -> Option<String> {
         }
     }
     let last = *segs.last()?;
+    let prefix_str = prefix.to_str()?;
     let mut walk = Walk::default();
-    if let Some(hit) = walk.find(&ctx.expand(prefix.to_str()?), &segs, 0) {
+    if let Some(hit) = walk.find(&ctx.expand_real_dotdot(prefix_str), &segs, 0) {
         return Some(hit);
     }
     if !walk.cut && (walk.matched || segs.len() == 1 && !last.contains("**")) {
         return None;
     }
     if !paths::has_glob(last) {
-        let pat = secret_pattern(&ctx.expand(raw))?;
+        let pat = secret_pattern(&ctx.expand(raw)).or_else(|| {
+            raw.contains("..")
+                .then(|| secret_pattern(&ctx.expand_real_dotdot(raw)))
+                .flatten()
+        })?;
         return Some(format!("{last} (pattern {pat})"));
     }
     SECRET_SAMPLES.iter().find_map(|sample| {
@@ -293,11 +300,19 @@ pub fn check_glob(raw: &str, ctx: &Ctx, verb: &str) -> Option<Denial> {
 /// Guard for the read file tools (`Read`, Gemini `read_file` and
 /// `read_many_files`): the path itself, then what a glob in it can expand to.
 pub fn check_read_target(raw: &str, path: &Path, ctx: &Ctx) -> Option<Denial> {
-    check_read(path).or_else(|| {
-        paths::has_glob(raw)
-            .then(|| check_glob(raw, ctx, "read"))
-            .flatten()
-    })
+    check_read(path)
+        .or_else(|| {
+            if !raw.contains("..") {
+                return None;
+            }
+            let real_dd = ctx.expand_real_dotdot(raw);
+            (real_dd != path).then(|| check_read(&real_dd)).flatten()
+        })
+        .or_else(|| {
+            paths::has_glob(raw)
+                .then(|| check_glob(raw, ctx, "read"))
+                .flatten()
+        })
 }
 
 fn check_target(raw: &str, verb: &str, ctx: &Ctx) -> Option<Denial> {
@@ -307,7 +322,16 @@ fn check_target(raw: &str, verb: &str, ctx: &Ctx) -> Option<Denial> {
     if paths::has_glob(raw) {
         return check_glob(raw, ctx, verb);
     }
-    let pat = secret_pattern(&ctx.expand(raw))?;
+    let path = ctx.expand(raw);
+    let pat = secret_pattern(&path).or_else(|| {
+        if !raw.contains("..") {
+            return None;
+        }
+        let real_dd = ctx.expand_real_dotdot(raw);
+        (real_dd != path)
+            .then(|| secret_pattern(&real_dd))
+            .flatten()
+    })?;
     Some(deny(format!(
         "{verb} {raw}: reading secret file is blocked (pattern {pat})"
     )))
@@ -315,9 +339,9 @@ fn check_target(raw: &str, verb: &str, ctx: &Ctx) -> Option<Denial> {
 
 /// Guard for `Bash` commands reading secret files via operands or `<` redirections.
 pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
-    // 1. Check input redirections (`< .env`) on ANY command (e.g. `pbcopy < .env`).
+    // 1. Check input redirections (`< .env`, `<> .env`) on ANY command (e.g. `pbcopy < .env`).
     for redirect in &cmd.redirects {
-        if redirect.op == "<"
+        if matches!(redirect.op.as_str(), "<" | "<>")
             && let Some(denial) = check_target(&redirect.target, "redirect from", ctx)
         {
             return Some(denial);
@@ -387,6 +411,14 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         }
         positionals.push(arg);
         i += 1;
+    }
+
+    if name == "sed" {
+        for read_path in crate::sed_script::script_files(args, &['r', 'R']) {
+            if let Some(denial) = check_target(&read_path, name, ctx) {
+                return Some(denial);
+            }
+        }
     }
 
     let skip_first = FIRST_POS_IS_EXPR.contains(&name) && !has_explicit_expr;

@@ -10,23 +10,23 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use aaf_domain::blocked::BlockedReason;
 use aaf_domain::config::RepoConfig;
 use aaf_domain::dag;
 use aaf_domain::event::FactoryEvent;
-use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
-use aaf_domain::run::{RunRecord, RunStatus};
+use aaf_domain::ports::{Clock, EventSink, TaskStore};
+use aaf_domain::run::RunRecord;
 use aaf_domain::task::{Task, TaskState};
-use aaf_engine::db::Db;
+use aaf_engine::db::{Db, RoDbCache};
 use aaf_engine::factory::schedule_order::blocked_upstream_tasks;
 use aaf_engine::handover::{load_handover, render_markdown};
 use aaf_engine::watch::{
-    WatchQuery, WatchSnapshot, collect_watch_snapshot, sanitize_display as san,
+    WatchQuery, WatchSnapshot, collect_watch_snapshot_with_tasks, format_blocked,
+    sanitize_display as san,
 };
 
 use super::cockpit_actions::{
-    action_approve, action_rework, action_steer, action_unblock, action_undo, action_unfreeze,
-    compute_critical_path, io_err, load_ro_task, open_db_ro, run_tail_view, wln,
+    DB_FILE, action_approve, action_rework, action_steer, action_unblock, action_undo,
+    action_unfreeze, compute_critical_path, io_err, load_ro_task, open_db_ro, run_tail_view, wln,
 };
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
@@ -86,11 +86,7 @@ fn resolve_scope(
     }
     let target = match repo {
         Some(r) => {
-            let cand = if r.is_absolute() {
-                r.to_path_buf()
-            } else {
-                ctx.cwd.join(r)
-            };
+            let cand = ctx.cwd.join(r);
             if !cand.exists() {
                 return Err(CmdError::new(format!(
                     "--repo {} does not exist",
@@ -104,12 +100,8 @@ fn resolve_scope(
             Err(_) => return Ok(("all (outside git repo)".to_string(), None, ctx.cwd.clone())),
         },
     };
-    let canonical = fs::canonicalize(&target).unwrap_or(target);
-    Ok((
-        canonical.display().to_string(),
-        Some(canonical.clone()),
-        canonical,
-    ))
+    let canon = fs::canonicalize(&target).unwrap_or(target);
+    Ok((canon.display().to_string(), Some(canon.clone()), canon))
 }
 
 /// Testable synchronous cockpit REPL driven by explicit `BufRead` and `Write`.
@@ -125,11 +117,21 @@ pub fn run_cockpit(
     }
     let (scope, scoped_repo, config_root) = resolve_scope(repo, all, ctx)?;
     let cfg = ctx.load_config(&config_root)?;
+    let ro_db = RoDbCache::new(ctx.data_dir.join(DB_FILE));
     let mut needs_render = true;
 
     loop {
         if needs_render {
-            let db = open_db_ro(ctx)?;
+            let db = open_db_ro(&ro_db)?;
+            let repo_str = scoped_repo
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned());
+            let all_tasks = match db.as_ref() {
+                Some(d) => d
+                    .list_tasks(repo_str.as_deref(), None)
+                    .map_err(|e| CmdError::new(e.to_string()))?,
+                None => Vec::new(),
+            };
             let query = WatchQuery {
                 scope: &scope,
                 repo_root: scoped_repo.as_deref(),
@@ -138,9 +140,9 @@ pub fn run_cockpit(
                 executor: &cfg.repo.run.executor,
                 now: SystemClock.now(),
             };
-            let snap = collect_watch_snapshot(&query, db.as_ref())
+            let snap = collect_watch_snapshot_with_tasks(&query, db.as_ref(), &all_tasks)
                 .map_err(|e| CmdError::new(e.to_string()))?;
-            let extras = collect_extras(db.as_ref(), scoped_repo.as_deref());
+            let extras = collect_extras(db.as_ref(), repo_str.as_deref(), &all_tasks);
             let rendered = format_panels(&snap, &extras);
             writer
                 .write_all(rendered.as_bytes())
@@ -161,12 +163,14 @@ pub fn run_cockpit(
         if matches!(trimmed, "q" | "quit") {
             return Ok(CmdOutput::ok("ok", ""));
         }
-        needs_render = dispatch_command(ctx, scoped_repo.as_deref(), trimmed, reader, writer)?;
+        needs_render =
+            dispatch_command(ctx, &ro_db, scoped_repo.as_deref(), trimmed, reader, writer)?;
     }
 }
 
 fn dispatch_command(
     ctx: &Ctx,
+    ro: &RoDbCache,
     scoped_repo: Option<&Path>,
     trimmed: &str,
     reader: &mut dyn BufRead,
@@ -174,17 +178,18 @@ fn dispatch_command(
 ) -> Result<bool, CmdError> {
     let (cmd, rest) = split_first(trimmed);
     match cmd {
-        "d" => show_task_details(ctx, rest.trim(), w).map(|()| false),
-        "t" => show_task_events(ctx, rest.trim(), w).map(|()| false),
-        "h" => show_task_handover(ctx, rest.trim(), w).map(|()| false),
-        "g" => show_dag(ctx, scoped_repo, w).map(|()| false),
-        "tail" => run_tail_view(ctx, rest.trim(), reader, w).map(|()| false),
+        "d" => show_task_details(ro, rest.trim(), w).map(|()| false),
+        "t" => show_task_events(ro, rest.trim(), w).map(|()| false),
+        "h" => show_task_handover(ctx, ro, rest.trim(), w).map(|()| false),
+        "g" => show_dag(ro, scoped_repo, w).map(|()| false),
+        "tail" => run_tail_view(ctx, ro, rest.trim(), reader, w).map(|()| false),
         "approve" => {
             let (id, rev) = split_first(rest);
             if id.is_empty() {
                 wln(w, "usage: approve <id> [reviewer]").map(|()| false)
             } else {
-                action_approve(ctx, id, (!rev.is_empty()).then_some(rev), reader, w).map(|()| true)
+                action_approve(ctx, ro, id, (!rev.is_empty()).then_some(rev), reader, w)
+                    .map(|()| true)
             }
         }
         "rework" => {
@@ -192,7 +197,7 @@ fn dispatch_command(
             if id.is_empty() || reason.is_empty() {
                 wln(w, "usage: rework <id> [--rerun] <reason>").map(|()| false)
             } else {
-                action_rework(ctx, id, reason, reader, w).map(|()| true)
+                action_rework(ctx, ro, id, reason, reader, w).map(|()| true)
             }
         }
         "steer" => {
@@ -203,10 +208,12 @@ fn dispatch_command(
                 action_steer(ctx, id, note, reader, w).map(|()| true)
             }
         }
-        "undo" if !rest.trim().is_empty() => action_undo(ctx, rest.trim(), reader, w).map(|()| true),
+        "undo" if !rest.trim().is_empty() => {
+            action_undo(ctx, ro, rest.trim(), reader, w).map(|()| true)
+        }
         "undo" => wln(w, "usage: undo <id>").map(|()| false),
         "unblock" if !rest.trim().is_empty() => {
-            action_unblock(ctx, rest.trim(), reader, w).map(|()| true)
+            action_unblock(ctx, ro, rest.trim(), reader, w).map(|()| true)
         }
         "unblock" => wln(w, "usage: unblock <id>").map(|()| false),
         "unfreeze" => action_unfreeze(ctx, reader, w).map(|()| true),
@@ -235,53 +242,43 @@ struct CockpitExtras {
     recent_events: Vec<FactoryEvent>,
 }
 
-fn collect_extras(db: Option<&Db>, repo_root: Option<&Path>) -> CockpitExtras {
+fn collect_extras(db: Option<&Db>, repo_str: Option<&str>, tasks: &[Task]) -> CockpitExtras {
     let mut extras = CockpitExtras {
         scopes_by_id: HashMap::new(),
         active_runs: Vec::new(),
         recent_events: Vec::new(),
     };
     let Some(db) = db else { return extras };
-    let repo_str = repo_root.map(|p| p.to_string_lossy().into_owned());
-    let Ok(tasks) = db.list_tasks(repo_str.as_deref(), None) else {
-        return extras;
-    };
-    let mut events = Vec::new();
-    for task in &tasks {
+    let mut active_ids = HashSet::new();
+    for task in tasks {
         if !task.scope_paths.is_empty() {
             extras
                 .scopes_by_id
                 .insert(task.id.clone(), task.scope_paths.clone());
         }
-        if !task.state.is_terminal()
-            && let Ok(runs) = db.runs_for_task(&task.id)
-        {
-            extras
-                .active_runs
-                .extend(runs.into_iter().filter(|r| r.status == RunStatus::Running));
-        }
-        if let Ok(evs) = db.events_for_task(&task.id, 5) {
-            events.extend(evs);
+        if !task.state.is_terminal() {
+            active_ids.insert(task.id.as_str());
         }
     }
-    events.sort_by(|a, b| {
-        b.created_at
-            .cmp(&a.created_at)
-            .then_with(|| b.id.unwrap_or(0).cmp(&a.id.unwrap_or(0)))
-    });
-    events.truncate(RECENT_EVENTS_SHOWN);
-    extras.recent_events = events;
+    extras.active_runs = db
+        .running_runs(repo_str)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| active_ids.contains(r.task_id.as_str()))
+        .collect();
+    extras.recent_events = db
+        .recent_events(repo_str, RECENT_EVENTS_SHOWN as u32)
+        .unwrap_or_default();
     extras
 }
 
 fn format_panels(snap: &WatchSnapshot, extras: &CockpitExtras) -> String {
     let mut buf = String::new();
     let frz = if snap.frozen { "yes" } else { "no" };
+    let (sc, fails) = (san(&snap.scope), snap.consecutive_root_fails);
     let _ = writeln!(
         buf,
-        "== aaf cockpit | scope: {} | frozen: {frz} (fails: {}) ==",
-        san(&snap.scope),
-        snap.consecutive_root_fails
+        "== aaf cockpit | scope: {sc} | frozen: {frz} (fails: {fails}) =="
     );
     let c = &snap.tasks.counts;
     let _ = writeln!(
@@ -301,36 +298,36 @@ fn format_panels(snap: &WatchSnapshot, extras: &CockpitExtras) -> String {
             .blocked_reason
             .as_deref()
             .map_or(String::new(), |r| format!(" [{}]", san(r)));
-        let _ = writeln!(
-            buf,
-            "  {}  {}  {:<8}  cycles={}  {}{sc}{blk}",
+        let (id, pr, st, tt) = (
             san(&t.id),
             san(&t.priority),
             t.state.as_str(),
-            t.unblock_cycles,
-            san(&t.title)
+            san(&t.title),
+        );
+        let _ = writeln!(
+            buf,
+            "  {id}  {pr}  {st:<8}  cycles={}  {tt}{sc}{blk}",
+            t.unblock_cycles
         );
     }
     let hs = &snap.heavy_slots;
     let drain = if hs.drain_active { "on" } else { "off" };
+    let (mp, mc) = (san(&hs.memory_pressure), hs.measured_commands);
     let _ = writeln!(
         buf,
-        "\n[2. Active Runs & Heavy Slots] frozen={frz} drain={drain} pressure={} measured={}",
-        san(&hs.memory_pressure),
-        hs.measured_commands
+        "\n[2. Active Runs & Heavy Slots] frozen={frz} drain={drain} pressure={mp} measured={mc}"
     );
     if extras.active_runs.is_empty() {
         let _ = writeln!(buf, "  (no active runs)");
     }
     for r in &extras.active_runs {
-        let _ = writeln!(
-            buf,
-            "  run {}  task={}  executor={}  branch={}",
+        let (rid, tid, ex, br) = (
             san(&r.id),
             san(&r.task_id),
             san(&r.executor),
-            san(&r.branch)
+            san(&r.branch),
         );
+        let _ = writeln!(buf, "  run {rid}  task={tid}  executor={ex}  branch={br}");
     }
     if hs.slots.is_empty() {
         let _ = writeln!(buf, "  (no slot files)");
@@ -350,7 +347,7 @@ fn format_panels(snap: &WatchSnapshot, extras: &CockpitExtras) -> String {
     let pin = ac
         .pinned_account
         .as_deref()
-        .map_or_else(|| "none".to_string(), san);
+        .map_or_else(|| "none".into(), san);
     let _ = writeln!(
         buf,
         "\n[3. Accounts & Cooldowns] selection={} pinned={pin}",
@@ -363,14 +360,8 @@ fn format_panels(snap: &WatchSnapshot, extras: &CockpitExtras) -> String {
         let cd = a
             .cooldown_until
             .map_or(String::new(), |ts| format!(" until={ts}"));
-        let _ = writeln!(
-            buf,
-            "  {}  {}  {}{cd}  tokens_5h={}",
-            san(&a.id),
-            san(&a.provider),
-            san(&a.state),
-            a.tokens_5h
-        );
+        let (id, prov, st) = (san(&a.id), san(&a.provider), san(&a.state));
+        let _ = writeln!(buf, "  {id}  {prov}  {st}{cd}  tokens_5h={}", a.tokens_5h);
     }
     let _ = writeln!(buf, "\n[4. Recent Events / Alerts & Commands]");
     if snap.frozen {
@@ -391,7 +382,7 @@ fn format_panels(snap: &WatchSnapshot, extras: &CockpitExtras) -> String {
         let _ = writeln!(buf, "  (no recent events)");
     }
     for ev in &extras.recent_events {
-        let tid = ev.task_id.as_deref().map_or_else(|| "-".to_string(), san);
+        let tid = ev.task_id.as_deref().map_or_else(|| "-".into(), san);
         let excerpt: String = san(&ev.payload_json)
             .chars()
             .take(EVENT_EXCERPT_CHARS)
@@ -410,38 +401,21 @@ fn format_panels(snap: &WatchSnapshot, extras: &CockpitExtras) -> String {
     buf
 }
 
-fn format_blocked(reason: &BlockedReason) -> String {
-    let detail = match reason {
-        BlockedReason::Quota { reset_at: Some(ts) } => return format!("quota (reset_at={ts})"),
-        BlockedReason::Quota { reset_at: None } => return "quota".to_string(),
-        BlockedReason::Dependency { task_id } => task_id,
-        BlockedReason::GateFailed { summary } => summary,
-        BlockedReason::NeedsHuman { why } => why,
-        BlockedReason::MergeConflict { detail }
-        | BlockedReason::FlakyTest { detail }
-        | BlockedReason::Stuck { detail }
-        | BlockedReason::BudgetExceeded { detail }
-        | BlockedReason::Infra { detail } => detail,
-    };
-    format!("{}: {detail}", reason.kind())
-}
-
-fn show_task_details(ctx: &Ctx, id: &str, w: &mut dyn Write) -> Result<(), CmdError> {
+fn show_task_details(ro: &RoDbCache, id: &str, w: &mut dyn Write) -> Result<(), CmdError> {
     if id.is_empty() {
         return wln(w, "usage: d <id>");
     }
-    let Some((db, task)) = load_ro_task(ctx, id, "task", w)? else {
+    let Some((db, task)) = load_ro_task(ro, id, "task", w)? else {
         return Ok(());
     };
     let mut buf = String::new();
-    let _ = writeln!(
-        buf,
-        "== task {} | {} | {} | cycles={} ==",
+    let (id, pr, st, cy) = (
         san(&task.id),
         task.priority.as_str(),
         task.state.as_str(),
-        task.unblock_cycles
+        task.unblock_cycles,
     );
+    let _ = writeln!(buf, "== task {id} | {pr} | {st} | cycles={cy} ==");
     let _ = writeln!(buf, "  title: {}", san(&task.title));
     let _ = writeln!(buf, "  spec: {}", san(&task.spec.description));
     for a in &task.spec.acceptance {
@@ -464,11 +438,11 @@ fn show_task_details(ctx: &Ctx, id: &str, w: &mut dyn Write) -> Result<(), CmdEr
     w.write_all(buf.as_bytes()).map_err(|e| io_err("write", e))
 }
 
-fn show_task_events(ctx: &Ctx, id: &str, w: &mut dyn Write) -> Result<(), CmdError> {
+fn show_task_events(ro: &RoDbCache, id: &str, w: &mut dyn Write) -> Result<(), CmdError> {
     if id.is_empty() {
         return wln(w, "usage: t <id>");
     }
-    let Some((db, _)) = load_ro_task(ctx, id, "events", w)? else {
+    let Some((db, _)) = load_ro_task(ro, id, "events", w)? else {
         return Ok(());
     };
     let events = match db.events_for_task(id, TASK_EVENTS_LIMIT) {
@@ -491,11 +465,16 @@ fn show_task_events(ctx: &Ctx, id: &str, w: &mut dyn Write) -> Result<(), CmdErr
     w.write_all(buf.as_bytes()).map_err(|e| io_err("write", e))
 }
 
-fn show_task_handover(ctx: &Ctx, id: &str, w: &mut dyn Write) -> Result<(), CmdError> {
+fn show_task_handover(
+    ctx: &Ctx,
+    ro: &RoDbCache,
+    id: &str,
+    w: &mut dyn Write,
+) -> Result<(), CmdError> {
     if id.is_empty() {
         return wln(w, "usage: h <id>");
     }
-    let Some((db, task)) = load_ro_task(ctx, id, "handover", w)? else {
+    let Some((db, task)) = load_ro_task(ro, id, "handover", w)? else {
         return Ok(());
     };
     let task_repo = Path::new(&task.repo_root);
@@ -517,8 +496,8 @@ fn show_task_handover(ctx: &Ctx, id: &str, w: &mut dyn Write) -> Result<(), CmdE
     }
 }
 
-fn show_dag(ctx: &Ctx, repo_root: Option<&Path>, w: &mut dyn Write) -> Result<(), CmdError> {
-    let Some(db) = open_db_ro(ctx)? else {
+fn show_dag(ro: &RoDbCache, repo_root: Option<&Path>, w: &mut dyn Write) -> Result<(), CmdError> {
+    let Some(db) = open_db_ro(ro)? else {
         return wln(w, "== DAG ==\n  (no tasks)");
     };
     let repo_str = repo_root.map(|p| p.to_string_lossy().into_owned());
@@ -565,8 +544,10 @@ fn show_dag(ctx: &Ctx, repo_root: Option<&Path>, w: &mut dyn Write) -> Result<()
         let dep_str = if deps.is_empty() {
             String::new()
         } else {
-            let clean: Vec<String> = deps.iter().map(|d| san(d)).collect();
-            format!(" <- {}", clean.join(", "))
+            format!(
+                " <- {}",
+                deps.iter().map(|d| san(d)).collect::<Vec<_>>().join(", ")
+            )
         };
         let crit_tag = if crit_set.contains(id.as_str()) {
             " [CRIT]"
@@ -576,13 +557,15 @@ fn show_dag(ctx: &Ctx, repo_root: Option<&Path>, w: &mut dyn Write) -> Result<()
         let blk_tag = blocked_map.get(id.as_str()).map_or(String::new(), |b| {
             format!(" [CASCADE-BLOCKED by {}]", san(b))
         });
-        let _ = writeln!(
-            buf,
-            "  {}  {}  {:<8}  {}{dep_str}{crit_tag}{blk_tag}",
+        let (tid, pr, st, tt) = (
             san(&t.id),
             t.priority.as_str(),
             t.state.as_str(),
-            san(&t.title)
+            san(&t.title),
+        );
+        let _ = writeln!(
+            buf,
+            "  {tid}  {pr}  {st:<8}  {tt}{dep_str}{crit_tag}{blk_tag}"
         );
     }
     if !crit.is_empty() {

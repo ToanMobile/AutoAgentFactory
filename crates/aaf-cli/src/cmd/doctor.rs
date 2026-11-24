@@ -19,10 +19,9 @@ use std::path::{Component, Path};
 use aaf_domain::config::MachineConfig;
 use aaf_engine::config::{EffectiveConfig, effective_profile};
 use aaf_engine::executors::find_on_path;
-use aaf_engine::github_board::has_trusted_login;
 use aaf_engine::skills::inspect_skills_dir;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::cmd::init::settings;
 use crate::ctx::{Ctx, RepoState};
@@ -91,7 +90,11 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// The hook entry and the binary it points at, as two results.
-fn hook_checks(ctx: &Ctx, repo_root: &Path) -> (Result<String, String>, Result<String, String>) {
+fn hook_checks(
+    ctx: &Ctx,
+    repo_root: &Path,
+    tracking: settings::Tracking,
+) -> (Result<String, String>, Result<String, String>) {
     let skipped = || Err("not checked: the hook is not registered".to_string());
     let path = repo_root.join(".claude/settings.json");
     let text = match fs::read_to_string(&path) {
@@ -130,7 +133,7 @@ fn hook_checks(ctx: &Ctx, repo_root: &Path) -> (Result<String, String>, Result<S
         return (Err(reason), skipped());
     }
     let mut detail = format!("matcher {:?} in {}", hook.matcher, path.display());
-    if let Some(problem) = settings::Tracking::of(repo_root).problem() {
+    if let Some(problem) = tracking.problem() {
         // Registered here; `hook_committed` says what that leaves open.
         detail.push_str(&format!("; warning: not committed (the file {problem})"));
     }
@@ -184,12 +187,12 @@ fn git_check(ctx: &Ctx) -> Result<String, String> {
 /// Whether the agents of `aaf run` get the hook: they work in worktrees cut
 /// from a commit, where the settings file is what HEAD has, not what the
 /// working tree has.
-fn hook_committed_check(repo_root: &Path) -> Result<String, String> {
+fn hook_committed_check(repo_root: &Path, tracking: settings::Tracking) -> Result<String, String> {
     let rel = settings::SETTINGS_REL;
     if !repo_root.join(rel).is_file() {
         return Err(format!("{rel} does not exist; run aaf init and commit it"));
     }
-    match settings::Tracking::of(repo_root).problem() {
+    match tracking.problem() {
         None => Ok(format!("{rel} is committed as it is")),
         Some(problem) => Err(format!(
             "{rel} {problem}: task worktrees of aaf run are cut from a commit and would run \
@@ -283,8 +286,8 @@ fn machine_detail(machine: &MachineConfig) -> String {
     )
 }
 
-fn skills_sync_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check {
-    let Some(root) = repo_root else {
+fn skills_sync_check(repo_root: Option<&Path>, profile: Option<&str>) -> Check {
+    let (Some(root), Some(profile)) = (repo_root, profile) else {
         return not_applicable("skills_sync");
     };
     let present: Vec<&str> = [".claude/skills", ".agents/skills"]
@@ -297,10 +300,9 @@ fn skills_sync_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check {
             Ok("no .claude/skills or .agents/skills directory; run aaf skills sync".to_string()),
         );
     }
-    let profile = effective_profile(&cfg.repo, root);
     let (mut ok_parts, mut warnings) = (Vec::new(), Vec::new());
     for rel in present {
-        let audit = inspect_skills_dir(&root.join(rel), &profile);
+        let audit = inspect_skills_dir(&root.join(rel), profile);
         let total = audit.synced.len() + audit.missing.len() + audit.modified.len();
         if audit.missing.is_empty() && audit.modified.is_empty() {
             ok_parts.push(format!(
@@ -326,31 +328,16 @@ fn skills_sync_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check {
     advisory("skills_sync", res)
 }
 
-fn check_mcp_mobile(root: &Path) -> Result<(), String> {
-    let text = fs::read_to_string(root.join(".mcp.json"))
-        .map_err(|_| "missing .mcp.json with mobile-mcp".to_string())?;
-    let val: Value =
-        serde_json::from_str(&text).map_err(|e| format!(".mcp.json is invalid JSON: {e}"))?;
-    let srv = val
-        .pointer("/mcpServers/mobile-mcp")
-        .ok_or_else(|| ".mcp.json does not configure mobile-mcp".to_string())?;
-    if srv
-        .pointer("/env/MOBILEMCP_DISABLE_TELEMETRY")
-        .and_then(Value::as_str)
-        != Some("1")
-    {
-        return Err(".mcp.json mobile-mcp lacks MOBILEMCP_DISABLE_TELEMETRY=\"1\"".to_string());
-    }
-    Ok(())
-}
-
-fn proof_readiness_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check {
-    let Some(root) = repo_root else {
+fn proof_readiness_check(
+    repo_root: Option<&Path>,
+    cfg: &EffectiveConfig,
+    profile: Option<&str>,
+) -> Check {
+    let (Some(root), Some(profile)) = (repo_root, profile) else {
         return not_applicable("proof_readiness");
     };
-    let profile = effective_profile(&cfg.repo, root);
     let mobile = matches!(
-        profile.as_str(),
+        profile,
         "android" | "ios" | "flutter" | "react-native" | "expo" | "unity"
     );
     if !cfg.repo.proof.required && !mobile {
@@ -372,7 +359,7 @@ fn proof_readiness_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Che
     if cfg.repo.proof.allowed_tools.is_empty() {
         issues.push("proof.allowed_tools is empty (fail-closed)".to_string());
     }
-    if let Err(err) = check_mcp_mobile(root) {
+    if let Err(err) = hosts::check_mcp_mobile(root) {
         issues.push(err);
     }
     let res = if issues.is_empty() {
@@ -389,24 +376,7 @@ fn github_board_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check 
     if repo_root.is_none() {
         return not_applicable("github_board");
     }
-    if !cfg.repo.github.enabled {
-        return advisory("github_board", Ok("disabled".to_string()));
-    }
-    let allow = &cfg.global.safety.owner_github_allowlist;
-    let mut issues = Vec::new();
-    if !has_trusted_login(allow) {
-        issues.push("safety.owner_github_allowlist has no valid owner login".to_string());
-    }
-    if let Err(err) = aaf_fp::program("gh") {
-        issues.push(format!("gh CLI unavailable: {err}"));
-    }
-    let res = if issues.is_empty() {
-        let n = allow.iter().filter(|s| !s.trim().is_empty()).count();
-        Ok(format!("enabled ({n} allowlisted owner(s), gh ready)"))
-    } else {
-        Err(issues.join("; "))
-    };
-    advisory("github_board", res)
+    advisory("github_board", hosts::github_board_status(cfg))
 }
 
 #[cfg(target_os = "macos")]
@@ -438,14 +408,32 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         sources: Vec::new(),
         warnings: Vec::new(),
     });
+    let root_opt = repo_root.as_deref().ok();
+    let (git_res, tracking_opt, daemons, git_hooks_res) = std::thread::scope(|s| {
+        let t_git = s.spawn(|| git_check(ctx));
+        let t_tracking = s.spawn(|| root_opt.map(settings::Tracking::of));
+        let t_daemons = s.spawn(aaf_engine::throttle::daemons::list);
+        let t_hooks = s.spawn(|| heavy::git_hooks_check(root_opt));
+        (
+            t_git
+                .join()
+                .unwrap_or_else(|_| Err("git check thread panicked".to_string())),
+            t_tracking.join().unwrap_or(None),
+            t_daemons.join().unwrap_or_default(),
+            t_hooks
+                .join()
+                .unwrap_or_else(|_| Err("git hooks check thread panicked".to_string())),
+        )
+    });
     let repo_checks = match &repo_state {
         RepoState::Root(root) => {
-            let (hook_registered, hook_binary) = hook_checks(ctx, root);
+            let tracking = tracking_opt.unwrap_or(settings::Tracking::Unknown);
+            let (hook_registered, hook_binary) = hook_checks(ctx, root, tracking);
             [
                 required("repo_root", Ok(root.display().to_string())),
                 required("hook_registered", hook_registered),
                 required("hook_binary", hook_binary),
-                advisory("hook_committed", hook_committed_check(root)),
+                advisory("hook_committed", hook_committed_check(root, tracking)),
             ]
         }
         // A repository is here and git fails on it: `aaf gate` and `aaf run`
@@ -473,7 +461,7 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         hook_binary,
         hook_committed,
     ] = repo_checks;
-    let root_opt = repo_root.as_deref().ok();
+    let profile = root_opt.map(|root| effective_profile(&effective.repo, root));
     let (accounts_check, accounts_fields) = accounts::report(ctx, &effective, root_opt);
     let config_detail = config
         .as_ref()
@@ -492,7 +480,7 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         .map_err(|err| err.message.clone());
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut checks = vec![
-        required("git", git_check(ctx)),
+        required("git", git_res),
         repo_root_check,
         required("config", config_detail),
         hook_registered,
@@ -512,17 +500,14 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
             "head_lock_runner_configs",
             head_lock::runner_config_check(&effective.repo.gate.head_lock_globs),
         ),
-        advisory(
-            "gradle_daemon",
-            heavy::live_daemons(&aaf_engine::throttle::daemons::list()),
-        ),
+        advisory("gradle_daemon", heavy::live_daemons(&daemons)),
         advisory(
             "gradle_daemon_config",
             heavy::daemon_config(root_opt, &effective.repo.commands),
         ),
-        advisory("git_hooks_heavy", heavy::git_hooks_check(root_opt)),
-        skills_sync_check(root_opt, &effective),
-        proof_readiness_check(root_opt, &effective),
+        advisory("git_hooks_heavy", git_hooks_res),
+        skills_sync_check(root_opt, profile.as_deref()),
+        proof_readiness_check(root_opt, &effective, profile.as_deref()),
         github_board_check(root_opt, &effective),
         root_opt.map_or_else(
             || not_applicable("multi_host_hooks"),

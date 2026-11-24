@@ -6,6 +6,31 @@
 //! address bar immediately via `history.replaceState`.
 
 use std::fmt::Write as _;
+use std::net::{IpAddr, UdpSocket};
+
+/// Resolves wildcard bind hosts (`0.0.0.0` or `::`) to the machine's outbound
+/// LAN IP (via a non-sending UDP `connect`) so mobile QR pairing links actually
+/// connect on the local network. Non-wildcard hosts are returned unchanged.
+pub fn display_host_for_pairing(host: &str) -> String {
+    let trimmed = host.trim();
+    let clean = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let detect_udp = |bind: &str, target: &str| -> Option<IpAddr> {
+        let sock = UdpSocket::bind(bind).ok()?;
+        sock.connect(target).ok()?;
+        let ip = sock.local_addr().ok()?.ip();
+        (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
+    };
+    let detected = match clean {
+        "0.0.0.0" => detect_udp("0.0.0.0:0", "1.1.1.1:80"),
+        "::" => detect_udp("[::]:0", "[2606:4700:4700::1111]:80")
+            .or_else(|| detect_udp("0.0.0.0:0", "1.1.1.1:80")),
+        _ => return trimmed.to_string(),
+    };
+    detected.map_or_else(|| trimmed.to_string(), |ip| ip.to_string())
+}
 
 /// Builds a pairing URL carrying the bearer token solely in the URL fragment.
 pub fn pairing_url(host: &str, port: u16, token: &str) -> String {
@@ -516,4 +541,25 @@ fn penalty_score(m: &QrMatrix) -> u32 {
     let pct = (dark * 100) / total;
     let dev = pct.abs_diff(50) / 5;
     penalty + (dev as u32) * 10
+}
+
+#[cfg(test)]
+mod pairing_host_tests {
+    use super::*;
+
+    #[test]
+    fn display_host_for_pairing_preserves_explicit_hosts_and_handles_wildcards() {
+        assert_eq!(display_host_for_pairing("127.0.0.1"), "127.0.0.1");
+        assert_eq!(display_host_for_pairing("localhost"), "localhost");
+        assert_eq!(display_host_for_pairing("::1"), "::1");
+        assert_eq!(display_host_for_pairing("192.168.1.50"), "192.168.1.50");
+
+        let v4 = display_host_for_pairing("0.0.0.0");
+        assert!(!v4.is_empty());
+        assert!(v4.parse::<IpAddr>().is_ok(), "unexpected v4 host: {v4}");
+
+        let v6 = display_host_for_pairing("::");
+        assert!(!v6.is_empty());
+        assert!(v6.parse::<IpAddr>().is_ok(), "unexpected v6 host: {v6}");
+    }
 }

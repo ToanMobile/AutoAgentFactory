@@ -4,11 +4,11 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, TryLockError};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use aaf_domain::ports::{PortError, RunStore, TaskStore};
-use aaf_domain::run::RunStatus;
+use aaf_domain::ports::{PortError, TaskStore};
 use aaf_domain::task::{Task, TaskState};
 use serde::{Deserialize, Serialize};
 
@@ -17,9 +17,11 @@ use crate::git::cmd::{failure, git, git_raw};
 use crate::git::worktree::{self, BRANCH_PREFIX, SNAPSHOT_REF_PREFIX};
 use crate::git::{GitError, path_str};
 use crate::process::CommandRunner;
+use crate::telemetry::is_exclusively_locked;
 
 /// Default retention window for stream `.jsonl` and report `.html` artifacts.
 pub const DEFAULT_OLDER_THAN_DAYS: u64 = 14;
+const MAX_SOP_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GcError {
@@ -93,16 +95,20 @@ fn try_lock_repo(
 ) -> Result<Option<RepoLockGuard>, GcError> {
     let locks_dir = data_dir.join("locks");
     let lock_path = locks_dir.join(format!("{repo_id}.run.lock"));
-    let file = if dry_run {
+    let (file, lock_res) = if dry_run {
         if !lock_path.exists() {
             return Ok(None);
         }
-        File::options().read(true).write(true).open(&lock_path)?
+        let file = File::open(&lock_path)?;
+        let res = file.try_lock_shared();
+        (file, res)
     } else {
         private::create_dir(&locks_dir)?;
-        private::open_file(&lock_path)?
+        let file = private::open_file(&lock_path)?;
+        let res = file.try_lock();
+        (file, res)
     };
-    match file.try_lock() {
+    match lock_res {
         Ok(()) => Ok(Some(RepoLockGuard { file })),
         Err(TryLockError::WouldBlock) => Err(GcError::Io(std::io::Error::new(
             std::io::ErrorKind::WouldBlock,
@@ -119,14 +125,7 @@ fn collect_db_state(data_dir: &Path) -> Result<(Vec<Task>, HashSet<String>), GcE
     }
     let db = Db::open_read_only(&db_path)?;
     let tasks = db.list_tasks(None, None)?;
-    let mut running_runs = HashSet::new();
-    for task in &tasks {
-        for run in db.runs_for_task(&task.id)? {
-            if run.status == RunStatus::Running {
-                running_runs.insert(run.id);
-            }
-        }
-    }
+    let running_runs = db.running_run_ids()?;
     Ok((tasks, running_runs))
 }
 
@@ -334,6 +333,21 @@ fn clean_task_artifacts(
     Ok(())
 }
 
+fn remove_and_record(path: &Path, is_dir: bool, dry_run: bool, report: &mut GcReport) {
+    if !dry_run {
+        let res = if is_dir {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+        if let Err(err) = res {
+            report.warnings.push(format!("{}: {err}", path.display()));
+            return;
+        }
+    }
+    report.removed_files.push(path.display().to_string());
+}
+
 fn clean_expired_artifacts(
     data_dir: &Path,
     opts: &GcOptions,
@@ -343,53 +357,129 @@ fn clean_expired_artifacts(
 ) {
     let max_age = Duration::from_secs(opts.older_than_days.saturating_mul(86_400));
     for subdir in ["streams", "reports"] {
-        let dir = data_dir.join(subdir);
-        let Ok(dir_meta) = fs::symlink_metadata(&dir) else {
-            continue;
-        };
-        if !dir_meta.is_dir() || dir_meta.file_type().is_symlink() {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
-        paths.sort();
-        for path in paths {
+        for path in sorted_real_dir_entries(&data_dir.join(subdir)) {
             let Ok(meta) = fs::symlink_metadata(&path) else {
                 continue;
             };
-            if !meta.is_file() || meta.file_type().is_symlink() {
-                continue;
-            }
-            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-                continue;
-            };
-            if ext != "jsonl" && ext != "html" {
-                continue;
-            }
-            if ext == "jsonl"
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                && running_runs.contains(stem)
+            let ext = path.extension().and_then(|e| e.to_str());
+            if !meta.is_file()
+                || meta.file_type().is_symlink()
+                || !matches!(ext, Some("jsonl" | "html"))
             {
                 continue;
             }
-            let Ok(modified) = meta.modified() else {
-                continue;
-            };
-            let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
-            if age < max_age {
-                continue;
-            }
-            if !opts.dry_run
-                && let Err(err) = fs::remove_file(&path)
+            if ext == Some("jsonl")
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| running_runs.contains(s))
             {
-                report.warnings.push(format!("{}: {err}", path.display()));
                 continue;
             }
-            report.removed_files.push(path.display().to_string());
+            if is_older_than(&meta, max_age, now) {
+                remove_and_record(&path, false, opts.dry_run, report);
+            }
         }
     }
+    for path in sorted_real_dir_entries(&data_dir.join("sops")) {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_file()
+            && !meta.file_type().is_symlink()
+            && path.extension().and_then(|e| e.to_str()) == Some("json")
+            && is_older_than(&meta, max_age, now)
+            && is_terminal_sop_file(&path)
+        {
+            remove_and_record(&path, false, opts.dry_run, report);
+        }
+    }
+    let locks_dir = data_dir.join("locks");
+    for path in sorted_real_dir_entries(&data_dir.join("merge-scratch")) {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            if !opts.dry_run
+                && meta.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some("lock")
+                && !path.with_extension("").exists()
+                && !is_exclusively_locked(&path)
+                && is_older_than(&meta, max_age, now)
+            {
+                let _ = fs::remove_file(&path);
+            }
+            continue;
+        }
+        let mut lock_os = path.as_os_str().to_os_string();
+        lock_os.push(".lock");
+        let lock_path = PathBuf::from(lock_os);
+        let merge_locked = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split_once("-pr").map(|(id, _)| id))
+            .filter(|id| {
+                !id.is_empty()
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            })
+            .is_some_and(|id| is_exclusively_locked(&locks_dir.join(format!("{id}.merge.lock"))));
+        if is_exclusively_locked(&lock_path) || merge_locked {
+            continue;
+        }
+        let has_lock = fs::symlink_metadata(&lock_path).is_ok_and(|m| m.is_file());
+        if has_lock || is_older_than(&meta, max_age, now) {
+            remove_and_record(&path, true, opts.dry_run, report);
+            if !opts.dry_run && has_lock && !path.exists() {
+                let _ = fs::remove_file(&lock_path);
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SopStatusPeek {
+    status: String,
+}
+
+fn is_older_than(meta: &fs::Metadata, max_age: Duration, now: SystemTime) -> bool {
+    meta.modified()
+        .ok()
+        .is_some_and(|m| now.duration_since(m).unwrap_or(Duration::ZERO) >= max_age)
+}
+
+fn is_terminal_sop_file(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    if file
+        .take(MAX_SOP_CHECKPOINT_BYTES + 1)
+        .read_to_end(&mut buf)
+        .is_err()
+        || u64::try_from(buf.len()).unwrap_or(u64::MAX) > MAX_SOP_CHECKPOINT_BYTES
+    {
+        return false;
+    }
+    serde_json::from_slice::<SopStatusPeek>(&buf).is_ok_and(|peek| {
+        matches!(
+            peek.status.trim().to_ascii_lowercase().as_str(),
+            "completed" | "aborted" | "failed"
+        )
+    })
+}
+
+fn sorted_real_dir_entries(dir: &Path) -> Vec<PathBuf> {
+    if !fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    paths.sort();
+    paths
 }
 
 #[derive(Debug, Deserialize)]

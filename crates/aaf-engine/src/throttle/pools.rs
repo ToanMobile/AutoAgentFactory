@@ -14,14 +14,13 @@
 
 use std::fs::{self, File, TryLockError};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aaf_domain::ports::Clock;
 
 use super::heavy::HeavyTool;
-use super::paths::{ensure_closed_dir, guest_dir, is_guest, open_guest_file};
+use super::paths::open_pool_file;
 use super::{Backoff, Sleeper};
-use crate::db::private;
 
 /// Held Layer-1 correctness locks; released automatically on drop.
 #[derive(Debug, Default)]
@@ -30,31 +29,8 @@ pub struct CorrectnessGuards {
     _worktree: Option<File>,
 }
 
-fn lock_dir(data_dir: &Path) -> io::Result<PathBuf> {
-    let base = if is_guest(data_dir) {
-        guest_dir(data_dir)
-    } else {
-        ensure_closed_dir(&data_dir.join("throttle"))?
-    };
-    let dir = base.join("pools");
-    if is_guest(data_dir) {
-        fs::create_dir_all(&dir)?;
-    } else {
-        ensure_closed_dir(&dir)?;
-    }
-    Ok(dir)
-}
-
-fn open_pool_file(data_dir: &Path, path: &Path) -> io::Result<File> {
-    if is_guest(data_dir) {
-        open_guest_file(path)
-    } else {
-        private::open_file(path)
-    }
-}
-
-fn try_lock_one(data_dir: &Path, path: &Path) -> io::Result<Option<File>> {
-    let file = open_pool_file(data_dir, path)?;
+fn try_lock_one(data_dir: &Path, filename: &str) -> io::Result<Option<File>> {
+    let file = open_pool_file(data_dir, filename)?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
@@ -64,21 +40,20 @@ fn try_lock_one(data_dir: &Path, path: &Path) -> io::Result<Option<File>> {
 
 fn try_lock_unity(data_dir: &Path, max_unity: u32) -> io::Result<Option<File>> {
     let cap = max_unity.max(1);
-    let dir = lock_dir(data_dir)?;
     for idx in 0..cap {
-        let path = dir.join(format!("tool.unity.{idx}.lock"));
-        if let Some(file) = try_lock_one(data_dir, &path)? {
+        let filename = format!("tool.unity.{idx}.lock");
+        if let Some(file) = try_lock_one(data_dir, &filename)? {
             return Ok(Some(file));
         }
     }
     Ok(None)
 }
 
-fn worktree_lock_path(data_dir: &Path, cwd: &Path) -> io::Result<PathBuf> {
+fn worktree_lock_name(cwd: &Path) -> String {
     let canonical = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let id = aaf_fp::sha256_hex(canonical.to_string_lossy().as_bytes());
     let short = &id[..16];
-    Ok(lock_dir(data_dir)?.join(format!("worktree.{short}.lock")))
+    format!("worktree.{short}.lock")
 }
 
 /// Parameters for acquiring Layer-1 correctness locks.
@@ -124,9 +99,9 @@ pub fn acquire_correctness(
     };
 
     // 2. Per-worktree lock (any heavy build tool).
-    let wt_path = worktree_lock_path(data_dir, ask.cwd)?;
+    let wt_name = worktree_lock_name(ask.cwd);
     let worktree = loop {
-        if let Some(file) = try_lock_one(data_dir, &wt_path)? {
+        if let Some(file) = try_lock_one(data_dir, &wt_name)? {
             break Some(file);
         }
         if expired(clock.now()) {
@@ -200,5 +175,58 @@ mod tests {
         )
         .unwrap();
         assert!(g4.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retry_loop_rejects_pools_dir_swapped_with_symlink_between_polls() {
+        use std::os::unix::fs::symlink;
+        use std::sync::{Arc, Mutex};
+
+        let data = TempDir::new().unwrap();
+        let wt = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let rig = Rig::calm();
+
+        let holder = acquire_correctness(
+            data.path(),
+            &CorrectnessAsk {
+                tool: Some(HeavyTool::Gradle),
+                cwd: wt.path(),
+                max_unity_parallel: 1,
+                wait_limit_secs: Some(0),
+                jitter_seed: 1,
+            },
+            &*rig.clock,
+            &rig.sleeper,
+        )
+        .unwrap()
+        .unwrap();
+        let holder = Arc::new(Mutex::new(Some(holder)));
+        let holder_ref = Arc::clone(&holder);
+        let pools = super::super::paths::pools_dir(data.path());
+        let outside_path = outside.path().to_path_buf();
+        rig.sleeper.on_sleep(move |_| {
+            holder_ref.lock().unwrap().take();
+            fs::remove_dir_all(&pools).unwrap();
+            symlink(&outside_path, &pools).unwrap();
+        });
+
+        let err = acquire_correctness(
+            data.path(),
+            &CorrectnessAsk {
+                tool: Some(HeavyTool::Gradle),
+                cwd: wt.path(),
+                max_unity_parallel: 1,
+                wait_limit_secs: Some(5),
+                jitter_seed: 2,
+            },
+            &*rig.clock,
+            &rig.sleeper,
+        );
+        assert!(
+            err.is_err(),
+            "swapped pools/ symlink must fail closed on retry"
+        );
     }
 }

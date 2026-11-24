@@ -12,7 +12,6 @@ mod undo_steer;
 
 use std::collections::HashSet;
 
-use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{BudgetStore, Clock, EventSink, PortError, RunStore, TaskStore};
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
@@ -22,7 +21,8 @@ use aaf_engine::factory::schedule_order::normalize_scope;
 use aaf_engine::factory::{is_frozen, unfreeze};
 use serde_json::{Value, json};
 
-use self::store::{err, open_db, refuse_inside_agent_run, repo_root};
+use self::store::{err, open_db, open_db_read_only, refuse_inside_agent_run, repo_root};
+use crate::cmd::task_ops::{TaskOpError, unblock_task};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -263,9 +263,13 @@ fn list(args: &ListArgs, ctx: &Ctx) -> CmdResult {
     } else {
         Some(repo_root(ctx)?.to_string_lossy().into_owned())
     };
-    let db = open_db(ctx)?;
-    let tasks = db.list_tasks(repo.as_deref(), state).map_err(port)?;
-    let frozen = is_frozen(&db).map_err(port)?;
+    let (tasks, frozen) = match open_db_read_only(ctx)? {
+        Some(db) => (
+            db.list_tasks(repo.as_deref(), state).map_err(port)?,
+            is_frozen(&db).map_err(port)?,
+        ),
+        None => (Vec::new(), false),
+    };
 
     let mut text: Vec<String> = tasks.iter().map(task_line).collect();
     if text.is_empty() {
@@ -295,7 +299,9 @@ fn event_json(event: &FactoryEvent) -> Value {
 }
 
 fn show(id: &str, ctx: &Ctx) -> CmdResult {
-    let db = open_db(ctx)?;
+    let Some(db) = open_db_read_only(ctx)? else {
+        return Err(port(PortError::NotFound(format!("task {id}"))));
+    };
     let task = db.get_task(id).map_err(port)?;
     let mut deps = Vec::new();
     for dep in db.deps_of(id).map_err(port)? {
@@ -365,47 +371,20 @@ fn unblock(id: &str, ctx: &Ctx) -> CmdResult {
         return Ok(refused);
     }
     let db = open_db(ctx)?;
-    let task = db.get_task(id).map_err(port)?;
-    if task.state != TaskState::Blocked {
-        let text = format!("{id} is {}, not blocked", task.state.as_str());
-        return Ok(CmdOutput::policy("refused", text).field("state", json!(task.state)));
-    }
     let now = SystemClock.now();
-    // A root that ran out of budget would be blocked again at once: the
-    // human's go-ahead comes with a fresh one (same limits).
-    let budget_reset = match db.get_budget(&task.root_id) {
-        Ok(budget) if budget.check() != BudgetCheck::Ok => {
-            db.put_budget(&RootBudget {
-                tokens_used: 0,
-                wall_secs_used: 0,
-                cycles_used: 0,
-                frozen: false,
-                ..budget
-            })
-            .map_err(port)?;
-            true
+    let out = match unblock_task(&db, id, "aaf board unblock", "human", now) {
+        Ok(out) => out,
+        Err(TaskOpError::WrongState { actual, .. }) => {
+            let text = format!("{id} is {}, not blocked", actual.as_str());
+            return Ok(CmdOutput::policy("refused", text).field("state", json!(actual)));
         }
-        Ok(_) | Err(PortError::NotFound(_)) => false,
-        Err(other) => return Err(port(other)),
+        Err(TaskOpError::Port(other)) => return Err(port(other)),
     };
-    let plan_approved = approve_plan::maybe_approve_on_unblock(&db, &task, now)?;
-    db.set_state(id, TaskState::Ready, None, now)
-        .map_err(port)?;
-    let payload = json!({
-        "to": "ready",
-        "why": "aaf board unblock",
-        "by": "human",
-        "was": task.blocked_reason,
-        "budget_reset": budget_reset,
-        "plan_approved": plan_approved,
-    });
-    let event = FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now);
-    db.emit(&event.for_task(id)).map_err(port)?;
     Ok(CmdOutput::ok("ok", format!("{id} is ready"))
         .field("task_id", json!(id))
         .field("state", json!(TaskState::Ready))
-        .field("budget_reset", json!(budget_reset))
-        .field("plan_approved", json!(plan_approved)))
+        .field("budget_reset", json!(out.budget_reset))
+        .field("plan_approved", json!(out.plan_approved)))
 }
 
 fn unfreeze_factory(ctx: &Ctx) -> CmdResult {
@@ -418,4 +397,46 @@ fn unfreeze_factory(ctx: &Ctx) -> CmdResult {
     Ok(CmdOutput::ok("ok", "factory is not frozen")
         .field("frozen", json!(false))
         .field("was_frozen", json!(was_frozen)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_list_and_show_do_not_create_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+            home: tmp.path().join("home"),
+            data_dir: data_dir.clone(),
+            config_dir: tmp.path().join("config"),
+            worktrees_dir: tmp.path().join("worktrees"),
+            path_var: std::ffi::OsString::new(),
+            run_id: None,
+            stdin_is_tty: false,
+            aaf_env: Vec::new(),
+        };
+
+        let listed = list(
+            &ListArgs {
+                state: None,
+                all: true,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(listed.status, "ok");
+        assert!(!data_dir.join("aaf.db").exists());
+
+        let err = show("t-missing", &ctx).unwrap_err();
+        assert!(
+            err.message.to_ascii_lowercase().contains("not found"),
+            "{}",
+            err.message
+        );
+        assert!(!data_dir.join("aaf.db").exists());
+    }
 }

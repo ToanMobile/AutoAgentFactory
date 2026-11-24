@@ -1,23 +1,33 @@
 //! Blocks git calls that rewrite shared history, delete protected branches
 //! or switch the repository's hooks off.
 
-use std::fs;
+use std::path::PathBuf;
 
 use crate::shell::Cmd;
 use crate::{Ctx, Denial, git_alias, git_files, paths};
+
+mod push;
+pub(crate) use push::current_branch;
 
 const RULE: &str = "git_guard";
 
 /// A git invocation with its global options peeled off.
 pub struct GitCall<'a> {
-    /// Last `-C <dir>`.
+    /// Last `-C <dir>` (kept for single-`-C` callers; prefer [`Self::resolve_dir`]
+    /// when multiple `-C` options may be chained).
     pub dir: Option<&'a str>,
+    /// Every `-C <dir>` in order, applied sequentially by git.
+    pub dirs: Vec<&'a str>,
     /// A global option sets `core.hooksPath`.
     pub hooks_override: bool,
     /// The global options, in order.
     pub globals: &'a [String],
     /// `-c alias.<name>=<value>` definitions.
     pub aliases: Vec<Alias<'a>>,
+    /// Every `-c <key>=<value>` pair passed as a global option.
+    pub config_pairs: Vec<(&'a str, &'a str)>,
+    /// `--config-env=<key>=<var>` entries whose `<key>` runs a program.
+    pub config_env_programs: Vec<(&'a str, Option<&'a str>)>,
     /// An alias whose value is not on the command line (`--config-env`).
     pub hidden_alias: bool,
     /// A global option includes a configuration file (`include.path`).
@@ -26,6 +36,61 @@ pub struct GitCall<'a> {
     pub unknown_key: bool,
     pub sub: &'a str,
     pub rest: &'a [String],
+}
+
+impl GitCall<'_> {
+    /// Resolves all `-C <dir>` flags sequentially starting from `ctx.cwd`,
+    /// matching git's own handling of multiple `-C` options.
+    pub fn resolve_dir(&self, ctx: &Ctx) -> PathBuf {
+        let mut cur = ctx.cwd.clone();
+        for dir in &self.dirs {
+            cur = paths::expand_real_dotdot(dir, &cur, ctx.env.home.as_deref());
+        }
+        cur
+    }
+
+    /// Resolves all `-C <dir>` flags before the last one when two or more `-C`
+    /// flags are present, so callers that apply `self.dir` once still see the
+    /// cumulative working directory.
+    pub(crate) fn resolve_prefix_dir(&self, ctx: &Ctx) -> Option<PathBuf> {
+        let (_, prefix) = self.dirs.split_last()?;
+        if prefix.is_empty() {
+            return None;
+        }
+        let mut cur = ctx.cwd.clone();
+        for dir in prefix {
+            cur = paths::expand_real_dotdot(dir, &cur, ctx.env.home.as_deref());
+        }
+        Some(cur)
+    }
+
+    /// Last `--git-dir` value in `self.globals`, if any.
+    pub(crate) fn explicit_git_dir(&self) -> Option<&str> {
+        let mut found = None;
+        let mut at = 0;
+        while let Some(arg) = self.globals.get(at).map(String::as_str) {
+            if let Some(val) = arg.strip_prefix("--git-dir=") {
+                found = Some(val);
+                at += 1;
+            } else if arg == "--git-dir" {
+                found = self.globals.get(at + 1).map(String::as_str);
+                at += 2;
+            } else if matches!(
+                arg,
+                "-C" | "-c"
+                    | "--work-tree"
+                    | "--namespace"
+                    | "--config-env"
+                    | "--attr-source"
+                    | "--super-prefix"
+            ) {
+                at += 2;
+            } else {
+                at += 1;
+            }
+        }
+        found
+    }
 }
 
 pub struct Alias<'a> {
@@ -40,8 +105,11 @@ pub struct Alias<'a> {
 pub fn split(args: &[String]) -> GitCall<'_> {
     let mut at = 0;
     let mut dir = None;
+    let mut dirs = Vec::new();
     let mut hooks_override = false;
     let mut aliases = Vec::new();
+    let mut config_pairs = Vec::new();
+    let mut config_env_programs = Vec::new();
     let (mut hidden_alias, mut includes_file, mut unknown_key) = (false, false, false);
     while let Some(arg) = args.get(at) {
         if !arg.starts_with('-') {
@@ -70,6 +138,9 @@ pub fn split(args: &[String]) -> GitCall<'_> {
         };
         if flag == "-C" {
             dir = value;
+            if let Some(v) = value {
+                dirs.push(v);
+            }
         }
         if mentions_hooks(arg) || value.is_some_and(mentions_hooks) {
             hooks_override = true;
@@ -83,13 +154,16 @@ pub fn split(args: &[String]) -> GitCall<'_> {
             };
             includes_file |= is_include(key);
             unknown_key |= !is_literal(key);
-            if let (Some(name), Some(value)) = (alias_name(key), value) {
-                aliases.push(Alias {
-                    at,
-                    width,
-                    name,
-                    value,
-                });
+            if let Some(val) = value {
+                config_pairs.push((key, val));
+                if let Some(name) = alias_name(key) {
+                    aliases.push(Alias {
+                        at,
+                        width,
+                        name,
+                        value: val,
+                    });
+                }
             }
         }
         let env_key = match arg.strip_prefix("--config-env") {
@@ -98,18 +172,26 @@ pub fn split(args: &[String]) -> GitCall<'_> {
             None => None,
         };
         if let Some(pair) = env_key {
-            let key = pair.rsplit_once('=').map_or(pair, |(key, _)| key);
+            let (key, env_var) = pair
+                .rsplit_once('=')
+                .map_or((pair, None), |(key, var)| (key, Some(var)));
             hidden_alias |= alias_name(key).is_some();
             includes_file |= is_include(key);
             unknown_key |= !is_literal(key);
+            if crate::git_persist::runs_program(key) {
+                config_env_programs.push((key, env_var));
+            }
         }
         at += width;
     }
     GitCall {
         dir,
+        dirs,
         hooks_override,
         globals: args.get(..at).unwrap_or(args),
         aliases,
+        config_pairs,
+        config_env_programs,
         hidden_alias,
         includes_file,
         unknown_key,
@@ -126,7 +208,7 @@ fn is_include(key: &str) -> bool {
 }
 
 /// A key the shell fills in at run time could be any of the refused ones.
-fn is_literal(key: &str) -> bool {
+pub(crate) fn is_literal(key: &str) -> bool {
     !key.is_empty() && !key.contains(['$', '`'])
 }
 
@@ -239,7 +321,7 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         return Some(denial);
     }
     let verdict = match call.sub {
-        "push" => push(&call, ctx),
+        "push" => push::push(&call, ctx),
         "commit" => commit(call.rest),
         "reset" => options(call.rest)
             .any(|a| abbrev(a, "--hard", 3))
@@ -366,167 +448,6 @@ fn commit(rest: &[String]) -> Verdict {
     None
 }
 
-fn push(call: &GitCall, ctx: &Ctx) -> Verdict {
-    let (mut force, mut lease, mut delete, mut dry_run) = (false, false, false, false);
-    let (mut skip_hooks, mut all, mut repo_option) = (false, false, false);
-    let mut positional: Vec<&str> = Vec::new();
-    let mut only_positional = false;
-    let mut at = 0;
-    while let Some(arg) = call.rest.get(at).map(String::as_str) {
-        at += 1;
-        if only_positional || !arg.starts_with('-') || arg == "-" {
-            positional.push(arg);
-        } else if arg == "--" {
-            only_positional = true;
-        } else if arg.starts_with("--") {
-            let flag = arg.split('=').next().unwrap_or(arg);
-            let is_repo = abbrev(flag, "--repo", 5);
-            if is_repo
-                || abbrev(flag, "--receive-pack", 6)
-                || abbrev(flag, "--exec", 3)
-                || abbrev(flag, "--push-option", 4)
-            {
-                // The value is attached or the next word; either way it is
-                // not a flag, even when it looks like `--dry-run`.
-                repo_option |= is_repo;
-                if flag == arg {
-                    at += 1;
-                }
-            } else if flag == "--dry-run" {
-                dry_run = true;
-            } else if flag.starts_with("--no-d") {
-                // `--no-dry-run` and its abbreviations: the last one wins,
-                // as in git. An ambiguous prefix is read the unsafe way.
-                dry_run = false;
-            } else if abbrev(flag, "--no-verify", 6) {
-                skip_hooks = true;
-            } else if flag.starts_with("--force-w") {
-                lease = true;
-            } else if flag.starts_with("--force-i") {
-                // --force-if-includes only tightens a lease.
-            } else if abbrev(flag, "--force", 3)
-                || flag.starts_with("--force")
-                || flag == "--mirror"
-            {
-                force = true;
-            } else if abbrev(flag, "--delete", 5) {
-                delete = true;
-            } else if flag == "--all" || flag == "--branches" {
-                all = true;
-            }
-        } else {
-            for (index, flag) in arg.char_indices().skip(1) {
-                match flag {
-                    'f' => force = true,
-                    'n' => dry_run = true,
-                    'd' => delete = true,
-                    'o' => {
-                        if index + 1 == arg.len() {
-                            at += 1;
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    if dry_run {
-        return None;
-    }
-    if skip_hooks {
-        return no_verify(call.rest);
-    }
-    // With `--repo` naming the remote, no positional is known to be the
-    // remote: each one is judged as a refspec.
-    let first_refspec = if repo_option { 0 } else { 1 };
-    let refspecs = positional.get(first_refspec..).unwrap_or(&[]);
-    if force {
-        return Some((
-            "push --force overwrites remote history".to_string(),
-            FIX_FORCE,
-        ));
-    }
-    if let Some(spec) = refspecs.iter().find(|spec| spec.starts_with('+')) {
-        return Some((format!("refspec {spec} is a force push"), FIX_FORCE));
-    }
-    let target = |spec: &str| -> String {
-        let spec = spec.trim_start_matches('+');
-        let dst = spec.rsplit(':').next().unwrap_or(spec);
-        dst.strip_prefix("refs/heads/").unwrap_or(dst).to_string()
-    };
-    let deleted = refspecs
-        .iter()
-        .filter(|spec| delete || spec.starts_with(':'))
-        .map(|spec| target(spec))
-        .find(|branch| is_protected(branch));
-    if let Some(branch) = deleted {
-        return Some((
-            format!("this deletes the protected branch {branch}"),
-            FIX_PROTECTED,
-        ));
-    }
-    if !lease {
-        return None;
-    }
-    if all {
-        return Some((
-            "--force-with-lease on every branch includes protected ones".to_string(),
-            FIX_PROTECTED,
-        ));
-    }
-    let mut targets: Vec<String> = refspecs.iter().map(|spec| target(spec)).collect();
-    if targets.is_empty() {
-        targets.push("HEAD".to_string());
-    }
-    for branch in targets {
-        let branch = if branch == "HEAD" || branch == "@" {
-            match current_branch(call, ctx) {
-                Some(current) => current,
-                None => {
-                    return Some((
-                        "cannot tell which branch --force-with-lease would overwrite".to_string(),
-                        "name the remote and the feature branch explicitly",
-                    ));
-                }
-            }
-        } else {
-            branch
-        };
-        if branch.contains('$') || paths::has_glob(&branch) {
-            return Some((
-                format!("--force-with-lease target {branch} is not a literal branch"),
-                "write the branch name literally",
-            ));
-        }
-        if is_protected(&branch) {
-            return Some((
-                format!("--force-with-lease would overwrite the protected branch {branch}"),
-                FIX_PROTECTED,
-            ));
-        }
-    }
-    None
-}
-
-/// Branch checked out where the push runs, read from `HEAD` (no git spawn).
-fn current_branch(call: &GitCall, ctx: &Ctx) -> Option<String> {
-    let dir = call.dir.map_or_else(|| ctx.cwd.clone(), |d| ctx.expand(d));
-    let root = (ctx.env.repo_root)(&dir)?;
-    let dot_git = root.join(".git");
-    let git_dir = if dot_git.is_dir() {
-        dot_git
-    } else {
-        // A linked worktree: `.git` is a file pointing at the real git dir.
-        let pointer = fs::read_to_string(&dot_git).ok()?;
-        root.join(pointer.trim().strip_prefix("gitdir:")?.trim())
-    };
-    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    head.trim()
-        .strip_prefix("ref: refs/heads/")
-        .map(str::to_string)
-}
-
 fn branch_delete(rest: &[String]) -> Verdict {
     let mut delete = false;
     let mut names = Vec::new();
@@ -537,7 +458,7 @@ fn branch_delete(rest: &[String]) -> Verdict {
         } else if arg == "--" {
             only_names = true;
         } else if arg.starts_with("--") {
-            delete |= abbrev(arg, "--delete", 5);
+            delete |= abbrev(arg, "--delete", 3);
         } else if is_cluster(arg) {
             delete |= arg.contains(['d', 'D']);
         } else {
@@ -571,18 +492,18 @@ fn update_ref(rest: &[String]) -> Verdict {
 /// Reading `core.hooksPath` is fine; setting or unsetting it is not.
 fn config(rest: &[String]) -> Verdict {
     // An option's value (`--comment get`) is not the verb.
-    let (_, positional) = crate::git_persist::config_args(rest);
+    let (flags, positional) = crate::git_persist::config_args(rest);
     let key = positional
         .iter()
         .position(|a| mentions_hooks(a) || is_include(a))?;
     let includes = positional.get(key).is_some_and(|a| is_include(a));
     let verb = positional.first().copied().unwrap_or("");
-    let writes = matches!(verb, "set" | "unset")
-        || rest.iter().any(|a| {
-            matches!(
-                a.as_str(),
-                "--unset" | "--unset-all" | "--add" | "--replace-all"
-            )
+    let writes = matches!(verb, "set" | "unset" | "unset-all")
+        || flags.iter().any(|a| {
+            abbrev(a, "--unset", 4)
+                || abbrev(a, "--unset-all", 8)
+                || abbrev(a, "--add", 4)
+                || abbrev(a, "--replace-all", 5)
         })
         || (verb != "get" && key + 1 < positional.len());
     writes.then(|| {

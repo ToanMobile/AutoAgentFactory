@@ -49,6 +49,8 @@ pub struct GitState {
     pub integrate_moves_base: bool,
     /// The note of every pull request, by task.
     pub pr_notes: Vec<(String, Option<String>)>,
+    /// Optional per-worktree diff override.
+    pub diffs: HashMap<PathBuf, String>,
 }
 
 #[derive(Default)]
@@ -87,6 +89,9 @@ impl GitOps for FakeGit {
         Ok(!state.no_changes.contains(&task_of(&worktree.path)))
     }
     fn diff(&self, worktree: &TaskWorktree) -> PortResult<String> {
+        if let Some(d) = self.0.lock().unwrap().diffs.get(&worktree.path) {
+            return Ok(d.clone());
+        }
         let id = task_of(&worktree.path);
         Ok(format!(
             "diff --git a/src/lib.rs b/src/lib.rs\n\

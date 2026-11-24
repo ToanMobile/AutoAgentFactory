@@ -110,7 +110,7 @@ impl Throttle<'_> {
         inherited: &Inherited,
     ) -> io::Result<Option<Supervised>> {
         let Launch {
-            ask,
+            mut ask,
             tool,
             mut command,
             timeout,
@@ -119,6 +119,7 @@ impl Throttle<'_> {
         // Before the wait for a slot: a stopped orphan may keep memory that
         // the admission below is waiting for.
         orphans::resume_orphans(data_dir, self.control);
+        let total_started = clock.now();
         // Layer 1: when `exclusive_build_tools = false` allows concurrent heavy
         // builds to share Layer-2 capacity slots by RAM, acquire correctness locks
         // (Unity pool -> Worktree lock) strictly BEFORE Layer 2 capacity slots.
@@ -147,6 +148,10 @@ impl Throttle<'_> {
         } else {
             None
         };
+        let layer1_waited = u64::try_from(clock.now() - total_started).unwrap_or(0);
+        ask.wait_limit_secs = ask
+            .wait_limit_secs
+            .map(|limit| limit.saturating_sub(layer1_waited));
         let Some(admitted) = self.admit_ask(data_dir, clock, &ask)? else {
             return Ok(None);
         };
@@ -264,7 +269,7 @@ impl Throttle<'_> {
             paused: done.paused,
             output,
             slot: dog.slot.index(),
-            waited_secs: admitted.waited_secs,
+            waited_secs: layer1_waited.saturating_add(admitted.waited_secs),
             degraded: admitted.degraded,
             peak_rss_bytes: dog.peak_rss_bytes,
             leftover_daemons,
@@ -322,7 +327,11 @@ impl Throttle<'_> {
         extra_env: &[(&str, &str)],
     ) -> io::Result<HeavyRun> {
         let tool = heavy::heavy_tool(job.command);
-        let cmd_family = heavy::stats_command_family(job.command);
+        let cmd_family = if tool.is_none() {
+            heavy::stats_command_family(job.command)
+        } else {
+            None
+        };
         let ask = Ask {
             repo_id: job.repo_id,
             label: job.label,
@@ -404,7 +413,11 @@ impl Throttle<'_> {
             ));
         }
         let tool = heavy::heavy_tool_argv(job.argv);
-        let cmd_family = heavy::stats_command_family_argv(job.argv);
+        let cmd_family = if tool.is_none() {
+            heavy::stats_command_family_argv(job.argv)
+        } else {
+            None
+        };
         let ask = Ask {
             repo_id: job.repo_id,
             label: job.label,

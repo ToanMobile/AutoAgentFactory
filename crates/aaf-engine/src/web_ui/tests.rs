@@ -2,13 +2,15 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use super::qr::{format_info_bits, pairing_url, render_pairing_card, render_qr_ascii};
+use super::server::{ParseError, read_http_request_with_timeout};
 use super::{
     HTML_CSP, UiBackend, UiConfig, UiError, constant_time_eq, is_loopback_host, start_server,
     validate_ui_config,
@@ -445,7 +447,7 @@ fn sse_events_accepts_query_token_and_clean_shutdown_unblocks() {
 
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(Duration::from_secs(4)))
         .unwrap();
     let req = format!(
         "GET /api/events?token={TEST_TOKEN}&run_id=run-42 HTTP/1.1\r\nHost: {addr}\r\n\r\n"
@@ -455,9 +457,10 @@ fn sse_events_accepts_query_token_and_clean_shutdown_unblocks() {
 
     let mut collected = String::new();
     let mut buf = [0u8; 2048];
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline
-        && !(collected.contains("event: stream") && collected.contains("run-42"))
+        && (collected.matches(": keepalive").count() < 2
+            || !(collected.contains("event: stream") && collected.contains("run-42")))
     {
         let n = stream.read(&mut buf).unwrap();
         if n == 0 {
@@ -467,15 +470,18 @@ fn sse_events_accepts_query_token_and_clean_shutdown_unblocks() {
     }
     assert!(collected.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(collected.contains("text/event-stream"));
-    assert!(collected.contains("event: status"));
-    assert!(collected.contains("event: stream"));
+    assert!(
+        collected.matches("event: status").count() >= 2,
+        "{collected}"
+    );
+    assert_eq!(collected.matches("event: stream").count(), 1, "{collected}");
     assert!(collected.contains("run-42"));
 
     let t0 = Instant::now();
     handle.join();
     assert!(
-        t0.elapsed() < Duration::from_secs(2),
-        "shutdown should unblock listener promptly"
+        t0.elapsed() < Duration::from_millis(500),
+        "condvar shutdown should unblock listener promptly"
     );
 }
 
@@ -540,4 +546,23 @@ fn qr_encoder_and_pairing_url_use_fragment_and_valid_spec_bits() {
     let card = render_pairing_card(&url, false, false, true);
     assert!(card.contains(&url));
     assert!(card.contains("loopback"));
+}
+
+#[test]
+fn slowloris_trickle_headers_hit_total_deadline_408() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = thread::spawn(move || {
+        let mut s = TcpStream::connect(addr).unwrap();
+        for b in b"GET / HTTP/1.1\r\nX-Slow: aaaaaaaaaaaaaaaa" {
+            if s.write_all(&[*b]).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    });
+    let (mut srv, _) = listener.accept().unwrap();
+    let res = read_http_request_with_timeout(&mut srv, Duration::from_millis(120));
+    assert!(matches!(res, Err(ParseError::Status(408, _))));
+    let _ = client.join();
 }

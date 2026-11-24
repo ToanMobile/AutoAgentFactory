@@ -7,18 +7,17 @@
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::reaper::validate_run_id;
+use super::secret_mask::{self, NamedSecret};
 
 /// Maximum bytes written to a single run's stream log (`2 MiB`).
 pub const MAX_STREAM_LOG_BYTES: usize = 2 * 1024 * 1024;
@@ -27,9 +26,9 @@ pub const MAX_TARGET_BYTES: usize = 512;
 
 const STREAMS_DIR: &str = "streams";
 const TRUNCATED_LINE: &str = "{\"type\":\"truncated\"}\n";
-const REDACTED: &str = "[REDACTED]";
 const MIN_ENV_SECRET_CHARS: usize = 4;
 const READ_TAIL_EXTRA_BYTES: usize = 4096;
+const INITIAL_TAIL_WINDOW: u64 = 32 * 1024;
 
 #[derive(Serialize)]
 struct LogEntry<'a> {
@@ -48,6 +47,7 @@ pub struct StreamLog {
     file: Option<File>,
     bytes_written: usize,
     truncated: bool,
+    named_secrets: Vec<NamedSecret>,
     extra_secrets: Vec<String>,
 }
 
@@ -58,6 +58,7 @@ impl StreamLog {
             file: None,
             bytes_written: 0,
             truncated: false,
+            named_secrets: Vec::new(),
             extra_secrets: Vec::new(),
         }
     }
@@ -90,6 +91,7 @@ impl StreamLog {
             file: Some(file),
             bytes_written: 0,
             truncated: false,
+            named_secrets: secret_mask::collect_env_secrets(),
             extra_secrets: normalize_secrets(extra_secrets),
         })
     }
@@ -109,8 +111,9 @@ impl StreamLog {
         if self.truncated || self.file.is_none() {
             return;
         }
-        let clean_tool = tool.map(|t| sanitize_field(t, &self.extra_secrets));
-        let clean_target = target.map(|t| sanitize_field(t, &self.extra_secrets));
+        let clean_tool = tool.map(|t| sanitize_field(t, &self.named_secrets, &self.extra_secrets));
+        let clean_target =
+            target.map(|t| sanitize_field(t, &self.named_secrets, &self.extra_secrets));
         let entry = LogEntry {
             ts: unix_secs(),
             kind,
@@ -155,7 +158,11 @@ impl StreamLog {
         raw_tail: &str,
     ) {
         let exit = format_exit(exit_code);
-        let scrubbed_tail = scrub_secrets(raw_tail, &self.extra_secrets);
+        let scrubbed_tail = secret_mask::mask_named_and_patterns(
+            raw_tail,
+            &self.named_secrets,
+            &self.extra_secrets,
+        );
         let tail_line = scrubbed_tail
             .lines()
             .rev()
@@ -307,7 +314,7 @@ pub fn read_tail_lines(data_dir: &Path, run_id: &str, max_lines: usize) -> io::R
             "stream log path is a symlink or not a regular file",
         ));
     }
-    let file = File::open(&path)?;
+    let mut file = File::open(&path)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -317,23 +324,45 @@ pub fn read_tail_lines(data_dir: &Path, run_id: &str, max_lines: usize) -> io::R
     if max_lines == 0 {
         return Ok(Vec::new());
     }
-    let limit = (MAX_STREAM_LOG_BYTES + READ_TAIL_EXTRA_BYTES) as u64;
-    let mut buf = Vec::new();
-    file.take(limit).read_to_end(&mut buf)?;
-    let text = String::from_utf8_lossy(&buf);
-
-    let mut ring: VecDeque<String> = VecDeque::with_capacity(max_lines.min(1024));
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if ring.len() == max_lines {
-            ring.pop_front();
-        }
-        ring.push_back(trimmed.to_string());
+    let file_len = file.seek(SeekFrom::End(0))?;
+    if file_len == 0 {
+        return Ok(Vec::new());
     }
-    Ok(ring.into_iter().collect())
+    let limit = (MAX_STREAM_LOG_BYTES + READ_TAIL_EXTRA_BYTES) as u64;
+    let max_window = file_len.min(limit);
+    let mut window = INITIAL_TAIL_WINDOW.min(max_window);
+    let mut buf = Vec::new();
+    loop {
+        let offset = file_len.saturating_sub(window);
+        file.seek(SeekFrom::Start(offset))?;
+        buf.clear();
+        std::io::Read::by_ref(&mut file)
+            .take(window)
+            .read_to_end(&mut buf)?;
+        let slice = if offset > 0 {
+            buf.iter()
+                .position(|&b| b == b'\n')
+                .map_or(&[][..], |pos| &buf[pos + 1..])
+        } else {
+            &buf[..]
+        };
+        let text = String::from_utf8_lossy(slice);
+        let mut ring: VecDeque<String> = VecDeque::with_capacity(max_lines.min(1024));
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if ring.len() == max_lines {
+                ring.pop_front();
+            }
+            ring.push_back(trimmed.to_string());
+        }
+        if ring.len() >= max_lines || window >= max_window {
+            return Ok(ring.into_iter().collect());
+        }
+        window = window.saturating_mul(2).min(max_window);
+    }
 }
 
 /// Truncates `text` to at most `max_bytes` on a valid UTF-8 character boundary.
@@ -352,29 +381,12 @@ pub fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 /// prefixes, named process environment secrets (`[secret NAME]`), and exact
 /// runtime values of passed environment secrets.
 pub fn scrub_secrets(input: &str, extra_secrets: &[String]) -> String {
-    let named = super::secret_mask::collect_env_secrets();
-    let mut out = super::secret_mask::mask_named_and_patterns(input, &named, extra_secrets);
-    let Some(patterns) = scrub_patterns() else {
-        return out;
-    };
-    out = patterns.pem_block.replace_all(&out, REDACTED).into_owned();
-    out = patterns.pem_line.replace_all(&out, REDACTED).into_owned();
-    out = patterns
-        .bearer
-        .replace_all(&out, "Bearer [REDACTED]")
-        .into_owned();
-    out = patterns
-        .url_creds
-        .replace_all(&out, "://[REDACTED]@")
-        .into_owned();
-    for key_re in &patterns.api_keys {
-        out = key_re.replace_all(&out, REDACTED).into_owned();
-    }
-    out
+    let named = secret_mask::collect_env_secrets();
+    secret_mask::mask_named_and_patterns(input, &named, extra_secrets)
 }
 
-fn sanitize_field(raw: &str, extra_secrets: &[String]) -> String {
-    let scrubbed = scrub_secrets(raw, extra_secrets);
+fn sanitize_field(raw: &str, named_secrets: &[NamedSecret], extra_secrets: &[String]) -> String {
+    let scrubbed = secret_mask::mask_named_and_patterns(raw, named_secrets, extra_secrets);
     truncate_utf8(&scrubbed, MAX_TARGET_BYTES).to_string()
 }
 
@@ -465,52 +477,80 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-struct ScrubPatterns {
-    pem_block: Regex,
-    pem_line: Regex,
-    bearer: Regex,
-    url_creds: Regex,
-    api_keys: Vec<Regex>,
-}
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
 
-fn compile_parts(parts: &[&str]) -> Option<Regex> {
-    Regex::new(&parts.concat()).ok()
-}
+    #[test]
+    fn read_tail_lines_seeks_backwards_over_large_file_and_discards_partial_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let streams = dir.path().join(STREAMS_DIR);
+        fs::create_dir_all(&streams).unwrap();
+        let path = streams.join("run_large.jsonl");
 
-/// Patterns are assembled from fragments so static secret checks never
-/// false-positive on this source file.
-fn scrub_patterns() -> Option<&'static ScrubPatterns> {
-    static PATTERNS: OnceLock<Option<ScrubPatterns>> = OnceLock::new();
-    PATTERNS
-        .get_or_init(|| {
-            let pem_block = compile_parts(&[
-                "(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE",
-                " KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE",
-                " KEY-----",
-            ])?;
-            let pem_line =
-                compile_parts(&["-----BEGIN (?:[A-Z0-9]+ )*PRIVATE", " KEY-----[^\\r\\n]*"])?;
-            let bearer = Regex::new(r#"(?i)\bBearer[ \t]+[^\s"',;]+"#).ok()?;
-            let url_creds = Regex::new(r#"://[^\s/@:"']+:[^\s/@"']+@"#).ok()?;
-            let api_key_specs: &[&[&str]] = &[
-                &[r"\bsk-", "[A-Za-z0-9_-]{4,}"],
-                &[r"\bgh[pousr]_", "[A-Za-z0-9_]{4,}"],
-                &[r"\bgithub_", "pat_[A-Za-z0-9_]{4,}"],
-                &[r"\bAK", "IA[0-9A-Z]{6,}"],
-                &[r"\bxox[bp]-", "[A-Za-z0-9-]{6,}"],
-                &[r"\bAI", "za[0-9A-Za-z_-]{10,}"],
-            ];
-            let mut api_keys = Vec::with_capacity(api_key_specs.len());
-            for spec in api_key_specs {
-                api_keys.push(compile_parts(spec)?);
-            }
-            Some(ScrubPatterns {
-                pem_block,
-                pem_line,
-                bearer,
-                url_creds,
-                api_keys,
-            })
-        })
-        .as_ref()
+        // ~100 KiB file (> 64 KiB) with multi-byte UTF-8 ('€') so backward seek
+        // lands mid-line and potentially mid-character.
+        let mut content = String::new();
+        for idx in 0..1_300usize {
+            content.push_str(&format!(
+                "{{\"idx\":{idx},\"msg\":\"€€€-payload-padding-0123456789abcdef-{idx:04}\"}}\n"
+            ));
+        }
+        assert!(content.len() > 80 * 1024);
+        fs::write(&path, &content).unwrap();
+
+        // Small tail satisfied within initial 32 KiB window.
+        let tail5 = read_tail_lines(dir.path(), "run_large", 5).unwrap();
+        assert_eq!(tail5.len(), 5);
+        for (offset, line) in tail5.iter().enumerate() {
+            assert!(!line.contains('\u{FFFD}'), "corrupted UTF-8: {line}");
+            let v: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["idx"], 1_295 + offset);
+        }
+
+        // Larger tail forces window growth (32 KiB -> 64 KiB -> 128 KiB).
+        let tail700 = read_tail_lines(dir.path(), "run_large", 700).unwrap();
+        assert_eq!(tail700.len(), 700);
+        assert_eq!(
+            serde_json::from_str::<Value>(&tail700[0]).unwrap()["idx"],
+            600
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&tail700[699]).unwrap()["idx"],
+            1_299
+        );
+
+        // Requesting more than total lines reaches offset 0 and keeps line 0 intact.
+        let all = read_tail_lines(dir.path(), "run_large", 5_000).unwrap();
+        assert_eq!(all.len(), 1_300);
+        assert_eq!(serde_json::from_str::<Value>(&all[0]).unwrap()["idx"], 0);
+    }
+
+    #[test]
+    fn read_tail_lines_handles_empty_single_long_line_and_over_cap_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let streams = dir.path().join(STREAMS_DIR);
+        fs::create_dir_all(&streams).unwrap();
+
+        fs::write(streams.join("run_empty.jsonl"), "").unwrap();
+        assert!(
+            read_tail_lines(dir.path(), "run_empty", 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Single 40 KiB line with no newline forces growth to offset 0.
+        let single = "a".repeat(40 * 1024);
+        fs::write(streams.join("run_single.jsonl"), &single).unwrap();
+        let got = read_tail_lines(dir.path(), "run_single", 5).unwrap();
+        assert_eq!(got, vec![single]);
+
+        // File exceeding MAX_STREAM_LOG_BYTES + READ_TAIL_EXTRA_BYTES still tails cleanly.
+        let mut huge = "x".repeat(MAX_STREAM_LOG_BYTES + READ_TAIL_EXTRA_BYTES + 1024);
+        huge.push_str("\n{\"idx\":1}\n{\"idx\":2}\n{\"idx\":3}\n");
+        fs::write(streams.join("run_huge.jsonl"), &huge).unwrap();
+        let tail = read_tail_lines(dir.path(), "run_huge", 3).unwrap();
+        assert_eq!(tail, vec!["{\"idx\":1}", "{\"idx\":2}", "{\"idx\":3}"]);
+    }
 }

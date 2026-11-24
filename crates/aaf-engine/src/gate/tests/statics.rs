@@ -134,9 +134,13 @@ fn comments_and_docs_do_not_trip_code_only_rules_while_secrets_still_fire() {
     let block_comment = j(&["/* catch (e) {", "} */"]);
     let py_comment = j(&["# except Exception:", " pass"]);
     let doc_log = j(&["console.", "log(example)"]);
-    for line in [&kdoc, &line_comment, &block_comment, &py_comment] {
+    for line in [&kdoc, &line_comment, &block_comment] {
         assert!(rules_hit("src/FooTest.kt", line).is_empty(), "{line}");
     }
+    assert!(
+        rules_hit("src/foo.py", &py_comment).is_empty(),
+        "{py_comment}"
+    );
     assert!(rules_hit("docs/notes.md", &j(&["catch (e) {", "}"])).is_empty());
     assert!(rules_hit("docs/notes.md", &doc_log).is_empty());
     // Two-line form inside KDoc is ignored.

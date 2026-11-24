@@ -15,7 +15,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
-use validate::{entry_problem, forbidden_env};
+pub use validate::{command_program, sole_program};
+use validate::{entry_matcher, entry_problem, forbidden_env, is_ours};
 
 /// Tools whose calls the hook judges (PLAN C.3).
 pub const HOOK_TOOLS: [&str; 5] = ["Bash", "Write", "Edit", "MultiEdit", "Read"];
@@ -124,110 +125,6 @@ pub fn shell_quote(path: &str) -> String {
     }
 }
 
-/// The first shell word of `command` with its quoting removed. Only to
-/// recognise an entry as ours (whatever follows the word); whether the
-/// entry may stand is [`sole_program`]'s question.
-pub fn command_program(command: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut seen = false;
-    let mut chars = command.trim_start().chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                seen = true;
-                out.extend(chars.by_ref().take_while(|q| *q != '\''));
-            }
-            '"' => {
-                seen = true;
-                while let Some(q) = chars.next() {
-                    match q {
-                        '"' => break,
-                        '\\' => out.extend(chars.next()),
-                        _ => out.push(q),
-                    }
-                }
-            }
-            '\\' => {
-                seen = true;
-                out.extend(chars.next());
-            }
-            c if c.is_whitespace() => break,
-            c => {
-                seen = true;
-                out.push(c);
-            }
-        }
-    }
-    seen.then_some(out)
-}
-
-/// The program `command` runs, when the command is that program and nothing
-/// else: one name or path, optionally quoted. Claude Code hands the command
-/// to a shell, so anything further (`|| true`, a redirection, a substitution,
-/// an argument) can throw the hook's verdict away while the entry still
-/// looks registered.
-pub fn sole_program(command: &str) -> Result<String, String> {
-    let reject = || {
-        format!(
-            "the command {command:?} must be only the program {HOOK_BINARY} (its name or an \
-             absolute path, optionally quoted), with no argument, redirection or shell operator"
-        )
-    };
-    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
-    let raw = command.trim();
-    // `NAME=value` alone is an assignment: the shell runs nothing and exits 0.
-    let name = raw
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .count();
-    if name > 0 && raw[name..].starts_with('=') {
-        return Err(reject());
-    }
-    let mut out = String::new();
-    let mut chars = raw.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => loop {
-                match chars.next() {
-                    Some('\'') => break,
-                    Some(quoted) => out.push(quoted),
-                    None => return Err(reject()),
-                }
-            },
-            '"' => loop {
-                match chars.next() {
-                    Some('"') => break,
-                    // Expansions and escapes work inside double quotes.
-                    Some(quoted) if !"$`\\".contains(quoted) => out.push(quoted),
-                    _ => return Err(reject()),
-                }
-            },
-            // Only `\'`, which is how `shell_quote` writes a quote.
-            '\\' => match chars.next() {
-                Some('\'') => out.push('\''),
-                _ => return Err(reject()),
-            },
-            c if plain(c) => out.push(c),
-            _ => return Err(reject()),
-        }
-    }
-    if out.is_empty() {
-        return Err(reject());
-    }
-    Ok(out)
-}
-
-fn is_ours(hook: &Value) -> bool {
-    hook.get("command")
-        .and_then(Value::as_str)
-        .and_then(command_program)
-        .is_some_and(|program| {
-            Path::new(&program)
-                .file_name()
-                .is_some_and(|name| name == HOOK_BINARY)
-        })
-}
-
 fn parse(text: &str) -> Result<Value, String> {
     // An empty file is what a careless `touch` leaves; nothing is lost by
     // treating it as an empty object.
@@ -242,27 +139,46 @@ fn parse(text: &str) -> Result<Value, String> {
     }
 }
 
+struct HookEntry {
+    registered: Registered,
+    matcher_valid: bool,
+    problem: Option<String>,
+}
+
 /// Every `aaf-hook` entry under `hooks.PreToolUse`, each with what keeps it
 /// from blocking (`None`: nothing).
-fn entries(root: &Value) -> Vec<(Registered, Option<String>)> {
+fn entries(root: &Value) -> Vec<HookEntry> {
     let entries = root
         .get("hooks")
         .and_then(|hooks| hooks.get("PreToolUse"))
         .and_then(Value::as_array);
     let mut found = Vec::new();
     for entry in entries.into_iter().flatten() {
-        let matcher = entry.get("matcher").and_then(Value::as_str).unwrap_or("");
+        let (matcher, matcher_valid, matcher_problem) = match entry_matcher(entry) {
+            Ok(m) => (m.to_string(), true, None),
+            Err(problem) => (
+                entry
+                    .get("matcher")
+                    .map_or_else(String::new, Value::to_string),
+                false,
+                Some(problem),
+            ),
+        };
         let hooks = entry.get("hooks").and_then(Value::as_array);
         for hook in hooks.into_iter().flatten().filter(|hook| is_ours(hook)) {
             let registered = Registered {
-                matcher: matcher.to_string(),
+                matcher: matcher.clone(),
                 command: hook
                     .get("command")
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
             };
-            found.push((registered, entry_problem(hook)));
+            found.push(HookEntry {
+                registered,
+                matcher_valid,
+                problem: matcher_problem.clone().or_else(|| entry_problem(hook)),
+            });
         }
     }
     found
@@ -270,7 +186,13 @@ fn entries(root: &Value) -> Vec<(Registered, Option<String>)> {
 
 /// The registered `aaf-hook` entries of a settings file, for `aaf doctor`.
 pub fn find_hooks(text: &str) -> Result<Vec<Registered>, String> {
-    parse(text).map(|root| entries(&root).into_iter().map(|(hook, _)| hook).collect())
+    parse(text).map(|root| {
+        entries(&root)
+            .into_iter()
+            .filter(|entry| entry.matcher_valid)
+            .map(|entry| entry.registered)
+            .collect()
+    })
 }
 
 /// True when `matcher` sends every tool in [`HOOK_TOOLS`] to the hook.
@@ -305,19 +227,32 @@ pub fn covering_hook(text: &str) -> Result<Registered, String> {
     let hooks = entries(&root);
     let mut covering = hooks
         .iter()
-        .filter(|(hook, _)| matcher_covers_all(&hook.matcher));
-    if let Some((hook, _)) = covering.clone().find(|(_, problem)| problem.is_none()) {
-        if let Some(problem) = forbidden_env(&root, !hook.command.contains('/')) {
+        .filter(|e| e.matcher_valid && matcher_covers_all(&e.registered.matcher));
+    if let Some(entry) = covering.clone().find(|e| e.problem.is_none()) {
+        if let Some(problem) = forbidden_env(&root) {
             return Err(problem);
         }
-        return Ok(hook.clone());
+        return Ok(entry.registered.clone());
     }
-    Err(match (covering.next(), hooks.first()) {
-        (Some((_, Some(problem))), _) => problem.clone(),
-        (_, Some((hook, _))) => {
-            format!("matcher {:?} does not cover {}", hook.matcher, matcher())
+    if let Some(problem) = covering.find_map(|e| e.problem.as_ref()) {
+        return Err(problem.clone());
+    }
+    if let Some(problem) = hooks
+        .iter()
+        .filter(|e| !e.matcher_valid)
+        .find_map(|e| e.problem.as_ref())
+    {
+        return Err(problem.clone());
+    }
+    Err(match hooks.first() {
+        Some(entry) => {
+            format!(
+                "matcher {:?} does not cover {}",
+                entry.registered.matcher,
+                matcher()
+            )
         }
-        _ => format!("no PreToolUse entry runs {HOOK_BINARY}"),
+        None => format!("no PreToolUse entry runs {HOOK_BINARY}"),
     })
 }
 
@@ -332,7 +267,7 @@ pub fn check_local(text: &str) -> Result<(), String> {
             ));
         }
     }
-    if let Some(problem) = forbidden_env(&root, true) {
+    if let Some(problem) = forbidden_env(&root) {
         return Err(format!("it sets {problem}"));
     }
     Ok(())
@@ -557,7 +492,12 @@ pub fn merge_hook(
     };
     let current = entries(&root);
     // An entry with a key that keeps it from blocking is rewritten too.
-    if existing.is_some() && current == [(wanted.clone(), None)] {
+    if existing.is_some()
+        && matches!(
+            current.as_slice(),
+            [only] if only.matcher_valid && only.problem.is_none() && only.registered == wanted
+        )
+    {
         return Ok((None, HookChange::Unchanged));
     }
     let change = if current.is_empty() {

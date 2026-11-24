@@ -6,112 +6,32 @@
 use std::path::Path;
 
 use crate::shell::{self, Cmd};
-use crate::{Ctx, Denial, delete_guard, paths, secret_guard};
+use crate::{Ctx, Denial, data_guard, delete_guard, git_files, paths, secret_guard};
+
+mod parse;
+
+use parse::{
+    Interp, classify_interpreter, extract_delimited_commands, extract_literals,
+    extract_space_call_commands, has_space_call, inline_payloads, normalize_api_haystack,
+};
 
 pub const RULE: &str = "interp_guard";
 
-const INTERPRETERS: &[&str] = &[
-    "python", "python3", "python2", "node", "nodejs", "perl", "ruby", "php",
-];
+/// True when `name` is a supported interpreter (including versioned forms like `python3.12`).
+pub(crate) fn is_interpreter(name: &str) -> bool {
+    classify_interpreter(name).is_some()
+}
 
 fn deny(reason: String, fix: &str) -> Denial {
     Denial::new(RULE, reason, fix)
 }
 
-/// Extracts inline code payloads passed via `-c`, `-e`, `--eval`, `-r`, `-p`, `-n`.
-fn inline_payloads(name: &str, args: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        if arg == "--" {
-            break;
-        }
-        let is_code_flag = match name {
-            "python" | "python3" | "python2" => arg == "-c",
-            "node" | "nodejs" => matches!(arg, "-e" | "--eval" | "-p" | "--print"),
-            "perl" => matches!(arg, "-e" | "-E"),
-            "ruby" => arg == "-e",
-            "php" => arg == "-r",
-            _ => false,
-        };
-        if is_code_flag {
-            if let Some(code) = args.get(i + 1) {
-                out.push(code.clone());
-            }
-            i += 2;
-            continue;
-        }
-        // Handle glued `-c...` or `-e...` or `--eval=...`.
-        if let Some(rest) = arg.strip_prefix("--eval=") {
-            out.push(rest.to_string());
-        } else if matches!(name, "python" | "python3" | "python2")
-            && let Some(rest) = arg.strip_prefix("-c")
-            && !rest.is_empty()
-        {
-            out.push(rest.to_string());
-        } else if matches!(name, "node" | "nodejs" | "perl" | "ruby")
-            && let Some(rest) = arg.strip_prefix("-e")
-            && !rest.is_empty()
-        {
-            out.push(rest.to_string());
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Extracts single- and double-quoted string literals from an inline script.
-fn extract_literals(code: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let chars: Vec<char> = code.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let q = chars[i];
-        if q != '\'' && q != '"' && q != '`' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        let mut buf = String::new();
-        while i < chars.len() {
-            let c = chars[i];
-            if c == '\\' && i + 1 < chars.len() {
-                buf.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if c == q {
-                i += 1;
-                break;
-            }
-            buf.push(c);
-            i += 1;
-        }
-        if !buf.is_empty() {
-            out.push(buf);
-        }
-    }
-    out
-}
-
-/// Extracts inline shell-like list invocations such as `['git', 'reset', '--hard']`.
 fn extract_bracket_commands(code: &str) -> Vec<String> {
-    let mut cmds = Vec::new();
-    let mut start = 0;
-    while let Some(open) = code[start..].find('[') {
-        let abs_open = start + open;
-        let Some(close) = code[abs_open + 1..].find(']') else {
-            break;
-        };
-        let inside = &code[abs_open + 1..abs_open + 1 + close];
-        let lits = extract_literals(inside);
-        if lits.len() >= 2 {
-            cmds.push(lits.join(" "));
-        }
-        start = abs_open + 1 + close + 1;
-    }
-    cmds
+    extract_delimited_commands(code, '[', ']')
+}
+
+fn extract_call_commands(code: &str) -> Vec<String> {
+    extract_delimited_commands(code, '(', ')')
 }
 
 fn has_any(haystack: &str, needles: &[&str]) -> bool {
@@ -128,6 +48,7 @@ const SHELL_EXEC_APIS: &[&str] = &[
     "child_process",
     "system(",
     "exec(",
+    "passthru(",
     "qx/",
     "qx{",
     "qx(",
@@ -144,17 +65,107 @@ const RMTREE_APIS: &[&str] = &[
     "remove_tree(",
 ];
 
+const FILE_DELETE_APIS: &[&str] = &[
+    "os.unlink(",
+    "os.remove(",
+    "os.rmdir(",
+    "os.rename(",
+    "os.replace(",
+    ".unlink(",
+];
+
 const FILE_READ_APIS: &[&str] = &[
     "open(",
     "Path(",
     "readFileSync(",
     "readFile(",
     "File.read(",
+    "File.readlines(",
+    "File.binread(",
     "IO.read(",
+    "IO.readlines(",
+    "IO.binread(",
     "file_get_contents(",
+    "readfile(",
+    "file(",
+    "parse_ini_file(",
+    "highlight_file(",
+    "show_source(",
 ];
 
-fn inspect_payload(interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
+const PERL_RUBY_SPACE_READ_APIS: &[&str] = &[
+    "open",
+    "File.read",
+    "File.open",
+    "File.readlines",
+    "File.binread",
+    "IO.read",
+    "IO.readlines",
+    "IO.binread",
+];
+
+const PHP_INCLUDE_APIS: &[&str] = &[
+    "include(",
+    "include_once(",
+    "require(",
+    "require_once(",
+    "include ",
+    "include_once ",
+    "require ",
+    "require_once ",
+    "include'",
+    "include\"",
+    "include_once'",
+    "include_once\"",
+    "require'",
+    "require\"",
+    "require_once'",
+    "require_once\"",
+];
+
+fn check_protected_path(
+    trimmed: &str,
+    takes_dirs: bool,
+    interp: &str,
+    ctx: &Ctx,
+) -> Option<Denial> {
+    if let Some(d) = delete_guard::target(trimmed, takes_dirs, interp, ctx) {
+        return Some(deny(
+            format!("{interp} delete of protected path blocked: {}", d.reason),
+            &d.fix,
+        ));
+    }
+    let check_git_and_data = |expanded: &Path| {
+        if let Some(d) = git_files::check_file(expanded) {
+            return Some(deny(
+                format!("{interp} delete of git file blocked: {}", d.reason),
+                &d.fix,
+            ));
+        }
+        if let Some(d) = data_guard::check_file(trimmed, expanded, ctx) {
+            return Some(deny(
+                format!("{interp} delete of data dir blocked: {}", d.reason),
+                &d.fix,
+            ));
+        }
+        None
+    };
+    let expanded = ctx.expand(trimmed);
+    if let Some(d) = check_git_and_data(&expanded) {
+        return Some(d);
+    }
+    if trimmed.contains("..") {
+        let real_dd = ctx.expand_real_dotdot(trimmed);
+        if real_dd != expanded
+            && let Some(d) = check_git_and_data(&real_dd)
+        {
+            return Some(d);
+        }
+    }
+    None
+}
+
+fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
     // Strip pure comment lines so comments inside multiline scripts do not trip.
     let active: String = code
         .lines()
@@ -164,10 +175,11 @@ fn inspect_payload(interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let api_haystack = normalize_api_haystack(&active, interp_kind == Interp::Php);
     let literals = extract_literals(&active);
 
     // 1. Check recursive delete APIs (`shutil.rmtree`, `fs.rmSync`, `FileUtils.rm_rf`, ...).
-    if has_any(&active, RMTREE_APIS) {
+    if has_any(&api_haystack, RMTREE_APIS) {
         let mut saw_path_literal = false;
         for lit in &literals {
             let trimmed = lit.trim();
@@ -186,12 +198,8 @@ fn inspect_payload(interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
                     &d.fix,
                 ));
             }
-            let expanded = ctx.expand(trimmed);
-            if let Some(d) = delete_guard::check_file(&expanded, ctx) {
-                return Some(deny(
-                    format!("{interp} delete of protected path blocked: {}", d.reason),
-                    &d.fix,
-                ));
+            if let Some(d) = check_protected_path(trimmed, true, interp, ctx) {
+                return Some(d);
             }
         }
         if !saw_path_literal {
@@ -202,37 +210,72 @@ fn inspect_payload(interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
         }
     }
 
-    // 2. Check shell-execution APIs (`os.system`, `subprocess.*`, `execSync`, `system(...)`, ...).
-    if has_any(&active, SHELL_EXEC_APIS) {
-        let mut candidates: Vec<String> = literals.clone();
-        candidates.extend(extract_bracket_commands(&active));
-        for snippet in &candidates {
-            let script = shell::parse(snippet);
-            for sub in &script.cmds {
-                if let Some(d) = crate::judge(sub, ctx) {
-                    return Some(deny(
-                        format!(
-                            "{interp} wrapped blocked command ({}): {}",
-                            d.rule, d.reason
-                        ),
-                        &d.fix,
-                    ));
-                }
+    // 2. Check single-file delete/rename APIs (`os.unlink`, `os.remove`, `os.rmdir`, `os.rename`, `os.replace`).
+    if has_any(&api_haystack, FILE_DELETE_APIS) {
+        let takes_dirs = has_any(&api_haystack, &["os.rmdir(", "os.rename(", "os.replace("]);
+        for lit in &literals {
+            let trimmed = lit.trim();
+            if trimmed.is_empty() || trimmed.contains('\n') {
+                continue;
+            }
+            if let Some(d) = check_protected_path(trimmed, takes_dirs, interp, ctx) {
+                return Some(d);
             }
         }
     }
 
-    // 3. Check secret file reads (`open('.env')`, `readFileSync('.env')`, ...).
-    if has_any(&active, FILE_READ_APIS) {
+    // 3. Check shell-execution APIs (`os.system`, `subprocess.*`, `execSync`, `system(...)`, Perl/Ruby `system '...'`, ...).
+    let perl_ruby = matches!(interp_kind, Interp::Perl | Interp::Ruby);
+    let has_shell_exec = has_any(&api_haystack, SHELL_EXEC_APIS)
+        || (perl_ruby && has_space_call(&active, &["system", "exec"]));
+    if has_shell_exec {
+        if ctx.depth >= shell::MAX_DEPTH {
+            return Some(deny(
+                format!("{interp} shell execution is nested too deeply to analyse"),
+                "rewrite as plain commands without nested interpreters",
+            ));
+        }
+        let mut candidates: Vec<String> = literals.clone();
+        candidates.extend(extract_bracket_commands(&active));
+        candidates.extend(extract_call_commands(&active));
+        if perl_ruby {
+            candidates.extend(extract_space_call_commands(&active));
+        }
+        for snippet in &candidates {
+            if let Some(d) = crate::bash(snippet, ctx.nested()) {
+                return Some(deny(
+                    format!(
+                        "{interp} wrapped blocked command ({}): {}",
+                        d.rule, d.reason
+                    ),
+                    &d.fix,
+                ));
+            }
+        }
+    }
+
+    // 4. Check secret file reads (`open('.env')`, `readFileSync('.env')`, PHP `include`/`require`, Ruby `File.read '.env'`, ...).
+    let php_include = interp_kind == Interp::Php && has_any(&api_haystack, PHP_INCLUDE_APIS);
+    let ruby_space_read = perl_ruby && has_space_call(&active, PERL_RUBY_SPACE_READ_APIS);
+    if has_any(&api_haystack, FILE_READ_APIS) || php_include || ruby_space_read {
         for lit in &literals {
             let trimmed = lit.trim();
             if trimmed.is_empty() || trimmed.contains('\n') {
                 continue;
             }
             let expanded = ctx.expand(trimmed);
-            if let Some(pat) = secret_guard::secret_pattern(&expanded)
-                .or_else(|| paths::is_secret_file(Path::new(trimmed)))
-            {
+            let pat = secret_guard::secret_pattern(&expanded)
+                .or_else(|| {
+                    if !trimmed.contains("..") {
+                        return None;
+                    }
+                    let real_dd = ctx.expand_real_dotdot(trimmed);
+                    (real_dd != expanded)
+                        .then(|| secret_guard::secret_pattern(&real_dd))
+                        .flatten()
+                })
+                .or_else(|| paths::is_secret_file(Path::new(trimmed)));
+            if let Some(pat) = pat {
                 return Some(deny(
                     format!("{interp} attempts to read secret file `{trimmed}` (pattern {pat})"),
                     "do not read secret/credential files from inline scripts; use .env.example",
@@ -244,13 +287,38 @@ fn inspect_payload(interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
     None
 }
 
+/// True when `code` mentions any shell-exec, recursive-delete, file-delete, or
+/// file-read API guarded by [`inspect_payload`].
+pub(crate) fn has_dangerous_api(code: &str) -> bool {
+    let norm = normalize_api_haystack(code, false);
+    let lower = normalize_api_haystack(code, true);
+    let check = |hay: &str| {
+        has_any(hay, SHELL_EXEC_APIS)
+            || has_any(hay, RMTREE_APIS)
+            || has_any(hay, FILE_DELETE_APIS)
+            || has_any(hay, FILE_READ_APIS)
+    };
+    check(&norm)
+        || check(&lower)
+        || has_space_call(code, &["system", "exec"])
+        || has_space_call(code, PERL_RUBY_SPACE_READ_APIS)
+}
+
 pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let name = cmd.name();
-    if !INTERPRETERS.contains(&name) {
-        return None;
+    let interp = classify_interpreter(name)?;
+    for payload in inline_payloads(interp, cmd.args()) {
+        if let Some(denial) = inspect_payload(interp, name, &payload, ctx) {
+            return Some(denial);
+        }
     }
-    for payload in inline_payloads(name, cmd.args()) {
-        if let Some(denial) = inspect_payload(name, &payload, ctx) {
+    for payload in shell::stdin_scripts(&cmd.redirects, cmd.feeder.as_deref()) {
+        if let Some(denial) = inspect_payload(interp, name, &payload, ctx) {
+            return Some(denial);
+        }
+    }
+    for payload in &cmd.heredocs {
+        if let Some(denial) = inspect_payload(interp, name, payload, ctx) {
             return Some(denial);
         }
     }

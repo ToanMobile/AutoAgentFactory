@@ -225,9 +225,9 @@ impl AgentRunner for ClaudeCodeRunner {
             final_text: summary.final_text,
             tokens_in: summary.tokens_in,
             tokens_out: summary.tokens_out,
-            limit_hit: summary.limit_hit,
             // A run that timed out was cut off by aaf: whatever it said last
             // is not why it ended.
+            limit_hit: summary.limit_hit.filter(|_| !output.timed_out),
             infra: summary.infra.filter(|_| !output.timed_out),
             log_tail: output.tail,
         })

@@ -22,13 +22,20 @@ fn takes_value(flag: &str) -> bool {
             | "--field"
             | "--raw-field"
             | "--header"
-            | "-h"
             | "--jq"
             | "-q"
             | "--template"
             | "-t"
             | "--input"
+            | "-p"
+            | "--preview"
+            | "--cache"
     )
+}
+
+fn normalize_endpoint(endpoint: &str) -> String {
+    let without_query = endpoint.split(['?', '#']).next().unwrap_or(endpoint);
+    without_query.trim_end_matches('/').to_ascii_lowercase()
 }
 
 fn is_gh(cmd: &shell::Cmd) -> bool {
@@ -74,27 +81,33 @@ pub fn check(cmd: &shell::Cmd) -> Option<Denial> {
     }
 
     if first == "api" {
-        let endpoint = positionals.get(1).copied().unwrap_or("");
-        let lower_ep = endpoint.to_ascii_lowercase();
-        let is_rest_merge = lower_ep.contains("/pulls/") && lower_ep.ends_with("/merge")
-            || lower_ep.starts_with("pulls/") && lower_ep.ends_with("/merge");
-        if is_rest_merge {
-            return Some(Denial::new(
-                RULE,
-                format!("direct `gh api {endpoint}` bypasses the locked merge gate"),
-                FIX,
-            ));
+        let mut is_graphql = false;
+        for &endpoint in positionals.iter().skip(1) {
+            let norm = normalize_endpoint(endpoint);
+            let segs: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
+            if matches!(segs.as_slice(), [.., "pulls", _, "merge"]) {
+                return Some(Denial::new(
+                    RULE,
+                    format!("direct `gh api {endpoint}` bypasses the locked merge gate"),
+                    FIX,
+                ));
+            }
+            is_graphql |= segs.last() == Some(&"graphql");
         }
-        if lower_ep == "graphql"
-            && args
+        if is_graphql {
+            let has_merge = |text: &str| text.to_ascii_lowercase().contains("mergepullrequest");
+            let in_args = args.iter().any(|a| has_merge(a));
+            let in_stdin = shell::stdin_scripts(&cmd.redirects, cmd.feeder.as_deref())
                 .iter()
-                .any(|a| a.to_ascii_lowercase().contains("mergepullrequest"))
-        {
-            return Some(Denial::new(
-                RULE,
-                "direct GraphQL `mergePullRequest` bypasses the locked merge gate",
-                FIX,
-            ));
+                .any(|s| has_merge(s));
+            let in_heredocs = cmd.heredocs.iter().any(|h| has_merge(h));
+            if in_args || in_stdin || in_heredocs {
+                return Some(Denial::new(
+                    RULE,
+                    "direct GraphQL `mergePullRequest` bypasses the locked merge gate",
+                    FIX,
+                ));
+            }
         }
     }
 

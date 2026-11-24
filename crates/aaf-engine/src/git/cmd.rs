@@ -3,7 +3,7 @@
 
 use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -65,8 +65,26 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
     rx
 }
 
+/// Sends SIGKILL to the child's entire process group on Unix so git helpers
+/// (ssh, credential helpers, hook scripts) are terminated with it, then falls
+/// back to `child.kill()`. Uses `/bin/kill` because `unsafe_code = "forbid"`.
+fn kill_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+}
+
 /// Runs `cmd` to completion with stdin closed. A run that exceeds `timeout`
-/// is killed and reported as `io::ErrorKind::TimedOut`.
+/// is killed (along with its process group on Unix) and reported as
+/// `io::ErrorKind::TimedOut`.
 pub fn run(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
     // Set once the child is reaped (or on any return before): the readers
     // then end with what the child wrote, even while a copy of a stream
@@ -77,6 +95,11 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
     cmd.stdin(Stdio::null())
         .stdout(stdout_end)
         .stderr(stderr_end);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn()?;
     // The builder is the caller's and would keep this process's copies of
     // the child's ends open for as long as it lives.
@@ -86,17 +109,26 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
     let stdout = drain(Some(stdout));
     let stderr = drain(Some(stderr));
     let deadline = Instant::now() + timeout;
+    let mut poll = Duration::from_millis(2);
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(err) => {
+                kill_process_group(&mut child);
+                let _ = child.wait();
+                return Err(err);
+            }
         }
-        if Instant::now() >= deadline {
-            // Best effort: the child may have exited in between.
-            let _ = child.kill();
+        let now = Instant::now();
+        if now >= deadline {
+            // Best effort: kill the whole process group before reaping.
+            kill_process_group(&mut child);
             let _ = child.wait();
             return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
         }
-        thread::sleep(Duration::from_millis(2));
+        thread::sleep(poll.min(deadline - now));
+        poll = (poll * 2).min(Duration::from_millis(50));
     };
     exited.mark();
     // Empty stdout would read as an answer ("nothing changed"): output that
@@ -166,5 +198,20 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
         Ok(out.stdout.trim().to_string())
     } else {
         Err(failure(args, &out))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn run_timeout_kills_process_group() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 30 & wait"]);
+        let err = run(&mut cmd, Duration::from_millis(80)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 }

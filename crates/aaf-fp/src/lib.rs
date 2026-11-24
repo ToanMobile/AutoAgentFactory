@@ -10,6 +10,7 @@ mod stale;
 mod tests;
 mod tools;
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -200,6 +201,92 @@ pub fn git_or_none(
 
 static TEMP_INDEX_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Resolved git repository paths needed by fingerprinting and worktree lookups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitLayout {
+    pub git_dir: PathBuf,
+    pub common_dir: PathBuf,
+    pub index: PathBuf,
+    pub objects: PathBuf,
+}
+
+impl GitLayout {
+    /// Main repository checkout root derived from `common_dir`.
+    pub fn common_repo_root(&self) -> &Path {
+        match self.common_dir.parent() {
+            Some(parent)
+                if self
+                    .common_dir
+                    .file_name()
+                    .is_some_and(|name| name == ".git") =>
+            {
+                parent
+            }
+            _ => &self.common_dir,
+        }
+    }
+}
+
+/// Probes `git_dir`, `common_dir`, `index`, and `objects` in a single
+/// `git rev-parse` invocation, falling back to individual calls if the
+/// installed git does not return 4 lines for `--path-format=absolute`.
+pub fn probe_git_layout(repo_root: &Path, timeout: Duration) -> Result<GitLayout, FpError> {
+    probe_git_layout_using(&GitCall::plain(repo_root, timeout))
+}
+
+fn resolve_git_path(repo_root: &Path, raw: &str) -> PathBuf {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    }
+}
+
+fn probe_git_layout_using(call: &GitCall<'_>) -> Result<GitLayout, FpError> {
+    let single_args = [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+        "--git-path",
+        "index",
+        "--git-path",
+        "objects",
+    ];
+    match git_raw(call, &single_args, &[], None) {
+        Ok(stdout) => {
+            let lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+            if lines.len() == 4 {
+                return Ok(GitLayout {
+                    git_dir: resolve_git_path(call.repo, lines[0]),
+                    common_dir: resolve_git_path(call.repo, lines[1]),
+                    index: resolve_git_path(call.repo, lines[2]),
+                    objects: resolve_git_path(call.repo, lines[3]),
+                });
+            }
+        }
+        Err(Failure::Other(err)) => return Err(err),
+        Err(Failure::Exit { .. }) => {}
+    }
+    let run = |args: &[&str]| -> Result<String, FpError> {
+        let label = args.first().copied().unwrap_or("");
+        git_raw(call, args, &[], None)
+            .map(|stdout| stdout.trim().to_string())
+            .map_err(|failure| failure.into_error(label))
+    };
+    let git_dir = PathBuf::from(run(&["rev-parse", "--absolute-git-dir"])?);
+    let common_dir = resolve_git_path(call.repo, &run(&["rev-parse", "--git-common-dir"])?);
+    let index = resolve_git_path(call.repo, &run(&["rev-parse", "--git-path", "index"])?);
+    let objects = resolve_git_path(call.repo, &run(&["rev-parse", "--git-path", "objects"])?);
+    Ok(GitLayout {
+        git_dir,
+        common_dir,
+        index,
+        objects,
+    })
+}
+
 /// Content fingerprint of the work tree: the git tree hash of every tracked
 /// and untracked, non-ignored file. Committing the same content does not
 /// change it; adding, editing or deleting any such file does.
@@ -212,46 +299,49 @@ pub fn tree_fp(repo_root: &Path, timeout: Duration) -> Result<String, FpError> {
     tree_fp_using(&GitCall::plain(repo_root, timeout))
 }
 
+/// [`tree_fp`] using a previously probed [`GitLayout`], avoiding redundant
+/// `git rev-parse` subprocesses.
+pub fn tree_fp_with_layout(
+    repo_root: &Path,
+    layout: &GitLayout,
+    timeout: Duration,
+) -> Result<String, FpError> {
+    tree_fp_with_layout_using(&GitCall::plain(repo_root, timeout), layout)
+}
+
 fn tree_fp_using(call: &GitCall<'_>) -> Result<String, FpError> {
-    let repo_root = call.repo;
+    let layout = probe_git_layout_using(call)?;
+    tree_fp_with_layout_using(call, &layout)
+}
+
+fn tree_fp_with_layout_using(call: &GitCall<'_>, layout: &GitLayout) -> Result<String, FpError> {
     let git = |args: &[&str], envs: &[(&str, &OsStr)]| -> Result<String, FpError> {
         let label = args.first().copied().unwrap_or("");
         git_raw(call, args, envs, None)
             .map(|stdout| stdout.trim().to_string())
             .map_err(|failure| failure.into_error(label))
     };
-    let git_dir = git(&["rev-parse", "--absolute-git-dir"], &[])?;
     // A run that was killed could not clean up after itself.
-    stale::sweep(
-        Path::new(&git_dir),
-        std::process::id(),
-        &stale::process_alive,
-    );
-    let git_path = |name: &str| -> Result<PathBuf, FpError> {
-        let path = git(&["rev-parse", "--git-path", name], &[])?;
-        Ok(if Path::new(&path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            repo_root.join(path)
-        })
-    };
-    let index = git_path("index")?;
-    // Of the main repository when `repo_root` is a linked worktree.
-    let store = git_path("objects")?;
+    stale::sweep(&layout.git_dir, std::process::id(), &stale::process_alive);
     let seq = TEMP_INDEX_SEQ.fetch_add(1, Ordering::Relaxed);
     let tag = format!("{}-{seq}", std::process::id());
-    let temp = Path::new(&git_dir).join(format!("{}{tag}", stale::INDEX_PREFIX));
-    let objects = Path::new(&git_dir).join(format!("{}{tag}", stale::OBJECTS_PREFIX));
+    let temp = layout.git_dir.join(format!("{}{tag}", stale::INDEX_PREFIX));
+    let objects = layout
+        .git_dir
+        .join(format!("{}{tag}", stale::OBJECTS_PREFIX));
     let tree = (|| {
         fs::create_dir_all(&objects)?;
-        if index.exists() {
+        if layout.index.exists() {
             // Start from the real index so unchanged files are not re-hashed.
-            fs::copy(&index, &temp)?;
+            fs::copy(&layout.index, &temp)?;
         }
         let env = [
             ("GIT_INDEX_FILE", temp.as_os_str()),
             ("GIT_OBJECT_DIRECTORY", objects.as_os_str()),
-            ("GIT_ALTERNATE_OBJECT_DIRECTORIES", store.as_os_str()),
+            (
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                layout.objects.as_os_str(),
+            ),
         ];
         // `--sparse`: in a sparse checkout a plain `git add -A` exits 1 as
         // soon as a file on disk lies outside the sparse definition. Entries
@@ -313,14 +403,14 @@ fn should_remove_legacy_fp(
     name: &str,
     path: &Path,
     own_pid: u32,
-    alive: &dyn Fn(u32) -> bool,
+    is_alive: &mut impl FnMut(u32) -> bool,
     now: SystemTime,
 ) -> bool {
     let Some(rest) = name.strip_prefix(LEGACY_FP_PREFIX) else {
         return false;
     };
     if let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) {
-        return pid != own_pid && !alive(pid);
+        return pid != own_pid && !is_alive(pid);
     }
     fs::symlink_metadata(path)
         .and_then(|meta| meta.modified())
@@ -336,6 +426,8 @@ fn sweep_stale_in(
     now: SystemTime,
 ) -> Result<usize, FpError> {
     let mut removed_count = 0usize;
+    let mut alive_cache: HashMap<u32, bool> = HashMap::new();
+    let mut is_alive = |pid: u32| *alive_cache.entry(pid).or_insert_with(|| alive(pid));
     for entry in fs::read_dir(git_dir)?.filter_map(Result::ok) {
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
@@ -343,9 +435,9 @@ fn sweep_stale_in(
         };
         let path = entry.path();
         let eligible = if let Some(pid) = stale_pid(name_str) {
-            pid != own_pid && !alive(pid)
+            pid != own_pid && !is_alive(pid)
         } else {
-            should_remove_legacy_fp(name_str, &path, own_pid, alive, now)
+            should_remove_legacy_fp(name_str, &path, own_pid, &mut is_alive, now)
         };
         if !eligible {
             continue;

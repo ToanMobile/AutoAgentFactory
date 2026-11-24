@@ -2,6 +2,8 @@
 //! `aaf run` was started in, plus the names `run.env_pass` adds, minus the
 //! names nobody may add.
 
+use std::path::Path;
+
 use aaf_domain::ports::{PortError, PortResult};
 
 use super::ExecEnv;
@@ -98,6 +100,38 @@ pub fn agent_env(env: &ExecEnv, set: &[(String, String)]) -> Vec<(String, String
     out
 }
 
+/// Credential-shaped variable names aligned with [`super::secret_mask`]:
+/// only the machine config (tier 1) may hand these on.
+const CREDENTIAL_EXACT: [&str; 2] = ["TOKEN", "SECRET"];
+const CREDENTIAL_SUBSTRINGS: [&str; 10] = [
+    "_TOKEN",
+    "_KEY",
+    "_SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "DATABASE_URL",
+    "AUTH_HEADER",
+    "BEARER",
+    "COOKIE",
+];
+const CREDENTIAL_EXCLUDED_EXACT: [&str; 2] = ["SSH_AUTH_SOCK", "KEYMAP"];
+const CREDENTIAL_EXCLUDED_SUBSTRINGS: [&str; 2] = ["PUBLIC_KEY", "KEYMAP"];
+
+fn is_credential_env_name(upper: &str) -> bool {
+    if CREDENTIAL_EXCLUDED_EXACT.contains(&upper)
+        || CREDENTIAL_EXCLUDED_SUBSTRINGS
+            .iter()
+            .any(|needle| upper.contains(needle))
+    {
+        return false;
+    }
+    CREDENTIAL_EXACT.contains(&upper)
+        || CREDENTIAL_SUBSTRINGS
+            .iter()
+            .any(|needle| upper.contains(needle))
+}
+
 /// Why `name` may not stand in a `run.env_pass` other than the machine
 /// config's, if it may not: everything [`refusal_everywhere`] refuses, plus
 /// what only the operator's own file may hand on (owner decision,
@@ -115,13 +149,9 @@ fn refusal(name: &str) -> Option<&'static str> {
              (~/.config/autofactory/config.toml) may name it",
         );
     }
-    if upper.ends_with("_TOKEN")
-        || upper.ends_with("_KEY")
-        || upper.ends_with("_SECRET")
-        || upper.contains("PASSWORD")
-    {
+    if is_credential_env_name(&upper) {
         return Some(
-            "its name has the shape of a credential (*_TOKEN, *_KEY, *_SECRET, *PASSWORD*); \
+            "its name has the shape of a credential; \
              only the machine config (~/.config/autofactory/config.toml) may name it",
         );
     }
@@ -220,4 +250,63 @@ fn check_names(
         }
     }
     Ok(())
+}
+
+/// Collects non-empty runtime values for variables named in `env.env_pass`
+/// (and `env.machine_env_pass`) so [`super::stream_log::StreamLog`] can scrub
+/// them before writing to disk.
+pub fn env_pass_secrets(env: &ExecEnv) -> Vec<String> {
+    let mut values = Vec::new();
+    for name in env.env_pass.iter().chain(&env.machine_env_pass) {
+        if let Some((_, val)) = env.parent_env.iter().find(|(k, _)| k == name)
+            && !val.is_empty()
+        {
+            values.push(val.clone());
+        }
+        if let Ok(val) = std::env::var(name)
+            && !val.is_empty()
+        {
+            values.push(val);
+        }
+    }
+    values
+}
+
+/// Resolves an absolute custom toolchain home from an explicit [`ExecEnv`]
+/// field or from `parent_env`.
+pub(super) fn toolchain_home(
+    explicit: Option<&str>,
+    parent_env: &[(String, String)],
+    var: &str,
+) -> Option<String> {
+    explicit
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            parent_env
+                .iter()
+                .rev()
+                .find(|(k, v)| k == var && !v.is_empty())
+                .map(|(_, v)| v.clone())
+        })
+        .filter(|v| Path::new(v).is_absolute())
+}
+
+/// Appends write-denied exact and prefix rules beneath `base`, deduplicating.
+pub(super) fn push_denied_entries(
+    base: &str,
+    entries: &[&str],
+    write_denied: &mut Vec<String>,
+    write_denied_prefix: &mut Vec<String>,
+) {
+    for entry in entries {
+        let (target, rel) = match entry.strip_suffix('*') {
+            Some(prefix) => (&mut *write_denied_prefix, prefix),
+            None => (&mut *write_denied, *entry),
+        };
+        let path = Path::new(base).join(rel).to_string_lossy().into_owned();
+        if !target.contains(&path) {
+            target.push(path);
+        }
+    }
 }

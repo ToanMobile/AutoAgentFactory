@@ -17,12 +17,13 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, ExitStatus};
-use std::time::Duration;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use aaf_engine::throttle::{
-    Progress, SLOT_ENV, SlotJob, SystemProbe, Throttle, daemons, inherited_slot,
+    Progress, SLOT_ENV, SignalRelay, SlotJob, SystemProbe, Throttle, daemons, inherited_slot,
 };
 use serde_json::json;
 
@@ -76,24 +77,105 @@ fn slot_of_ancestor(ctx: &Ctx) -> Option<usize> {
     inherited_slot(&ctx.data_dir, value)
 }
 
+fn kill_process_group(pgid: u32) {
+    let group = format!("-{pgid}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let alive = Command::new("/bin/kill")
+            .args(["-0", "--", &group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !alive || Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_nested(
+    child: &mut Child,
+    started: Instant,
+    timeout_secs: u64,
+    label: &str,
+) -> Result<i32, CmdError> {
+    let limit = Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(exit_code(status)),
+            Ok(None) => {}
+            Err(err) => {
+                kill_process_group(child.id());
+                let _ = child.wait();
+                return Err(CmdError::new(format!("{label}: {err}")));
+            }
+        }
+        if started.elapsed() >= limit {
+            kill_process_group(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            notice(
+                "slot",
+                &format!("{label}: command timed out after {timeout_secs}s and was terminated"),
+            );
+            return Ok(EXIT_EXEC_TIMEOUT);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Runs the command below the holder of `slot`, without a slot of its own.
 ///
 /// It gets the daemon switches again, as whatever stands between the holder
 /// and this process may have replaced `GRADLE_OPTS`. Priority and watchdog
 /// are not set up a second time because the holder's still apply: the nice
 /// value and the background policy are inherited from the holder's command,
-/// and this command stays in that command's process group, which is what
-/// the holder's watchdog measures and stops under memory pressure.
-fn run_nested(args: &SlotArgs, program: &OsString, label: &str) -> Result<i32, CmdError> {
+/// and when `--exec-timeout` is not set this command stays in that command's
+/// process group, which is what the holder's watchdog measures and stops
+/// under memory pressure.
+fn run_nested(
+    args: &SlotArgs,
+    program: &OsString,
+    label: &str,
+    inherit_stdin: bool,
+) -> Result<i32, CmdError> {
     let gradle_opts = daemons::gradle_opts(std::env::var_os("GRADLE_OPTS").as_deref());
-    let status = Command::new(program)
-        .args(&args.command[1..])
+    let Some(timeout_secs) = args.exec_timeout else {
+        let status = Command::new(program)
+            .args(&args.command[1..])
+            .env("GRADLE_OPTS", gradle_opts)
+            .status();
+        return match status {
+            Ok(status) => Ok(exit_code(status)),
+            Err(err) => start_failure(label, &err),
+        };
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(&args.command[1..])
         .env("GRADLE_OPTS", gradle_opts)
-        .status();
-    match status {
-        Ok(status) => Ok(exit_code(status)),
-        Err(err) => start_failure(label, &err),
+        .process_group(0);
+    if !inherit_stdin {
+        cmd.stdin(Stdio::null());
     }
+    let started = Instant::now();
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => return start_failure(label, &err),
+    };
+    let relay = SignalRelay::start(child.id()).ok();
+    let result = wait_nested(&mut child, started, timeout_secs, label);
+    if let Some(r) = relay {
+        r.stop();
+    }
+    result
 }
 
 fn start_failure(label: &str, err: &io::Error) -> Result<i32, CmdError> {
@@ -120,7 +202,7 @@ fn run_command(args: &SlotArgs, ctx: &Ctx) -> Result<i32, CmdError> {
             "slot",
             &format!("{label}: already inside heavy slot {slot}; running at once"),
         );
-        return run_nested(args, program, &label);
+        return run_nested(args, program, &label, !ctx.stdin_is_tty);
     }
 
     let repo_root = ctx.repo_root().ok();
@@ -196,6 +278,7 @@ pub fn run(args: &SlotArgs, ctx: &Ctx) -> CmdResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -219,5 +302,35 @@ mod tests {
             "aaf", "slot", "--", "tool", "--json"
         ])));
         assert!(!json_requested(args(&["aaf", "slot", "--", "true"])));
+    }
+
+    #[test]
+    fn run_nested_enforces_exec_timeout() {
+        let program = OsString::from("/bin/sh");
+        let timed_out_args = SlotArgs {
+            label: Some("sleep-test".into()),
+            timeout: None,
+            exec_timeout: Some(1),
+            command: vec![
+                program.clone(),
+                OsString::from("-c"),
+                OsString::from("sleep 10"),
+            ],
+        };
+        let code = run_nested(&timed_out_args, &program, "sleep-test", false).unwrap();
+        assert_eq!(code, EXIT_EXEC_TIMEOUT);
+
+        let fast_args = SlotArgs {
+            label: Some("fast-test".into()),
+            timeout: None,
+            exec_timeout: Some(5),
+            command: vec![
+                program.clone(),
+                OsString::from("-c"),
+                OsString::from("exit 0"),
+            ],
+        };
+        let ok = run_nested(&fast_args, &program, "fast-test", false).unwrap();
+        assert_eq!(ok, 0);
     }
 }

@@ -289,3 +289,104 @@ fn heavy_argv_table() {
     assert_eq!(heavy_argv(cmd, true, &bare), argv(&["/bin/sh", "-c", cmd]));
     assert_eq!(heavy_argv(cmd, false, &mac), argv(&["/bin/sh", "-c", cmd]));
 }
+
+#[test]
+fn first_tick_reuses_tree_leader_start_without_extra_group_state_scan() {
+    use std::fs;
+    use std::sync::atomic::AtomicUsize;
+
+    use super::super::GroupControl;
+    use super::super::probe::{GroupState, ProcId};
+    use super::super::slots::slot_path;
+    use super::super::watchdog::TreeSample;
+
+    struct CountingGroup {
+        tree_sample: Option<TreeSample>,
+        fallback_started: Option<String>,
+        tree_calls: AtomicUsize,
+        group_state_calls: AtomicUsize,
+    }
+
+    impl GroupControl for CountingGroup {
+        fn rss_bytes(&self, _pgid: u32) -> Option<u64> {
+            Some(4096)
+        }
+        fn stop(&self, _pgid: u32) -> bool {
+            true
+        }
+        fn resume(&self, _pgid: u32) -> bool {
+            true
+        }
+        fn group_state(&self, _pgid: u32) -> Option<GroupState> {
+            self.group_state_calls.fetch_add(1, Ordering::SeqCst);
+            Some(GroupState {
+                leader_started: self.fallback_started.clone(),
+                stopped: false,
+            })
+        }
+        fn tree(&self, _pgid: u32, _known: &[ProcId]) -> Option<TreeSample> {
+            self.tree_calls.fetch_add(1, Ordering::SeqCst);
+            self.tree_sample.clone()
+        }
+    }
+
+    // Case 1: tree() returns leader info -> no redundant group_state() call on tick 0.
+    let data = TempDir::new().unwrap();
+    let rig = Rig::calm();
+    let throttle = rig.throttle();
+    let control = CountingGroup {
+        tree_sample: Some(TreeSample {
+            rss_bytes: 8192,
+            members: vec![ProcId {
+                pid: PGID,
+                started: "Mon Nov 23 14:00:00 2026".to_string(),
+            }],
+        }),
+        fallback_started: Some("SHOULD_NOT_BE_USED".to_string()),
+        tree_calls: AtomicUsize::new(0),
+        group_state_calls: AtomicUsize::new(0),
+    };
+    let mut dog = Watchdog::new(
+        throttle.probe,
+        &control,
+        throttle.progress,
+        data.path(),
+        "test_full",
+        slot(&data),
+        STEP,
+    );
+    assert!(!dog.tick(PGID, Duration::ZERO));
+    assert_eq!(control.tree_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control.group_state_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(dog.peak_rss_bytes, Some(8192));
+    let text = fs::read_to_string(slot_path(data.path(), 0)).unwrap();
+    assert!(text.contains("lstart=Mon Nov 23 14:00:00 2026"), "{text:?}");
+    drop(dog);
+
+    // Case 2: tree() returns None -> falls back to group_state() on tick 0.
+    let data2 = TempDir::new().unwrap();
+    let control2 = CountingGroup {
+        tree_sample: None,
+        fallback_started: Some("Mon Nov 23 15:00:00 2026".to_string()),
+        tree_calls: AtomicUsize::new(0),
+        group_state_calls: AtomicUsize::new(0),
+    };
+    let mut dog2 = Watchdog::new(
+        throttle.probe,
+        &control2,
+        throttle.progress,
+        data2.path(),
+        "test_full",
+        slot(&data2),
+        STEP,
+    );
+    assert!(!dog2.tick(PGID, Duration::ZERO));
+    assert_eq!(control2.tree_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control2.group_state_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dog2.peak_rss_bytes, Some(4096));
+    let text2 = fs::read_to_string(slot_path(data2.path(), 0)).unwrap();
+    assert!(
+        text2.contains("lstart=Mon Nov 23 15:00:00 2026"),
+        "{text2:?}"
+    );
+}

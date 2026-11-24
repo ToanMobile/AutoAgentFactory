@@ -8,12 +8,15 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 
+static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 use super::{
-    HOOK_BINARY, HookChange, Registered, SETTINGS_REL, covering_hook, forbidden_env,
-    hooks_switched_off, is_ours, parse, shell_quote,
+    HOOK_BINARY, HookChange, HookEntry, Registered, SETTINGS_REL, covering_hook, entry_matcher,
+    forbidden_env, hooks_switched_off, is_ours, parse, shell_quote,
 };
 
 /// Repo-relative path of the Codex CLI hooks configuration file.
@@ -277,32 +280,51 @@ fn matcher_covers_spec(matcher: &str, spec: HostSpec) -> bool {
     spec.tools.iter().all(|tool| listed.contains(tool))
 }
 
-fn host_entries(root: &Value, spec: HostSpec) -> Vec<(Registered, Option<String>)> {
+fn host_entries(root: &Value, spec: HostSpec) -> Vec<HookEntry> {
     let entries = root
         .get("hooks")
         .and_then(|hooks| hooks.get(spec.event_key))
         .and_then(Value::as_array);
     let mut found = Vec::new();
     for entry in entries.into_iter().flatten() {
-        let matcher = entry.get("matcher").and_then(Value::as_str).unwrap_or("");
+        let (matcher, matcher_valid, matcher_problem) = match entry_matcher(entry) {
+            Ok(m) => (m.to_string(), true, None),
+            Err(problem) => (
+                entry
+                    .get("matcher")
+                    .map_or_else(String::new, Value::to_string),
+                false,
+                Some(problem),
+            ),
+        };
         let hooks = entry.get("hooks").and_then(Value::as_array);
         for hook in hooks.into_iter().flatten().filter(|hook| is_ours(hook)) {
             let registered = Registered {
-                matcher: matcher.to_string(),
+                matcher: matcher.clone(),
                 command: hook
                     .get("command")
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
             };
-            found.push((registered, host_entry_problem(hook, spec)));
+            found.push(HookEntry {
+                registered,
+                matcher_valid,
+                problem: matcher_problem
+                    .clone()
+                    .or_else(|| host_entry_problem(hook, spec)),
+            });
         }
     }
     found
 }
 
 fn gemini_hooks_disabled(root: &Value) -> Option<String> {
-    let enabled = root.get("hooksConfig")?.get("enabled")?;
+    let config = root.get("hooksConfig")?;
+    let Some(obj) = config.as_object() else {
+        return Some(format!("\"hooksConfig\": {config} is not a JSON object"));
+    };
+    let enabled = obj.get("enabled")?;
     match enabled {
         Value::Bool(true) => None,
         other => Some(format!(
@@ -324,22 +346,30 @@ fn covering_host_hook(text: &str, spec: HostSpec) -> Result<Registered, String> 
     let hooks = host_entries(&root, spec);
     let mut covering = hooks
         .iter()
-        .filter(|(hook, _)| matcher_covers_spec(&hook.matcher, spec));
-    if let Some((hook, _)) = covering.clone().find(|(_, problem)| problem.is_none()) {
-        let program = parse_host_command(&hook.command, spec.host_flag)?;
-        if let Some(problem) = forbidden_env(&root, !program.contains('/')) {
+        .filter(|e| e.matcher_valid && matcher_covers_spec(&e.registered.matcher, spec));
+    if let Some(entry) = covering.clone().find(|e| e.problem.is_none()) {
+        if let Some(problem) = forbidden_env(&root) {
             return Err(problem);
         }
-        return Ok(hook.clone());
+        return Ok(entry.registered.clone());
     }
-    Err(match (covering.next(), hooks.first()) {
-        (Some((_, Some(problem))), _) => problem.clone(),
-        (_, Some((hook, _))) => format!(
+    if let Some(problem) = covering.find_map(|e| e.problem.as_ref()) {
+        return Err(problem.clone());
+    }
+    if let Some(problem) = hooks
+        .iter()
+        .filter(|e| !e.matcher_valid)
+        .find_map(|e| e.problem.as_ref())
+    {
+        return Err(problem.clone());
+    }
+    Err(match hooks.first() {
+        Some(entry) => format!(
             "matcher {:?} does not cover {}",
-            hook.matcher,
+            entry.registered.matcher,
             spec.tools.join("|")
         ),
-        _ => format!("no {} entry runs {HOOK_BINARY}", spec.event_key),
+        None => format!("no {} entry runs {HOOK_BINARY}", spec.event_key),
     })
 }
 
@@ -355,7 +385,12 @@ fn merge_host_hook(
         command: wanted_cmd,
     };
     let current = host_entries(&root, spec);
-    if existing.is_some() && current == [(wanted.clone(), None)] {
+    if existing.is_some()
+        && matches!(
+            current.as_slice(),
+            [only] if only.matcher_valid && only.problem.is_none() && only.registered == wanted
+        )
+    {
         return Ok((None, HookChange::Unchanged));
     }
     let change = if current.is_empty() {
@@ -412,7 +447,21 @@ fn register_host(
             fs::create_dir_all(parent)
                 .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
         }
-        fs::write(&path, text).map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+        let seq = WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut tmp_name = path
+            .file_name()
+            .map(OsStr::to_os_string)
+            .unwrap_or_default();
+        tmp_name.push(format!(".aaf-tmp-{}-{seq}", std::process::id()));
+        let tmp = path.with_file_name(tmp_name);
+        if let Err(err) = fs::write(&tmp, text) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("cannot write {}: {err}", path.display()));
+        }
+        if let Err(err) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("cannot write {}: {err}", path.display()));
+        }
     }
     Ok(change)
 }

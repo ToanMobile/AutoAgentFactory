@@ -21,6 +21,17 @@ pub trait GateRunner: Send + Sync {
     fn run(&self, tree: &Path) -> PortResult<Receipt>;
     /// Head-lock state of `tree` without running any command.
     fn head_lock(&self, tree: &Path) -> PortResult<HeadLockReport>;
+    /// Verifies that a cached `Clear` receipt still authentically covers `tree`
+    /// (unchanged fingerprint, config hash, base, clean hidden files, and valid
+    /// on-disk HMAC signature) so a redundant gate run can be skipped safely.
+    fn verify_cached_receipt(&self, _tree: &Path, _receipt: &Receipt) -> bool {
+        false
+    }
+    /// Returns `(tree_fp, base_sha)` for `tree` so a pre-gate head-lock audit
+    /// can be reused post-gate only when the tree and base are unchanged.
+    fn tree_binding(&self, _tree: &Path) -> Option<(String, Option<String>)> {
+        None
+    }
     /// Reruns the failed test command from `receipt` on the unchanged `tree`
     /// to detect flaky tests (PLAN §C.9). Returns `Ok(None)` when not
     /// supported or when `receipt` has no rerunnable test command.
@@ -68,6 +79,15 @@ pub trait GitOps: Send + Sync {
         worktree: &TaskWorktree,
         regate: &dyn Fn(&Path) -> Result<bool, String>,
     ) -> PortResult<MergeOutcome>;
+    /// Like [`GitOps::merge`], passing the resolved SHA of the base tip onto
+    /// which `worktree` was rebased (`""` for fakes delegating to `merge`).
+    fn merge_with_onto(
+        &self,
+        worktree: &TaskWorktree,
+        regate: &dyn Fn(&Path, &str) -> Result<bool, String>,
+    ) -> PortResult<MergeOutcome> {
+        self.merge(worktree, &|tree| regate(tree, ""))
+    }
     /// `note` goes above the receipt summary in the pull request body: it
     /// says whose receipt this is when the gate ran on an integration tree.
     fn open_pr(

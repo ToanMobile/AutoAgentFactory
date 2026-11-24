@@ -12,6 +12,7 @@ pub mod gh_client;
 pub mod merge_queue;
 pub mod pr;
 pub mod pr_merge;
+mod pr_merge_support;
 pub mod worktree;
 
 #[cfg(test)]

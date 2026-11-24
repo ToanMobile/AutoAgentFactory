@@ -74,7 +74,12 @@ pub struct SandboxPaths {
 /// rather than dropped, because dropping a denied path would silently widen
 /// the sandbox.
 pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortResult<String> {
-    let mut writable = canonical_paths(policy.writable_paths.iter().chain(&extra.writable))?;
+    let policy_writable: &[String] = if policy.read_only {
+        &[]
+    } else {
+        &policy.writable_paths
+    };
+    let mut writable = canonical_paths(policy_writable.iter().chain(&extra.writable))?;
     let git_dirs = canonical_paths(extra.git_dirs.iter())?;
     let denied = canonical_paths(policy.read_denied_paths.iter().chain(&extra.read_denied))?;
     let worktree = extra.worktree.as_deref().map(canonical).transpose()?;
@@ -121,13 +126,14 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     for git_dir in &git_dirs {
         let hooks = sbpl_string(&git_dir.join("hooks"))?;
         let config = sbpl_string(&git_dir.join("config"))?;
+        let config_worktree = sbpl_string(&git_dir.join("config.worktree"))?;
         let refs_aaf = sbpl_string(&git_dir.join("refs/aaf"))?;
         let linked = sbpl_regex(&format!(
             "^{}/worktrees/[^/]+/(hooks|config|config\\.worktree)(/|$)",
             regex_escape(path_str(git_dir)?)
         ))?;
         profile.push_str(&format!(
-            "(deny file-write* (subpath {hooks}) (literal {config}) (regex {linked}))\n"
+            "(deny file-write* (subpath {hooks}) (literal {config}) (literal {config_worktree}) (regex {linked}))\n"
         ));
         // Host-owned snapshot refs under `refs/aaf/` stay read-only to agents.
         profile.push_str(&format!("(deny file-write* (subpath {refs_aaf}))\n"));
@@ -223,6 +229,11 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     let mut closed: Vec<PathBuf> = denied.clone();
     closed.extend(worktrees_root.clone());
     closed.extend(git_dirs.iter().map(|git_dir| git_dir.join("config")));
+    closed.extend(
+        git_dirs
+            .iter()
+            .map(|git_dir| git_dir.join("config.worktree")),
+    );
     closed.extend(git_dirs.iter().map(|git_dir| git_dir.join("refs/aaf")));
     closed.extend(worktree.iter().map(|worktree| worktree.join(".git")));
     let listed = extra.write_denied.iter().chain(&extra.write_denied_prefix);
@@ -299,11 +310,8 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // Data only: the agent can neither remove nor replace the mark to hide
     // what it leaves behind.
     if let Some(mark) = &extra.run_mark {
-        let mark = Path::new(mark);
-        if !mark.is_absolute() {
-            return Err(PortError::Invalid(format!("run mark {mark:?}")));
-        }
-        let mark = sbpl_string(mark)?;
+        let mark = canonical(mark)?;
+        let mark = sbpl_string(&mark)?;
         profile.push_str(&format!("(allow file-write-data (literal {mark}))\n"));
     }
     Ok(profile)

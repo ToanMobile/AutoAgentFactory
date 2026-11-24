@@ -17,7 +17,8 @@ use aaf_domain::ports::{
 use aaf_domain::task::Task;
 
 use super::classifier::{
-    FailureSignal, budget_detail, classify, failure_digest, one_line, truncate_chars,
+    FailureSignal, budget_detail, classify, extract_gate_diagnostics, failure_digest, one_line,
+    truncate_chars,
 };
 use super::proposer::{SubtaskProposer, validate_plans};
 
@@ -80,12 +81,12 @@ fn marker(tier: UnblockTier, digest: &str) -> String {
 
 pub(crate) fn tried(task: &Task, tier: UnblockTier, digest: &str) -> bool {
     let marker = marker(tier, digest);
-    // Human rework resets the unblock tier ladder: scan only notes appended
-    // after the most recent `rework:` note.
+    // Human rework or unblock resets the unblock tier ladder: scan only notes
+    // appended after the most recent `rework:` or `unblocked:` note.
     let start = task
         .context_notes
         .iter()
-        .rposition(|n| n.starts_with("rework:"))
+        .rposition(|n| n.starts_with("rework:") || n.starts_with("unblocked:"))
         .map_or(0, |idx| idx + 1);
     task.context_notes[start..]
         .iter()
@@ -158,6 +159,7 @@ impl<'a> Ladder<'a> {
         let task = self.tasks.get_task(task_id)?;
         let digest = failure_digest(signal);
         let classified = classify(signal);
+        let gate_diag = extract_gate_diagnostics(signal);
 
         let (cycle, tier, reason, action) = if matches!(
             classified,
@@ -165,12 +167,19 @@ impl<'a> Ladder<'a> {
         ) {
             // Upstream infrastructure and quota/rate-limit events must not
             // burn task unblock cycles or trigger FreezeRoot.
-            let (tier, reason, action) =
-                match self.walk(&task, classified, &digest, quota, proposer, now)? {
-                    WalkOutcome::Decision(t, r, a) | WalkOutcome::ProposerTransient(t, r, a) => {
-                        (t, r, a)
-                    }
-                };
+            let (tier, reason, action) = match self.walk(
+                &task,
+                classified,
+                &digest,
+                gate_diag.as_deref(),
+                quota,
+                proposer,
+                now,
+            )? {
+                WalkOutcome::Decision(t, r, a) | WalkOutcome::ProposerTransient(t, r, a) => {
+                    (t, r, a)
+                }
+            };
             (task.unblock_cycles, tier, reason, action)
         } else {
             let current = self.ensure_budget(&task.root_id)?;
@@ -187,7 +196,15 @@ impl<'a> Ladder<'a> {
                 let (tier, reason, action) = self.freeze_root(&task, &budget, detail, now)?;
                 (cycle, tier, reason, action)
             } else {
-                match self.walk(&task, classified, &digest, quota, proposer, now)? {
+                match self.walk(
+                    &task,
+                    classified,
+                    &digest,
+                    gate_diag.as_deref(),
+                    quota,
+                    proposer,
+                    now,
+                )? {
                     WalkOutcome::ProposerTransient(tier, reason, action) => {
                         return Ok(UnblockDecision {
                             tier,
@@ -276,11 +293,13 @@ impl<'a> Ladder<'a> {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &self,
         task: &Task,
         reason: BlockedReason,
         digest: &str,
+        gate_diag: Option<&str>,
         quota: QuotaRoute,
         proposer: Option<&dyn SubtaskProposer>,
         now: i64,
@@ -335,6 +354,12 @@ impl<'a> Ladder<'a> {
                 reason_text(&reason)
             );
             self.note(task, t3, digest, &text, now)?;
+            if let Some(diag) = gate_diag {
+                let diag_note = format!(
+                    "gate_diagnostic: <untrusted-data id=\"gate-diagnostic\">{diag}</untrusted-data>"
+                );
+                self.tasks.append_context_note(&task.id, &diag_note, now)?;
+            }
             let action = UnblockAction::RetryFreshContext {
                 digest: digest.to_string(),
             };

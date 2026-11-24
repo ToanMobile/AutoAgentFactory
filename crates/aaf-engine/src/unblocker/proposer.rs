@@ -10,11 +10,18 @@ use aaf_domain::blocked::{BlockedReason, SubtaskPlan};
 use aaf_domain::ports::{AgentRequest, AgentRunner, BudgetStore, PortError, PortResult};
 use aaf_domain::task::Task;
 
+/// `runs.executor` value recorded for T4 subtask-proposer runs.
+pub const PROPOSER_EXECUTOR: &str = "unblock-proposer";
+
 pub const MAX_PLANS: usize = 4;
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_DESCRIPTION_CHARS: usize = 4000;
 const MAX_ACCEPTANCE_ITEMS: usize = 10;
 const MAX_ACCEPTANCE_CHARS: usize = 500;
+
+const MAX_FAILURE_SNIPPET_CHARS: usize = 400;
+const MAX_RECENT_NOTES: usize = 3;
+const MAX_NOTE_CHARS: usize = 400;
 
 pub trait SubtaskProposer {
     /// Plans for splitting `task`; empty when it cannot be split.
@@ -36,12 +43,19 @@ struct RawPlan {
     acceptance: Vec<String>,
 }
 
-/// Parses an agent answer. Accepts only a JSON array (optionally inside one
-/// Markdown code fence) of at most [`MAX_PLANS`] valid plans.
+/// Parses an agent answer. Accepts a strict JSON array (optionally inside one
+/// Markdown JSON code fence, even with surrounding prose) of at most
+/// [`MAX_PLANS`] valid plans.
 pub fn parse_plans(text: &str) -> Vec<SubtaskPlan> {
     // Unparsable output is an expected outcome, not an error: fail closed
     // with no plans.
-    let raw: Vec<RawPlan> = serde_json::from_str(strip_fence(text)).unwrap_or_default();
+    let direct = serde_json::from_str::<Vec<RawPlan>>(strip_fence(text)).ok();
+    let raw = direct
+        .or_else(|| {
+            extract_fenced_json_array(text)
+                .and_then(|slice| serde_json::from_str::<Vec<RawPlan>>(slice).ok())
+        })
+        .unwrap_or_default();
     validate_plans(
         raw.into_iter()
             .map(|p| SubtaskPlan {
@@ -75,6 +89,26 @@ fn plan_is_valid(plan: &SubtaskPlan) -> bool {
             .all(|a| filled(a, MAX_ACCEPTANCE_CHARS))
 }
 
+fn strip_json_tag(inner: &str) -> &str {
+    let trimmed = inner.trim_start();
+    if let Some(after) = strip_ascii_prefix_ignore_case(trimmed, "json")
+        && (after.is_empty() || after.starts_with(char::is_whitespace) || after.starts_with('['))
+    {
+        return after.trim();
+    }
+    trimmed.trim()
+}
+
+fn strip_ascii_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let bytes = text.as_bytes();
+    let pbytes = prefix.as_bytes();
+    if bytes.len() >= pbytes.len() && bytes[..pbytes.len()].eq_ignore_ascii_case(pbytes) {
+        Some(&text[pbytes.len()..])
+    } else {
+        None
+    }
+}
+
 fn strip_fence(text: &str) -> &str {
     let trimmed = text.trim();
     let Some(inner) = trimmed
@@ -83,7 +117,129 @@ fn strip_fence(text: &str) -> &str {
     else {
         return trimmed;
     };
-    inner.strip_prefix("json").unwrap_or(inner).trim()
+    strip_json_tag(inner)
+}
+
+fn is_valid_json_fence_tag(tag: &str) -> bool {
+    let tag = tag.trim();
+    tag.is_empty() || tag.eq_ignore_ascii_case("json")
+}
+
+/// Extracts the body of a single Markdown JSON code fence from `text`,
+/// allowing prose before and after the fence. Rejects missing, unclosed,
+/// multiple, or non-JSON fences.
+fn extract_single_fence_body(text: &str) -> Option<&str> {
+    // Prefer line-anchored fences so inline triple backticks inside JSON strings
+    // do not split the fence prematurely.
+    let mut fences: Vec<(bool, usize, usize)> = Vec::new();
+    let mut open: Option<(bool, usize)> = None;
+    let mut offset = 0usize;
+    for raw_line in text.split_inclusive('\n') {
+        let line_len = raw_line.len();
+        let trimmed = raw_line.trim();
+        if let Some(rest) = trimmed.strip_prefix("```") {
+            if let Some((tag_ok, body_start)) = open {
+                if rest.trim().is_empty() {
+                    fences.push((tag_ok, body_start, offset));
+                    open = None;
+                }
+            } else {
+                open = Some((is_valid_json_fence_tag(rest), offset + line_len));
+            }
+        }
+        offset += line_len;
+    }
+    if open.is_none() && !fences.is_empty() {
+        if fences.len() != 1 {
+            return None;
+        }
+        let (tag_ok, start, end) = fences[0];
+        return tag_ok.then(|| text.get(start..end)).flatten();
+    }
+
+    // Fallback for inline fences (e.g. `Here: ```JSON\n[...]\n``` done`).
+    let mut inline: Vec<&str> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("```") {
+        let after_open = &rest[start + 3..];
+        let end = after_open.find("```")?;
+        inline.push(&after_open[..end]);
+        rest = &after_open[end + 3..];
+    }
+    if inline.len() != 1 {
+        return None;
+    }
+    let body = inline[0];
+    if let Some((first_line, tail)) = body.split_once('\n') {
+        if is_valid_json_fence_tag(first_line) {
+            return Some(tail.trim());
+        }
+        let trimmed_first = first_line.trim();
+        if trimmed_first.starts_with('[')
+            || strip_ascii_prefix_ignore_case(trimmed_first, "json")
+                .is_some_and(|after| after.trim_start().starts_with('['))
+        {
+            return Some(strip_json_tag(body));
+        }
+        return None;
+    }
+    Some(strip_json_tag(body))
+}
+
+/// Extracts the single top-level JSON array `[...]` from `text`, respecting
+/// JSON string literals and escape sequences. Returns `None` if zero or
+/// multiple top-level arrays exist or brackets/strings are unbalanced.
+fn extract_single_json_array(text: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0usize;
+    let mut found: Option<(usize, usize)> = None;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' => {
+                if depth == 0 {
+                    if found.is_some() {
+                        return None;
+                    }
+                    start = idx;
+                }
+                depth += 1;
+            }
+            ']' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    found = Some((start, idx + ch.len_utf8()));
+                }
+            }
+            _ => {}
+        }
+    }
+    if in_string || depth != 0 {
+        return None;
+    }
+    let (s, e) = found?;
+    text.get(s..e)
+}
+
+fn extract_fenced_json_array(text: &str) -> Option<&str> {
+    let body = extract_single_fence_body(text)?;
+    extract_single_json_array(body)
 }
 
 /// Asks an agent for the plans. `base` supplies run id, working directory,
@@ -126,13 +282,84 @@ impl SubtaskProposer for AgentSubtaskProposer<'_> {
     }
 }
 
+fn sanitize_untrusted_tags(text: &str) -> String {
+    const TAGS: [&[u8]; 2] = [b"</untrusted-data", b"<untrusted-data"];
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0usize;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let matched = TAGS.iter().copied().find(|tag| {
+            at + tag.len() <= bytes.len() && bytes[at..at + tag.len()].eq_ignore_ascii_case(tag)
+        });
+        if let Some(tag) = matched {
+            out.push_str(&text[copied..at]);
+            if tag.starts_with(b"</") {
+                out.push_str("&lt;/untrusted-data");
+            } else {
+                out.push_str("&lt;untrusted-data");
+            }
+            at += tag.len();
+            copied = at;
+        } else {
+            at += 1;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+fn concise_snippet(text: &str, max_chars: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clipped: String = flat.chars().take(max_chars).collect();
+    sanitize_untrusted_tags(&clipped)
+}
+
+fn reason_detail(reason: &BlockedReason) -> &str {
+    match reason {
+        BlockedReason::GateFailed { summary } => summary,
+        BlockedReason::MergeConflict { detail }
+        | BlockedReason::FlakyTest { detail }
+        | BlockedReason::Stuck { detail }
+        | BlockedReason::BudgetExceeded { detail }
+        | BlockedReason::Infra { detail } => detail,
+        BlockedReason::NeedsHuman { why } => why,
+        BlockedReason::Dependency { task_id } => task_id,
+        BlockedReason::Quota { .. } => "",
+    }
+}
+
 fn build_prompt(task: &Task, reason: &BlockedReason, digest: &str) -> String {
     let acceptance: String = task
         .spec
         .acceptance
         .iter()
-        .map(|a| format!("- {a}\n"))
+        .map(|a| format!("- {}\n", sanitize_untrusted_tags(a)))
         .collect();
+    let mut failure_block = String::new();
+    let detail = concise_snippet(reason_detail(reason), MAX_FAILURE_SNIPPET_CHARS);
+    if !detail.is_empty() {
+        failure_block.push_str(&format!("failure_context: {detail}\n"));
+    }
+    let recent_notes: Vec<String> = task
+        .context_notes
+        .iter()
+        .rev()
+        .filter_map(|note| {
+            let s = concise_snippet(note, MAX_NOTE_CHARS);
+            (!s.is_empty()).then_some(s)
+        })
+        .take(MAX_RECENT_NOTES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if !recent_notes.is_empty() {
+        failure_block.push_str("recent_notes:\n");
+        for note in recent_notes {
+            failure_block.push_str(&format!("- {note}\n"));
+        }
+    }
     format!(
         "A task failed repeatedly (failure kind: {kind}, digest: {digest}). Split it into at \
          most {MAX_PLANS} smaller independent subtasks that together satisfy the original \
@@ -146,9 +373,10 @@ fn build_prompt(task: &Task, reason: &BlockedReason, digest: &str) -> String {
          title: {title}\n\
          description:\n{description}\n\
          acceptance:\n{acceptance}\
+         {failure_block}\
          </untrusted-data>\n",
         kind = reason.kind(),
-        title = task.title,
-        description = task.spec.description,
+        title = sanitize_untrusted_tags(&task.title),
+        description = sanitize_untrusted_tags(&task.spec.description),
     )
 }

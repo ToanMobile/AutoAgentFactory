@@ -121,7 +121,13 @@ _aaf_completions() {{
             COMPREPLY=( $(compgen -W "--force --with-skills --hook-host --host --json --help" -- "$cur") )
             ;;
         gate)
-            COMPREPLY=( $(compgen -W "--scoped --full --release --json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--scoped --full --release --when-idle --idle-wait-secs --json --help" -- "$cur") )
+            ;;
+        slot)
+            COMPREPLY=( $(compgen -W "--label --timeout --exec-timeout --json --help" -- "$cur") )
+            ;;
+        status)
+            COMPREPLY=( $(compgen -W "--all --approval --json --help" -- "$cur") )
             ;;
         board)
             COMPREPLY=( $(compgen -W "add list show unblock unfreeze rework trace split dep graph approve-plan undo steer import-issues sync-github --json --help" -- "$cur") )
@@ -136,19 +142,19 @@ _aaf_completions() {{
             COMPREPLY=( $(compgen -W "list sync --json --help" -- "$cur") )
             ;;
         sop)
-            COMPREPLY=( $(compgen -W "list run show --json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "list show run init validate runs approve send-back --json --help" -- "$cur") )
             ;;
         executors)
-            COMPREPLY=( $(compgen -W "list check --json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "list resolve roles mcp --json --help" -- "$cur") )
             ;;
         ui)
-            COMPREPLY=( $(compgen -W "--port --bind --qr --token --json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--port --host --key --read-only --qr --open --all --repo --json --help" -- "$cur") )
             ;;
         telegram)
             COMPREPLY=( $(compgen -W "--once --all --repo --send-test --json --help" -- "$cur") )
             ;;
         upgrade)
-            COMPREPLY=( $(compgen -W "--check --version --dry-run --dir --repo --json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--check --dry-run --version --from-source --dir --repo --json --help" -- "$cur") )
             ;;
         completions)
             COMPREPLY=( $(compgen -W "bash zsh fish powershell --json --help" -- "$cur") )
@@ -198,7 +204,13 @@ _aaf() {{
                     _arguments '--force' '--with-skills' '--hook-host[Hook host]:host:(claude codex gemini all)' '--json'
                     ;;
                 gate)
-                    _arguments '--scoped' '--full' '--release' '--json'
+                    _arguments '--scoped' '--full' '--release' '--when-idle' '--idle-wait-secs[Idle wait seconds]:secs:' '--json' '--help'
+                    ;;
+                slot)
+                    _arguments '--label[Slot label]:name:' '--timeout[Admission wait seconds]:secs:' '--exec-timeout[Execution timeout seconds]:secs:' '--json' '--help'
+                    ;;
+                status)
+                    _arguments '--all' '--approval' '--json' '--help'
                     ;;
                 board)
                     _values 'board subcommand' add list show unblock unfreeze rework trace split dep graph approve-plan undo steer import-issues sync-github
@@ -213,19 +225,19 @@ _aaf() {{
                     _values 'skills subcommand' list sync
                     ;;
                 sop)
-                    _values 'sop subcommand' list run show
+                    _values 'sop subcommand' list show run init validate runs approve send-back
                     ;;
                 executors)
-                    _values 'executors subcommand' list check
+                    _values 'executors subcommand' list resolve roles mcp
                     ;;
                 ui)
-                    _arguments '--port[Port]:port:' '--bind[Bind address]:addr:' '--qr[Show QR code]' '--json'
+                    _arguments '--port[Port]:port:' '--host[Bind host]:host:' '--key[Bearer token]:token:' '--read-only[Disable mutating actions]' '--qr[Show QR code]' '--open[Open in browser]' '--all[All repos]' '--repo[Repo path]:dir:_files -/' '--json' '--help'
                     ;;
                 telegram)
                     _arguments '--once' '--all' '--repo[Repo path]:dir:_files -/' '--send-test' '--json'
                     ;;
                 upgrade)
-                    _arguments '--check' '--version[Release tag]:tag:' '--dry-run' '--dir[Install dir]:dir:_files -/' '--repo[GitHub repo]:repo:' '--json'
+                    _arguments '--check' '--dry-run' '--version[Release tag]:tag:' '--from-source[Local checkout]:dir:_files -/' '--dir[Install dir]:dir:_files -/' '--repo[GitHub repo]:repo:' '--json' '--help'
                     ;;
                 completions)
                     _values 'shell' bash zsh fish powershell
@@ -268,17 +280,32 @@ complete -c aaf -n '__fish_seen_subcommand_from init' -l hook-host -xa 'claude c
 complete -c aaf -n '__fish_seen_subcommand_from gate' -l scoped -d 'Run scoped gate'
 complete -c aaf -n '__fish_seen_subcommand_from gate' -l full -d 'Run full gate'
 complete -c aaf -n '__fish_seen_subcommand_from gate' -l release -d 'Run release gate'
+complete -c aaf -n '__fish_seen_subcommand_from gate' -l when-idle -d 'Run only when machine is idle'
+complete -c aaf -n '__fish_seen_subcommand_from gate' -l idle-wait-secs -r -d 'Seconds to wait for idle'
+complete -c aaf -n '__fish_seen_subcommand_from slot' -l label -r -d 'Measurement label'
+complete -c aaf -n '__fish_seen_subcommand_from slot' -l timeout -r -d 'Admission wait timeout seconds'
+complete -c aaf -n '__fish_seen_subcommand_from slot' -l exec-timeout -r -d 'Execution timeout seconds'
+complete -c aaf -n '__fish_seen_subcommand_from status' -l all -d 'Summarize across all repos'
+complete -c aaf -n '__fish_seen_subcommand_from status' -l approval -d 'Inspect head-lock approval state'
 complete -c aaf -n '__fish_seen_subcommand_from board' -a 'add list show unblock unfreeze rework trace split dep graph approve-plan undo steer import-issues sync-github'
 complete -c aaf -n '__fish_seen_subcommand_from accounts' -a 'list next cooldown'
 complete -c aaf -n '__fish_seen_subcommand_from proof' -a 'record verify show'
 complete -c aaf -n '__fish_seen_subcommand_from skills' -a 'list sync'
-complete -c aaf -n '__fish_seen_subcommand_from sop' -a 'list run show'
-complete -c aaf -n '__fish_seen_subcommand_from executors' -a 'list check'
+complete -c aaf -n '__fish_seen_subcommand_from sop' -a 'list show run init validate runs approve send-back'
+complete -c aaf -n '__fish_seen_subcommand_from executors' -a 'list resolve roles mcp'
+complete -c aaf -n '__fish_seen_subcommand_from ui' -l port -r -d 'Listening port'
+complete -c aaf -n '__fish_seen_subcommand_from ui' -l host -r -d 'Bind host address'
+complete -c aaf -n '__fish_seen_subcommand_from ui' -l key -r -d 'Bearer token'
+complete -c aaf -n '__fish_seen_subcommand_from ui' -l read-only -d 'Disable mutating endpoints'
 complete -c aaf -n '__fish_seen_subcommand_from ui' -l qr -d 'Print mobile QR pairing code'
+complete -c aaf -n '__fish_seen_subcommand_from ui' -l open -d 'Open pairing URL in browser'
+complete -c aaf -n '__fish_seen_subcommand_from ui' -l all -d 'Aggregate all repositories'
+complete -c aaf -n '__fish_seen_subcommand_from ui' -l repo -r -d 'Repository path'
 complete -c aaf -n '__fish_seen_subcommand_from telegram' -l once -d 'Run one poll cycle'
 complete -c aaf -n '__fish_seen_subcommand_from upgrade' -l check -d 'Check for updates only'
-complete -c aaf -n '__fish_seen_subcommand_from upgrade' -l version -d 'Specific release tag'
+complete -c aaf -n '__fish_seen_subcommand_from upgrade' -l version -r -d 'Specific release tag'
 complete -c aaf -n '__fish_seen_subcommand_from upgrade' -l dry-run -d 'Download and verify SHA-256 only'
+complete -c aaf -n '__fish_seen_subcommand_from upgrade' -l from-source -d 'Install from local checkout'
 complete -c aaf -n '__fish_seen_subcommand_from upgrade' -l dir -r -d 'Destination directory'
 complete -c aaf -n '__fish_seen_subcommand_from upgrade' -l repo -r -d 'GitHub repository slug'
 complete -c aaf -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish powershell' -d 'Shell kind'
@@ -322,16 +349,18 @@ Register-ArgumentCompleter -Native -CommandName aaf -ScriptBlock {{
 
     $subOpts = switch ($sub) {{
         'init'        {{ @('--force', '--with-skills', '--hook-host', '--json', '--help') }}
-        'gate'        {{ @('--scoped', '--full', '--release', '--json', '--help') }}
+        'gate'        {{ @('--scoped', '--full', '--release', '--when-idle', '--idle-wait-secs', '--json', '--help') }}
+        'slot'        {{ @('--label', '--timeout', '--exec-timeout', '--json', '--help') }}
+        'status'      {{ @('--all', '--approval', '--json', '--help') }}
         'board'       {{ @('add', 'list', 'show', 'unblock', 'unfreeze', 'rework', 'trace', 'split', 'dep', 'graph', 'approve-plan', 'undo', 'steer', 'import-issues', 'sync-github', '--json') }}
         'accounts'    {{ @('list', 'next', 'cooldown', '--json') }}
         'proof'       {{ @('record', 'verify', 'show', '--json') }}
         'skills'      {{ @('list', 'sync', '--json') }}
-        'sop'         {{ @('list', 'run', 'show', '--json') }}
-        'executors'   {{ @('list', 'check', '--json') }}
-        'ui'          {{ @('--port', '--bind', '--qr', '--json') }}
+        'sop'         {{ @('list', 'show', 'run', 'init', 'validate', 'runs', 'approve', 'send-back', '--json', '--help') }}
+        'executors'   {{ @('list', 'resolve', 'roles', 'mcp', '--json', '--help') }}
+        'ui'          {{ @('--port', '--host', '--key', '--read-only', '--qr', '--open', '--all', '--repo', '--json', '--help') }}
         'telegram'    {{ @('--once', '--all', '--repo', '--send-test', '--json') }}
-        'upgrade'     {{ @('--check', '--version', '--dry-run', '--dir', '--repo', '--json') }}
+        'upgrade'     {{ @('--check', '--dry-run', '--version', '--from-source', '--dir', '--repo', '--json', '--help') }}
         'completions' {{ @('bash', 'zsh', 'fish', 'powershell', '--json') }}
         default       {{ @('--json', '--help') }}
     }}
@@ -342,4 +371,46 @@ Register-ArgumentCompleter -Native -CommandName aaf -ScriptBlock {{
 }}
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_shells_sync_cli_flags_and_drop_stale_entries() {
+        for shell in [
+            ShellKind::Bash,
+            ShellKind::Zsh,
+            ShellKind::Fish,
+            ShellKind::Powershell,
+        ] {
+            let s = render_script(shell);
+            assert!(!s.contains("--bind"), "{shell:?} still contains --bind");
+            assert!(!s.contains("--token"), "{shell:?} still contains --token");
+            assert!(
+                !s.contains("list check"),
+                "{shell:?} still has stale executors check"
+            );
+            assert!(
+                !s.contains("'list', 'check'"),
+                "{shell:?} still has stale executors check"
+            );
+
+            for expected in [
+                "when-idle",
+                "idle-wait-secs",
+                "exec-timeout",
+                "approval",
+                "from-source",
+                "read-only",
+                "send-back",
+                "resolve",
+                "roles",
+                "mcp",
+            ] {
+                assert!(s.contains(expected), "{shell:?} missing {expected}");
+            }
+        }
+    }
 }

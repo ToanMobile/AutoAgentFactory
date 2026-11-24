@@ -198,8 +198,40 @@ fn ps_listing(ps: Ps, args: &[&str], tries: usize) -> PortResult<String> {
     Err(last)
 }
 
+/// One call of `kill` for `(pid, signal)`.
+type Kill<'a> = &'a dyn Fn(u32, Signal) -> PortResult<bool>;
+
+fn kill_all_with(victims: impl IntoIterator<Item = u32>, kill: Kill) -> PortResult<Vec<u32>> {
+    let mut killed = Vec::new();
+    let mut first_err: Option<PortError> = None;
+    for pid in victims {
+        match kill(pid, Signal::Kill) {
+            Ok(true) => killed.push(pid),
+            Ok(false) => {}
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+        }
+    }
+    match first_err {
+        Some(err) => Err(err),
+        None => Ok(killed),
+    }
+}
+
 /// [`reap_in`] with `ps` passed in.
 fn reap_with(run_id: &str, marks: Option<&RunMarks>, ps: Ps) -> PortResult<Vec<u32>> {
+    reap_with_kill(run_id, marks, ps, &kill_pid)
+}
+
+fn reap_with_kill(
+    run_id: &str,
+    marks: Option<&RunMarks>,
+    ps: Ps,
+    kill: Kill,
+) -> PortResult<Vec<u32>> {
     validate_run_id(run_id)?;
     // `e` appends the environment to the command column; `ww` stops `ps`
     // truncating it.
@@ -207,20 +239,27 @@ fn reap_with(run_id: &str, marks: Option<&RunMarks>, ps: Ps) -> PortResult<Vec<u
     let self_pid = std::process::id();
     let mut victims = select_victims(&listing, run_id, self_pid);
     if let Some(marks) = marks {
+        let resolved = RunMarks {
+            mark: canonical_str(&marks.mark),
+            control: canonical_str(&marks.control),
+        };
         let protected = self_and_ancestors(&listing, self_pid);
         for pid in listed_pids(&listing) {
-            if !protected.contains(&pid) && !victims.contains(&pid) && in_run_sandbox(pid, marks) {
+            if !protected.contains(&pid)
+                && !victims.contains(&pid)
+                && in_run_sandbox(pid, &resolved)
+            {
                 victims.push(pid);
             }
         }
     }
-    let mut killed = Vec::new();
-    for pid in victims {
-        if kill_pid(pid, Signal::Kill)? {
-            killed.push(pid);
-        }
-    }
-    Ok(killed)
+    kill_all_with(victims, kill)
+}
+
+fn canonical_str(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|resolved| resolved.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// Whether `pid` runs in the sandbox `marks` belong to: sandboxed, may write
@@ -373,17 +412,25 @@ impl ProcessTracker {
 
     /// Kills every tracked process that is still alive. Returns their pids.
     pub fn kill_survivors(&self) -> PortResult<Vec<u32>> {
-        let table = process_table(&system_ps, PS_READS)?;
-        let own = std::process::id();
-        let mut killed = Vec::new();
-        for (&pid, started) in &self.seen {
-            let same = table.get(&pid).is_some_and(|row| &row.started == started);
-            if same && pid != own && kill_pid(pid, Signal::Kill)? {
-                killed.push(pid);
-            }
+        self.kill_survivors_with(&system_ps, &kill_pid)
+    }
+
+    fn kill_survivors_with(&self, ps: Ps, kill: Kill) -> PortResult<Vec<u32>> {
+        if self.seen.is_empty() {
+            return Ok(Vec::new());
         }
-        killed.sort_unstable();
-        Ok(killed)
+        let table = process_table(ps, PS_READS)?;
+        let own = std::process::id();
+        let mut targets: Vec<u32> = self
+            .seen
+            .iter()
+            .filter_map(|(&pid, started)| {
+                let same = table.get(&pid).is_some_and(|row| &row.started == started);
+                (same && pid != own).then_some(pid)
+            })
+            .collect();
+        targets.sort_unstable();
+        kill_all_with(targets, kill)
     }
 }
 
@@ -411,3 +458,70 @@ fn process_table(ps: Ps, tries: usize) -> PortResult<HashMap<u32, ProcessRow>> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod kill_loop_tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    #[test]
+    fn kill_survivors_skips_ps_when_nothing_was_tracked() {
+        let tracker = ProcessTracker::new(99_999);
+        let ps_calls = Cell::new(0usize);
+        let ps = |_: &[&str]| -> PortResult<(Option<i32>, String)> {
+            ps_calls.set(ps_calls.get() + 1);
+            Err(PortError::Io("ps must not be called".to_string()))
+        };
+        let kill = |_: u32, _: Signal| -> PortResult<bool> {
+            Err(PortError::Io("kill must not be called".to_string()))
+        };
+        assert_eq!(
+            tracker.kill_survivors_with(&ps, &kill).unwrap(),
+            Vec::<u32>::new()
+        );
+        assert_eq!(ps_calls.get(), 0);
+    }
+
+    #[test]
+    fn reap_and_kill_survivors_keep_killing_after_first_error_and_return_first_error() {
+        let listing = "  100  1  /bin/sleep 60 AAF_RUN_ID=run-err\n\
+                         200  1  /bin/sleep 60 AAF_RUN_ID=run-err\n\
+                         300  1  /bin/sleep 60 AAF_RUN_ID=run-err\n";
+        let ps = |_: &[&str]| -> PortResult<(Option<i32>, String)> {
+            Ok((Some(0), listing.to_string()))
+        };
+        let attempted = RefCell::new(Vec::new());
+        let kill = |pid: u32, _sig: Signal| -> PortResult<bool> {
+            attempted.borrow_mut().push(pid);
+            match pid {
+                100 => Err(PortError::Io("first failure".to_string())),
+                200 => Err(PortError::Io("second failure".to_string())),
+                _ => Ok(true),
+            }
+        };
+        let err = reap_with_kill("run-err", None, &ps, &kill).unwrap_err();
+        assert_eq!(err, PortError::Io("first failure".to_string()));
+        assert_eq!(*attempted.borrow(), vec![100, 200, 300]);
+
+        let mut tracker = ProcessTracker::new(100);
+        tracker
+            .seen
+            .insert(100, "Mon Nov 23 09:00:00 2026".to_string());
+        tracker
+            .seen
+            .insert(200, "Mon Nov 23 09:00:00 2026".to_string());
+        tracker
+            .seen
+            .insert(300, "Mon Nov 23 09:00:00 2026".to_string());
+        let table = "  100  1  Mon Nov 23 09:00:00 2026\n\
+                       200  1  Mon Nov 23 09:00:00 2026\n\
+                       300  1  Mon Nov 23 09:00:00 2026\n";
+        let table_ps =
+            |_: &[&str]| -> PortResult<(Option<i32>, String)> { Ok((Some(0), table.to_string())) };
+        attempted.borrow_mut().clear();
+        let err = tracker.kill_survivors_with(&table_ps, &kill).unwrap_err();
+        assert_eq!(err, PortError::Io("first failure".to_string()));
+        assert_eq!(*attempted.borrow(), vec![100, 200, 300]);
+    }
+}
