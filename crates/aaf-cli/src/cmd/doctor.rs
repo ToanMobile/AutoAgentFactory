@@ -381,16 +381,26 @@ fn github_board_check(repo_root: Option<&Path>, cfg: &EffectiveConfig) -> Check 
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_sandbox_exposure_check() -> Check {
-    advisory(
-        "keychain_sandbox_exposure",
-        Err(
-            "Seatbelt keeps ~/Library/Keychains readable because blocking it breaks `claude -p` \
-             OAuth login (verified empirically on macOS: `Not logged in · Please run /login`); \
-             sandboxed agents can read user Keychain items (SECURITY.md §10 #3)"
+fn keychain_sandbox_exposure_check(policy: aaf_domain::keychain::KeychainPolicy) -> Check {
+    use aaf_domain::keychain::KeychainPolicy;
+    let res = match policy {
+        KeychainPolicy::Always => Ok(
+            "macOS Keychain read and SecurityServer IPC are denied in Seatbelt for all runs"
                 .to_string(),
         ),
-    )
+        KeychainPolicy::Auto => Err(
+            "Keychain (~/Library/Keychains) is closed automatically for API-key and non-Claude \
+             runs, while remaining open for Claude OAuth (SECURITY.md §10 #3; set [safety] \
+             deny_macos_keychain = \"always\" with API key auth to close for all runs)"
+                .to_string(),
+        ),
+        KeychainPolicy::Never => Err(
+            "Seatbelt keeps ~/Library/Keychains readable because [safety] deny_macos_keychain = \
+             \"never\"; sandboxed agents can read user Keychain items (SECURITY.md §10 #3)"
+                .to_string(),
+        ),
+    };
+    advisory("keychain_sandbox_exposure", res)
 }
 
 pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
@@ -538,7 +548,9 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         ),
     ];
     #[cfg(target_os = "macos")]
-    checks.push(keychain_sandbox_exposure_check());
+    checks.push(keychain_sandbox_exposure_check(
+        effective.global.safety.deny_macos_keychain,
+    ));
 
     let failed = checks.iter().any(|check| check.required && !check.ok);
     let text = checks

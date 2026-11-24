@@ -339,3 +339,93 @@ pub fn check_base(repo_root: &Path, base: &str, path_var: &OsStr) -> Result<(), 
     }
     Ok(())
 }
+
+fn checked_executor_hook(
+    repo_root: &Path,
+    executor: &str,
+) -> Result<Option<super::Registered>, String> {
+    match executor.trim().to_ascii_lowercase().as_str() {
+        "claude" => {
+            let path = repo_root.join(SETTINGS_REL);
+            let text = std::fs::read_to_string(&path).map_err(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    format!("{SETTINGS_REL} does not exist")
+                } else {
+                    format!("{SETTINGS_REL} cannot be read ({err})")
+                }
+            })?;
+            let reg = covering_hook(&text)?;
+            let local_path = repo_root.join(LOCAL_SETTINGS_REL);
+            match std::fs::read_to_string(&local_path) {
+                Ok(local) => check_local(&local)
+                    .map_err(|problem| format!("{LOCAL_SETTINGS_REL}: {problem}"))?,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::NotFound
+                        && local_path.symlink_metadata().is_err() => {}
+                Err(err) => {
+                    return Err(format!("{LOCAL_SETTINGS_REL} cannot be read ({err})"));
+                }
+            }
+            Ok(Some(reg))
+        }
+        "codex" => super::multi_host::check_codex(repo_root).map(Some),
+        "gemini" => super::multi_host::check_gemini(repo_root)
+            .or_else(|primary_err| {
+                super::multi_host::check_antigravity(repo_root).map_err(|_| primary_err)
+            })
+            .map(Some),
+        "antigravity" => super::multi_host::check_antigravity(repo_root)
+            .or_else(|primary_err| {
+                super::multi_host::check_gemini(repo_root).map_err(|_| primary_err)
+            })
+            .map(Some),
+        "opencode" => super::multi_host::check_opencode(repo_root).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// Validates the matching host hook settings file in `repo_root` for `executor`.
+///
+/// Checks `.claude/settings.json` (`claude`), `.codex/hooks.json` (`codex`),
+/// `.gemini/settings.json` (`gemini`/`antigravity`), or `.opencode/hooks.json`
+/// (`opencode`). Unknown / `custom` executors return `Ok(())`.
+pub fn validate_for_executor(repo_root: &Path, executor: &str) -> Result<(), String> {
+    checked_executor_hook(repo_root, executor).map(|_| ())
+}
+
+/// Verifies the matching host hook registration in `worktree` for `executor`,
+/// delegating `claude` to [`check_worktree`] and validating host-specific hook
+/// configs + binary resolution for `codex`, `gemini`, `antigravity`, and `opencode`.
+pub fn check_worktree_for_executor(
+    worktree: &Path,
+    path_var: &OsStr,
+    base: Option<&str>,
+    executor: &str,
+) -> Result<(), String> {
+    let normalized = executor.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "claude" {
+        return check_worktree(worktree, path_var, base);
+    }
+    let Some(reg) = checked_executor_hook(worktree, &normalized).map_err(|problem| {
+        format!(
+            "the agent would run without {HOOK_BINARY}: hook settings for {normalized} in {}: \
+             {problem} — fix: run `aaf init --hook-host {normalized}` and commit the settings \
+             file on the base branch, then `aaf board unblock` the task",
+            worktree.display()
+        )
+    })?
+    else {
+        return Ok(());
+    };
+    let program = super::command_program(&reg.command).ok_or_else(|| {
+        format!("the agent would run without {HOOK_BINARY}: empty hook command for {normalized}")
+    })?;
+    resolve_program(&program, path_var, Some(worktree))
+        .map(|_| ())
+        .map_err(|problem| {
+            format!(
+                "the agent would run without {HOOK_BINARY}: {problem} — fix: start `aaf run` \
+                 with {HOOK_BINARY} on PATH, then `aaf board unblock` the task"
+            )
+        })
+}

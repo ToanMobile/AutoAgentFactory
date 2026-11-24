@@ -22,6 +22,7 @@ const FIX: &str = "leave git's hooks, control files, and protected refs untouche
 
 const HOOK: &str = "a git hook";
 const CONFIG: &str = "git's configuration";
+const EXCLUDE: &str = "git's local exclude rules";
 /// The directory itself, or one that holds the control files of a linked
 /// worktree or a submodule: moving, replacing or unpacking into it brings
 /// hooks and configuration along.
@@ -150,6 +151,12 @@ fn guarded(path: &Path) -> Option<&'static str> {
     }
     match below {
         [.., last] if is(last, "config") || is(last, "config.worktree") => Some(CONFIG),
+        [.., info, name]
+            if is(info, "info") && (is(name, "exclude") || is(name, "exclude.lock")) =>
+        {
+            Some(EXCLUDE)
+        }
+        [info] if is(info, "info") => Some(EXCLUDE),
         [.., last] if is(last, "commondir") || is(last, "gitdir") => Some(GIT_DIR),
         [] => Some(GIT_DIR),
         [first] | [first, _] if is(first, "worktrees") || is(first, "modules") => Some(GIT_DIR),

@@ -23,11 +23,17 @@ mod worktree_inspect;
 mod tests;
 
 pub use gh_client::{GhClient, MergeStrategy, PrCheck, PrInfo, SystemGh};
-pub use hydration::{GateSecretStage, HydratedPaths, hydrate_for_agent, stage_for_gate};
+pub use hydration::{
+    GateSecretStage, HydratedPaths, hydrate_for_agent, hydrate_fresh_worktree_with_snaps,
+    stage_for_gate,
+};
 pub use merge_queue::{MergeOutcome, MergeRequest, merge};
 pub use pr::{PrOutcome, PrRequest, open_pr, open_pr_with_proof, pr_body, pr_body_with_proof};
 pub use pr_merge::{PrMergeOutcome, PrMergeRequest, merge_pr};
-pub use warm_slot::{SlotKind, WarmSlot, promote_clean_base_snapshot, warm_slots_root};
+pub use warm_slot::{
+    SlotKind, WarmSlot, base_snapshots_dir, promote_clean_base_snapshot,
+    promote_from_pure_base_slot, restore_clean_base_snapshot, warm_slots_root,
+};
 pub use worktree::{TaskWorktree, WorktreeEntry};
 
 #[derive(Debug, thiserror::Error)]

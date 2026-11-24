@@ -123,7 +123,9 @@ fn run_plan_turn_in(
     let task = deps.store.get_task(task_id)?;
     let snap = load_snapshot(deps, task_id)?;
     let root = &tree.path;
-    if let Some(problem) = worker::hook_problem_if(deps, root, target.hook_required) {
+    if let Some(problem) =
+        worker::hook_problem_if(deps, root, target.hook_required, &target.executor)
+    {
         unblock::block_untried(deps, task_id, &problem)?;
         return Ok(Next::Blocked);
     }

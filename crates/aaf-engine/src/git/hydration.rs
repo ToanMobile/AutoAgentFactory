@@ -94,6 +94,14 @@ pub fn validate_relative_entry(entry: &str) -> Result<PathBuf, GitError> {
 /// `repo_root` (never solely by `.git/info/exclude`, global `core.excludesfile`,
 /// or an untracked `.gitignore`) and contains no git-tracked files.
 pub fn assert_tracked_gitignore(repo_root: &Path, rel: &Path) -> Result<(), GitError> {
+    assert_tracked_gitignore_inner(repo_root, rel, false)
+}
+
+fn assert_tracked_gitignore_inner(
+    repo_root: &Path,
+    rel: &Path,
+    expect_dir: bool,
+) -> Result<(), GitError> {
     let clean = validate_relative_entry(path_str(rel)?)?;
     let rel_str = path_str(&clean)?;
 
@@ -102,7 +110,7 @@ pub fn assert_tracked_gitignore(repo_root: &Path, rel: &Path) -> Result<(), GitE
             "hydration path {rel_str:?} contains git-tracked files"
         )));
     }
-    let probe = if repo_root.join(&clean).is_dir() {
+    let probe = if expect_dir || repo_root.join(&clean).is_dir() {
         format!("{rel_str}/")
     } else {
         rel_str.to_string()
@@ -317,11 +325,44 @@ pub fn hydrate_for_agent(
     wt_root: &Path,
     cfg: &WorktreeConfig,
 ) -> Result<HydratedPaths, GitError> {
+    hydrate_for_agent_inner(repo_root, wt_root, cfg, None)
+}
+
+fn hydrate_for_agent_inner(
+    repo_root: &Path,
+    wt_root: &Path,
+    cfg: &WorktreeConfig,
+    snap_fallback: Option<(&Path, &str)>,
+) -> Result<HydratedPaths, GitError> {
     if cfg.is_empty() {
         return Ok(HydratedPaths::default());
     }
     let mut write_denied = Vec::new();
     for entry in &cfg.clone_dirs {
+        let rel = validate_relative_entry(entry)?;
+        assert_tracked_gitignore_inner(repo_root, &rel, true)?;
+        assert_no_escaping_wt_prefix(wt_root, &rel)?;
+        let dst = wt_root.join(&rel);
+        let main_missing = matches!(
+            fs::symlink_metadata(repo_root.join(&rel)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound
+        );
+        if main_missing && let Some((snaps_dir, base_sha)) = snap_fallback {
+            if fs::symlink_metadata(&dst).is_err() {
+                let rel_s = path_str(&rel)?;
+                let restored = super::warm_slot::restore_clean_base_snapshot(
+                    wt_root,
+                    snaps_dir,
+                    base_sha,
+                    &[rel_s],
+                )?;
+                if restored == 0 {
+                    let _ = resolve_entry(repo_root, wt_root, entry, true, "clone_dirs")?;
+                }
+            }
+            write_denied.push(dst);
+            continue;
+        }
         let (src, dst) = resolve_entry(repo_root, wt_root, entry, true, "clone_dirs")?;
         if fs::symlink_metadata(&dst).is_err() {
             if let Some(parent) = dst.parent() {
@@ -364,12 +405,52 @@ pub fn hydrate_for_agent(
 }
 
 /// Loads `[worktree]` from `base_sha` and hydrates a freshly created worktree,
+/// falling back to [`super::warm_slot::base_snapshots_dir`] when `clone_dirs`
+/// are absent from `repo_root`, and removing the worktree and its branch on error.
+pub fn hydrate_fresh_worktree_with_snaps(
+    repo_root: &Path,
+    worktree: &TaskWorktree,
+    base_sha: &str,
+    data_dir: &Path,
+    common_id: &str,
+) -> Result<HydratedPaths, GitError> {
+    let snaps_dir = super::warm_slot::base_snapshots_dir(data_dir, common_id);
+    let result = load_base_worktree_config(repo_root, base_sha).and_then(|cfg| {
+        let resolved_sha = git(
+            repo_root,
+            &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
+        )
+        .unwrap_or_else(|_| base_sha.to_string());
+        hydrate_for_agent_inner(
+            repo_root,
+            &worktree.path,
+            &cfg,
+            Some((&snaps_dir, resolved_sha.as_str())),
+        )
+    });
+    if result.is_err() {
+        let _ = worktree::remove(repo_root, worktree, true, true);
+    }
+    result
+}
+
+/// Loads `[worktree]` from `base_sha` and hydrates a freshly created worktree,
 /// removing the worktree and its branch if hydration fails.
 pub fn hydrate_fresh_worktree(
     repo_root: &Path,
     worktree: &TaskWorktree,
     base_sha: &str,
 ) -> Result<HydratedPaths, GitError> {
+    if let Some(data_dir) = std::env::var_os("AAF_DATA_DIR").filter(|v| !v.is_empty()) {
+        let common_id = crate::gate::stats_repo_id(repo_root);
+        return hydrate_fresh_worktree_with_snaps(
+            repo_root,
+            worktree,
+            base_sha,
+            Path::new(&data_dir),
+            &common_id,
+        );
+    }
     let result = load_base_worktree_config(repo_root, base_sha)
         .and_then(|cfg| hydrate_for_agent(repo_root, &worktree.path, &cfg));
     if result.is_err() {

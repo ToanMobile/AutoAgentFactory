@@ -34,6 +34,15 @@ pub(crate) fn run_executor_is_claude(run: &RunConfig) -> bool {
             .is_some_and(|name| name.eq_ignore_ascii_case("claude"))
 }
 
+fn executor_requires_hook(run: &RunConfig) -> bool {
+    run_executor_is_claude(run)
+        || (run.executor_cmd.is_empty()
+            && matches!(
+                run.executor.trim().to_ascii_lowercase().as_str(),
+                "codex" | "gemini" | "antigravity" | "opencode"
+            ))
+}
+
 pub(super) fn build_deps(
     ctx: &Ctx,
     repo: &Path,
@@ -96,6 +105,7 @@ pub(super) fn build_deps(
         // `run.env_pass` (tier 2) to `env_pass`.
         machine_env_pass: cfg.global.run.env_pass.clone(),
         machine_writable_caches: cfg.global.machine.writable_caches.clone(),
+        keychain_policy: cfg.global.safety.deny_macos_keychain,
         ..ExecEnv::from_process()
     };
     let runner: Arc<dyn AgentRunner> = Arc::from(
@@ -149,7 +159,7 @@ pub(super) fn build_deps(
             max_parallel: effective_max_parallel,
             auto_merge: cfg.repo.run.auto_merge,
             sandboxed,
-            hook_required: run_executor_is_claude(&cfg.repo.run),
+            hook_required: executor_requires_hook(&cfg.repo.run),
             // The executor hands the PATH of this process on to the agent.
             agent_path: ctx.path_var.clone(),
             mobile: MOBILE_PROFILES.contains(&profile.as_str()),

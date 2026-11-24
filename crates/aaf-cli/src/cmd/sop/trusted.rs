@@ -138,17 +138,16 @@ pub(super) fn acquire_sop_run_lock(ctx: &Ctx, repo_root: &Path) -> Result<Option
     }
 }
 
-/// Returns `true` when any stage in `spec` requires write isolation in a
-/// dedicated SOP worktree (`StageKind::Script` or non-read-only `StageKind::Agent`).
+/// Returns `true` when any stage in `spec` executes scripts, agents (even
+/// `read_only`), or gates (`StageKind::Script`, `StageKind::Agent`, or
+/// `StageKind::Gate`), guaranteeing Zero-Touch `main` isolation in a dedicated
+/// `aaf/sop-*` worktree. Pure `StageKind::HumanGate` / empty SOPs do not need a
+/// worktree.
 pub(super) fn spec_needs_worktree(spec: &SopSpec) -> bool {
     spec.stages.iter().any(|stage| {
         matches!(
             stage.kind,
-            StageKind::Script { .. }
-                | StageKind::Agent {
-                    read_only: false,
-                    ..
-                }
+            StageKind::Script { .. } | StageKind::Agent { .. } | StageKind::Gate { .. }
         )
     })
 }

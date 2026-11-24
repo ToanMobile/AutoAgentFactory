@@ -135,6 +135,7 @@ fn build_bwrap_args_enforces_least_privilege_mounts_and_hides_data_dir() {
         worktrees_root: Some(wt_root_str),
         path_dirs: vec![],
         run_mark: None,
+        deny_keychain_dir: None,
     };
 
     let argv = build_bwrap_args(

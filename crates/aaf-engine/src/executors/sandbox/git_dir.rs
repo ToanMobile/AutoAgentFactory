@@ -12,6 +12,29 @@ use super::{path_str, regex_escape, sbpl_regex, sbpl_string};
 /// is read for any git dir and moves where git finds the others.
 pub(super) const OBEYED: [&str; 4] = ["config", "config.worktree", "hooks", "commondir"];
 
+/// Primary git-dir files never needed by normal commits (always write-denied).
+const ALWAYS_PROTECTED_FILES: [&str; 4] = [
+    "info/exclude",
+    "info/exclude.lock",
+    "packed-refs",
+    "packed-refs.lock",
+];
+
+/// Protected branch refs write-denied when running in a linked worktree
+/// (`worktrees/<name>/` and `refs/heads/aaf/*` stay writable).
+const LINKED_PROTECTED_REFS: [&str; 7] = [
+    "refs/heads/main",
+    "refs/heads/main.lock",
+    "refs/heads/master",
+    "refs/heads/master.lock",
+    "refs/heads/develop",
+    "refs/heads/develop.lock",
+    "refs/heads/release.lock",
+];
+
+/// Primary git-dir subpaths write-denied for linked worktrees (`release/*`).
+const LINKED_PROTECTED_SUBPATHS: [&str; 1] = ["refs/heads/release"];
+
 /// More directories than this below the `modules` dirs of one git dir is
 /// refused rather than half walked: a submodule left out would lose its
 /// rename guard.
@@ -82,6 +105,28 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>, walked: &mut usize) 
     Ok(())
 }
 
+/// Closed paths under `git_dir` whose ancestor directory entries must be
+/// pinned against rename/deletion (without blocking sibling creation inside
+/// `refs/heads`, so `refs/heads/aaf/*` stays writable).
+pub(super) fn protected_closed_paths(git_dir: &Path, worktree: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = vec![
+        git_dir.join("refs/aaf"),
+        git_dir.join("info/exclude"),
+        git_dir.join("packed-refs"),
+    ];
+    if worktree.is_some_and(|wt| is_linked_worktree_of(wt, git_dir)) {
+        for rel in [
+            "refs/heads/main",
+            "refs/heads/master",
+            "refs/heads/develop",
+            "refs/heads/release",
+        ] {
+            paths.push(git_dir.join(rel));
+        }
+    }
+    paths
+}
+
 /// The deny rules for one git dir and its existing submodule git dirs
 /// `subs` (see [`submodule_git_dirs`]).
 pub(super) fn rules(git_dir: &Path, subs: &[PathBuf]) -> PortResult<String> {
@@ -93,6 +138,11 @@ pub(super) fn rules(git_dir: &Path, subs: &[PathBuf]) -> PortResult<String> {
     // Host-owned snapshot refs under `refs/aaf/` stay read-only to agents.
     let refs_aaf = sbpl_string(&git_dir.join("refs/aaf"))?;
     out.push_str(&format!("(deny file-write* (subpath {refs_aaf}))\n"));
+    let mut always = String::new();
+    for rel in ALWAYS_PROTECTED_FILES {
+        always.push_str(&format!(" (literal {})", sbpl_string(&git_dir.join(rel))?));
+    }
+    out.push_str(&format!("(deny file-write*{always})\n"));
     // The whole git dir moved into a writable place is no longer where the
     // rules above look.
     let own = sbpl_string(git_dir)?;
@@ -101,9 +151,10 @@ pub(super) fn rules(git_dir: &Path, subs: &[PathBuf]) -> PortResult<String> {
 }
 
 /// When `worktree` is a linked worktree of `git_dir`, the deny rules for the
-/// state `git_dir` keeps for its own checkout (SEC-023): `HEAD`, `index` and
-/// the merge, rebase and bisect state next to them. A linked worktree keeps
-/// its own under `worktrees/<name>/` and writes only shared parts here.
+/// state `git_dir` keeps for its own checkout (SEC-023) plus protected branch
+/// refs (`main`, `master`, `develop`, `release/*`): `HEAD`, `index` and the
+/// merge, rebase and bisect state next to them. A linked worktree keeps its
+/// own under `worktrees/<name>/` and writes only shared parts here.
 /// Direct children only: the entry of `git_dir` itself is closed, so none of
 /// them can be renamed away, changed and renamed back.
 pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> PortResult<String> {
@@ -119,6 +170,14 @@ pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> 
         let regex = sbpl_regex(&format!("^{escaped}{pattern}"))?;
         out.push_str(&format!("(deny file-write* (regex {regex}))\n"));
     }
+    let mut refs = String::new();
+    for rel in LINKED_PROTECTED_REFS {
+        refs.push_str(&format!(" (literal {})", sbpl_string(&git_dir.join(rel))?));
+    }
+    for rel in LINKED_PROTECTED_SUBPATHS {
+        refs.push_str(&format!(" (subpath {})", sbpl_string(&git_dir.join(rel))?));
+    }
+    out.push_str(&format!("(deny file-write*{refs})\n"));
     Ok(out)
 }
 

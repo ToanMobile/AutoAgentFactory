@@ -35,6 +35,7 @@ fn exec_env_for(ctx: &Ctx, cfg: &EffectiveConfig) -> ExecEnv {
         agy_bin: AgyRunner::resolve_binary(&ctx.path_var).map(|p| s(&p)),
         machine_env_pass: cfg.global.run.env_pass.clone(),
         machine_writable_caches: cfg.global.machine.writable_caches.clone(),
+        keychain_policy: cfg.global.safety.deny_macos_keychain,
         ..ExecEnv::from_process()
     };
     env.parent_env.retain(|(k, _)| k != "PATH");

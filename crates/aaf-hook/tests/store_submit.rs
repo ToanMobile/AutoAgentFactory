@@ -208,17 +208,25 @@ fn a_tracked_file_git_was_told_not_to_look_at_denies_the_submission() {
 }
 
 #[test]
-fn a_file_ignored_outside_the_tree_is_left_to_the_release_gate() {
+fn only_os_metadata_files_ignored_outside_the_tree_are_tolerated() {
     let project = Project::new();
     project.gate(&project.receipt());
-    // Every developer machine has such files (`.DS_Store` under a global
-    // excludes file): the hook does not refuse them, `aaf gate --release`
-    // does before it signs.
-    fs::write(project.repo.join(".git/info/exclude"), "local.cache\n").unwrap();
-    fs::write(project.repo.join("local.cache"), "x\n").unwrap();
+    // Harmless OS metadata files (`.DS_Store`, `Thumbs.db`, `Desktop.ini`, `._*`)
+    // under external exclude rules are tolerated during store submission.
+    fs::write(
+        project.repo.join(".git/info/exclude"),
+        ".DS_Store\nlocal.cache\n",
+    )
+    .unwrap();
+    fs::write(project.repo.join(".DS_Store"), "os-meta\n").unwrap();
     let hidden = aaf_fp::hidden_files(&project.repo, aaf_fp::GIT_TIMEOUT).unwrap();
     assert_eq!(hidden.ignored.len(), 1, "{hidden:?}");
     assert_eq!(project.submit("fastlane deliver"), Ok(()));
+
+    // Any non-metadata external-excluded file is refused (`SECURITY.md §9`).
+    fs::write(project.repo.join("local.cache"), "x\n").unwrap();
+    let reason = project.submit("fastlane deliver").unwrap_err();
+    assert!(reason.contains("local.cache"), "{reason}");
 }
 
 #[test]

@@ -10,6 +10,7 @@ pub use capture::{
     HOST_CAPTURE_DEVICE, HOST_CAPTURE_TOOL, capture_and_record_proof, captured_proof_image_path,
     load_base_proof_capture_cmd, proof_triggered,
 };
+pub use png::is_likely_blank_png;
 
 use std::env;
 use std::fs::{self, File};

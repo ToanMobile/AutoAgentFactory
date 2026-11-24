@@ -14,7 +14,9 @@ mod merge;
 mod merge_pipeline;
 mod render;
 
-pub use detect::{Detected, PROFILES, detect_stack, effective_profile};
+pub use detect::{
+    Detected, PROFILES, default_proof_trigger_globs, detect_stack, effective_profile,
+};
 pub use load::{
     ConfigError, ConfigInputs, EffectiveConfig, LOCAL_CONFIG_REL, REPO_CONFIG_REL,
     global_config_path, load, load_from_env, load_from_env_with, load_over_repo,

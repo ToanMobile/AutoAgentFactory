@@ -446,11 +446,10 @@ fn protected_dir<'a>(lit: &'a str, ctx: &Ctx) -> Option<&'a str> {
 }
 
 /// What git itself reads in its directory: a script that may write there
-/// changes the branch, the index or the object store under git's feet.
-/// `info/exclude` is the user's own list of ignored files; nothing is
-/// below git's files (`config/app.json`). A path composed below a
-/// directory picked at run time is not git's when it ends in a dot-file
-/// git does not read (`logs/.keep`).
+/// changes the branch, the index, local exclude rules (`info/exclude`), or the
+/// object store under git's feet. Nothing is below git's files
+/// (`config/app.json`). A path composed below a directory picked at run time
+/// is not git's when it ends in a dot-file git does not read (`logs/.keep`).
 fn git_state(path: &Path, composed: bool) -> bool {
     const FILES: &[&str] = &[
         "HEAD",
@@ -486,9 +485,7 @@ fn git_state(path: &Path, composed: bool) -> bool {
     let dot_leaf = composed && parts.last().is_some_and(|last| last.starts_with('.'));
     (0..parts.len()).any(|at| {
         let file = FILES.iter().any(|name| is(at + 1, name)) && parts.len() == at + 2;
-        let dir = DIRS.iter().any(|name| is(at + 1, name))
-            && !(is(at + 1, "info") && is(at + 2, "exclude"))
-            && !(dot_leaf && parts.len() > at + 2);
+        let dir = DIRS.iter().any(|name| is(at + 1, name)) && !(dot_leaf && parts.len() > at + 2);
         is(at, ".git") && (file || dir)
     })
 }

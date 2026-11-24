@@ -340,3 +340,18 @@ pub fn effective_profile(repo: &RepoConfig, repo_root: &Path) -> String {
         repo.project.profile.clone()
     }
 }
+
+/// Sensible default `[proof].trigger_globs` for UI-bearing project stacks.
+///
+/// Returns an empty list for headless/non-UI stacks (`rust`, `backend`, `auto`, ...).
+pub fn default_proof_trigger_globs(profile: &str) -> Vec<String> {
+    let globs: &[&str] = match profile.trim().to_ascii_lowercase().as_str() {
+        "android" => &["res/layout/**", "**/res/layout/**", "**/ui/**", "**/*.kt"],
+        "ios" => &["**/*.swift", "**/*.storyboard"],
+        "flutter" => &["lib/**"],
+        "react-native" | "expo" => &["src/**", "app/**"],
+        "web" => &["src/**", "app/**", "pages/**"],
+        _ => &[],
+    };
+    globs.iter().map(|s| (*s).to_string()).collect()
+}

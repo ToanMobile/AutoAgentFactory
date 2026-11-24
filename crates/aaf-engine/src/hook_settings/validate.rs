@@ -211,7 +211,9 @@ mod tests {
 
     use crate::hook_settings::covering_hook;
     use crate::hook_settings::multi_host::{
-        CODEX_TOOLS, codex_matcher, covering_codex_hook, covering_gemini_hook, gemini_matcher,
+        CODEX_TOOLS, antigravity_matcher, codex_matcher, covering_antigravity_hook,
+        covering_codex_hook, covering_gemini_hook, covering_opencode_hook, gemini_matcher,
+        opencode_matcher,
     };
 
     #[test]
@@ -263,6 +265,38 @@ mod tests {
             }
         });
         assert!(covering_gemini_hook(&gemini.to_string()).is_ok());
+
+        let antigravity = json!({
+            "hooks": {
+                "BeforeTool": [{
+                    "matcher": antigravity_matcher(),
+                    "hooks": [{
+                        "type": "command",
+                        "command": "aaf-hook --host antigravity",
+                        "name": "AAF Antigravity Guard",
+                        "description": "BeforeTool guard",
+                        "statusMessage": "Checking..."
+                    }]
+                }]
+            }
+        });
+        assert!(covering_antigravity_hook(&antigravity.to_string()).is_ok());
+
+        let opencode = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": opencode_matcher(),
+                    "hooks": [{
+                        "type": "command",
+                        "command": "aaf-hook --host opencode",
+                        "name": "AAF OpenCode Guard",
+                        "description": "PreToolUse guard",
+                        "statusMessage": "Checking..."
+                    }]
+                }]
+            }
+        });
+        assert!(covering_opencode_hook(&opencode.to_string()).is_ok());
 
         // Non-string metadata values and dangerous keys are still rejected.
         let bad_meta = json!({

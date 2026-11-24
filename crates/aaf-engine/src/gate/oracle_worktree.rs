@@ -14,7 +14,11 @@ use super::changes::{self, Change};
 use super::oracle::is_oracle_test_path;
 use super::proc::git_bytes;
 use super::{GIT_TIMEOUT, GateError};
-use crate::git::warm_slot::{SlotKind, WarmSlot};
+use crate::git::hydration::load_base_worktree_config;
+use crate::git::warm_slot::{
+    SlotKind, WarmSlot, base_snapshots_dir, promote_from_pure_base_slot,
+    restore_clean_base_snapshot,
+};
 
 #[path = "oracle_worktree_lexer.rs"]
 mod lexer;
@@ -39,7 +43,7 @@ impl ScratchWorktree {
         data_dir: &Path,
         common_id: &str,
         head_sha: &str,
-        _base_sha: &str,
+        base_sha: &str,
     ) -> Result<Self, GateError> {
         let slot = WarmSlot::acquire(
             repo_root,
@@ -50,11 +54,46 @@ impl ScratchWorktree {
             "oracle",
         )
         .map_err(|err| GateError::Git(err.to_string()))?;
-        Ok(Self { slot })
+        let scratch = Self { slot };
+        if let Ok(wt_cfg) = load_base_worktree_config(repo_root, base_sha)
+            && !wt_cfg.clone_dirs.is_empty()
+        {
+            let dirs: Vec<&str> = wt_cfg.clone_dirs.iter().map(String::as_str).collect();
+            scratch.seed_from_base_snapshot(data_dir, common_id, base_sha, &dirs);
+        }
+        Ok(scratch)
     }
 
     pub(crate) fn path(&self) -> &Path {
         self.slot.path()
+    }
+
+    /// Best-effort CoW restore of pre-warmed base artifact directories into
+    /// this oracle scratch worktree from the shared base snapshots directory.
+    pub(crate) fn seed_from_base_snapshot(
+        &self,
+        data_dir: &Path,
+        common_id: &str,
+        base_sha: &str,
+        artifact_dirs: &[&str],
+    ) -> usize {
+        let snaps_dir = base_snapshots_dir(data_dir, common_id);
+        restore_clean_base_snapshot(self.slot.path(), &snaps_dir, base_sha, artifact_dirs)
+            .unwrap_or(0)
+    }
+
+    /// Promotes build artifact directories ONLY when the underlying slot is at
+    /// pure `base_sha` with a clean working tree (never from a PR/reverted tree).
+    #[allow(dead_code)]
+    pub(crate) fn promote_clean_base_artifacts(
+        &self,
+        data_dir: &Path,
+        common_id: &str,
+        base_sha: &str,
+        artifact_dirs: &[&str],
+    ) -> Result<(), GateError> {
+        promote_from_pure_base_slot(&self.slot, data_dir, common_id, base_sha, artifact_dirs)
+            .map_err(|err| GateError::Git(err.to_string()))
     }
 }
 

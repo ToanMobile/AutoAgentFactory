@@ -214,6 +214,7 @@ impl AgentRunner for ClaudeCodeRunner {
             request,
             &self.env,
             account,
+            "claude",
             Some(Box::new(move |line| {
                 let mut guard = feed.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.0.feed_line(line);

@@ -6,6 +6,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aaf_domain::config::{ProofConfig, RepoConfig};
@@ -26,6 +27,8 @@ pub const HOST_CAPTURE_DEVICE: &str = "host-capture";
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(180);
 const CAPTURE_LOG_TAIL_BYTES: usize = 4096;
 const TEMP_FILE_MAX_ATTEMPTS: usize = 32;
+const DEFAULT_PROOF_RETRY_DELAY_MS: u64 = 500;
+const MAX_PROOF_RETRY_DELAY_MS: u64 = 2000;
 const SCRUBBED_CAPTURE_ENV: [&str; 7] = [
     "AAF_DATA_DIR",
     "GIT_DIR",
@@ -286,33 +289,32 @@ fn build_record(
     }
 }
 
-/// Runs the immutable `base_sha` `[proof].capture_cmd` on the host, validates
-/// the PNG output from a private per-run temp file outside `AAF_DATA_DIR`,
-/// copies the validated bytes into `$AAF_DATA_DIR/proofs/<repo_id>/<tree_fp>.png`
-/// (mode `0600`), and writes the HMAC-signed [`ProofRecord`] (mirroring to the
-/// common repository root for the exact same `tree_fp`).
-pub fn capture_and_record_proof(
-    repo_root: &Path,
-    data_dir: &Path,
-    base_sha: &str,
-    cfg: &ProofConfig,
-    tree_fp: &str,
-    clock: &dyn Clock,
-) -> Result<RecordedProof, ProofError> {
-    let fp = tree_fp.trim();
-    if fp.is_empty() {
-        return Err(ProofError::Invalid("tree_fp must not be empty".to_string()));
+fn proof_retry_delay() -> Duration {
+    let ms = std::env::var("AAF_PROOF_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PROOF_RETRY_DELAY_MS)
+        .min(MAX_PROOF_RETRY_DELAY_MS);
+    Duration::from_millis(ms)
+}
+
+fn is_retryable_capture_error(err: &ProofError) -> bool {
+    match err {
+        ProofError::Invalid(msg) => !msg.contains("must be a regular non-symlink file"),
+        ProofError::Io(_) => true,
+        ProofError::DeniedDevice(_) | ProofError::Fingerprint(_) => false,
     }
-    let canon_root = fs::canonicalize(repo_root)?;
-    super::validate_host_capture_device(&canon_root, cfg, HOST_CAPTURE_DEVICE)?;
+}
 
-    let capture_cmd = load_base_proof_capture_cmd(&canon_root, base_sha)?.ok_or_else(|| {
-        ProofError::Invalid("no [proof].capture_cmd configured at base_sha".to_string())
-    })?;
-
-    let temp_out = PrivateTempFile::create_outside(data_dir, &canon_root)?;
+fn run_capture_attempt(
+    canon_root: &Path,
+    data_dir: &Path,
+    capture_cmd: &str,
+    cfg: &ProofConfig,
+) -> Result<(Vec<u8>, u32, u32), ProofError> {
+    let temp_out = PrivateTempFile::create_outside(data_dir, canon_root)?;
     let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(&capture_cmd).current_dir(&canon_root);
+    cmd.arg("-c").arg(capture_cmd).current_dir(canon_root);
     for var in SCRUBBED_CAPTURE_ENV {
         cmd.env_remove(var);
     }
@@ -341,8 +343,52 @@ pub fn capture_and_record_proof(
     }
 
     let (_, bytes) = super::read_regular_image(&temp_out.path, cfg.min_bytes)?;
+    if super::png::is_likely_blank_png(&bytes) {
+        return Err(ProofError::Invalid(super::png::BLANK_PNG_ERROR.to_string()));
+    }
     let (width, height) =
         super::png::validate_png(&bytes, cfg.min_width, cfg.min_height, cfg.min_bytes)?;
+    Ok((bytes, width, height))
+}
+
+/// Runs the immutable `base_sha` `[proof].capture_cmd` on the host, validates
+/// the PNG output from a private per-run temp file outside `AAF_DATA_DIR`
+/// (retrying once automatically after a brief settle pause on transient capture
+/// failure or blank frame), copies the validated bytes into
+/// `$AAF_DATA_DIR/proofs/<repo_id>/<tree_fp>.png` (mode `0600`), and writes the
+/// HMAC-signed [`ProofRecord`] (mirroring to the common repository root for the
+/// exact same `tree_fp`).
+pub fn capture_and_record_proof(
+    repo_root: &Path,
+    data_dir: &Path,
+    base_sha: &str,
+    cfg: &ProofConfig,
+    tree_fp: &str,
+    clock: &dyn Clock,
+) -> Result<RecordedProof, ProofError> {
+    let fp = tree_fp.trim();
+    if fp.is_empty() {
+        return Err(ProofError::Invalid("tree_fp must not be empty".to_string()));
+    }
+    let canon_root = fs::canonicalize(repo_root)?;
+    super::validate_host_capture_device(&canon_root, cfg, HOST_CAPTURE_DEVICE)?;
+
+    let capture_cmd = load_base_proof_capture_cmd(&canon_root, base_sha)?.ok_or_else(|| {
+        ProofError::Invalid("no [proof].capture_cmd configured at base_sha".to_string())
+    })?;
+
+    let (bytes, width, height) = match run_capture_attempt(&canon_root, data_dir, &capture_cmd, cfg)
+    {
+        Ok(ok) => ok,
+        Err(err) if is_retryable_capture_error(&err) => {
+            let delay = proof_retry_delay();
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            run_capture_attempt(&canon_root, data_dir, &capture_cmd, cfg)?
+        }
+        Err(err) => return Err(err),
+    };
     let image_sha256 = aaf_fp::sha256_hex(&bytes);
     let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let recorded_at = clock.now();
