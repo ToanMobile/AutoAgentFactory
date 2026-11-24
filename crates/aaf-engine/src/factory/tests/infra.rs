@@ -145,3 +145,30 @@ fn an_ordinary_failure_still_counts_and_the_run_goes_on() {
     assert_eq!(world.task("t1").unblock_cycles, 1);
     assert!(!world.task("t1").context_notes.is_empty());
 }
+
+/// O12-2: a 429 the auditor only printed (no structured reset time) cools
+/// its account down for the default rate-limit pause, not the router's
+/// 5-hour fallback for an unknown reset.
+#[test]
+fn a_heuristic_auditor_429_cools_the_account_for_the_default_pause() {
+    let world = World::new();
+    world.add("t1");
+    world
+        .gate
+        .state
+        .lock()
+        .unwrap()
+        .locked
+        .insert("t1".to_string(), "lockfp1".to_string());
+    world.runner.0.lock().unwrap().audit_outcome =
+        Some(failed_outcome("API error: HTTP 429 Too Many Requests"));
+
+    world.once();
+
+    assert_eq!(world.runner.count(&RunKind::Audit), 1);
+    let cooldown = world.pool.state.lock().unwrap().cooldown.get("a").copied();
+    assert_eq!(
+        cooldown,
+        Some(1_000 + crate::factory::scheduler::DEFAULT_RATE_LIMIT_COOLDOWN_SECS)
+    );
+}

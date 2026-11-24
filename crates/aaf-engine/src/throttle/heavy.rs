@@ -12,8 +12,6 @@
 
 use std::ffi::OsStr;
 
-pub use super::heavy_family::{stats_command_family, stats_command_family_argv};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeavyTool {
     Gradle,
@@ -53,6 +51,45 @@ pub const HEAVY_FLAGS: &[(&str, HeavyTool)] = &[
     ("-batchmode", HeavyTool::Unity),
     ("-runTests", HeavyTool::Unity),
     ("-executeMethod", HeavyTool::Unity),
+];
+
+/// Common build/test tool families used ONLY to share learned peak-RSS
+/// measurements across custom `--label` runs in the same repository (e.g.
+/// `aaf slot --label fix-g6 -- cargo test ...` reusing `@cmd:cargo` instead of
+/// falling back to `Admission::Unmeasured` and triggering a machine-wide drain).
+/// Separate from [`HEAVY_PROGRAMS`] so daemon-exclusive policy and `aaf-hook`
+/// rules remain unchanged.
+const STATS_FAMILIES: &[(&str, &str)] = &[
+    ("cargo", "cargo"),
+    ("rustc", "cargo"),
+    ("gradle", "gradle"),
+    ("gradlew", "gradle"),
+    ("gradlew.bat", "gradle"),
+    ("xcodebuild", "xcodebuild"),
+    ("unity", "unity"),
+    ("unity.exe", "unity"),
+    ("unity-editor", "unity"),
+    ("mvn", "maven"),
+    ("mvnw", "maven"),
+    ("flutter", "flutter"),
+    ("dart", "flutter"),
+    ("npm", "node"),
+    ("npx", "node"),
+    ("pnpm", "node"),
+    ("yarn", "node"),
+    ("bun", "node"),
+    ("pytest", "python"),
+    ("uv", "python"),
+    ("go", "go"),
+    ("swift", "swift"),
+    ("bazel", "bazel"),
+    ("bazelisk", "bazel"),
+    ("make", "make"),
+    ("cmake", "make"),
+    ("ninja", "make"),
+    ("dotnet", "dotnet"),
+    ("sbt", "sbt"),
+    ("zig", "zig"),
 ];
 
 /// Words after which the real program is still to come. Their own options
@@ -209,7 +246,7 @@ fn is_shell_option(word: &str) -> bool {
 /// not the word right after `-c` (`sh -c -- 'cmd'`, `bash -c -o pipefail
 /// 'cmd'`, `zsh -c +o nomatch 'cmd'`). `flag` is the word that held the
 /// `c`; it may hold an `o` whose value comes next (`-co pipefail`).
-pub(super) fn shell_script<'a>(
+fn shell_script<'a>(
     flag: &str,
     words: &mut impl Iterator<Item = std::borrow::Cow<'a, str>>,
 ) -> Option<std::borrow::Cow<'a, str>> {
@@ -256,13 +293,13 @@ fn carried_script<'a>(wrapper: &str, option: &'a str) -> Option<&'a str> {
     option[at..].strip_prefix(short)
 }
 
-pub(super) enum Token {
+enum Token {
     Word(String),
     /// A new command starts here.
     Break,
 }
 
-pub(super) fn tokens(text: &str) -> Vec<Token> {
+fn tokens(text: &str) -> Vec<Token> {
     let mut out = Vec::new();
     let mut word = String::new();
     let mut quote: Option<char> = None;
@@ -331,8 +368,15 @@ fn lookup(table: &[(&str, HeavyTool)], word: &str) -> Option<HeavyTool> {
         .map(|(_, tool)| *tool)
 }
 
+fn lookup_family(word: &str) -> Option<&'static str> {
+    STATS_FAMILIES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(word))
+        .map(|(_, family)| *family)
+}
+
 /// What one word did to the scan.
-pub(super) enum Step<'a> {
+enum Step<'a> {
     Heavy(HeavyTool),
     /// A known build/test command family for stats sharing (not a daemon-heavy tool).
     Family(&'static str),
@@ -344,7 +388,7 @@ pub(super) enum Step<'a> {
 }
 
 /// Reads one command after the other, a word at a time.
-pub(super) struct Scanner {
+struct Scanner {
     /// A command given to `aaf slot` or `aaf gate` does not count.
     skip_queued: bool,
     at_command: bool,
@@ -352,7 +396,7 @@ pub(super) struct Scanner {
     /// Active wrapper name (for wrapper-specific script options).
     wrapper: &'static str,
     /// The wrapper last seen is a shell.
-    pub(super) shell: bool,
+    shell: bool,
     /// `script [opts] <typescript-file> [command]`: skip the recording file once.
     skip_file: bool,
     valued: Valued,
@@ -363,7 +407,7 @@ pub(super) struct Scanner {
 }
 
 impl Scanner {
-    pub(super) fn new(skip_queued: bool) -> Scanner {
+    fn new(skip_queued: bool) -> Scanner {
         Scanner {
             skip_queued,
             at_command: true,
@@ -379,19 +423,19 @@ impl Scanner {
     }
 
     /// A new command starts with the next word.
-    pub(super) fn start_command(&mut self) {
+    fn start_command(&mut self) {
         *self = Scanner::new(self.skip_queued);
     }
 
     /// Only the heavy flags count from here on: what follows are arguments.
-    pub(super) fn arguments_only(&mut self) {
+    fn arguments_only(&mut self) {
         self.at_command = false;
         self.in_wrapper = false;
         self.wrapper = "";
         self.skip_file = false;
     }
 
-    pub(super) fn word<'a>(&mut self, word: &'a str) -> Step<'a> {
+    fn word<'a>(&mut self, word: &'a str) -> Step<'a> {
         if self.queued {
             return Step::Next;
         }
@@ -457,7 +501,7 @@ impl Scanner {
         if let Some(tool) = lookup(HEAVY_PROGRAMS, base) {
             return Step::Heavy(tool);
         }
-        if let Some(family) = super::heavy_family::lookup_family(base) {
+        if let Some(family) = lookup_family(base) {
             return Step::Family(family);
         }
         self.after_aaf = base == "aaf";
@@ -532,3 +576,6 @@ pub fn heavy_tool_argv<S: AsRef<OsStr>>(argv: &[S]) -> Option<HeavyTool> {
     }
     None
 }
+
+mod family;
+pub use family::{stats_command_family, stats_command_family_argv};

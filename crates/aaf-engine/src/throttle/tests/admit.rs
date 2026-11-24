@@ -9,11 +9,11 @@ use super::super::stats::{HeavySample, record};
 use super::super::{Backoff, Pressure, SlotGuard};
 use super::support::{GIB, Rig};
 
-const REPO: &str = "repo";
-const LABEL: &str = "test_full";
+pub(super) const REPO: &str = "repo";
+pub(super) const LABEL: &str = "test_full";
 
 /// Marks the command as measured with a 2 GiB peak.
-fn measure(rig: &Rig, data: &TempDir) {
+pub(super) fn measure(rig: &Rig, data: &TempDir) {
     let sample = HeavySample {
         peak_rss_bytes: 2 * GIB,
         duration_ms: 10,
@@ -22,7 +22,7 @@ fn measure(rig: &Rig, data: &TempDir) {
 }
 
 /// Takes slot 0 the way another `aaf` process would.
-fn occupy(data: &TempDir) -> SlotGuard {
+pub(super) fn occupy(data: &TempDir) -> SlotGuard {
     let measured = Admission::Measured { peak_rss_bytes: 1 };
     try_acquire(data.path(), 1, measured, &|| None)
         .unwrap()
@@ -330,96 +330,6 @@ fn newer_measured_waiter_yields_to_older_fifo_ticket_when_slots_are_scarce() {
         .admit_ask(data.path(), &*rig.clock, &ask)
         .unwrap();
     assert!(admitted.is_some());
-}
-
-#[test]
-fn fifo_waiter_behind_older_ticket_keeps_full_8s_backoff_cap() {
-    let data = TempDir::new().unwrap();
-    let mut rig = Rig::calm();
-    rig.machine.max_heavy_parallel = 1;
-    measure(&rig, &data);
-    let held = Arc::new(Mutex::new(Some(occupy(&data))));
-    let older = Arc::new(Mutex::new(Some(
-        super::super::queue::WaitTicket::join(data.path(), 500).unwrap(),
-    )));
-    let release_slot = Arc::clone(&held);
-    let release_ticket = Arc::clone(&older);
-    rig.sleeper.on_sleep(move |count| {
-        if count == 6 {
-            release_ticket.lock().unwrap().take();
-            release_slot.lock().unwrap().take();
-        }
-    });
-
-    let admitted = rig
-        .throttle()
-        .admit(data.path(), &*rig.clock, REPO, LABEL)
-        .unwrap();
-    assert_eq!(admitted.slot.index(), 0);
-    let slept = rig.sleeper.slept.lock().unwrap().clone();
-    assert_eq!(slept.len(), 6);
-    // Waiter behind an older FIFO ticket (`ahead > 0`) keeps the full 8 s cap.
-    let bases = [250u64, 500, 1_000, 2_000, 4_000, 8_000];
-    for (delay, base) in slept.iter().zip(bases) {
-        let millis = u64::try_from(delay.as_millis()).unwrap();
-        assert!(
-            millis >= base * 3 / 4 && millis <= base * 5 / 4,
-            "{millis} vs {base}"
-        );
-    }
-}
-
-#[test]
-fn draining_job_caps_wakeup_at_front_of_queue_cap_and_immediate_admit_skips_phase_c() {
-    let data = TempDir::new().unwrap();
-    let rig = Rig::calm();
-    // Calm immediate admit skips Phase C pressure re-probe (only Phase A polls once).
-    let admitted = rig
-        .throttle()
-        .admit(data.path(), &*rig.clock, REPO, LABEL)
-        .unwrap();
-    assert_eq!(rig.probe.pressure.calls(), 1);
-    drop(admitted);
-
-    // Unmeasured job waiting past DRAIN_AFTER_SECS grows to 8 s before draining,
-    // then drops to FRONT_OF_QUEUE_CAP (<= 1.25 s) once `drain.is_some()`.
-    let rig = Rig::calm();
-    let held = Arc::new(Mutex::new(Some(occupy(&data))));
-    let release = Arc::clone(&held);
-    let clock = Arc::clone(&rig.clock);
-    let started = clock.now();
-    let drain_after = i64::try_from(super::super::DRAIN_AFTER_SECS).unwrap();
-    let draining_sleeps = Arc::new(Mutex::new(0usize));
-    let draining_ref = Arc::clone(&draining_sleeps);
-    rig.sleeper.on_sleep(move |_| {
-        if clock.now() - started >= drain_after {
-            let mut n = draining_ref.lock().unwrap();
-            *n += 1;
-            if *n >= 4 {
-                release.lock().unwrap().take();
-            }
-        }
-    });
-
-    let admitted = rig
-        .throttle()
-        .admit(data.path(), &*rig.clock, REPO, "unmeasured_drain")
-        .unwrap();
-    assert_eq!(admitted.slot.index(), 0);
-    let slept = rig.sleeper.slept.lock().unwrap().clone();
-    assert!(slept.len() >= 8, "{slept:?}");
-    // Before draining, delays exceed FRONT_OF_QUEUE_CAP * 1.25 (reach ~8 s).
-    assert!(
-        slept.iter().any(|d| *d >= Duration::from_secs(4)),
-        "expected pre-drain backoff to grow past 4 s: {slept:?}"
-    );
-    // Final sleeps while draining are all capped at FRONT_OF_QUEUE_CAP * 1.25 (1250 ms).
-    for delay in &slept[slept.len() - 3..] {
-        assert!(
-            *delay <= Duration::from_millis(1_250) && *delay >= Duration::from_millis(750),
-            "expected draining delay in 750..=1250ms, got {delay:?} in {slept:?}"
-        );
-    }
 }
 
 #[test]

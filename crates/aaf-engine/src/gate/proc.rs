@@ -15,6 +15,10 @@ use aaf_fp::output::{self, Exited};
 use super::GateError;
 
 const POLL: Duration = Duration::from_millis(5);
+/// Many children (a git call) end within a few milliseconds: while one is
+/// this young its exit is checked every [`FAST_POLL`] instead of [`POLL`].
+const FAST_POLL_FOR: Duration = Duration::from_millis(50);
+const FAST_POLL: Duration = Duration::from_millis(1);
 /// Longest wait for the output once the child is gone: only another holder
 /// of the stream that goes on writing takes that long.
 const DRAIN_LIMIT: Duration = Duration::from_secs(30);
@@ -230,6 +234,15 @@ pub(crate) struct Waited {
     pub paused: Duration,
 }
 
+/// The sleep before the next exit check of a child running for `elapsed`.
+fn next_poll(elapsed: Duration) -> Duration {
+    if elapsed < FAST_POLL_FOR {
+        FAST_POLL
+    } else {
+        POLL
+    }
+}
+
 /// Waits for `child`, the leader of its own process group, under
 /// `supervisor`; kills the group once it has run for `timeout`. Besides how
 /// it ended: the group, when the timeout kill gave up with members left.
@@ -276,7 +289,7 @@ fn wait_supervised(
             }
             break child.wait()?;
         }
-        thread::sleep(POLL);
+        thread::sleep(next_poll(now - started));
     };
     let end = Instant::now();
     if paused {
@@ -409,8 +422,14 @@ pub(crate) fn git_bytes(
     let git = aaf_fp::program("git").map_err(|err| GateError::Git(err.to_string()))?;
     let mut cmd = Command::new(git);
     // No auto gc in any git command of aaf (docs/PLAN.md C.8): a repack must
-    // not start inside a call that has a deadline.
-    cmd.arg("-C").arg(repo).args(["-c", "gc.auto=0"]).args(args);
+    // not start inside a call that has a deadline. No fsmonitor either: git
+    // checks a repository embedded in the work tree with a child `git status`
+    // that would start the `core.fsmonitor` the agent wrote into it; `-c`
+    // reaches those child gits through GIT_CONFIG_PARAMETERS.
+    cmd.arg("-C")
+        .arg(repo)
+        .args(["-c", "gc.auto=0", "-c", "core.fsmonitor=false"])
+        .args(args);
     for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
         cmd.env_remove(var);
     }
@@ -463,5 +482,16 @@ mod tests {
         drain(EndlessReader, sink, tx, Arc::clone(&stop));
         stop.store(true, Ordering::Relaxed);
         assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn next_poll_is_fast_while_young() {
+        let ms = Duration::from_millis;
+        for elapsed in [0, 1, 8, 49] {
+            assert_eq!(next_poll(ms(elapsed)), ms(1));
+        }
+        for elapsed in [50, 51, 5_000] {
+            assert_eq!(next_poll(ms(elapsed)), POLL);
+        }
     }
 }

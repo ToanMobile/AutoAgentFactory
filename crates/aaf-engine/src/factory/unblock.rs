@@ -6,104 +6,23 @@ use aaf_domain::blocked::{BlockedReason, SubtaskPlan, UnblockAction};
 use aaf_domain::budget::BudgetCheck;
 use aaf_domain::config::MAX_AUDIT_REWORKS_CAP;
 use aaf_domain::event::{EventKind, FactoryEvent};
-use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, LimitHit, PortResult};
-use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
+use aaf_domain::ports::{LimitHit, PortResult};
 use aaf_domain::task::{ImmutableSpec, Task, TaskState};
 use serde_json::json;
 
 use super::audit_turn::InfraWatch;
 use super::ports::Grant;
 use super::rework_filter::is_valid_rework_finding;
-use super::worker::{
-    GateJob, Next, ensure_budget, halt_on_infra, hook_problem, request, status_of,
-};
+use super::worker::{GateJob, Next, ensure_budget, halt_on_infra, hook_problem, request};
 use super::{Deps, Store};
 use crate::cross_audit::Finding;
 use crate::git::TaskWorktree;
 use crate::git::worktree::validate_task_id;
-use crate::unblocker::{
-    AgentSubtaskProposer, FailureSignal, Ladder, PROPOSER_EXECUTOR, QuotaRoute, failure_digest,
-};
+use crate::unblocker::{AgentSubtaskProposer, FailureSignal, Ladder, QuotaRoute, failure_digest};
 use crate::webhook::WebhookEvent;
 
-/// Records T4 subtask-proposer runs in `runs`, emits `RunStarted`/`RunFinished`,
-/// and adds wall-clock seconds to the root budget (`AgentSubtaskProposer` charges tokens).
-struct ProposerRecorder<'a> {
-    deps: &'a Deps,
-    task: &'a Task,
-    branch: String,
-    account_id: Option<&'a str>,
-    inner: &'a dyn AgentRunner,
-}
-
-impl AgentRunner for ProposerRecorder<'_> {
-    fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome> {
-        let started = self.deps.now();
-        self.deps.store.insert_run(&RunRecord {
-            id: request.run_id.clone(),
-            task_id: self.task.id.clone(),
-            account_id: self.account_id.map(str::to_string),
-            executor: PROPOSER_EXECUTOR.to_string(),
-            worktree_path: request.cwd.clone(),
-            branch: self.branch.clone(),
-            status: RunStatus::Running,
-            exit_code: None,
-            tokens_in: 0,
-            tokens_out: 0,
-            started_at: started,
-            ended_at: None,
-        })?;
-        self.deps.emit(
-            EventKind::RunStarted,
-            &self.task.id,
-            json!({
-                "run_id": request.run_id,
-                "executor": PROPOSER_EXECUTOR,
-                "account": self.account_id,
-            }),
-        )?;
-        let res = self.inner.run(request);
-        let ended = self.deps.now();
-        let wall = u64::try_from(ended - started).unwrap_or(0);
-        let (status, exit_code, tokens_in, tokens_out) = match &res {
-            Ok(outcome) => (
-                status_of(outcome),
-                outcome.exit_code,
-                outcome.tokens_in,
-                outcome.tokens_out,
-            ),
-            Err(_) => (RunStatus::Failed, None, 0, 0),
-        };
-        self.deps.store.finish_run(
-            &request.run_id,
-            &RunFinish {
-                status,
-                exit_code,
-                tokens_in,
-                tokens_out,
-                ended_at: ended,
-            },
-        )?;
-        ensure_budget(self.deps, &self.task.root_id)?;
-        self.deps.store.add_usage(&self.task.root_id, 0, wall, 0)?;
-        self.deps.emit(
-            EventKind::RunFinished,
-            &self.task.id,
-            json!({
-                "run_id": request.run_id,
-                "status": status.as_str(),
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "tokens_measured": self.inner.reports_tokens(),
-            }),
-        )?;
-        res
-    }
-
-    fn reports_tokens(&self) -> bool {
-        self.inner.reports_tokens()
-    }
-}
+mod proposer;
+use proposer::ProposerRecorder;
 
 /// Records an account rate-limit cooldown and emits `AccountCooldown`.
 pub(super) fn report_account_limit(

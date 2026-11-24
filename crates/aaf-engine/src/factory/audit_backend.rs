@@ -4,9 +4,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use aaf_domain::budget::BudgetCheck;
 use aaf_domain::config::{AuditScope, CrossAuditConfig};
 use aaf_domain::event::EventKind;
 use aaf_domain::ports::{AgentOutcome, AgentRunner, LimitHit, PortResult};
+use aaf_domain::task::Task;
 use serde_json::json;
 
 pub(crate) use super::audit_turn::run_auditor_turn;
@@ -318,6 +320,34 @@ pub(crate) fn audit_rejection_signal(log_tail: &str) -> FailureSignal {
     signal
 }
 
+/// O12-1: whether an audit of fingerprint `fp` (the `fp_field` of its
+/// `CrossAudit` event) that ended without a verdict gets one more run: only
+/// a readable, complete diff, and only once per fingerprint (the event of
+/// the first one carries `"retry": true`), and only while the root budget
+/// still allows work.
+pub(crate) fn retry_inconclusive(
+    deps: &Deps,
+    task: &Task,
+    (verdict, diff_truncated): (&AuditVerdict, bool),
+    fp_field: &str,
+    fp: &str,
+) -> PortResult<bool> {
+    if diff_truncated || !matches!(verdict, AuditVerdict::Inconclusive { .. }) {
+        return Ok(false);
+    }
+    if super::worker::ensure_budget(deps, &task.root_id)?.check() != BudgetCheck::Ok {
+        return Ok(false);
+    }
+    let retried = deps
+        .store
+        .events_for_task(&task.id, 200)?
+        .iter()
+        .filter(|e| e.kind == EventKind::CrossAudit)
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.payload_json).ok())
+        .any(|p| p["retry"] == json!(true) && p[fp_field] == json!(fp));
+    Ok(!retried)
+}
+
 pub(crate) fn verdict_text(verdict: &AuditVerdict) -> String {
     match verdict {
         AuditVerdict::Pass { .. } => "pass".to_string(),
@@ -466,6 +496,14 @@ pub(crate) fn execute_audit(
         &*deps.clock,
     )?;
     let text = verdict_text(&report.verdict);
+    let retry = approval.is_none()
+        && retry_inconclusive(
+            deps,
+            &task,
+            (&report.verdict, report.diff_truncated),
+            "lock_fp",
+            lock_fp,
+        )?;
     deps.emit(
         EventKind::CrossAudit,
         &task.id,
@@ -475,8 +513,13 @@ pub(crate) fn execute_audit(
             "reviewer": reviewer,
             "same_account": same_account,
             "lock_fp": lock_fp,
+            "retry": retry,
         }),
     )?;
+    if retry {
+        let lock_fp = lock_fp.to_string();
+        return Ok(Next::RetryAudit(Box::new(Job::Audit { job, lock_fp })));
+    }
     if approval.is_some() {
         let next_job = GateJob {
             audited: true,

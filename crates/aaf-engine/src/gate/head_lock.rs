@@ -30,9 +30,17 @@ fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateErr
 }
 
 /// Hash of what is on disk at `path` now, or `deleted`.
-fn content_hash(repo_root: &Path, path: &str) -> Result<String, GateError> {
+pub(super) fn content_hash(repo_root: &Path, path: &str) -> Result<String, GateError> {
     let full = repo_root.join(path);
     let Ok(meta) = fs::symlink_metadata(&full) else {
+        // A name git reported in non-UTF-8 bytes was decoded lossily, so
+        // the decoded name is never on disk: it is not a deletion an
+        // approval could cover.
+        if path.contains('\u{FFFD}') {
+            return Err(GateError::Config(format!(
+                "locked path {path} is not valid UTF-8"
+            )));
+        }
         return Ok("deleted".to_string());
     };
     if meta.is_symlink() {
@@ -46,15 +54,6 @@ fn content_hash(repo_root: &Path, path: &str) -> Result<String, GateError> {
     Err(GateError::Config(format!(
         "locked path {path} is neither a file nor a symlink"
     )))
-}
-
-fn status_letter(kind: ChangeKind) -> &'static str {
-    match kind {
-        ChangeKind::Added => "A",
-        ChangeKind::Modified => "M",
-        ChangeKind::Deleted => "D",
-        ChangeKind::Renamed => "R",
-    }
 }
 
 /// Extract directory prefixes from non-test locked globs so a symlink placed
@@ -178,19 +177,21 @@ fn locked(
     changes: &[Change],
     added: &[AddedLines],
 ) -> Result<(Vec<LockedChange>, String), GateError> {
-    let (report, fp, _) = locked_with_cache(repo_root, cfg, changes, added, &mut HashMap::new())?;
+    let mut hash = |path: &str| content_hash(repo_root, path);
+    let (report, fp, _) = locked_with(repo_root, cfg, changes, added, &mut hash)?;
     Ok((report, fp))
 }
 
-/// Locked changes, their fingerprint, and exact sorted entry tuples, caching
-/// per-path content hashes so derived views (base config, tracked-only changes)
-/// reuse the exact same single working-tree read.
-fn locked_with_cache(
+/// Locked changes, their fingerprint, and exact sorted entry tuples, with
+/// the content of each changed path read by `hash` (callers memoise it so
+/// derived views (base config, tracked-only changes) reuse the exact same
+/// single working-tree read).
+fn locked_with(
     repo_root: &Path,
     cfg: &RepoConfig,
     changes: &[Change],
     added: &[AddedLines],
-    hash_cache: &mut HashMap<String, String>,
+    hash: &mut dyn FnMut(&str) -> Result<String, GateError>,
 ) -> Result<(Vec<LockedChange>, String, Vec<LockEntry>), GateError> {
     let matchers = LockMatchers::from_globs(&cfg.gate.head_lock_globs)?;
     let mut allow_paths: HashSet<&str> = HashSet::new();
@@ -214,17 +215,10 @@ fn locked_with_cache(
         };
         // The hash follows the content on disk, so an approval stops
         // covering the change the moment the file is edited again.
-        let hash = match hash_cache.get(&change.path) {
-            Some(cached) => cached.clone(),
-            None => {
-                let computed = content_hash(repo_root, &change.path)?;
-                hash_cache.insert(change.path.clone(), computed.clone());
-                computed
-            }
-        };
+        let hash = hash(&change.path)?;
         entries.push((
             path.to_string(),
-            status_letter(change.kind),
+            change.kind.letter(),
             change.path.clone(),
             hash,
         ));
@@ -409,49 +403,47 @@ pub fn approve(
     same_account: bool,
     clock: &dyn Clock,
 ) -> Result<Approval, GateError> {
-    approve_inner(
-        data_dir,
-        repo_root,
-        cfg,
-        reviewer,
-        same_account,
-        None,
-        clock,
-    )
-}
-
-/// Signs a `PASS` approval only if the locked-file fingerprint still matches
-/// `expected_lock_fp` (closing TOCTOU between preview and confirmation).
-pub fn approve_matching(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    reviewer: &str,
-    same_account: bool,
-    expected_lock_fp: &str,
-    clock: &dyn Clock,
-) -> Result<Approval, GateError> {
-    approve_inner(
-        data_dir,
-        repo_root,
-        cfg,
-        reviewer,
-        same_account,
-        Some(expected_lock_fp),
-        clock,
-    )
-}
-
-fn approve_inner(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    reviewer: &str,
-    same_account: bool,
-    expected_lock_fp: Option<&str>,
-    clock: &dyn Clock,
-) -> Result<Approval, GateError> {
     let base = base::resolve(repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
+    let who = (reviewer, same_account);
+    let mut hash = |path: &str| content_hash(repo_root, path);
+    approve_inner(data_dir, repo_root, cfg, &base, who, clock, None, &mut hash)
+}
+
+/// [`approve`] against an already resolved `base`, for the locked diff a
+/// reviewer was shown only: `NothingLocked` when no locked file is changed
+/// and `LockFpChanged` when their `lock_fp` is no longer `expected`, both
+/// decided on one evaluation and before the key is loaded or anything is
+/// written (audit a13 L8-R3-1). `who` is (reviewer, same account).
+pub fn approve_expecting(
+    data_dir: &Path,
+    repo_root: &Path,
+    cfg: &RepoConfig,
+    base: &base::Base,
+    who: (&str, bool),
+    clock: &dyn Clock,
+    expected: &str,
+) -> Result<Approval, GateError> {
+    let mut hash = |path: &str| content_hash(repo_root, path);
+    let expected = Some(expected);
+    approve_inner(
+        data_dir, repo_root, cfg, base, who, clock, expected, &mut hash,
+    )
+}
+
+/// The approvals for the locked changes, every fingerprint from the content
+/// `read_hash` gave for each path, read once per path. With `expected`, see
+/// [`approve_expecting`] (`NothingLocked` / `LockFpChanged`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn approve_inner(
+    data_dir: &Path,
+    repo_root: &Path,
+    cfg: &RepoConfig,
+    base: &base::Base,
+    (reviewer, same_account): (&str, bool),
+    clock: &dyn Clock,
+    expected_lock_fp: Option<&str>,
+    read_hash: &mut dyn FnMut(&str) -> Result<String, GateError>,
+) -> Result<Approval, GateError> {
     let set = changes::collect(repo_root, &base.diff_target, GIT_TIMEOUT)?;
     let added = changes::added_lines(
         repo_root,
@@ -460,9 +452,20 @@ fn approve_inner(
         &static_checks::skip_path,
         GIT_TIMEOUT,
     )?;
-    let mut hash_cache = HashMap::new();
+    // One read per path for every fingerprint signed below: a file edited
+    // while this runs (after the `expected` check, during the `git show`)
+    // must not reach any approval (audit a13 R4-L2-1).
+    let mut seen_content = HashMap::<String, String>::new();
+    let mut hash = |path: &str| -> Result<String, GateError> {
+        if let Some(hash) = seen_content.get(path) {
+            return Ok(hash.clone());
+        }
+        let hash = read_hash(path)?;
+        seen_content.insert(path.to_string(), hash.clone());
+        Ok(hash)
+    };
     let (locked_changes, lock_fp, primary_entries) =
-        locked_with_cache(repo_root, cfg, &set.changes, &added, &mut hash_cache)?;
+        locked_with(repo_root, cfg, &set.changes, &added, &mut hash)?;
     if locked_changes.is_empty() && expected_lock_fp.is_some() {
         return Err(GateError::NothingLocked);
     }
@@ -470,10 +473,7 @@ fn approve_inner(
         && let Some(expected) = expected_lock_fp
         && lock_fp != expected
     {
-        return Err(GateError::LockFpMismatch {
-            expected: expected.to_string(),
-            actual: lock_fp,
-        });
+        return Err(GateError::LockFpChanged);
     }
     // `aaf merge` evaluates head-lock against the trusted config on `base` inside
     // a clean detached scratch worktree (no untracked local worktree files such
@@ -487,7 +487,7 @@ fn approve_inner(
     });
     let base_view = base_cfg.as_ref().and_then(|bcfg| {
         let (base_locked, fp, entries) =
-            locked_with_cache(repo_root, bcfg, &set.changes, &added, &mut hash_cache).ok()?;
+            locked_with(repo_root, bcfg, &set.changes, &added, &mut hash).ok()?;
         (!base_locked.is_empty()).then_some((fp, entries))
     });
     let (primary_fp, allowed_entries, base_view) = if !locked_changes.is_empty() {
@@ -516,7 +516,7 @@ fn approve_inner(
     }
     if !tracked_changes.is_empty() {
         if let Ok((tl, fp, entries)) =
-            locked_with_cache(repo_root, cfg, &tracked_changes, &added, &mut hash_cache)
+            locked_with(repo_root, cfg, &tracked_changes, &added, &mut hash)
             && !tl.is_empty()
             && entries.iter().all(|e| primary_set.contains(e))
         {
@@ -524,7 +524,7 @@ fn approve_inner(
         }
         if let Some(bcfg) = base_cfg.as_ref()
             && let Ok((tl, fp, base_entries)) =
-                locked_with_cache(repo_root, bcfg, &tracked_changes, &added, &mut hash_cache)
+                locked_with(repo_root, bcfg, &tracked_changes, &added, &mut hash)
             && !tl.is_empty()
             && base_entries.iter().all(|e| primary_set.contains(e))
         {

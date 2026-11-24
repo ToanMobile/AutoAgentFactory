@@ -153,9 +153,7 @@ fn merge_locked(
         )));
     }
     // Uncommitted work would be neither rebased nor gated nor merged.
-    if !git(tree, &["status", "--porcelain"])?.is_empty() {
-        return Err(GitError::Dirty(tree.to_path_buf()));
-    }
+    worktree::ensure_clean(tree)?;
 
     let remote = has_remote(&req.repo_root, &req.remote)?;
     let onto = if remote {
@@ -168,9 +166,14 @@ fn merge_locked(
     };
 
     let onto_sha = git(&req.repo_root, &["rev-parse", "--verify", &onto])?;
+    // Onto the resolved commit, not the ref: a ref that moved in between
+    // would land the task on a base the gate is not told about.
     if let Some(files) = rebase(tree, &onto_sha)? {
         return Ok(MergeOutcome::Conflict { files });
     }
+    // Hooks are off for the rebase, but anything that still left the tree
+    // differing from HEAD would let the gate judge one tree and land another.
+    worktree::ensure_clean(tree)?;
     // The exact commit the gate is about to judge is the one that lands.
     let head = git(tree, &["rev-parse", "HEAD"])?;
     match regate(tree, &onto_sha) {
@@ -187,9 +190,11 @@ fn merge_locked(
 }
 
 /// Rebases the checked-out branch onto `onto`. Returns the conflicting
-/// files after aborting when the rebase stopped on a conflict.
+/// files after aborting when the rebase stopped on a conflict. Hooks are off:
+/// the task's own (in-tree `core.hooksPath`) would run with the gate's trust
+/// and could rewrite the working tree the gate is about to judge.
 fn rebase(tree: &Path, onto: &str) -> Result<Option<Vec<String>>, GitError> {
-    let args = ["rebase", onto];
+    let args = ["-c", "core.hooksPath=/dev/null", "rebase", onto];
     let out = git_raw(tree, &args)?;
     if out.success() {
         return Ok(None);
@@ -204,7 +209,10 @@ fn rebase(tree: &Path, onto: &str) -> Result<Option<Vec<String>>, GitError> {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect();
-    git(tree, &["rebase", "--abort"])?;
+    git(
+        tree,
+        &["-c", "core.hooksPath=/dev/null", "rebase", "--abort"],
+    )?;
     if files.is_empty() {
         // Stopped for a reason other than a content conflict.
         return Err(failure(&args, &out));

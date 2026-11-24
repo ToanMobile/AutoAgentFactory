@@ -12,6 +12,8 @@ use aaf_domain::ports::{PortError, PortResult, SandboxPolicy};
 
 use super::pty::CommandSpec;
 
+mod git_dir;
+
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// Device nodes ordinary programs write to; without them even `> /dev/null`
@@ -123,40 +125,11 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // Hooks and config are run or obeyed by every later git command,
     // including the user's own outside the sandbox; the same files exist per
     // linked worktree under `worktrees/<name>/`.
+    let mut submodules = Vec::new();
     for git_dir in &git_dirs {
-        let hooks = sbpl_string(&git_dir.join("hooks"))?;
-        let config = sbpl_string(&git_dir.join("config"))?;
-        let config_worktree = sbpl_string(&git_dir.join("config.worktree"))?;
-        let refs_aaf = sbpl_string(&git_dir.join("refs/aaf"))?;
-        let linked = sbpl_regex(&format!(
-            "^{}/worktrees/[^/]+/(hooks|config|config\\.worktree)(/|$)",
-            regex_escape(path_str(git_dir)?)
-        ))?;
-        profile.push_str(&format!(
-            "(deny file-write* (subpath {hooks}) (literal {config}) (literal {config_worktree}) (regex {linked}))\n"
-        ));
-        // Host-owned snapshot refs under `refs/aaf/` stay read-only to agents.
-        profile.push_str(&format!("(deny file-write* (subpath {refs_aaf}))\n"));
-        // A linked worktree finds its common dir (and so its hooks and
-        // config) through these two pointer files.
-        let pointers = sbpl_regex(&format!(
-            "^{}/worktrees/[^/]+/(commondir|gitdir)$",
-            regex_escape(path_str(git_dir)?)
-        ))?;
-        profile.push_str(&format!("(deny file-write* (regex {pointers}))\n"));
-        // The directory entries themselves: a renamed admin dir (or a
-        // renamed `worktrees`, or the whole git dir moved into a writable
-        // place) is no longer where the rules above look, and a new sibling
-        // entry would be a worktree registration the agent made up. Git's
-        // own work goes on below `worktrees/<name>/` and is not touched.
-        let entries = sbpl_regex(&format!(
-            "^{}/worktrees(/[^/]+)?$",
-            regex_escape(path_str(git_dir)?)
-        ))?;
-        let own = sbpl_string(git_dir)?;
-        profile.push_str(&format!(
-            "(deny file-write* (regex {entries}))\n(deny file-write* (literal {own}))\n"
-        ));
+        let subs = git_dir::submodule_git_dirs(git_dir)?;
+        profile.push_str(&git_dir::rules(git_dir, &subs)?);
+        submodules.extend(subs);
     }
     if let Some(worktree) = &worktree {
         // The entry itself, not what is below it: replacing the `.git` file
@@ -228,12 +201,11 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // closed as the directories that lead to it (see `entries_to`).
     let mut closed: Vec<PathBuf> = denied.clone();
     closed.extend(worktrees_root.clone());
-    closed.extend(git_dirs.iter().map(|git_dir| git_dir.join("config")));
-    closed.extend(
-        git_dirs
-            .iter()
-            .map(|git_dir| git_dir.join("config.worktree")),
-    );
+    // The obeyed files of every git dir, submodules included: renaming a
+    // directory on the way to one would carry it out of its rules (F7-R4-2).
+    for root in git_dirs.iter().chain(&submodules) {
+        closed.extend(git_dir::OBEYED.iter().map(|name| root.join(name)));
+    }
     closed.extend(git_dirs.iter().map(|git_dir| git_dir.join("refs/aaf")));
     closed.extend(worktree.iter().map(|worktree| worktree.join(".git")));
     let listed = extra.write_denied.iter().chain(&extra.write_denied_prefix);

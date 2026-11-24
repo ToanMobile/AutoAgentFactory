@@ -58,6 +58,18 @@ pub enum ChangeKind {
     Renamed,
 }
 
+impl ChangeKind {
+    /// One-letter code as `git status` shows it (`A`, `M`, `D`, `R`).
+    pub fn letter(self) -> &'static str {
+        match self {
+            ChangeKind::Added => "A",
+            ChangeKind::Modified => "M",
+            ChangeKind::Deleted => "D",
+            ChangeKind::Renamed => "R",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedChange {
     pub path: String,

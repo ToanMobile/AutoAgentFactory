@@ -468,6 +468,7 @@ pub fn evaluate(action: ToolAction, ctx: Ctx) -> Option<Denial> {
 /// Judges one hook payload for `host` (auto-detecting when `HookHost::Auto`)
 /// and returns both the [`Decision`] and the resolved [`HookHost`].
 pub fn decide_for_host(input: &[u8], env: &HookEnv, host: HookHost) -> (Decision, HookHost) {
+    let _resolving = crate::paths::Resolving::start();
     let (resolved_host, parsed) = parse_payload_with_host(input, host);
     let parsed = match parsed {
         Ok(parsed) => parsed,

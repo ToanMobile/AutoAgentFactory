@@ -77,24 +77,62 @@ fn slot_of_ancestor(ctx: &Ctx) -> Option<usize> {
     inherited_slot(&ctx.data_dir, value)
 }
 
+/// `/bin/kill <args>`; true when it exited 0.
+fn kill(args: &[&str]) -> bool {
+    Command::new("/bin/kill")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// True when `ps -A -o pgid=,stat=` output lists a member of `pgid` that is
+/// not a zombie. Output with no line at all proves nothing: true.
+fn ps_lists_live_member(text: &str, pgid: u32) -> bool {
+    if text.trim().is_empty() {
+        return true;
+    }
+    let target = pgid.to_string();
+    text.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        match (cols.next(), cols.next()) {
+            (Some(group), Some(stat)) => group == target && !stat.starts_with('Z'),
+            _ => false,
+        }
+    })
+}
+
+/// True when process group `pgid` still has a member that is not a zombie.
+/// On Linux `kill -0 -- -<pgid>` goes on succeeding while the leader is an
+/// unreaped zombie, which held the kill loop below for its whole bound
+/// (`/bin/kill` run every 10 ms); macOS already reports the group empty.
+/// Fails safe (true) when `ps` cannot answer.
+fn group_has_live_member(pgid: u32) -> bool {
+    if !kill(&["-0", "--", &format!("-{pgid}")]) {
+        return false;
+    }
+    let Ok(out) = Command::new("/bin/ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return true;
+    };
+    !out.status.success() || ps_lists_live_member(&String::from_utf8_lossy(&out.stdout), pgid)
+}
+
+/// SIGKILL to the group of `pgid` until no live member is left, for at most
+/// five seconds. Called before the leader is reaped, so the group id cannot
+/// belong to anyone else yet.
 fn kill_process_group(pgid: u32) {
     let group = format!("-{pgid}");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let _ = Command::new("/bin/kill")
-            .args(["-KILL", "--", &group])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let alive = Command::new("/bin/kill")
-            .args(["-0", "--", &group])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !alive || Instant::now() >= deadline {
+        kill(&["-KILL", "--", &group]);
+        if !group_has_live_member(pgid) || Instant::now() >= deadline {
             break;
         }
         thread::sleep(Duration::from_millis(10));
@@ -205,13 +243,13 @@ fn run_command(args: &SlotArgs, ctx: &Ctx) -> Result<i32, CmdError> {
         return run_nested(args, program, &label, !ctx.stdin_is_tty);
     }
 
-    let repo_root = ctx.repo_root().ok();
+    // One git call for the work tree and the id its siblings share.
+    let (repo_root, repo_id) = match aaf_engine::gate::repo_root_and_stats_id(&ctx.cwd) {
+        Some((root, id)) => (Some(root), id),
+        None => (None, aaf_fp::repo_id(&ctx.cwd)),
+    };
     // Outside a repo the machine limits of tier 1 still apply.
     let cfg = ctx.load_config(repo_root.as_deref().unwrap_or(&ctx.cwd))?;
-    let repo_id = match &repo_root {
-        Some(root) => aaf_engine::gate::stats_repo_id(root),
-        None => aaf_fp::repo_id(&ctx.cwd),
-    };
     let progress = |event: &Progress<'_>| notice("slot", &progress_line(event));
     let probe = SystemProbe::detect();
     let throttle = Throttle::system(&cfg.global.machine, &probe, &progress);
@@ -302,6 +340,54 @@ mod tests {
             "aaf", "slot", "--", "tool", "--json"
         ])));
         assert!(!json_requested(args(&["aaf", "slot", "--", "true"])));
+    }
+
+    #[test]
+    fn ps_listing_counts_only_live_members_of_the_group() {
+        assert!(!ps_lists_live_member(" 4242 Z+\n  100 S\n", 4242));
+        assert!(!ps_lists_live_member(" 4242 Zs\n42420 R\n", 4242));
+        assert!(ps_lists_live_member(" 4242 Z+\n 4242 S+\n", 4242));
+        assert!(ps_lists_live_member(" 4242 R\n", 4242));
+        assert!(!ps_lists_live_member("  100 S\n", 4242));
+        // Nothing to read is no proof that the group is gone.
+        assert!(ps_lists_live_member("", 4242));
+        assert!(ps_lists_live_member("\n  \n", 4242));
+    }
+
+    /// The leader has exited and is not reaped yet: a zombie, the only
+    /// member of its group. Killing the group returns at once instead of
+    /// spinning for the whole bound (on Linux `kill -0` still answers yes).
+    #[test]
+    fn killing_a_group_whose_only_member_is_a_zombie_leader_returns_at_once() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pgid = child.id();
+        // Exited, not reaped.
+        let settle = Instant::now();
+        while kill(&["-0", "--", &pgid.to_string()])
+            && ps_lists_live_member(
+                &String::from_utf8_lossy(
+                    &Command::new("/bin/ps")
+                        .args(["-A", "-o", "pgid=,stat="])
+                        .output()
+                        .unwrap()
+                        .stdout,
+                ),
+                pgid,
+            )
+            && settle.elapsed() < Duration::from_secs(5)
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        kill_process_group(pgid);
+        let took = started.elapsed();
+        let _ = child.wait();
+        assert!(took < Duration::from_secs(2), "took {took:?}");
     }
 
     #[test]

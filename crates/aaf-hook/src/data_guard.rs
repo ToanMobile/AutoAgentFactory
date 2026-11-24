@@ -46,6 +46,12 @@ pub fn mentions(text: &str, ctx: &Ctx) -> bool {
             .any(|dir| contains_path(text, &dir.to_string_lossy()))
 }
 
+/// Text a program reads as code (an interpreter's heredoc or `-c` script)
+/// names the data directory.
+pub fn check_text(program: &str, text: &str, ctx: &Ctx) -> Option<Denial> {
+    mentions(text, ctx).then(|| deny(&format!("a `{program}` script")))
+}
+
 /// `text` read as a path lands in the data directory, lexically or through
 /// a symlink. Relative paths count: `data/aaf.db` from the parent directory.
 fn resolves_inside(text: &str, ctx: &Ctx) -> bool {

@@ -218,7 +218,9 @@ fn edits_in_place(cmd: &Cmd) -> bool {
 fn reads_only(cmd: &Cmd) -> bool {
     let name = cmd.name();
     match name {
-        "sed" | "perl" => !edits_in_place(cmd),
+        "sed" => !edits_in_place(cmd),
+        // `perl -e 'open(my $f, ">", $ARGV[0])' <file>` writes its file.
+        "perl" => !edits_in_place(cmd) && !crate::interp_guard::perl_inline_writes(cmd.args()),
         "find" => !cmd
             .args()
             .iter()

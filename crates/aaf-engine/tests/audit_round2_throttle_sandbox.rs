@@ -178,7 +178,7 @@ fn heavy_tool_recognizes_taskpolicy_valued_flags_and_family_reexports() {
         None
     );
 
-    // Re-exports from `throttle::heavy` remain intact after extracting `heavy_family.rs`.
+    // Re-exports from `throttle::heavy` remain intact after extracting `heavy/family.rs`.
     assert_eq!(
         stats_command_family("cargo test --workspace"),
         Some("cargo")

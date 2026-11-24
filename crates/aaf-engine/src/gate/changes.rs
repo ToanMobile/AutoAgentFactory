@@ -1,6 +1,7 @@
 //! The change set relative to the base: changed paths (including untracked
 //! files) and the lines they add.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -275,51 +276,108 @@ pub(crate) fn lines_head_has_nul(file: &AddedLines) -> bool {
     false
 }
 
-/// Whether git was told to diff `path` as text despite a NUL: a
+/// Paths per `git check-attr` call, well under any argument-length limit.
+const ATTR_CHUNK: usize = 500;
+
+/// `diff` and `working-tree-encoding` of each of `count` paths, in argv
+/// order, from `check-attr -z` output (`path NUL attr NUL value NUL`, both
+/// attributes per path in that order). Read by position, never by the echoed
+/// path: macOS `core.precomposeunicode` echoes NFC for an NFD argument
+/// (audit a13 R3-L2-1). `None` unless the output is exactly that.
+fn parse_check_attr(raw: &[u8], count: usize) -> Option<Vec<[Option<String>; 2]>> {
+    let mut fields: Vec<&[u8]> = raw.split(|b| *b == 0).collect();
+    if fields.last().is_some_and(|last| last.is_empty()) {
+        fields.pop();
+    }
+    let (triples, rest) = fields.as_chunks::<3>();
+    if !rest.is_empty() || triples.len() != 2 * count {
+        return None;
+    }
+    let text = |field: &[u8]| Some(String::from_utf8_lossy(field).into_owned());
+    let (pairs, _) = triples.as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|[[_, diff, d], [_, enc, e]]| {
+            (*diff == b"diff" && *enc == b"working-tree-encoding").then(|| [text(d), text(e)])
+        })
+        .collect()
+}
+
+/// How git diffs a path with a NUL, by its `diff` and
+/// `working-tree-encoding` attributes: as text, as binary, or as the
+/// `diff.<driver>.binary` config of a driver (`default` when unspecified)
+/// decides. A missing attribute counts as text.
+enum AttrVerdict {
+    Text,
+    Binary,
+    Driver(String),
+}
+
+fn attr_verdict(attrs: Option<&[Option<String>; 2]>) -> AttrVerdict {
+    let Some([Some(diff), Some(encoding)]) = attrs else {
+        return AttrVerdict::Text;
+    };
+    match (encoding.as_str(), diff.as_str()) {
+        ("unspecified" | "unset", "set") => AttrVerdict::Text,
+        ("unspecified" | "unset", "unset") => AttrVerdict::Binary,
+        ("unspecified" | "unset", "unspecified") => AttrVerdict::Driver("default".to_string()),
+        ("unspecified" | "unset", driver) => AttrVerdict::Driver(driver.to_string()),
+        _ => AttrVerdict::Text,
+    }
+}
+
+/// Which of `paths` git was told to diff as text despite a NUL: a
 /// `working-tree-encoding` (the disk bytes are not what git diffs), a set
-/// `diff` attribute, or a `diff=<driver>` (`default` when unspecified) whose
-/// `diff.<driver>.binary` is false. A failed lookup counts as text.
-fn diffed_as_text(repo_root: &Path, path: &str, timeout: Duration) -> bool {
-    let args = [
-        "check-attr",
-        "-z",
-        "diff",
-        "working-tree-encoding",
-        "--",
-        path,
-    ];
-    let Ok(raw) = git_bytes(repo_root, &args, timeout) else {
-        return true;
-    };
-    let fields = nul_fields(&raw);
-    let value = |attr: &str| {
-        let triple = fields.chunks(3).find(|t| t.len() == 3 && t[1] == attr);
-        triple.map(|t| t[2].as_str())
-    };
-    let (Some(diff), Some(encoding)) = (value("diff"), value("working-tree-encoding")) else {
-        return true;
-    };
-    let driver = match (encoding, diff) {
-        ("unspecified" | "unset", "set") => return true,
-        ("unspecified" | "unset", "unset") => return false,
-        ("unspecified" | "unset", "unspecified") => "default",
-        ("unspecified" | "unset", driver) => driver,
-        _ => return true,
-    };
-    // Git uses `default` for a driver with no config at all; asking it for
-    // any driver errs towards scanning.
-    [driver, "default"].iter().any(|driver| {
+/// `diff` attribute, or a `diff=<driver>` whose `diff.<driver>.binary` is
+/// false. One `check_attr` per [`ATTR_CHUNK`] paths and one `is_false` per
+/// distinct config key; a failed lookup counts as text.
+fn diffed_as_text(
+    paths: &[&str],
+    mut check_attr: impl FnMut(&[&str]) -> Option<Vec<u8>>,
+    mut is_false: impl FnMut(&str) -> bool,
+) -> HashSet<String> {
+    let mut asked: HashMap<String, bool> = HashMap::new();
+    let mut text = HashSet::new();
+    for chunk in paths.chunks(ATTR_CHUNK) {
+        let attrs = check_attr(chunk).and_then(|raw| parse_check_attr(&raw, chunk.len()));
+        for (i, path) in chunk.iter().enumerate() {
+            let verdict = match &attrs {
+                Some(attrs) => attr_verdict(attrs.get(i)),
+                None => AttrVerdict::Text,
+            };
+            let as_text = match verdict {
+                AttrVerdict::Text => true,
+                AttrVerdict::Binary => false,
+                AttrVerdict::Driver(driver) => binary_set_false(&driver, |key| {
+                    *asked
+                        .entry(key.to_string())
+                        .or_insert_with(|| is_false(key))
+                }),
+            };
+            if as_text {
+                text.insert((*path).to_string());
+            }
+        }
+    }
+    text
+}
+
+/// Whether `diff.<driver>.binary` or `diff.default.binary` is false, as
+/// answered by `is_false` for each key. Git uses `default` for a driver with
+/// no config at all; asking it for any driver errs towards scanning.
+fn binary_set_false(driver: &str, mut is_false: impl FnMut(&str) -> bool) -> bool {
+    let fallback = (driver != "default").then_some("default");
+    std::iter::once(driver).chain(fallback).any(|driver| {
         let key = format!("diff.{driver}.binary");
-        let args = ["config", "--type=bool", "--get", key.as_str()];
-        git_bytes(repo_root, &args, timeout).is_ok_and(|out| out.trim_ascii() == b"false")
+        is_false(&key)
     })
 }
 
-/// True for a real binary, by the heuristic git itself uses: a NUL in the
-/// first 8000 bytes of the diffed lines and of the file on disk, with no
-/// attribute telling git to diff it as text anyway. Symlinks, missing paths
-/// and read errors count as text: their lines are scanned rather than skipped.
-fn is_binary(repo_root: &Path, file: &AddedLines, timeout: Duration) -> bool {
+/// Whether `file` looks binary by the heuristic git itself uses: a NUL in
+/// the first 8000 bytes of the diffed lines and of the file on disk.
+/// Symlinks, missing paths and read errors count as text: their lines are
+/// scanned rather than skipped.
+fn has_nul_heads(repo_root: &Path, file: &AddedLines) -> bool {
     if !lines_head_has_nul(file) {
         return false;
     }
@@ -328,10 +386,40 @@ fn is_binary(repo_root: &Path, file: &AddedLines, timeout: Duration) -> bool {
         return false;
     }
     let mut head = Vec::with_capacity(8000);
-    let disk_nul = fs::File::open(&full)
+    fs::File::open(&full)
         .and_then(|file| file.take(8000).read_to_end(&mut head))
-        .is_ok_and(|_| head.contains(&0));
-    disk_nul && !diffed_as_text(repo_root, &file.path, timeout)
+        .is_ok_and(|_| head.contains(&0))
+}
+
+/// Drops the real binaries from `files`: NUL heads ([`has_nul_heads`]) and
+/// no attribute telling git to diff them as text anyway ([`diffed_as_text`]).
+fn drop_binaries(repo_root: &Path, files: &mut Vec<AddedLines>, timeout: Duration) {
+    let candidates: Vec<&str> = files
+        .iter()
+        .filter(|file| has_nul_heads(repo_root, file))
+        .map(|file| file.path.as_str())
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let text = diffed_as_text(
+        &candidates,
+        |chunk| {
+            let mut args = vec!["check-attr", "-z", "diff", "working-tree-encoding", "--"];
+            args.extend_from_slice(chunk);
+            git_bytes(repo_root, &args, timeout).ok()
+        },
+        |key| {
+            let args = ["config", "--type=bool", "--get", key];
+            git_bytes(repo_root, &args, timeout).is_ok_and(|out| out.trim_ascii() == b"false")
+        },
+    );
+    let binary: HashSet<String> = candidates
+        .into_iter()
+        .filter(|path| !text.contains(*path))
+        .map(str::to_string)
+        .collect();
+    files.retain(|file| !binary.contains(&file.path));
 }
 
 /// Added lines of tracked changes relative to `base`, filtered by `skip` and
@@ -366,7 +454,8 @@ pub fn diff_added_tracked(
         timeout,
     )?;
     let mut files = parse_added(&String::from_utf8_lossy(&raw));
-    files.retain(|file| !skip(&file.path) && !is_binary(repo_root, file, timeout));
+    files.retain(|file| !skip(&file.path));
+    drop_binaries(repo_root, &mut files, timeout);
     Ok(files)
 }
 
@@ -396,3 +485,6 @@ pub fn added_lines(
     append_untracked_lines(repo_root, &mut files, untracked, skip)?;
     Ok(files)
 }
+
+#[cfg(test)]
+mod binary_config_tests;

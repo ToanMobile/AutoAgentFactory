@@ -25,6 +25,14 @@ const PIPE_GRACE: Duration = Duration::from_secs(30);
 /// Longest stderr kept in an error message.
 const STDERR_TAIL: usize = 2000;
 
+/// Most git calls end within a few milliseconds: while a call is this young
+/// its exit is checked every [`FAST_POLL`], then on a backoff from
+/// [`FIRST_BACKOFF`] doubling to [`MAX_BACKOFF`].
+const FAST_POLL_FOR: Duration = Duration::from_millis(50);
+const FAST_POLL: Duration = Duration::from_millis(1);
+const FIRST_BACKOFF: Duration = Duration::from_millis(2);
+const MAX_BACKOFF: Duration = Duration::from_millis(10);
+
 /// Location variables a git hook exports. Left in place they would point
 /// our commands at the hook's repository instead of `-C <dir>`.
 const SCRUBBED_ENV: [&str; 6] = [
@@ -82,6 +90,16 @@ fn kill_process_group(child: &mut Child) {
     let _ = child.kill();
 }
 
+/// The sleep before the next exit check of a call running for `elapsed`,
+/// and the backoff to pass on the check after.
+fn next_poll(elapsed: Duration, backoff: Duration) -> (Duration, Duration) {
+    if elapsed < FAST_POLL_FOR {
+        (FAST_POLL, backoff)
+    } else {
+        (backoff, (backoff * 2).min(MAX_BACKOFF))
+    }
+}
+
 /// Runs `cmd` to completion with stdin closed. A run that exceeds `timeout`
 /// is killed (along with its process group on Unix) and reported as
 /// `io::ErrorKind::TimedOut`.
@@ -108,8 +126,9 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
     // a full buffer while we wait for it.
     let stdout = drain(Some(stdout));
     let stderr = drain(Some(stderr));
-    let deadline = Instant::now() + timeout;
-    let mut poll = Duration::from_millis(2);
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut backoff = FIRST_BACKOFF;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -127,8 +146,9 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
             let _ = child.wait();
             return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
         }
+        let (poll, next) = next_poll(now - started, backoff);
+        backoff = next;
         thread::sleep(poll.min(deadline - now));
-        poll = (poll * 2).min(Duration::from_millis(50));
     };
     exited.mark();
     // Empty stdout would read as an answer ("nothing changed"): output that
@@ -151,7 +171,14 @@ pub(crate) fn git_command(dir: &Path, args: &[&str]) -> io::Result<Command> {
     let mut cmd = Command::new(aaf_fp::program("git")?);
     // Many worktrees share one object store; a gc started by one command
     // must not run under another task's feet.
-    cmd.arg("-C").arg(dir).args(["-c", "gc.auto=0"]).args(args);
+    // A repository an agent created inside its worktree has a config of the
+    // agent's: `status`/`diff` in the worktree run `git status` in it, and
+    // that would start its `core.fsmonitor`. `-c` reaches those child gits
+    // (`GIT_CONFIG_PARAMETERS`); the monitor is only a speed-up.
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["-c", "gc.auto=0", "-c", "core.fsmonitor=false"])
+        .args(args);
     for var in SCRUBBED_ENV {
         cmd.env_remove(var);
     }
@@ -177,8 +204,14 @@ pub(crate) fn failure(args: &[&str], out: &Output) -> GitError {
 
 /// Runs git in `dir` and returns its output whatever the exit code.
 pub fn git_raw(dir: &Path, args: &[&str]) -> Result<Output, GitError> {
+    git_timed(dir, args, GIT_TIMEOUT)
+}
+
+/// [`git_raw`] with a budget of the caller's: a call that runs the
+/// repository's hooks (a commit) may legitimately outlast [`GIT_TIMEOUT`].
+pub(crate) fn git_timed(dir: &Path, args: &[&str], timeout: Duration) -> Result<Output, GitError> {
     git_command(dir, args)
-        .and_then(|mut cmd| run(&mut cmd, GIT_TIMEOUT))
+        .and_then(|mut cmd| run(&mut cmd, timeout))
         .map_err(|err| {
             if err.kind() == io::ErrorKind::TimedOut {
                 GitError::Timeout {
@@ -213,5 +246,25 @@ mod tests {
         cmd.args(["-c", "sleep 30 & wait"]);
         let err = run(&mut cmd, Duration::from_millis(80)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn next_poll_is_fast_while_young_then_backs_off() {
+        let ms = Duration::from_millis;
+        for elapsed in [0, 1, 8, 49] {
+            assert_eq!(
+                next_poll(ms(elapsed), FIRST_BACKOFF),
+                (ms(1), FIRST_BACKOFF)
+            );
+            assert_eq!(next_poll(ms(elapsed), MAX_BACKOFF), (ms(1), MAX_BACKOFF));
+        }
+        let mut backoff = FIRST_BACKOFF;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let (poll, next) = next_poll(ms(50), backoff);
+            seen.push(poll.as_millis());
+            backoff = next;
+        }
+        assert_eq!(seen, [2, 4, 8, 10, 10]);
     }
 }

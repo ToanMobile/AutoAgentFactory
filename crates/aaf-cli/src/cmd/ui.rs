@@ -11,14 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aaf_domain::config::RepoConfig;
-use aaf_domain::gate::{ChangeKind, HeadLockReport};
 use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::db::Db;
 use aaf_engine::executors::stream_log::read_tail_lines;
 use aaf_engine::factory::{snapshots::steer_task, unfreeze};
-use aaf_engine::gate::{GIT_TIMEOUT, GateError, base, head_lock};
+use aaf_engine::gate::GateError;
 use aaf_engine::handover::{load_handover, render_markdown};
 use aaf_engine::telemetry::{
     CostRates, RunCounts, StatusQuery, TaskCounts, collect_status_from_db_with_throttle,
@@ -35,8 +33,9 @@ use serde_json::{Value, json};
 
 use self::actions::{collect_recent_runs, do_rework, do_unblock, format_blocked_detail, s_err};
 use super::board::store::{SharedRoDb, open_db, refuse_inside_agent_run};
+use super::handover::load_repo_config;
 use super::scope::resolve_scope;
-use super::task_ops::resolve_task_tree;
+use super::task_ops::{ApproveRefusal, approve_if_unchanged, eval_task_head_lock, task_tree};
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -206,26 +205,6 @@ impl CliUiBackend {
         }
     }
 
-    fn resolve_task_repo(&self, id: &str) -> Result<(PathBuf, RepoConfig), String> {
-        let db = self.require_db_ro()?;
-        let task = db.get_task(id).map_err(s_err)?;
-        let tree = resolve_task_tree(&db, &task, &self.ctx);
-        drop(db);
-        let eff = self.ctx.load_config(&tree).map_err(|e| e.message)?;
-        Ok((tree, eff.repo))
-    }
-
-    fn eval_head_lock(&self, id: &str) -> Result<HeadLockReport, String> {
-        let (tree, cfg) = self.resolve_task_repo(id)?;
-        let base = base::resolve(&tree, &cfg.gate.base_ref, GIT_TIMEOUT).map_err(s_err)?;
-        Ok(head_lock::evaluate(
-            &self.ctx.data_dir,
-            &tree,
-            &cfg,
-            &base.diff_target,
-        ))
-    }
-
     fn require_db_ro(&self) -> Result<Db, String> {
         self.ro_db
             .get()
@@ -393,18 +372,7 @@ impl UiBackend for CliUiBackend {
     fn handover_json(&self, task_id: &str) -> Result<Value, String> {
         let db = self.require_db_ro()?;
         let task = db.get_task(task_id).map_err(s_err)?;
-        let task_repo = Path::new(&task.repo_root);
-        let repo_cfg = task_repo
-            .is_dir()
-            .then(|| self.ctx.load_config(task_repo).ok())
-            .flatten()
-            .or_else(|| {
-                self.ctx
-                    .repo_root()
-                    .ok()
-                    .and_then(|r| self.ctx.load_config(&r).ok())
-            })
-            .map_or_else(RepoConfig::default, |eff| eff.repo);
+        let repo_cfg = load_repo_config(&self.ctx, Path::new(&task.repo_root));
         let data = load_handover(&db, &self.ctx.data_dir, task_id, &repo_cfg).map_err(s_err)?;
         let mut val = serde_json::to_value(&data).map_err(s_err)?;
         if let Value::Object(ref mut map) = val {
@@ -414,19 +382,12 @@ impl UiBackend for CliUiBackend {
     }
 
     fn approve_preview_json(&self, task_id: &str) -> Result<Value, String> {
-        let report = self.eval_head_lock(task_id)?;
+        let (_, report) = eval_task_head_lock(self.require_db_ro()?, task_id, &self.ctx)
+            .map_err(|e| e.message().to_string())?;
         let changes: Vec<Value> = report
             .locked_changes
             .iter()
-            .map(|ch| {
-                let code = match ch.change {
-                    ChangeKind::Added => "A",
-                    ChangeKind::Modified => "M",
-                    ChangeKind::Deleted => "D",
-                    ChangeKind::Renamed => "R",
-                };
-                json!({ "change": code, "path": ch.path })
-            })
+            .map(|ch| json!({ "change": ch.change.letter(), "path": ch.path }))
             .collect();
         Ok(json!({
             "task_id": task_id, "lock_fp": report.lock_fp,
@@ -435,7 +396,8 @@ impl UiBackend for CliUiBackend {
     }
 
     fn approve_commit(&self, id: &str, expected_fp: &str, reviewer: &str) -> Result<Value, String> {
-        let (tree, repo_cfg) = self.resolve_task_repo(id)?;
+        let tree =
+            task_tree(self.require_db_ro()?, id, &self.ctx).map_err(|e| e.message().to_string())?;
         let by: String = reviewer
             .trim()
             .chars()
@@ -443,28 +405,24 @@ impl UiBackend for CliUiBackend {
             .take(64)
             .collect();
         let who = if by.is_empty() { "web-ui" } else { &by };
-        match head_lock::approve_matching(
-            &self.ctx.data_dir,
-            &tree,
-            &repo_cfg,
-            who,
-            false,
-            expected_fp,
-            &SystemClock,
-        ) {
+        match approve_if_unchanged(&self.ctx, &tree, expected_fp, who) {
             Ok(a) => {
                 self.invalidate_status_cache();
                 Ok(json!({
                     "approved": true, "task_id": id, "reviewer": a.reviewer, "lock_fp": a.lock_fp
                 }))
             }
-            Err(GateError::NothingLocked) => {
+            Err(ApproveRefusal::Eval(e)) => Err(e.message().to_string()),
+            Err(ApproveRefusal::NothingLocked) => {
+                Err("refused: no locked file is changed; nothing to approve".to_string())
+            }
+            Err(ApproveRefusal::FpChanged) => {
+                Err("lock_fp mismatch: locked diff changed since preview".to_string())
+            }
+            Err(ApproveRefusal::Sign(GateError::NothingLocked)) => {
                 Err("refused: no locked file is changed; nothing approved".into())
             }
-            Err(GateError::LockFpMismatch { .. }) => {
-                Err("lock_fp mismatch: locked diff changed since preview".into())
-            }
-            Err(e) => Err(e.to_string()),
+            Err(ApproveRefusal::Sign(e)) => Err(e.to_string()),
         }
     }
 

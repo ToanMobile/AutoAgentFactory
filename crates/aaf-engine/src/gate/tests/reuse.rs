@@ -249,3 +249,175 @@ fn a_blocked_receipt_edited_to_clear_does_not_pass() {
     assert_eq!(again.status, GateStatus::Blocked);
     assert_eq!(again.created_at, 2_000);
 }
+
+/// A release receipt from one worktree is not written into a sibling
+/// worktree whose tree holds a file hidden only by `info/exclude`: a release
+/// gate there would have blocked on it, and the materialized receipt would
+/// unlock a store submission of that tree (audit a13 F2-1).
+#[test]
+fn a_common_release_receipt_is_not_materialized_beside_hidden_files() {
+    let case = Case::new();
+    let release = case.gate_at(GateMode::Release, 1_000);
+    assert_eq!(release.status, GateStatus::Clear, "{:?}", release.reasons);
+    let ran = case.ran().len();
+
+    let sibling_dir = TempDir::new().unwrap();
+    let sibling = sibling_dir.path().join("wt");
+    case.repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        sibling.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let sibling = fs::canonicalize(&sibling).unwrap();
+    fs::write(sibling.join("x"), "planted\n").unwrap();
+    let common = case
+        .repo
+        .git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let exclude = Path::new(&common).join("info/exclude");
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    let mut rules = fs::read_to_string(&exclude).unwrap_or_default();
+    rules.push_str("\nx\n");
+    fs::write(&exclude, rules).unwrap();
+
+    let rig = Rig::calm();
+    let run = super::super::run_gate_policy(
+        case.repo.data_dir(),
+        &sibling,
+        &case.cfg,
+        GateMode::Scoped,
+        &FixedClock(2_000),
+        &rig.throttle(),
+        super::super::HiddenPolicy::Warn,
+    )
+    .unwrap();
+    assert!(
+        !run.reused,
+        "a release receipt stood in beside a hidden file"
+    );
+    assert_eq!(run.receipt.mode, GateMode::Scoped);
+    assert!(case.ran().len() > ran, "the scoped gate must run");
+    let local = aaf_fp::read_receipt(
+        case.repo.data_dir(),
+        &aaf_fp::load_key(case.repo.data_dir()).unwrap(),
+        &sibling,
+    )
+    .unwrap();
+    assert_ne!(local.mode, GateMode::Release, "{:?}", local.reasons);
+}
+
+/// Without a hidden file the sibling still reuses the common receipt.
+#[test]
+fn a_common_release_receipt_still_covers_a_clean_sibling_worktree() {
+    let case = Case::new();
+    let release = case.gate_at(GateMode::Release, 1_000);
+    assert_eq!(release.status, GateStatus::Clear, "{:?}", release.reasons);
+    let ran = case.ran().len();
+    let sibling_dir = TempDir::new().unwrap();
+    let sibling = sibling_dir.path().join("wt");
+    case.repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        sibling.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let rig = Rig::calm();
+    let run = super::super::run_gate_policy(
+        case.repo.data_dir(),
+        &sibling,
+        &case.cfg,
+        GateMode::Scoped,
+        &FixedClock(2_000),
+        &rig.throttle(),
+        super::super::HiddenPolicy::Warn,
+    )
+    .unwrap();
+    assert!(run.reused, "{:?}", run.receipt.reasons);
+    assert_eq!(run.receipt.mode, GateMode::Release);
+    assert_eq!(case.ran().len(), ran);
+}
+
+/// One git call answers what `aaf slot` asked with two (audit a13 O11-7):
+/// the same root and the same shared statistics id, in the main checkout,
+/// in a sibling worktree, in a subdirectory, and nothing outside a repo.
+#[test]
+fn repo_root_and_stats_id_match_the_two_separate_calls() {
+    let case = Case::new();
+    let sibling_dir = TempDir::new().unwrap();
+    let sibling = sibling_dir.path().join("wt");
+    case.repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        sibling.to_str().unwrap(),
+        "HEAD",
+    ]);
+    for dir in [
+        case.repo.root().to_path_buf(),
+        sibling.clone(),
+        sibling.join("src"),
+    ] {
+        let root = aaf_fp::repo_root(&dir).unwrap();
+        let expected = (root.clone(), super::super::stats_repo_id(&root));
+        assert_eq!(
+            super::super::repo_root_and_stats_id(&dir),
+            Some(expected),
+            "{dir:?}"
+        );
+    }
+    let main_id = super::super::stats_repo_id(case.repo.root());
+    assert_eq!(
+        super::super::repo_root_and_stats_id(&sibling).map(|(_, id)| id),
+        Some(main_id)
+    );
+    let outside = TempDir::new().unwrap();
+    assert_eq!(super::super::repo_root_and_stats_id(outside.path()), None);
+}
+
+/// In a normal repository and in a sibling worktree the combined call alone
+/// answers: one git call, the two-call fallback never asked (audit a13
+/// O11-7). Outside a repository the fallback is what says `None`.
+#[test]
+fn repo_root_and_stats_id_takes_the_single_call_path() {
+    use std::cell::Cell;
+    let case = Case::new();
+    let sibling_dir = TempDir::new().unwrap();
+    let sibling = sibling_dir.path().join("wt");
+    case.repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        sibling.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let outside = TempDir::new().unwrap();
+    for (dir, in_repo) in [
+        (case.repo.root().to_path_buf(), true),
+        (sibling.join("src"), true),
+        (outside.path().to_path_buf(), false),
+    ] {
+        let (calls, fallbacks) = (Cell::new(0), Cell::new(0));
+        let got = super::super::reuse::repo_root_and_stats_id_by(
+            |args| {
+                calls.set(calls.get() + 1);
+                aaf_fp::git(&dir, args, &[], std::time::Duration::from_secs(30)).ok()
+            },
+            || {
+                fallbacks.set(fallbacks.get() + 1);
+                None
+            },
+        );
+        assert_eq!(
+            (calls.get(), fallbacks.get()),
+            (1, usize::from(!in_repo)),
+            "{dir:?}"
+        );
+        assert_eq!(got, super::super::repo_root_and_stats_id(&dir), "{dir:?}");
+    }
+}

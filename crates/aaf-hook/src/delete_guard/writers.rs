@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::{Ctx, Denial, paths, sed_script};
 
-use super::{deny, hit, is_guarded_dir, pattern_could_match, target};
+use super::{check_recursive_rm_target, deny, hit, is_guarded_dir, pattern_could_match, target};
 
 pub(super) fn check_sed(args: &[String], ctx: &Ctx) -> Option<Denial> {
     for shell_cmd in sed_script::exec_commands(args) {
@@ -275,9 +275,44 @@ pub(super) fn check_copier(name: &str, args: &[String], ctx: &Ctx) -> Option<Den
         }
         i += if copier_skips_next(name, arg) { 2 } else { 1 };
     }
+    if name == "rsync"
+        && let Some(denial) = rsync_deletes(args, &positionals, ctx)
+    {
+        return Some(denial);
+    }
     if let Some(dir) = target_dir {
         return check_copy_into_dir(dir, &positionals, name, true, recursive, ctx);
     }
     let (&dst, sources) = positionals.split_last()?;
     check_copy_into_dir(dst, sources, name, false, recursive, ctx)
+}
+
+/// `rsync --delete*` empties the destination of whatever the source lacks
+/// and `--remove-source-files` deletes the sources: both get the
+/// containment of `rm -r`. A remote side (`host:path`) is not this machine.
+/// rsync takes any unambiguous prefix of a long option, and the old name
+/// `--remove-sent-files`: no other option starts with `--remov`.
+fn rsync_deletes(args: &[String], positionals: &[&str], ctx: &Ctx) -> Option<Denial> {
+    let options = || args.iter().take_while(|arg| *arg != "--");
+    let deletes = options().any(|arg| arg.starts_with("--del"));
+    let removes_sources = options().any(|arg| arg.starts_with("--remov"));
+    let remote = |path: &str| {
+        path.split('/')
+            .next()
+            .is_some_and(|head| head.contains(':'))
+    };
+    let (&dst, sources) = positionals.split_last()?;
+    if deletes
+        && !remote(dst)
+        && let Some(denial) = check_recursive_rm_target(dst, "rsync --delete", ctx)
+    {
+        return Some(denial);
+    }
+    if removes_sources {
+        return sources
+            .iter()
+            .filter(|src| !remote(src))
+            .find_map(|src| check_recursive_rm_target(src, "rsync --remove-source-files", ctx));
+    }
+    None
 }

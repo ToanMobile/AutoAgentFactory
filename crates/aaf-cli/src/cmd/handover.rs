@@ -180,18 +180,34 @@ fn has_html_extension(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
 }
 
-fn load_repo_config(ctx: &Ctx, task_repo: &Path) -> RepoConfig {
+/// Repository config for a task's handover: the task's own repository while
+/// it still exists, else the current repository's only when it is the same
+/// repository (same common repo id), else the defaults with proof required
+/// (fail closed: another repository's config must not waive the task's
+/// proof). Shared by every channel (CLI, web UI, Telegram, cockpit) so they
+/// all report the same readiness for the same task.
+pub(crate) fn load_repo_config(ctx: &Ctx, task_repo: &Path) -> RepoConfig {
     if task_repo.is_dir()
         && let Ok(eff) = ctx.load_config(task_repo)
     {
         return eff.repo;
     }
     if let Ok(root) = ctx.repo_root()
+        && same_repository(task_repo, &root)
         && let Ok(eff) = ctx.load_config(&root)
     {
         return eff.repo;
     }
-    RepoConfig::default()
+    let mut cfg = RepoConfig::default();
+    cfg.proof.required = true;
+    cfg
+}
+
+/// Whether `cwd_root` belongs to the repository `task_repo` named. A gone
+/// `task_repo` is identified by its path alone (git cannot read it).
+fn same_repository(task_repo: &Path, cwd_root: &Path) -> bool {
+    let task_id = aaf_engine::gate::stats_repo_id(task_repo);
+    task_id == aaf_engine::gate::stats_repo_id(cwd_root) || task_id == aaf_fp::repo_id(cwd_root)
 }
 
 fn canonicalize_best_effort(path: &Path) -> Result<PathBuf, OutError> {

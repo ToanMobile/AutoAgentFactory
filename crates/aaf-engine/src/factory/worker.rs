@@ -75,6 +75,17 @@ pub(crate) enum Job {
 }
 
 impl Job {
+    /// A post-gate audit of `receipt` that audits afresh: no pre-gate
+    /// verdict is reused (a retry, or a switch to another account).
+    pub(crate) fn fresh_post_audit(job: GateJob, receipt: Receipt) -> Box<Job> {
+        let receipt = Box::new(receipt);
+        Box::new(Job::PostAudit {
+            job,
+            receipt,
+            pre_audit: None,
+        })
+    }
+
     pub(crate) fn task_id(&self) -> &str {
         match self {
             Job::Agent { task_id } => task_id,
@@ -96,6 +107,8 @@ pub(crate) enum Next {
     /// Like [`Next::Switch`], re-queueing an in-flight audit/post-audit job
     /// directly on another account without re-running the gate.
     SwitchJob(Box<Job>),
+    /// The audit ended without a verdict: the same audit job runs once more.
+    RetryAudit(Box<Job>),
     /// Ready again after a usage limit that no other account may take over
     /// (a pinned repository, or every account limited): the task waits for
     /// a cooldown and is not started again in this invocation.

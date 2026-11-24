@@ -61,7 +61,15 @@ impl ScratchWorktree {
         }
         if let Err(err) = git(
             repo_root,
-            &["worktree", "add", "--detach", path_s, base_sha],
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "worktree",
+                "add",
+                "--detach",
+                path_s,
+                base_sha,
+            ],
         ) {
             let _ = lock_file.unlock();
             drop(lock_file);

@@ -4,7 +4,8 @@ use aaf_domain::config::RepoConfig;
 use aaf_domain::gate::{Approval, ChangeKind, HeadLockReport, LockStatus, LockedChange};
 
 use super::super::GateError;
-use super::super::head_lock::{approve, evaluate};
+use super::super::base;
+use super::super::head_lock::{approve, approve_expecting, approve_inner, content_hash, evaluate};
 use super::support::{FixedClock, Repo};
 
 fn report(repo: &Repo) -> HeadLockReport {
@@ -108,6 +109,92 @@ fn approval_unlocks_exactly_that_fingerprint() {
     assert!(edited.approval.is_none());
 }
 
+/// The cockpit, web UI and Telegram sign only the locked diff the reviewer
+/// was shown: an edit after the preview is refused before any key or
+/// approval is touched (audit a13 L8-R3-1).
+#[test]
+fn approve_expecting_refuses_a_stale_fingerprint_and_writes_nothing() {
+    let repo = Repo::new();
+    repo.append("tests/a_test.rs", "// previewed\n");
+    let shown = report(&repo).lock_fp;
+    repo.append("tests/a_test.rs", "// sneaked in after the preview\n");
+    let cfg = RepoConfig::default();
+    let base = base::resolve(repo.root(), "main", super::super::GIT_TIMEOUT).unwrap();
+    let clock = FixedClock(42);
+    let sign = |expected: &str| {
+        let who = ("reviewer-1", false);
+        approve_expecting(
+            repo.data_dir(),
+            repo.root(),
+            &cfg,
+            &base,
+            who,
+            &clock,
+            expected,
+        )
+    };
+    let refused = sign(&shown);
+    assert!(
+        matches!(refused, Err(GateError::LockFpChanged)),
+        "{refused:?}"
+    );
+    assert!(
+        !repo.data_dir().join("approvals").exists(),
+        "nothing signed"
+    );
+    assert_eq!(report(&repo).status, LockStatus::Blocked);
+
+    let now = report(&repo).lock_fp;
+    assert_eq!(sign(&now).unwrap().lock_fp, now);
+    assert_eq!(report(&repo).status, LockStatus::Approved);
+
+    let clean = Repo::new();
+    let base = base::resolve(clean.root(), "main", super::super::GIT_TIMEOUT).unwrap();
+    let who = ("reviewer-1", false);
+    let none = approve_expecting(
+        clean.data_dir(),
+        clean.root(),
+        &cfg,
+        &base,
+        who,
+        &clock,
+        &now,
+    );
+    assert!(matches!(none, Err(GateError::NothingLocked)), "{none:?}");
+}
+
+/// One condition, one error: the signing core itself refuses a stale
+/// preview with the production `LockFpChanged` (no second error variant or
+/// approval API that callers must remember to translate).
+#[test]
+fn the_signing_core_refuses_a_stale_preview_with_lock_fp_changed() {
+    let repo = Repo::new();
+    repo.append("tests/a_test.rs", "// previewed\n");
+    let shown = report(&repo).lock_fp;
+    repo.append("tests/a_test.rs", "// sneaked in after the preview\n");
+    let cfg = RepoConfig::default();
+    let base = base::resolve(repo.root(), "main", super::super::GIT_TIMEOUT).unwrap();
+    let mut read_hash = |path: &str| content_hash(repo.root(), path);
+    let refused = approve_inner(
+        repo.data_dir(),
+        repo.root(),
+        &cfg,
+        &base,
+        ("reviewer-1", false),
+        &FixedClock(42),
+        Some(&shown),
+        &mut read_hash,
+    );
+    assert!(
+        matches!(refused, Err(GateError::LockFpChanged)),
+        "stale preview must be refused with LockFpChanged, got {refused:?}"
+    );
+    assert!(
+        !repo.data_dir().join("approvals").exists(),
+        "nothing signed"
+    );
+}
+
 #[test]
 fn approve_refuses_when_nothing_is_locked() {
     let repo = Repo::new();
@@ -174,4 +261,71 @@ fn unusable_glob_or_base_fails_closed() {
         "no-such-ref",
     );
     assert_eq!(report.status, LockStatus::Blocked);
+}
+
+/// One approval reads each locked file once: the base-config and
+/// tracked-only fingerprints are signed for the same content as the one
+/// the reviewer was shown, not for an edit made while signing (audit a13
+/// R4-L2-1).
+#[test]
+fn approve_signs_every_fingerprint_from_one_read_of_each_file() {
+    let repo = Repo::new();
+    repo.write(".autofactory/config.toml", "");
+    repo.commit("base config");
+    repo.git(&["branch", "-f", "main"]);
+    repo.append("tests/a_test.rs", "// reviewed\n");
+    repo.append("src/lib.rs", "// reviewed\n");
+    repo.write("tests/new_test.rs", "fn added() {}\n");
+    // The worktree config also locks `src/`: its fingerprint and the one
+    // under the base config differ.
+    let mut cfg = RepoConfig::default();
+    cfg.gate.head_lock_globs.push("src/**".to_string());
+    let base = base::resolve(repo.root(), "main", super::super::GIT_TIMEOUT).unwrap();
+    let mut reads = std::collections::HashMap::<String, u32>::new();
+    // The real content the first time, an edit every time after.
+    let mut read_hash = |path: &str| -> Result<String, GateError> {
+        let count = reads.entry(path.to_string()).or_default();
+        *count += 1;
+        if *count == 1 {
+            let bytes = fs::read(repo.path(path)).unwrap();
+            Ok(aaf_fp::sha256_hex(&bytes))
+        } else {
+            Ok(format!("edited-{count}"))
+        }
+    };
+    let who = ("reviewer-1", false);
+    let clock = FixedClock(42);
+    let root = repo.root();
+    let signed = approve_inner(
+        repo.data_dir(),
+        root,
+        &cfg,
+        &base,
+        who,
+        &clock,
+        None,
+        &mut read_hash,
+    );
+    signed.unwrap();
+    for (path, count) in &reads {
+        assert_eq!(*count, 1, "{path} read {count} times: {reads:?}");
+    }
+    let under = |cfg: &RepoConfig| evaluate(repo.data_dir(), root, cfg, "main").status;
+    assert_eq!(under(&cfg), LockStatus::Approved);
+    assert_eq!(under(&RepoConfig::default()), LockStatus::Approved);
+}
+
+/// A locked path whose name git reported in bytes that are not UTF-8 was
+/// decoded lossily: reading the decoded name finds nothing, which must not
+/// pass for a deletion an approval could cover (audit a13 L2-R5-1).
+#[test]
+fn missing_lossily_decoded_path_fails_closed() {
+    let repo = Repo::new();
+    let err = content_hash(repo.root(), "tests/bad_\u{FFFD}_test.rs").unwrap_err();
+    assert!(
+        matches!(&err, GateError::Config(msg) if msg.contains("not valid UTF-8")),
+        "{err:?}"
+    );
+    let gone = content_hash(repo.root(), "tests/gone_test.rs").unwrap();
+    assert_eq!(gone, "deleted");
 }

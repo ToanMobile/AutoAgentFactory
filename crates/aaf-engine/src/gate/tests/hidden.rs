@@ -350,3 +350,33 @@ fn deletion_refuses_a_path_that_leaves_the_work_tree() {
     assert!(delete(&root, "way-out").is_ok());
     assert!(outside.path().join("kept.txt").exists());
 }
+
+/// The inspection runs beside the git layout and base lookups (audit a13
+/// O11-3); when every one of them fails, the error is still the
+/// inspection's, as it was when they ran one after another.
+#[test]
+fn outside_a_repository_the_inspection_error_comes_first() {
+    let outside = tempfile::TempDir::new().unwrap();
+    let data = tempfile::TempDir::new().unwrap();
+    let root = fs::canonicalize(outside.path()).unwrap();
+    let expected = super::super::hidden::inspect(
+        &root,
+        HiddenPolicy::Warn,
+        super::super::hidden::When::BeforeCommands,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    let rig = Rig::calm();
+    let err = run_gate_policy(
+        data.path(),
+        &root,
+        &passing_cfg(),
+        GateMode::Scoped,
+        &FixedClock(1_000),
+        &rig.throttle(),
+        HiddenPolicy::Warn,
+    )
+    .unwrap_err();
+    assert_eq!(err.to_string(), expected);
+}

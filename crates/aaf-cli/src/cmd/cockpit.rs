@@ -6,11 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use aaf_domain::config::RepoConfig;
 use aaf_domain::dag;
 use aaf_domain::event::FactoryEvent;
 use aaf_domain::ports::{Clock, EventSink, TaskStore};
@@ -26,8 +24,11 @@ use aaf_engine::watch::{
 
 use super::cockpit_actions::{
     DB_FILE, action_approve, action_rework, action_steer, action_unblock, action_undo,
-    action_unfreeze, compute_critical_path, io_err, load_ro_task, open_db_ro, run_tail_view, wln,
+    action_unfreeze, io_err, load_ro_task, open_db_ro, run_tail_view, wln,
 };
+use super::handover::load_repo_config;
+use super::scope::resolve_scope;
+use super::task_ops::compute_critical_path;
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -74,34 +75,6 @@ fn check_entry_gates(ctx: &Ctx) -> Option<CmdOutput> {
         ));
     }
     None
-}
-
-fn resolve_scope(
-    repo: Option<&Path>,
-    all: bool,
-    ctx: &Ctx,
-) -> Result<(String, Option<PathBuf>, PathBuf), CmdError> {
-    if all {
-        return Ok(("all".to_string(), None, ctx.cwd.clone()));
-    }
-    let target = match repo {
-        Some(r) => {
-            let cand = ctx.cwd.join(r);
-            if !cand.exists() {
-                return Err(CmdError::new(format!(
-                    "--repo {} does not exist",
-                    cand.display()
-                )));
-            }
-            aaf_fp::repo_root(&cand).unwrap_or(cand)
-        }
-        None => match aaf_fp::repo_root(&ctx.cwd) {
-            Ok(root) => root,
-            Err(_) => return Ok(("all (outside git repo)".to_string(), None, ctx.cwd.clone())),
-        },
-    };
-    let canon = fs::canonicalize(&target).unwrap_or(target);
-    Ok((canon.display().to_string(), Some(canon.clone()), canon))
 }
 
 /// Testable synchronous cockpit REPL driven by explicit `BufRead` and `Write`.
@@ -477,14 +450,10 @@ fn show_task_handover(
     let Some((db, task)) = load_ro_task(ro, id, "handover", w)? else {
         return Ok(());
     };
-    let task_repo = Path::new(&task.repo_root);
-    let repo_cfg = if task_repo.is_dir()
-        && let Ok(eff) = ctx.load_config(task_repo)
-    {
-        eff.repo
-    } else {
-        RepoConfig::default()
-    };
+    // Same lookup as the handover command, web UI and Telegram. This used to
+    // skip the current-repository fallback, so a task whose repo_root was gone
+    // showed default-config readiness here (e.g. ignoring `proof.required`).
+    let repo_cfg = load_repo_config(ctx, Path::new(&task.repo_root));
     match load_handover(&db, &ctx.data_dir, id, &repo_cfg) {
         Ok(data) => {
             for line in render_markdown(&data).lines() {

@@ -275,7 +275,7 @@ fn has_stdin_flag(cmd: &Cmd, start: usize, separate: &[&str], glued: &[&str]) ->
 impl Lexer<'_, '_> {
     fn is_top_level_data_sink(&self) -> bool {
         !self.failed
-            && !self.compound
+            && !self.chained
             && self.depth == 0
             && self.out.cmds.len() == self.first_cmd + 1
             && self.out.cmds.last().is_some_and(heredoc_data_sink)
@@ -311,7 +311,7 @@ impl Lexer<'_, '_> {
     }
 
     pub(super) fn finish_all_bodies(&mut self) {
-        if self.compound {
+        if self.chained {
             let items = mem::take(&mut self.bodies);
             self.lex_deferred_bodies(items);
         }

@@ -4,13 +4,17 @@
 //! the guards can look at the real argv instead of raw text. Anything it
 //! cannot split is reported in [`Script::opaque`] and judged conservatively.
 
+mod brace;
 mod command;
 mod decode;
+mod launcher;
+mod options;
+mod plain;
+mod quote;
 mod scan;
 mod stdin;
 
 pub use command::{DECLARERS, NAME_SETTERS};
-use scan::{decode_ansi_c, find_close};
 pub(crate) use stdin::{shell_quote, stdin_scripts};
 
 /// Nesting of `$(…)`, backticks, `sh -c` and `eval` that is still analysed.
@@ -93,12 +97,36 @@ pub struct Script {
     pub opaque: Vec<String>,
     /// Names of the shell functions the line defines.
     pub functions: Vec<String>,
+    /// Indices into `cmds` of the commands that run in the current shell and
+    /// whose success alone lets the next command run: joined to it by `&&`,
+    /// not after `||` or `!`, not in a pipeline. A `cd` elsewhere may fail,
+    /// or run in a subshell, and leave the next command where it was.
+    pub(crate) sure_steps: Vec<usize>,
+    /// Indices into `cmds` of the commands that run in the current shell
+    /// whatever came before them: not in a pipeline, not after `&&` or
+    /// `||`, not in the background, not in the body of an `if`, `case` or
+    /// loop.
+    pub(crate) plain_steps: Vec<usize>,
     /// The commands being split right now are the payload of an `aaf slot`.
     in_slot: bool,
     /// An `aaf slot` was started with a search path of its own.
     rebound: bool,
     /// Commands being split right now run under an environment-clearing wrapper.
     env_cleared: bool,
+}
+
+impl Cmd {
+    /// Drops what fed this command more than `stages` pipe stages back.
+    fn cut_feeders(&mut self, stages: usize) {
+        let mut cmd = self;
+        for _ in 0..stages {
+            match cmd.feeder.as_deref_mut() {
+                Some(feeder) => cmd = feeder,
+                None => return,
+            }
+        }
+        cmd.feeder = None;
+    }
 }
 
 impl Script {
@@ -140,6 +168,7 @@ pub fn parse_argv(words: &[String]) -> Script {
             // is empty or still holds a `$` was not typed literally.
             dynamic: word.is_empty() || word.contains('$'),
             quoted: true,
+            braces: Vec::new(),
         })
         .collect();
     Lexer::new("", 0, &mut out, None).emit(Vec::new(), toks, Vec::new(), None);
@@ -152,6 +181,8 @@ struct Tok {
     text: String,
     dynamic: bool,
     quoted: bool,
+    /// Char indices in `text` of the unquoted `{`, `,` and `}`.
+    braces: Vec<usize>,
 }
 
 struct Heredoc {
@@ -199,8 +230,24 @@ struct Lexer<'o, 'd> {
     feeder_idx: Option<usize>,
     /// Any pipe, command chaining (`;`, `&&`, `||`, `&`, `(`, `)`), process
     /// substitution (`<(` / `>(`), or `$(…)` / backtick appeared at this level.
-    compound: bool,
+    chained: bool,
     failed: bool,
+    /// The command being split follows `||` or `&&`, or is fed by a pipe.
+    after_or: bool,
+    after_and: bool,
+    piped: bool,
+    /// Open `if`/`case`/`while`/`until`/`for`/`select` bodies.
+    compound: usize,
+    /// Open `{ … }` groups: whether the group runs in this shell whatever
+    /// came before it, and the index in `out.cmds` of its first command.
+    groups: Vec<(bool, usize)>,
+    /// The step just ended closed a `{ … }` group starting at this index:
+    /// a `|` or `&` after it puts the whole group in a subshell.
+    closed_group: Option<usize>,
+    /// Open `${…}` braces of the word being read: not brace expansion.
+    param_braces: usize,
+    /// A word expanded past `brace::MAX_WORDS` already put the line in `opaque`.
+    braces_refused: bool,
 }
 
 fn lex(src: &str, depth: usize, out: &mut Script, defer: Option<&mut Vec<String>>) {
@@ -237,8 +284,16 @@ impl<'o, 'd> Lexer<'o, 'd> {
             cmd_deferred: Vec::new(),
             feeder: None,
             feeder_idx: None,
-            compound: false,
+            chained: false,
             failed: false,
+            after_or: false,
+            after_and: false,
+            piped: false,
+            compound: 0,
+            groups: Vec::new(),
+            closed_group: None,
+            param_braces: 0,
+            braces_refused: false,
         }
     }
 }
@@ -275,33 +330,59 @@ impl Lexer<'_, '_> {
                 }
                 '\n' => {
                     self.pos += 1;
-                    self.end_cmd();
+                    // After `||`, `&&` or `|` with no command yet, a
+                    // newline continues the list.
+                    let blank = self.word.is_none()
+                        && self.toks.is_empty()
+                        && self.redirects.is_empty()
+                        && self.pending.is_none();
+                    if !(blank && (self.after_or || self.after_and || self.piped)) {
+                        self.end_step();
+                    }
                     self.read_heredocs_or_defer();
                 }
                 ';' => {
-                    self.compound = true;
+                    self.chained = true;
                     self.pos += 1;
-                    self.end_cmd();
+                    self.end_step();
                 }
                 '(' => {
-                    self.compound = true;
+                    self.chained = true;
                     self.note_function();
                     self.pos += 1;
-                    self.end_cmd();
+                    self.end_step();
                     self.out.enter_scope();
                 }
                 ')' => {
-                    self.compound = true;
+                    self.chained = true;
                     self.pos += 1;
-                    self.end_cmd();
+                    self.end_step();
                     self.out.exit_scope();
                 }
                 '|' => self.pipe(),
                 '&' if self.chars.get(self.pos + 1) == Some(&'>') => self.redirect(),
+                '&' if self.chars.get(self.pos + 1) == Some(&'&') => {
+                    self.chained = true;
+                    self.pos += 2;
+                    self.end_word();
+                    let negated = self
+                        .toks
+                        .iter()
+                        .take_while(|tok| !tok.quoted && RESERVED.contains(&tok.text.as_str()))
+                        .any(|tok| tok.text == "!");
+                    let sure = !self.after_or && !self.piped && !negated;
+                    if let Some(idx) = self.end_step().filter(|_| sure) {
+                        self.out.sure_steps.push(idx);
+                    }
+                    self.after_and = true;
+                }
                 '&' => {
-                    self.compound = true;
+                    self.chained = true;
                     self.pos += 1;
-                    self.end_cmd();
+                    // In the background: a subshell of its own.
+                    let ended = self.end_step();
+                    self.out.plain_steps.retain(|idx| Some(*idx) != ended);
+                    self.unplain_group();
                 }
                 '<' | '>' => self.redirect(),
                 '#' if self.word.is_none() => {
@@ -339,7 +420,7 @@ impl Lexer<'_, '_> {
                 }
                 _ => {
                     self.pos += 1;
-                    self.word_mut().text.push(c);
+                    self.push_plain(c);
                 }
             }
         }
@@ -350,13 +431,22 @@ impl Lexer<'_, '_> {
     /// `|` and `|&` hand the command just ended to the next one as its
     /// feeder; `||` starts an unrelated command.
     fn pipe(&mut self) {
-        self.compound = true;
+        self.chained = true;
         self.pos += 1;
         let before = self.out.cmds.len();
-        self.end_cmd();
+        let stored = self.end_cmd();
         match self.peek() {
-            Some('|') => self.pos += 1,
+            Some('|') => {
+                self.pos += 1;
+                self.after_or = true;
+                self.piped = false;
+            }
             next => {
+                // A pipeline element: a subshell of its own.
+                self.out.plain_steps.retain(|idx| Some(*idx) != stored);
+                self.unplain_group();
+                self.after_or = false;
+                self.piped = true;
                 if next == Some('&') {
                     self.pos += 1;
                 }
@@ -364,110 +454,20 @@ impl Lexer<'_, '_> {
                 // Nothing stored: the pipe comes out of a `( … )` group.
                 let ended = self.out.cmds.len() > before;
                 self.feeder_idx = ended.then(|| self.out.cmds.len() - 1);
-                self.feeder = self
-                    .out
-                    .cmds
-                    .last()
-                    .filter(|_| ended)
-                    .cloned()
-                    .map(Box::new);
+                // The chain that fed it is read (`echo … | base64 -d | sh`)
+                // only `MAX_DEPTH` stages back: a copy of the whole chain
+                // is quadratic in a long pipeline.
+                self.feeder = self.out.cmds.last().filter(|_| ended).map(|cmd| {
+                    let mut copy = cmd.clone();
+                    copy.cut_feeders(MAX_DEPTH);
+                    Box::new(copy)
+                });
             }
         }
-    }
-
-    fn single(&mut self) {
-        self.word_mut().quoted = true;
-        loop {
-            match self.take() {
-                None => return self.fail(),
-                Some('\'') => return,
-                Some(c) => self.word_mut().text.push(c),
-            }
-        }
-    }
-
-    fn double(&mut self) {
-        self.word_mut().quoted = true;
-        while !self.failed {
-            match self.peek() {
-                None => return self.fail(),
-                Some('"') => {
-                    self.pos += 1;
-                    return;
-                }
-                Some('\\') => {
-                    self.pos += 1;
-                    match self.take() {
-                        None => return self.fail(),
-                        Some('\n') => {}
-                        Some(c @ ('"' | '\\' | '$' | '`')) => self.word_mut().text.push(c),
-                        Some(c) => {
-                            let word = self.word_mut();
-                            word.text.push('\\');
-                            word.text.push(c);
-                        }
-                    }
-                }
-                Some('$') => self.dollar(true),
-                Some('`') => self.backtick(),
-                Some(c) => {
-                    self.pos += 1;
-                    self.word_mut().text.push(c);
-                }
-            }
-        }
-    }
-
-    fn dollar(&mut self, in_double: bool) {
-        self.pos += 1;
-        match self.peek() {
-            Some('(') => {
-                let start = self.pos + 1;
-                match find_close(&self.chars, start, 0) {
-                    Some(end) => {
-                        let inner: String = self.chars[start..end].iter().collect();
-                        self.pos = end + 1;
-                        self.substitute(&inner);
-                    }
-                    None => self.fail(),
-                }
-            }
-            Some('\'') if !in_double => {
-                self.pos += 1;
-                self.ansi_c();
-            }
-            _ => {
-                // `$VAR`, `${VAR}`: the value is unknown, keep the text.
-                let word = self.word_mut();
-                word.dynamic = true;
-                word.text.push('$');
-            }
-        }
-    }
-
-    fn backtick(&mut self) {
-        self.pos += 1;
-        let mut inner = String::new();
-        loop {
-            match self.take() {
-                None => return self.fail(),
-                Some('`') => break,
-                Some('\\') => match self.take() {
-                    None => return self.fail(),
-                    Some(c @ ('`' | '\\' | '$')) => inner.push(c),
-                    Some(c) => {
-                        inner.push('\\');
-                        inner.push(c);
-                    }
-                },
-                Some(c) => inner.push(c),
-            }
-        }
-        self.substitute(&inner);
     }
 
     fn substitute(&mut self, inner: &str) {
-        self.compound = true;
+        self.chained = true;
         let mut deferred = Vec::new();
         self.out.enter_scope();
         lex(inner, self.depth + 1, self.out, Some(&mut deferred));
@@ -476,19 +476,6 @@ impl Lexer<'_, '_> {
         let word = self.word_mut();
         word.dynamic = true;
         word.text.push('$');
-    }
-
-    /// `$'…'`: decoded so `$'\x67it'` is seen as `git`.
-    fn ansi_c(&mut self) {
-        self.word_mut().quoted = true;
-        match decode_ansi_c(&self.chars, &mut self.pos) {
-            Some((text, dynamic)) => {
-                let word = self.word_mut();
-                word.text.push_str(&text);
-                word.dynamic |= dynamic;
-            }
-            None => self.fail(),
-        }
     }
 
     fn redirect(&mut self) {
@@ -516,7 +503,7 @@ impl Lexer<'_, '_> {
         match self.peek() {
             // Process substitution: the parenthesis splits the commands.
             Some('(') => {
-                self.compound = true;
+                self.chained = true;
                 return;
             }
             Some(c @ ('&' | '|')) => {
@@ -537,6 +524,7 @@ impl Lexer<'_, '_> {
     }
 
     fn end_word(&mut self) {
+        self.param_braces = 0;
         let Some(tok) = self.word.take() else { return };
         match self.pending.take() {
             Some(op) if op == "<<" || op == "<<-" => self.heredocs.push(Heredoc {
@@ -547,11 +535,8 @@ impl Lexer<'_, '_> {
                 cmd_idx: None,
                 pipeline: Vec::new(),
             }),
-            Some(op) => self.redirects.push(Redirect {
-                op,
-                target: tok.text,
-            }),
-            None => self.toks.push(tok),
+            Some(op) => self.push_redirect(op, tok),
+            None => self.push_word(tok),
         }
     }
 }

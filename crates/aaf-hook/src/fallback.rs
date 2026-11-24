@@ -10,7 +10,7 @@ use crate::{
     human_guard, interp_guard, paths, store_guard,
 };
 
-const RULE: &str = "unparsable_command";
+pub(crate) const RULE: &str = "unparsable_command";
 const FIX: &str = "rewrite it as plain commands: balanced quotes, no deep nesting";
 
 pub fn check(text: &str, ctx: &Ctx) -> Option<Denial> {
@@ -23,8 +23,9 @@ pub fn check(text: &str, ctx: &Ctx) -> Option<Denial> {
 }
 
 fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
+    // `,` too: a brace list too long to expand (`{1..99,..}`) still names `..`.
     let tokens: Vec<&str> = line
-        .split(|c: char| c.is_whitespace() || ";|&()<>\"'`{}\\".contains(c))
+        .split(|c: char| c.is_whitespace() || ";|&()<>\"'`{},\\".contains(c))
         .filter(|t| !t.is_empty())
         .collect();
     let has = |name: &str| tokens.iter().any(|t| basename(t) == name);

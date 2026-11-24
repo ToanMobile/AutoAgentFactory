@@ -413,7 +413,7 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
 
 /// Caches a single read-only [`Db`] handle keyed by `(dev, ino)` so long-lived
 /// loops (`aaf ui`, `aaf cockpit`, `aaf telegram`) reuse one reader thread and
-/// connection. Never caches `immutable=1` fallback handles and automatically
+/// connection. Never caches `immutable=1` fallback or older-schema handles and automatically
 /// drops the cached handle if the file disappears or its inode changes.
 #[derive(Debug)]
 pub struct RoDbCache {
@@ -442,7 +442,12 @@ impl RoDbCache {
         }
         *guard = None;
         let db = Db::open_read_only(&self.path)?;
-        if !db.is_immutable() && file_identity(&self.path) == Some(id) {
+        // An older-schema handle goes stale once the daemon migrates the same
+        // inode in place, so only current-schema handles are reused.
+        if !db.is_immutable()
+            && db.schema_version() >= SCHEMA_VERSION
+            && file_identity(&self.path) == Some(id)
+        {
             *guard = Some((id, db.clone()));
         }
         Ok(Some(db))
@@ -499,5 +504,26 @@ mod tests {
         // Removing the file clears the cache and returns None.
         std::fs::remove_file(&db_path).unwrap();
         assert!(cache.open().unwrap().is_none());
+    }
+
+    #[test]
+    fn ro_db_cache_reports_current_schema_after_in_place_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("aaf.db");
+        {
+            // An older (pre-v1) database file: valid SQLite, user_version 0.
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("CREATE TABLE legacy (x INTEGER);")
+                .unwrap();
+        }
+        let cache = RoDbCache::new(db_path.clone());
+        let old = cache.open().unwrap().unwrap();
+        assert!(old.schema_version() < SCHEMA_VERSION);
+        drop(old);
+
+        // The daemon migrates the same inode in place.
+        drop(Db::open(&db_path).unwrap());
+        let fresh = cache.open().unwrap().unwrap();
+        assert_eq!(fresh.schema_version(), SCHEMA_VERSION);
     }
 }

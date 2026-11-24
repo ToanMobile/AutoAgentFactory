@@ -344,8 +344,10 @@ fn layer1_wait_counts_toward_waited_secs_and_subtracts_from_layer2_wait_limit() 
         done.waited_secs
     );
 
-    // Part 2: Layer 1 consumes the entire wait budget (3 s) while Layer 2 slot 0 is busy ->
-    // Layer 2 receives remaining budget 0 and times out immediately with zero extra sleeps.
+    // Part 2: Layer 1 spends part of the wait budget (3 s) while Layer 2 slot 0 is busy ->
+    // Layer 2 spends what is left of the same budget and no more. (This fake clock moves a
+    // whole second per sleep; the budget is kept to the millisecond of what was slept, see
+    // `layer1_budget.rs`, so Layer 2 may still sleep the remainder.)
     let work2 = TempDir::new().unwrap();
     let gradlew2 = work2.path().join("gradlew");
     fs::write(&gradlew2, "#!/bin/sh\nexit 0\n").unwrap();
@@ -382,9 +384,55 @@ fn layer1_wait_counts_toward_waited_secs_and_subtracts_from_layer2_wait_limit() 
     });
     let outcome = run(&rig2, data.path(), &job(work2.path(), &command, Some(3)));
     assert_eq!(outcome, None);
-    assert_eq!(
-        rig2.sleeper.count(),
-        3,
-        "Layer 2 must not sleep past the remaining budget after Layer 1"
+    assert!(rig2.sleeper.count() > 3, "Layer 1 was passed");
+    let slept: std::time::Duration = rig2.sleeper.slept.lock().unwrap().iter().sum();
+    assert!(
+        slept <= std::time::Duration::from_secs(3),
+        "Layer 2 must not sleep past the remaining budget after Layer 1: {slept:?}"
     );
+}
+
+/// A clock whose every reading is one second later than the one before: the
+/// worst case of a real clock crossing a second between two readings.
+struct TickingClock(std::sync::atomic::AtomicI64);
+
+impl aaf_domain::ports::Clock for TickingClock {
+    fn now(&self) -> i64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Neither layer slept, so nothing was waited: a second the clock crossed
+/// between two readings is not a wait (audit a13: the Layer-1 time was
+/// counted even when no correctness lock was waited for, reintroducing the
+/// "waited 1 s" flake fixed on main in bc4ffcf).
+#[test]
+fn no_wait_in_either_layer_reports_zero_waited_secs_on_a_ticking_clock() {
+    let data = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    let gradlew = work.path().join("gradlew");
+    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut rig = Rig::calm();
+    rig.machine.exclusive_build_tools = false;
+    let sample = HeavySample {
+        peak_rss_bytes: 1024,
+        duration_ms: 1,
+    };
+    record(data.path(), REPO, "job", sample, &rig.sleeper).unwrap();
+    let clock = TickingClock(std::sync::atomic::AtomicI64::new(1_000));
+    let command = argv(&["./gradlew", "lint"]);
+    let done = rig
+        .throttle()
+        .run_slot_with(
+            data.path(),
+            &clock,
+            &job(work.path(), &command, Some(60)),
+            &Inherited::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(done.status.success());
+    assert_eq!(rig.sleeper.count(), 0);
+    assert_eq!(done.waited_secs, 0);
 }

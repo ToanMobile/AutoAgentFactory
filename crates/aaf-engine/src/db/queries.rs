@@ -3,9 +3,11 @@
 
 use std::collections::HashMap;
 
+use aaf_domain::blocked::BlockedReason;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{META_FACTORY_FROZEN, PortResult};
 use aaf_domain::run::{RunRecord, RunStatus};
+use aaf_domain::task::TaskState;
 use rusqlite::{OptionalExtension, Row, params};
 
 use super::{Db, corrupt, sql_err, to_u64};
@@ -49,6 +51,50 @@ fn event_from_row(row: &Row<'_>) -> PortResult<FactoryEvent> {
 }
 
 impl Db {
+    /// Task counts grouped by `(state, blocked kind)` without decoding task
+    /// rows; the kind is `None` for non-blocked rows and blocked rows without
+    /// a reason. Optionally scoped to `repo_root`.
+    pub fn task_state_counts(
+        &self,
+        repo_root: Option<&str>,
+    ) -> PortResult<Vec<(TaskState, Option<&'static str>, usize)>> {
+        let repo_root = repo_root.map(str::to_string);
+        self.read(move |conn| {
+            let sql = if repo_root.is_some() {
+                "SELECT state, blocked_reason, COUNT(*) FROM tasks WHERE repo_root = ?1 \
+                 GROUP BY state, blocked_reason"
+            } else {
+                "SELECT state, blocked_reason, COUNT(*) FROM tasks GROUP BY state, blocked_reason"
+            };
+            let mut stmt = conn.prepare_cached(sql).map_err(sql_err)?;
+            let mut rows = match &repo_root {
+                Some(root) => stmt.query(params![root]),
+                None => stmt.query([]),
+            }
+            .map_err(sql_err)?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().map_err(sql_err)? {
+                let state_str: String = row.get(0).map_err(sql_err)?;
+                let state = TaskState::parse(&state_str)
+                    .ok_or_else(|| corrupt("tasks.state", &state_str))?;
+                let blocked: Option<String> = row.get(1).map_err(sql_err)?;
+                let kind = match blocked {
+                    Some(text) if state == TaskState::Blocked => Some(
+                        serde_json::from_str::<BlockedReason>(&text)
+                            .map_err(|_| corrupt("tasks.blocked_reason", &text))?
+                            .kind(),
+                    ),
+                    _ => None,
+                };
+                let count: i64 = row.get(2).map_err(sql_err)?;
+                let count = usize::try_from(count)
+                    .map_err(|_| corrupt("tasks.count", &count.to_string()))?;
+                out.push((state, kind, count));
+            }
+            Ok(out)
+        })
+    }
+
     /// Loads factory freeze state, per-task dependencies (ordered by `rowid`),
     /// and latest run id per task (`max_by_key(|r| (r.started_at, r.id.clone()))`)
     /// inside a single read closure.

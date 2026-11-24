@@ -11,6 +11,16 @@ pub const BRANCH_PREFIX: &str = "aaf/";
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/aaf/snapshots/";
 const BATCH_PREFIX: &str = "batch-";
 
+/// Fails with [`GitError::Dirty`] when `tree` differs from its `HEAD`
+/// (staged, unstaged or untracked): what the gate reads must be what lands.
+pub(crate) fn ensure_clean(tree: &Path) -> Result<(), GitError> {
+    if git(tree, &["status", "--porcelain"])?.is_empty() {
+        Ok(())
+    } else {
+        Err(GitError::Dirty(tree.to_path_buf()))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskWorktree {
     pub path: PathBuf,
@@ -38,6 +48,9 @@ pub struct WorktreeEntry {
     pub head: Option<String>,
     /// Short branch name; `None` when detached or bare.
     pub branch: Option<String>,
+    /// `git worktree lock`ed: git keeps its record (and its branch checked
+    /// out) even when the directory is gone.
+    pub locked: bool,
 }
 
 impl WorktreeEntry {
@@ -134,9 +147,7 @@ pub fn remove(
     }
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     if !force {
-        if !git(&worktree.path, &["status", "--porcelain"])?.is_empty() {
-            return Err(GitError::Dirty(worktree.path.clone()));
-        }
+        ensure_clean(&worktree.path)?;
         if delete_branch {
             let holders = git(
                 repo_root,
@@ -236,9 +247,7 @@ pub fn remove_verified_merged(
                 worktree.branch
             )));
         }
-        if !git(&worktree.path, &["status", "--porcelain"])?.is_empty() {
-            return Err(GitError::Dirty(worktree.path.clone()));
-        }
+        ensure_clean(&worktree.path)?;
         let actual_head = git(&worktree.path, &["rev-parse", "HEAD"])?;
         if actual_head != expected_head_oid {
             return Err(GitError::Command {
@@ -311,17 +320,28 @@ pub fn existing_head(
     Ok(None)
 }
 
+/// Outcome of [`remove_orphan_batch_worktrees`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrphanSweep {
+    /// Removed (or removable, on a dry run) batch names.
+    pub removed: Vec<String>,
+    /// `"<id>: worktree remove: <stderr>"` for each clean orphan git
+    /// refused to remove without `--force` (initialised submodules, a lock).
+    pub warnings: Vec<String>,
+}
+
 /// Inspects `<worktrees_root>/<repo_id>/` and local `aaf/batch-*` refs for
 /// orphaned integration worktrees/branches not present in `active_task_ids`.
-/// Dirty worktrees are skipped rather than forced. Returns the removed (or
-/// removable, when `dry_run` is true) batch names.
+/// Dirty worktrees, and clean ones `git worktree remove` refuses without
+/// `--force`, are skipped rather than forced; a refusal is reported in
+/// [`OrphanSweep::warnings`].
 pub fn remove_orphan_batch_worktrees(
     repo_root: &Path,
     worktrees_root: &Path,
     repo_id: &str,
     active_task_ids: &HashSet<String>,
     dry_run: bool,
-) -> Result<Vec<String>, GitError> {
+) -> Result<OrphanSweep, GitError> {
     let mut candidates = BTreeSet::new();
     let repo_wt_dir = worktrees_root.join(repo_id);
     if let Ok(entries) = fs::read_dir(&repo_wt_dir) {
@@ -363,7 +383,7 @@ pub fn remove_orphan_batch_worktrees(
         }
     }
 
-    let mut removed = Vec::new();
+    let mut sweep = OrphanSweep::default();
     for id in candidates {
         let branch = format!("{BRANCH_PREFIX}{id}");
         let expected_path = repo_wt_dir.join(&id);
@@ -371,13 +391,43 @@ pub fn remove_orphan_batch_worktrees(
             .iter()
             .find(|e| e.branch.as_deref() == Some(branch.as_str()));
         if let Some(entry) = reg_entry {
+            // git lists the main worktree first: never removed.
+            if registered
+                .first()
+                .is_some_and(|main| main.path == entry.path)
+            {
+                sweep.warnings.push(format!(
+                    "{id}: branch is checked out in the main worktree: kept"
+                ));
+                continue;
+            }
             if entry.path.exists() {
                 if !git(&entry.path, &["status", "--porcelain"])?.is_empty() {
                     continue;
                 }
-                if !dry_run {
-                    git(repo_root, &["worktree", "remove", path_str(&entry.path)?])?;
+                // A clean worktree git still refuses without --force
+                // (initialised submodules, a lock) is kept like a dirty
+                // one, without stopping the sweep, and reported.
+                let refusal = if dry_run {
+                    removal_refusal(&entry.path)?
+                        .map(|reason| format!("would be refused: {reason}"))
+                } else {
+                    let out = git_raw(repo_root, &["worktree", "remove", path_str(&entry.path)?])?;
+                    (!out.success()).then(|| out.stderr.trim().to_string())
+                };
+                if let Some(reason) = refusal {
+                    sweep
+                        .warnings
+                        .push(format!("{id}: worktree remove: {reason}"));
+                    continue;
                 }
+            } else if entry.locked {
+                // The tree is on a volume that is not mounted: git keeps
+                // its record and its branch.
+                sweep.warnings.push(format!(
+                    "{id}: worktree is locked and its directory is missing: kept"
+                ));
+                continue;
             } else if !dry_run {
                 prune(repo_root)?;
             }
@@ -389,8 +439,9 @@ pub fn remove_orphan_batch_worktrees(
                 continue;
             }
             if expected_path.join(".git").exists() {
+                // A tree git cannot read is kept, like a dirty one.
                 let status = git_raw(&expected_path, &["status", "--porcelain"])?;
-                if status.success() && !status.stdout.trim().is_empty() {
+                if !status.success() || !status.stdout.trim().is_empty() {
                     continue;
                 }
                 if !dry_run {
@@ -407,12 +458,39 @@ pub fn remove_orphan_batch_worktrees(
             }
         }
         if !dry_run {
-            delete_branch_ignore_missing(repo_root, &branch)?;
+            // e.g. a stale ref lock: this id's warning, the sweep goes on.
+            if let Err(err) = delete_branch_ignore_missing(repo_root, &branch) {
+                sweep.warnings.push(format!("{id}: branch delete: {err}"));
+                continue;
+            }
             let _ = delete_snapshot_refs(repo_root, &id);
         }
-        removed.push(id);
+        sweep.removed.push(id);
     }
-    Ok(removed)
+    Ok(sweep)
+}
+
+/// Why a plain (non-`--force`) `git worktree remove` of `wt` would be
+/// refused, mirroring git's own checks: a lock file, or initialised
+/// submodules (`<git-dir>/modules`, or a gitlink checked out with a `.git`).
+/// Lets a dry run report what the real run would keep.
+pub fn removal_refusal(wt: &Path) -> Result<Option<&'static str>, GitError> {
+    let git_dir = PathBuf::from(git(wt, &["rev-parse", "--absolute-git-dir"])?.trim());
+    if git_dir.join("locked").exists() {
+        return Ok(Some("cannot remove a locked working tree"));
+    }
+    const SUBMODULES: &str = "working trees containing submodules cannot be moved or removed";
+    if git_dir.join("modules").is_dir() {
+        return Ok(Some(SUBMODULES));
+    }
+    let index = git(wt, &["ls-files", "--stage", "-z"])?;
+    let populated = index.split('\0').any(|entry| {
+        entry.starts_with("160000 ")
+            && entry
+                .split_once('\t')
+                .is_some_and(|(_, path)| wt.join(path).join(".git").exists())
+    });
+    Ok(populated.then_some(SUBMODULES))
 }
 
 /// Every worktree of the repository, the main one first.
@@ -429,12 +507,15 @@ pub fn list(repo_root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
                 path: PathBuf::from(path),
                 head: None,
                 branch: None,
+                locked: false,
             });
         } else if let Some(entry) = entries.last_mut() {
             if let Some(head) = field.strip_prefix("HEAD ") {
                 entry.head = Some(head.to_string());
             } else if let Some(name) = field.strip_prefix("branch refs/heads/") {
                 entry.branch = Some(name.to_string());
+            } else if field == "locked" || field.starts_with("locked ") {
+                entry.locked = true;
             }
         }
     }

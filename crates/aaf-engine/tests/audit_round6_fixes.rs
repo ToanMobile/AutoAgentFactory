@@ -65,10 +65,10 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {:?}", out.stderr);
 }
 
-// ---- 1. Lane 2: head_lock::approve_matching subset guard ------------------
+// ---- 1. Lane 2: head_lock::approve_expecting subset guard -----------------
 
 #[test]
-fn head_lock_approve_matching_refuses_to_sign_unpreviewed_base_lock_fp() {
+fn head_lock_approve_expecting_refuses_to_sign_unpreviewed_base_lock_fp() {
     let (dir, data) = (TempDir::new().unwrap(), TempDir::new().unwrap());
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
@@ -94,7 +94,17 @@ fn head_lock_approve_matching_refuses_to_sign_unpreviewed_base_lock_fp() {
     let clock = TestClock::new(100);
     let eval = |cfg: &RepoConfig| head_lock::evaluate(data.path(), root, cfg, "main");
     let approve = |cfg: &RepoConfig, fp: &str| {
-        head_lock::approve_matching(data.path(), root, cfg, "rev", false, fp, clock.as_ref())
+        let timeout = Duration::from_secs(30);
+        let base = aaf_engine::gate::base::resolve(root, &cfg.gate.base_ref, timeout)?;
+        head_lock::approve_expecting(
+            data.path(),
+            root,
+            cfg,
+            &base,
+            ("rev", false),
+            clock.as_ref(),
+            fp,
+        )
     };
 
     let preview = eval(&pr_cfg);
@@ -127,7 +137,7 @@ fn head_lock_approve_matching_refuses_to_sign_unpreviewed_base_lock_fp() {
     fs::remove_dir_all(root.join(".claude")).unwrap();
     assert_eq!(eval(&base_cfg).status, LockStatus::Blocked);
 
-    // Clearing head_lock_globs completely must return NothingLocked under approve_matching.
+    // Clearing head_lock_globs completely must return NothingLocked under approve_expecting.
     let empty_toml = "[gate]\nbase_ref = \"main\"\nhead_lock_globs = []\n";
     fs::write(root.join(".autofactory/config.toml"), empty_toml).unwrap();
     let empty_cfg: RepoConfig = toml::from_str(empty_toml).unwrap();

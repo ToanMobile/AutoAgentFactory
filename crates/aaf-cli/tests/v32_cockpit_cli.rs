@@ -11,8 +11,14 @@ mod output;
 
 #[path = "../src/cmd"]
 mod cmd {
+    pub mod board {
+        pub mod store;
+    }
     pub mod cockpit;
     pub mod cockpit_actions;
+    pub mod handover;
+    pub mod scope;
+    pub mod task_ops;
 }
 
 use std::fs;
@@ -451,120 +457,4 @@ fn cockpit_approve_displays_locked_files_and_signs_only_on_confirm() {
         head_lock::evaluate(&ctx.data_dir, &repo, &cfg, &base_info.diff_target).status,
         LockStatus::Approved
     );
-}
-
-#[test]
-fn cockpit_approve_refuses_when_locked_file_changes_during_confirm() {
-    use aaf_engine::db::RoDbCache;
-
-    struct MutatingConfirm(std::path::PathBuf, &'static [u8], bool);
-    impl std::io::Read for MutatingConfirm {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.2 {
-                return Ok(0);
-            }
-            self.2 = true;
-            fs::write(&self.0, self.1)?;
-            let n = buf.len().min(2);
-            buf[..n].copy_from_slice(&b"y\n"[..n]);
-            Ok(n)
-        }
-    }
-
-    let (_tmp, ctx) = fixture_ctx();
-    let repo = ctx.cwd.clone();
-    fs::create_dir_all(repo.join("tests")).unwrap();
-    fs::write(repo.join("tests/it.rs"), "// v1\n").unwrap();
-    git(&repo, &["add", "-A"]);
-    git(&repo, &["commit", "-q", "-m", "add test"]);
-    fs::write(repo.join("tests/it.rs"), "// v2\n").unwrap();
-    {
-        let db = Db::open(&ctx.data_dir.join("aaf.db")).unwrap();
-        let mut task = Task::new_root(
-            "t-toctou",
-            repo.to_string_lossy(),
-            "Approve locked change",
-            spec("toctou"),
-            Priority::P1,
-            1_700_000_000,
-        );
-        task.state = TaskState::Blocked;
-        db.insert_task(&task).unwrap();
-    }
-    let ro = RoDbCache::new(ctx.data_dir.join("aaf.db"));
-    let mut rdr =
-        std::io::BufReader::new(MutatingConfirm(repo.join("tests/it.rs"), b"// v3\n", false));
-    let mut out = Vec::new();
-    cmd::cockpit_actions::action_approve(&ctx, &ro, "t-toctou", Some("alice"), &mut rdr, &mut out)
-        .unwrap();
-    let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("lock_fp mismatch"), "{text}");
-
-    let cfg = RepoConfig::default();
-    let b = base::resolve(&repo, &cfg.gate.base_ref, GIT_TIMEOUT).unwrap();
-    let eval = head_lock::evaluate(&ctx.data_dir, &repo, &cfg, &b.diff_target);
-    assert_eq!(eval.status, LockStatus::Blocked);
-}
-
-#[test]
-fn cockpit_approve_refuses_when_base_ref_moves_during_confirm() {
-    use aaf_engine::db::RoDbCache;
-
-    struct MovingBaseConfirm(std::path::PathBuf, String, bool);
-    impl std::io::Read for MovingBaseConfirm {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.2 {
-                return Ok(0);
-            }
-            self.2 = true;
-            git(&self.0, &["merge", "--ff-only", &self.1]);
-            let n = buf.len().min(2);
-            buf[..n].copy_from_slice(&b"y\n"[..n]);
-            Ok(n)
-        }
-    }
-
-    let (_tmp, ctx) = fixture_ctx();
-    let repo = ctx.cwd.clone();
-    fs::create_dir_all(repo.join("tests")).unwrap();
-    fs::write(repo.join("tests/a.rs"), "// a0\n").unwrap();
-    fs::write(repo.join("tests/b.rs"), "// b0\n").unwrap();
-    git(&repo, &["add", "-A"]);
-    git(&repo, &["commit", "-q", "-m", "add locked tests"]);
-
-    let wt = worktree::create(&repo, &ctx.worktrees_dir, "t-base", "main").unwrap();
-    fs::write(wt.path.join("tests/b.rs"), "// b1\n").unwrap();
-    git(&wt.path, &["add", "-A"]);
-    git(&wt.path, &["commit", "-q", "-m", "edit b"]);
-    let c1 = git(&wt.path, &["rev-parse", "HEAD"]);
-    fs::write(wt.path.join("tests/a.rs"), "// a1\n").unwrap();
-    git(&wt.path, &["add", "-A"]);
-    git(&wt.path, &["commit", "-q", "-m", "edit a"]);
-
-    {
-        let db = Db::open(&ctx.data_dir.join("aaf.db")).unwrap();
-        let mut task = Task::new_root(
-            "t-base",
-            repo.to_string_lossy(),
-            "Approve with moving base",
-            spec("base move toctou"),
-            Priority::P1,
-            1_700_000_000,
-        );
-        task.state = TaskState::Blocked;
-        db.insert_task(&task).unwrap();
-    }
-
-    let ro = RoDbCache::new(ctx.data_dir.join("aaf.db"));
-    let mut rdr = std::io::BufReader::new(MovingBaseConfirm(repo, c1, false));
-    let mut out = Vec::new();
-    cmd::cockpit_actions::action_approve(&ctx, &ro, "t-base", Some("alice"), &mut rdr, &mut out)
-        .unwrap();
-    let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("lock_fp mismatch"), "{text}");
-
-    let cfg = RepoConfig::default();
-    let b = base::resolve(&wt.path, &cfg.gate.base_ref, GIT_TIMEOUT).unwrap();
-    let eval = head_lock::evaluate(&ctx.data_dir, &wt.path, &cfg, &b.diff_target);
-    assert_eq!(eval.status, LockStatus::Blocked);
 }

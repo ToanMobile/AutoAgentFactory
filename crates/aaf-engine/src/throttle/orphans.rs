@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::paths::{closed_dir, ensure_closed_dir, guest_dir, is_guest, open_guest_file};
 use super::probe::GroupState;
+use super::slot_file::unlock_all;
 use super::watchdog::GroupControl;
 use crate::db::private;
 
@@ -139,27 +140,36 @@ pub(crate) fn resume_orphans(data_dir: &Path, control: &dyn GroupControl) -> usi
         if file.try_lock().is_err() {
             continue;
         }
-        // No answer from the process table decides nothing: the record
-        // stays for the next heavy run. Removing it here left the group
-        // stopped for good whenever `ps` ran over its time under load.
-        let Ok(state) = control.read_group_state(pgid) else {
-            continue;
-        };
-        // An unreadable record names no start time, which matches no leader.
-        let recorded = fs::read_to_string(entry.path()).unwrap_or_default();
-        let recorded = recorded
-            .lines()
-            .find_map(|line| line.strip_prefix(STARTED_KEY));
-        if is_the_stopped_group(recorded, state.as_ref()) {
-            // If the signal fails nothing more can be done for the group;
-            // either way the record goes.
-            let _ = control.resume(pgid);
-        }
-        if fs::remove_file(entry.path()).is_ok() {
-            swept += 1;
-        }
+        let gone = sweep_one(&entry.path(), pgid, control);
+        // Unlocked explicitly ([`unlock_all`]): a record that stays would
+        // otherwise read as held by a live owner to the next sweep until
+        // each child being spawned at this moment has exec'ed.
+        unlock_all(std::slice::from_ref(&file));
+        swept += usize::from(gone);
     }
     swept
+}
+
+/// Continues the group of the record at `path`, which the caller has
+/// locked, when it is still the stopped one; true when the record is gone.
+fn sweep_one(path: &Path, pgid: u32, control: &dyn GroupControl) -> bool {
+    // No answer from the process table decides nothing: the record
+    // stays for the next heavy run. Removing it here left the group
+    // stopped for good whenever `ps` ran over its time under load.
+    let Ok(state) = control.read_group_state(pgid) else {
+        return false;
+    };
+    // An unreadable record names no start time, which matches no leader.
+    let recorded = fs::read_to_string(path).unwrap_or_default();
+    let recorded = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix(STARTED_KEY));
+    if is_the_stopped_group(recorded, state.as_ref()) {
+        // If the signal fails nothing more can be done for the group;
+        // either way the record goes.
+        let _ = control.resume(pgid);
+    }
+    fs::remove_file(path).is_ok()
 }
 
 // --- A command that runs on after its `aaf` was killed (not stopped) ---

@@ -2,13 +2,18 @@
 
 use std::path::{Component, Path, PathBuf};
 
+mod resolving;
+
+pub(crate) use resolving::Resolving;
+use resolving::{canonical, known_missing};
+
 fn expand_unnormalized(raw: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     // `$HOMEWORK` is not `$HOME`: the prefix must end at a separator.
     let home_rest = ["~", "$HOME", "${HOME}"]
         .iter()
         .find_map(|prefix| raw.strip_prefix(prefix))
         .filter(|rest| rest.is_empty() || rest.starts_with('/'));
-    let pwd_rest = ["$PWD", "${PWD}"]
+    let pwd_rest = ["~+", "$PWD", "${PWD}"]
         .iter()
         .find_map(|prefix| raw.strip_prefix(prefix))
         .filter(|rest| rest.is_empty() || rest.starts_with('/'));
@@ -84,15 +89,28 @@ pub fn references_home(raw: &str) -> bool {
 
 /// True when `raw` still contains an unresolved shell variable (`$VAR`, `${...}`,
 /// `$(...)`) or backtick command substitution after stripping known safe prefixes
-/// (`$HOME`, `${HOME}`, `$PWD`, `${PWD}`, `$TMPDIR`, `${TMPDIR}`).
+/// (`$HOME`, `${HOME}`, `$PWD`, `${PWD}`, `$TMPDIR`, `${TMPDIR}`, `~`, `~+`), or
+/// starts with a tilde prefix the hook cannot resolve (`~-`, `~1`, `~user`).
 pub fn has_unresolved_var(raw: &str) -> bool {
-    let tail = ["${HOME}", "$HOME", "${PWD}", "$PWD", "${TMPDIR}", "$TMPDIR"]
-        .iter()
-        .find_map(|prefix| {
-            raw.strip_prefix(prefix)
-                .filter(|rest| rest.is_empty() || rest.starts_with('/'))
-        })
-        .unwrap_or(raw);
+    let known = [
+        "${HOME}",
+        "$HOME",
+        "${PWD}",
+        "$PWD",
+        "${TMPDIR}",
+        "$TMPDIR",
+        "~+",
+        "~",
+    ]
+    .iter()
+    .find_map(|prefix| {
+        raw.strip_prefix(prefix)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
+    if known.is_none() && raw.starts_with('~') {
+        return true;
+    }
+    let tail = known.unwrap_or(raw);
     tail.contains('$') || tail.contains('`')
 }
 
@@ -271,7 +289,9 @@ pub fn real(path: &Path) -> PathBuf {
     let mut tail = Vec::new();
     let mut current = path;
     loop {
-        if let Ok(resolved) = current.canonicalize() {
+        if !current.parent().is_some_and(known_missing)
+            && let Some(resolved) = canonical(current)
+        {
             let mut out = resolved;
             for part in tail.iter().rev() {
                 out.push(part);

@@ -246,7 +246,34 @@ impl<'a> Ctx<'a> {
             return true;
         }
         let root = self.root().unwrap_or_else(|| self.cwd.clone());
-        paths::is_inside(path, &root)
+        if paths::is_inside(path, &root) {
+            return true;
+        }
+        // A `cd` or `env -C` out of the repository does not take its files
+        // out of reach: the repository the call started in still counts.
+        if self.workspace_cwd == self.cwd || self.workspace_cwd.as_os_str().is_empty() {
+            return false;
+        }
+        let workspace = self
+            .workspace_root()
+            .unwrap_or_else(|| self.workspace_cwd.clone());
+        paths::is_inside(path, &workspace)
+    }
+
+    /// `path` is the repository the call started in, or a directory holding
+    /// it: removing it removes the whole repository.
+    pub fn holds_workspace_repo(&self, path: &Path) -> bool {
+        if self.workspace_cwd.as_os_str().is_empty() || path.as_os_str().is_empty() {
+            return false;
+        }
+        // Only a path at or above the starting directory can hold its
+        // repository, so the root lookup stays off the common path.
+        let above = |cwd: &Path| cwd.starts_with(path);
+        if !above(&self.workspace_cwd) && !above(&paths::real(&self.workspace_cwd)) {
+            return false;
+        }
+        self.workspace_root()
+            .is_some_and(|root| paths::is_inside(&root, path))
     }
 }
 
@@ -263,6 +290,7 @@ fn bad_input(reason: &str) -> Decision {
 /// Judges one PreToolUse payload. Unknown tools are allowed; a payload that
 /// cannot be read is denied.
 pub fn decide(input: &[u8], env: &HookEnv) -> Decision {
+    let _resolving = paths::Resolving::start();
     let value: Value = match serde_json::from_slice(input) {
         Ok(value) => value,
         Err(_) => return bad_input("stdin is not valid JSON"),

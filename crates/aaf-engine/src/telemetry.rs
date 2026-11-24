@@ -10,7 +10,7 @@ use aaf_domain::ports::{
     PortResult, RunStore, TaskStore,
 };
 use aaf_domain::run::RunStatus;
-use aaf_domain::task::{Task, TaskState};
+use aaf_domain::task::TaskState;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -257,10 +257,14 @@ pub fn collect_status(
             totals.tokens_out = totals.tokens_out.saturating_add(run.tokens_out);
         }
     }
+    let groups: Vec<_> = all_tasks
+        .iter()
+        .map(|t| (t.state, t.blocked_reason.as_ref().map(|r| r.kind()), 1))
+        .collect();
     let throttle = query
         .data_dir
         .map_or_else(ThrottleSnapshot::default, inspect_throttle);
-    assemble_status(&all_tasks, totals, kv, accounts, query, throttle)
+    assemble_status(&groups, totals, kv, accounts, query, throttle)
 }
 
 /// Collects global/repo status directly from [`Db`] using a single SQL
@@ -279,7 +283,7 @@ pub fn collect_status_from_db_with_throttle(
     query: &StatusQuery<'_>,
     throttle: ThrottleSnapshot,
 ) -> PortResult<TelemetrySummary> {
-    let all_tasks = db.list_tasks(query.repo_root, None)?;
+    let groups = db.task_state_counts(query.repo_root)?;
     let mut totals = RunTotals {
         counts: RunCounts::default(),
         tokens_in: 0,
@@ -294,11 +298,12 @@ pub fn collect_status_from_db_with_throttle(
         totals.tokens_in = totals.tokens_in.saturating_add(t_in);
         totals.tokens_out = totals.tokens_out.saturating_add(t_out);
     }
-    assemble_status(&all_tasks, totals, db, Some(db), query, throttle)
+    assemble_status(&groups, totals, db, Some(db), query, throttle)
 }
 
+/// `task_groups`: `(state, blocked kind, task count)`.
 fn assemble_status(
-    all_tasks: &[Task],
+    task_groups: &[(TaskState, Option<&'static str>, usize)],
     totals: RunTotals,
     kv: &dyn KvStore,
     accounts: Option<&dyn AccountStore>,
@@ -313,12 +318,13 @@ fn assemble_status(
 
     let mut counts = TaskCounts::default();
     let mut blocked_reasons = BTreeMap::new();
-    for task in all_tasks {
-        bump_task(&mut counts, task.state);
-        if task.state == TaskState::Blocked {
-            let kind = task.blocked_reason.as_ref().map_or("unknown", |r| r.kind());
-            let entry = blocked_reasons.entry(kind.to_string()).or_insert(0usize);
-            *entry = entry.saturating_add(1);
+    for &(state, kind, n) in task_groups {
+        bump_task(&mut counts, state, u32::try_from(n).unwrap_or(u32::MAX));
+        if state == TaskState::Blocked {
+            let entry = blocked_reasons
+                .entry(kind.unwrap_or("unknown").to_string())
+                .or_insert(0usize);
+            *entry = entry.saturating_add(n);
         }
     }
 
@@ -373,18 +379,19 @@ pub(crate) fn summarize_accounts(
         .collect()
 }
 
-pub(crate) fn bump_task(counts: &mut TaskCounts, state: TaskState) {
-    counts.total = counts.total.saturating_add(1);
-    match state {
-        TaskState::Backlog => counts.backlog = counts.backlog.saturating_add(1),
-        TaskState::Ready => counts.ready = counts.ready.saturating_add(1),
-        TaskState::Running => counts.running = counts.running.saturating_add(1),
-        TaskState::Gating => counts.gating = counts.gating.saturating_add(1),
-        TaskState::Review => counts.review = counts.review.saturating_add(1),
-        TaskState::Blocked => counts.blocked = counts.blocked.saturating_add(1),
-        TaskState::Done => counts.done = counts.done.saturating_add(1),
-        TaskState::Cancelled => counts.cancelled = counts.cancelled.saturating_add(1),
-    }
+pub(crate) fn bump_task(counts: &mut TaskCounts, state: TaskState, n: u32) {
+    counts.total = counts.total.saturating_add(n);
+    let slot = match state {
+        TaskState::Backlog => &mut counts.backlog,
+        TaskState::Ready => &mut counts.ready,
+        TaskState::Running => &mut counts.running,
+        TaskState::Gating => &mut counts.gating,
+        TaskState::Review => &mut counts.review,
+        TaskState::Blocked => &mut counts.blocked,
+        TaskState::Done => &mut counts.done,
+        TaskState::Cancelled => &mut counts.cancelled,
+    };
+    *slot = slot.saturating_add(n);
 }
 
 fn bump_run(counts: &mut RunCounts, status: RunStatus, delta: u32) {

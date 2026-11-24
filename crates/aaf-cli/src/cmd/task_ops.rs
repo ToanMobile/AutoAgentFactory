@@ -1,24 +1,31 @@
-//! Unified human task actions shared by `aaf board`, `aaf ui`, and `aaf telegram`.
+//! Unified human task actions shared by `aaf board`, `aaf ui`, `aaf telegram`,
+//! and `aaf cockpit`.
 //!
 //! Centralizing `unblock_task`, `rework_task`, budget reset, plan approval,
 //! stale-receipt cleanup, and worktree resolution guarantees all channels keep
 //! identical invariants — notably appending an `"unblocked: <source>"` context
 //! note on every unblock so the unblocker ladder resets its failure streak.
+//! Also hosts the DAG critical-path helper shared by `aaf board graph` and
+//! `aaf cockpit`.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aaf_domain::blocked::BlockedReason;
 use aaf_domain::budget::{BudgetCheck, RootBudget};
+use aaf_domain::config::RepoConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
+use aaf_domain::gate::{Approval, HeadLockReport};
 use aaf_domain::ports::{BudgetStore, EventSink, PortError, RunStore, TaskStore};
 use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::Db;
 use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
+use aaf_engine::gate::{GIT_TIMEOUT, GateError, base, head_lock};
 use aaf_engine::git::worktree::worktree_path;
 use serde_json::{Value, json};
 
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, SystemClock};
 
 pub(crate) const PLAN_APPROVAL_PREFIX: &str = "plan approval required:";
 const PLAN_EVENT_LOOKBACK: u32 = 100;
@@ -115,19 +122,18 @@ pub(crate) fn clear_stale_receipts(db: &impl RunStore, task: &Task, ctx: &Ctx) {
             continue;
         }
         let wt_approvals = ctx.data_dir.join("approvals").join(&wt_id);
-        let mut mirrored = Vec::new();
+        // Drop the mirrored copies first and the worktree dir last: if this is
+        // interrupted, the dir still lists what to clean on the next rework
+        // instead of leaving orphaned (still valid) main-repo approvals.
         if let Ok(entries) = fs::read_dir(&wt_approvals) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 if name.to_str().is_some_and(|s| s.ends_with(".json")) {
-                    mirrored.push(name);
+                    let _ = fs::remove_file(main_approvals_dir.join(name));
                 }
             }
         }
         let _ = fs::remove_dir_all(&wt_approvals);
-        for file_name in mirrored {
-            let _ = fs::remove_file(main_approvals_dir.join(file_name));
-        }
     }
 }
 
@@ -181,6 +187,98 @@ pub(crate) fn resolve_task_tree(db: &Db, task: &Task, ctx: &Ctx) -> PathBuf {
                 .find(|p| !p.as_os_str().is_empty() && p.is_dir())
         })
         .unwrap_or_else(|| PathBuf::from(&task.repo_root))
+}
+
+/// The step at which a head-lock evaluation failed, so each channel keeps
+/// its own wording.
+#[derive(Debug)]
+pub(crate) enum HeadLockEvalError {
+    Task(String),
+    Config(String),
+    Base(String),
+}
+
+impl HeadLockEvalError {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Task(m) | Self::Config(m) | Self::Base(m) => m,
+        }
+    }
+}
+
+/// The config of `tree` and its resolved configured base.
+fn tree_config_base(ctx: &Ctx, tree: &Path) -> Result<(RepoConfig, base::Base), HeadLockEvalError> {
+    let eff = ctx
+        .load_config(tree)
+        .map_err(|e| HeadLockEvalError::Config(e.message))?;
+    let base = base::resolve(tree, &eff.repo.gate.base_ref, GIT_TIMEOUT)
+        .map_err(|e| HeadLockEvalError::Base(e.to_string()))?;
+    Ok((eff.repo, base))
+}
+
+/// Head-lock state of `tree` against its configured base, with the config used.
+pub(crate) fn eval_tree_head_lock(
+    ctx: &Ctx,
+    tree: &Path,
+) -> Result<(RepoConfig, HeadLockReport), HeadLockEvalError> {
+    let (repo, base) = tree_config_base(ctx, tree)?;
+    let report = head_lock::evaluate(&ctx.data_dir, tree, &repo, &base.diff_target);
+    Ok((repo, report))
+}
+
+/// The task's work tree; consumes `db` so the read-only handle is released
+/// before any git work on the tree.
+pub(crate) fn task_tree(db: Db, task_id: &str, ctx: &Ctx) -> Result<PathBuf, HeadLockEvalError> {
+    let task = db
+        .get_task(task_id)
+        .map_err(|e| HeadLockEvalError::Task(e.to_string()))?;
+    Ok(resolve_task_tree(&db, &task, ctx))
+}
+
+/// Resolves the task's work tree and evaluates its head-lock.
+pub(crate) fn eval_task_head_lock(
+    db: Db,
+    task_id: &str,
+    ctx: &Ctx,
+) -> Result<(PathBuf, HeadLockReport), HeadLockEvalError> {
+    let tree = task_tree(db, task_id, ctx)?;
+    let (_, report) = eval_tree_head_lock(ctx, &tree)?;
+    Ok((tree, report))
+}
+
+/// Why [`approve_if_unchanged`] signed nothing.
+#[derive(Debug)]
+pub(crate) enum ApproveRefusal {
+    /// Re-evaluating the head-lock failed.
+    Eval(HeadLockEvalError),
+    /// No locked file is changed any more.
+    NothingLocked,
+    /// The locked diff is not the one the reviewer was shown.
+    FpChanged,
+    /// Signing itself failed.
+    Sign(GateError),
+}
+
+/// Signs a head-lock approval only for the locked diff the reviewer saw:
+/// refuses unless locked files are still changed and their `lock_fp` is
+/// still `expected_fp`, checked on the very evaluation that is signed
+/// ([`head_lock::approve_expecting`], audit a13 L8-R3-1). Shared by cockpit,
+/// web UI and Telegram so every channel binds approvals the same way.
+pub(crate) fn approve_if_unchanged(
+    ctx: &Ctx,
+    tree: &Path,
+    expected_fp: &str,
+    reviewer: &str,
+) -> Result<Approval, ApproveRefusal> {
+    let (repo, base) = tree_config_base(ctx, tree).map_err(ApproveRefusal::Eval)?;
+    let (data, who) = (&ctx.data_dir, (reviewer, false));
+    head_lock::approve_expecting(data, tree, &repo, &base, who, &SystemClock, expected_fp).map_err(
+        |e| match e {
+            GateError::NothingLocked => ApproveRefusal::NothingLocked,
+            GateError::LockFpChanged => ApproveRefusal::FpChanged,
+            e => ApproveRefusal::Sign(e),
+        },
+    )
 }
 
 /// Moves a `Blocked` task back to `Ready`, resets any exhausted root budget,
@@ -284,94 +382,64 @@ pub(crate) fn rework_task(
     })
 }
 
+/// Longest directed chain (`blocker -> ... -> dependent`) in the DAG.
+/// Returns an empty path when there are no dependency edges.
+pub(crate) fn compute_critical_path(topo: &[String], edges: &[(String, String)]) -> Vec<String> {
+    if edges.is_empty() {
+        return Vec::new();
+    }
+    let mut blockers: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (task, blocked_by) in edges {
+        blockers
+            .entry(task.as_str())
+            .or_default()
+            .push(blocked_by.as_str());
+    }
+    let mut best_len: HashMap<&str, usize> = HashMap::with_capacity(topo.len());
+    let mut pred: HashMap<&str, &str> = HashMap::new();
+    let mut best_end: Option<&str> = None;
+    let mut global_max = 0usize;
+
+    for node in topo {
+        let mut len = 1usize;
+        let mut best_prev: Option<&str> = None;
+        if let Some(deps) = blockers.get(node.as_str()) {
+            for &dep in deps {
+                let dep_len = best_len.get(dep).copied().unwrap_or(0);
+                let cand = dep_len.saturating_add(1);
+                if cand > len {
+                    len = cand;
+                    best_prev = Some(dep);
+                }
+            }
+        }
+        best_len.insert(node.as_str(), len);
+        if let Some(prev) = best_prev {
+            pred.insert(node.as_str(), prev);
+        }
+        if len > global_max {
+            global_max = len;
+            best_end = Some(node.as_str());
+        }
+    }
+
+    if global_max < 2 {
+        return Vec::new();
+    }
+    let mut path = Vec::with_capacity(global_max);
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut cur = best_end;
+    while let Some(node) = cur {
+        if !seen.insert(node) {
+            break;
+        }
+        path.push(node.to_string());
+        cur = pred.get(node).copied();
+    }
+    path.reverse();
+    path
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use aaf_domain::task::{ImmutableSpec, Priority};
-
-    #[test]
-    fn unblock_task_appends_unblocked_note_and_transitions_to_ready() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Db::open(&tmp.path().join("aaf.db")).unwrap();
-        let mut task = Task::new_root(
-            "t-blk",
-            "/repo",
-            "Blocked task",
-            ImmutableSpec {
-                description: "desc".into(),
-                acceptance: vec!["ok".into()],
-            },
-            Priority::P2,
-            10,
-        );
-        task.state = TaskState::Blocked;
-        task.blocked_reason = Some(BlockedReason::Stuck {
-            detail: "two fails".into(),
-        });
-        db.insert_task(&task).unwrap();
-
-        let out = unblock_task(&db, "t-blk", "aaf board unblock", "human", 20).unwrap();
-        assert!(!out.budget_reset);
-        assert!(!out.plan_approved);
-
-        let updated = db.get_task("t-blk").unwrap();
-        assert_eq!(updated.state, TaskState::Ready);
-        assert!(
-            updated
-                .context_notes
-                .iter()
-                .any(|n| n == "unblocked: aaf board unblock"),
-            "missing unblocked note: {:?}",
-            updated.context_notes
-        );
-    }
-
-    #[test]
-    fn clear_stale_receipts_preserves_sibling_main_approvals() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        let data = tmp.path().join("data");
-        let worktrees = tmp.path().join("worktrees");
-        fs::create_dir_all(&repo).unwrap();
-        fs::create_dir_all(&data).unwrap();
-        let db = Db::open(&data.join("aaf.db")).unwrap();
-        let task = Task::new_root(
-            "t1",
-            repo.to_string_lossy().into_owned(),
-            "Task 1",
-            ImmutableSpec {
-                description: "desc".into(),
-                acceptance: vec![],
-            },
-            Priority::P2,
-            1,
-        );
-        let wt = worktree_path(&repo, &worktrees, &task.id).unwrap();
-        fs::create_dir_all(&wt).unwrap();
-        let main_dir = data.join("approvals").join(aaf_fp::repo_id(&repo));
-        let wt_dir = data.join("approvals").join(aaf_fp::repo_id(&wt));
-        fs::create_dir_all(&main_dir).unwrap();
-        fs::create_dir_all(&wt_dir).unwrap();
-        fs::write(wt_dir.join("fp-task.json"), "{}").unwrap();
-        fs::write(main_dir.join("fp-task.json"), "{}").unwrap();
-        fs::write(main_dir.join("fp-sibling.json"), "{}").unwrap();
-
-        let ctx = Ctx {
-            cwd: repo.clone(),
-            home: tmp.path().join("home"),
-            data_dir: data,
-            config_dir: tmp.path().join("config"),
-            worktrees_dir: worktrees,
-            path_var: std::ffi::OsString::new(),
-            run_id: None,
-            stdin_is_tty: false,
-            aaf_env: Vec::new(),
-        };
-        clear_stale_receipts(&db, &task, &ctx);
-
-        assert!(!wt_dir.exists());
-        assert!(!main_dir.join("fp-task.json").exists());
-        assert!(main_dir.join("fp-sibling.json").exists());
-    }
-}
+mod tests;

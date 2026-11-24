@@ -14,6 +14,7 @@ use common::{Fixture, rule, run_corpus};
 use serde_json::json;
 
 const ALLOW: Option<&str> = None;
+const DATA: Option<&str> = Some("data_dir_guard");
 const DELETE: Option<&str> = Some("delete_guard");
 const GIT: Option<&str> = Some("git_guard");
 const INTERP: Option<&str> = Some("interp_guard");
@@ -82,9 +83,11 @@ fn interp_guard_php_stdin_heredocs_bash_and_rmtree_protections() {
                 "python3 -c \"import shutil; shutil.rmtree('.git')\"",
                 INTERP,
             ),
+            // `data_dir_guard` runs first and refuses any word naming the
+            // data directory, so it answers before `interp_guard` does.
             (
                 "python3 -c \"import shutil; shutil.rmtree('{data}')\"",
-                Some("data_dir_guard"),
+                DATA,
             ),
             (
                 "python3 -c \"import shutil; shutil.rmtree('build')\"",

@@ -82,6 +82,21 @@ fn queue_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
 /// when `mine` is `None`). Stale unlocked ticket files from crashed processes
 /// are removed opportunistically by host processes.
 pub fn older_waiters(data_dir: &Path, mine: Option<&WaitTicket>) -> usize {
+    older_waiters_than(data_dir, mine, i64::MAX)
+}
+
+/// The second of a ticket name; `None` for a name this module did not make.
+fn ticket_secs(name: &str) -> Option<u64> {
+    name.get(..16)?.parse().ok()
+}
+
+/// [`older_waiters`] for a caller that arrived at `arrived_at` (epoch
+/// seconds from the throttle clock). Without a ticket of its own (a sandboxed
+/// guest cannot write one, a host has none before it first waits) only
+/// tickets taken no later than its arrival are ahead of it: counting the
+/// newer ones too let every host that queued after a guest hold it back.
+pub fn older_waiters_than(data_dir: &Path, mine: Option<&WaitTicket>, arrived_at: i64) -> usize {
+    let arrived = u64::try_from(arrived_at).unwrap_or(0);
     let guest = is_guest(data_dir);
     let dir = throttle_dir(data_dir).join(QUEUE_DIR);
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -99,6 +114,9 @@ pub fn older_waiters(data_dir: &Path, mine: Option<&WaitTicket>) -> usize {
         if let Some(mine) = my_name
             && name.as_str() >= mine
         {
+            continue;
+        }
+        if my_name.is_none() && ticket_secs(&name).is_some_and(|secs| secs > arrived) {
             continue;
         }
         let path = entry.path();
@@ -141,6 +159,11 @@ mod tests {
         assert_eq!(older_waiters(data.path(), Some(&first)), 0);
         assert_eq!(older_waiters(data.path(), Some(&second)), 1);
         assert_eq!(older_waiters(data.path(), None), 2);
+        // Without a ticket, only tickets taken by its arrival are ahead.
+        assert_eq!(older_waiters_than(data.path(), None, 999), 0);
+        assert_eq!(older_waiters_than(data.path(), None, 1_000), 1);
+        assert_eq!(older_waiters_than(data.path(), None, 1_005), 2);
+        assert_eq!(older_waiters_than(data.path(), Some(&second), 0), 1);
 
         // Stale unlocked file from an older dead process is cleaned up and ignored.
         let stale = data

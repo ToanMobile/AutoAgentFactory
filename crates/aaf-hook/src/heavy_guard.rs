@@ -105,7 +105,8 @@ pub fn check_script(cmds: &[Cmd]) -> Option<Denial> {
 }
 
 /// The program a command runs and its arguments: for `sh gradlew build` the
-/// script the shell is handed. (`sh -c '…'` is split by the shell module.)
+/// script the shell is handed. (`sh -c '…'` is split by the shell module,
+/// and so are launchers such as `xcrun` or `bundle exec`.)
 fn invoked(cmd: &Cmd) -> (&str, &[String]) {
     let args = cmd.args();
     if !SHELLS.contains(&cmd.name()) {

@@ -4,11 +4,11 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use aaf_domain::config::{GateConfig, RepoConfig};
+use aaf_domain::config::{GateConfig, MachineConfig, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus};
 use aaf_domain::ports::Clock;
 use aaf_engine::gate::docs_fast::DOCS_FAST_PATH_NOTE;
-use aaf_engine::gate::run_gate_in;
+use aaf_engine::gate::run_gate_with;
 use tempfile::TempDir;
 
 struct FixedClock(i64);
@@ -83,12 +83,18 @@ fn gate014_markdown_embedded_via_include_str_must_not_take_docs_fast_path() {
         "grep -q 'aaf proof record' templates/skills/mobile-proof-qa/SKILL.md".to_string();
     cfg.commands.test_full = cfg.commands.test_scoped.clone();
 
-    let receipt = run_gate_in(
+    // The CPU-load wait is off: the host running the tests may be busy.
+    let machine = MachineConfig {
+        max_load_percent: 0,
+        ..MachineConfig::default()
+    };
+    let receipt = run_gate_with(
         data.path(),
         repo.path(),
         &cfg,
         GateMode::Scoped,
         &FixedClock(100),
+        &machine,
     )
     .unwrap();
 

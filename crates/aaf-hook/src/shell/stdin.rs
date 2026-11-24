@@ -16,6 +16,8 @@ pub(super) enum ShellInput<'a> {
     Command(&'a str),
     /// `-s`, or no operand: standard input.
     Stdin,
+    /// `/dev/fd/N`: what a redirection on the command opens as fd N.
+    Fd,
     /// The first operand names a script file.
     File,
 }
@@ -53,8 +55,25 @@ pub(super) fn shell_input(words: &[Tok]) -> ShellInput<'_> {
         None if command => ShellInput::File,
         _ if stdin => ShellInput::Stdin,
         None => ShellInput::Stdin,
+        Some(tok) if names_stdin(&tok.text) => ShellInput::Stdin,
+        Some(tok) if names_fd(&tok.text) => ShellInput::Fd,
         Some(_) => ShellInput::File,
     }
+}
+
+/// A script operand that is standard input itself (`bash /dev/stdin`,
+/// `. /dev/fd/0`, `bash /proc/self/fd/0`, `bash -- -`).
+pub(super) fn names_stdin(word: &str) -> bool {
+    matches!(word, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0" | "-")
+}
+
+/// A script operand that is another open file descriptor (`/dev/fd/3`,
+/// `/proc/self/fd/3`): fed by a redirection on the command (`3<<< '…'`).
+pub(super) fn names_fd(word: &str) -> bool {
+    ["/dev/fd/", "/proc/self/fd/"]
+        .iter()
+        .filter_map(|prefix| word.strip_prefix(prefix))
+        .any(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The literal script a shell or interpreter reading standard input gets: a
@@ -246,7 +265,7 @@ impl Lexer<'_, '_> {
             if let Some(idx) = cmd_idx {
                 let cmds_len = self.out.cmds.len();
                 if let Some(cmd) = self.out.cmds.get_mut(idx) {
-                    is_interp |= crate::interp_guard::is_interpreter(cmd.name());
+                    is_interp |= crate::interp_guard::reads_program_from_stdin(cmd);
                     is_shell |= SHELLS.contains(&cmd.name());
                     owner_wrapped = cmd.wrapped.clone();
                     owner_slotted |= cmd.slotted;
@@ -270,7 +289,7 @@ impl Lexer<'_, '_> {
                         }
                         is_shell |= SHELLS.contains(&consumer.name());
                         let consumer_is_interp =
-                            crate::interp_guard::is_interpreter(consumer.name());
+                            crate::interp_guard::reads_program_from_stdin(consumer);
                         if let Some(feeder) = feeder_at_mut(consumer, step + 1) {
                             is_interp |= consumer_is_interp;
                             feeder.heredocs.push(body.clone());
@@ -281,12 +300,17 @@ impl Lexer<'_, '_> {
                     }
                 }
             }
+            // The pipe after the owner is still waiting for its consumer.
+            let awaits_consumer = self.feeder_idx.is_some()
+                && pipeline.last().copied().or(cmd_idx) == self.feeder_idx;
             if quoted && is_interp && !is_shell {
                 // Quoted heredoc feeding an interpreter: shell does not run it,
                 // and `interp_guard` inspects `Cmd::heredocs` / `feeder.heredocs`.
-            } else if may_be_lone_cat {
+            } else if may_be_lone_cat || awaits_consumer {
                 // Defer until `finish_bodies` to know whether `cat <<'EOF'`
-                // stayed the sole command in this script/substitution.
+                // stayed the sole command in this script/substitution, or
+                // (`cat <<EOF |` with the consumer on the line after the
+                // body) which environment the consumer runs it under.
                 self.bodies.push(HeredocBody {
                     body,
                     quoted,
@@ -353,8 +377,58 @@ impl Lexer<'_, '_> {
                     {
                         *fidx += inserted_len;
                     }
+                    self.shift_steps(insert_at, inserted_len);
+                    let at = |idx: usize| idx + insert_at;
+                    self.out
+                        .sure_steps
+                        .extend(sub.sure_steps.into_iter().map(at));
+                    self.out
+                        .plain_steps
+                        .extend(sub.plain_steps.into_iter().map(at));
+                    self.out.sure_steps.sort_unstable();
+                    self.out.plain_steps.sort_unstable();
                 }
             }
+        }
+    }
+
+    /// Indices of commands at or after `at` move by `by` once a heredoc
+    /// body's commands are spliced in before them.
+    fn shift_steps(&mut self, at: usize, by: usize) {
+        let shift = |idx: &mut usize| {
+            if *idx >= at {
+                *idx += by;
+            }
+        };
+        self.out.sure_steps.iter_mut().for_each(shift);
+        self.out.plain_steps.iter_mut().for_each(shift);
+        self.groups.iter_mut().for_each(|(_, start)| shift(start));
+        if let Some(start) = self.closed_group.as_mut() {
+            shift(start);
+        }
+    }
+
+    /// The bodies a feeder read after `pipe` copied it (`cat <<'EOF' |`,
+    /// the body, then the consumer on a line of its own): every command
+    /// handed that copy takes them, as `read_heredocs` gives them to a
+    /// consumer on the `|` line. Not before `emit`: the bodies are split
+    /// once the line ends, and a shell consumer would split them again,
+    /// twice more at each level they nest.
+    pub(super) fn give_late_bodies(&mut self, from: usize, copy: &Cmd, bodies: Vec<String>) {
+        let mut cleared = false;
+        for cmd in self.out.cmds.iter_mut().skip(from) {
+            let env_cleared = cmd.env_cleared;
+            if let Some(feeder) = cmd.feeder.as_deref_mut()
+                && *feeder == *copy
+            {
+                feeder.heredocs.clone_from(&bodies);
+                cleared |= env_cleared;
+            }
+        }
+        // They run under the environment the consumer clears.
+        let late = bodies.get(copy.heredocs.len()..).unwrap_or(&[]);
+        for item in &mut self.bodies {
+            item.cleared |= cleared && late.contains(&item.body);
         }
     }
 
@@ -375,8 +449,11 @@ impl Lexer<'_, '_> {
                     defer.push(item.body);
                 }
             } else if item.quoted && item.is_interp {
-                // Quoted heredoc feeding an interpreter: shell does not run it,
-                // and `interp_guard` inspects `Cmd::heredocs` directly.
+                // Quoted heredoc that is an interpreter's program (it reads
+                // its program from stdin): no shell runs it, and `interp_guard`
+                // inspects `Cmd::heredocs` directly. As stdin of a program
+                // given another way (`perl -e 'exec "sh"' <<'EOF'`) it may
+                // reach a shell, and is split like any other body.
             } else {
                 let outer_cleared = self.out.env_cleared;
                 self.out.env_cleared |= item.cleared;

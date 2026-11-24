@@ -4,10 +4,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::shell::{self, Cmd};
+use crate::shell::Cmd;
 use crate::{Ctx, Denial, git_guard, paths};
 
+mod find;
 mod writers;
+
+use find::{DELETERS, feeds_protected, find};
 
 const RULE: &str = "delete_guard";
 const FIX: &str = "leave it in place; protected files are changed by a human, by hand";
@@ -106,6 +109,12 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                 target(arg, takes_dirs, name, ctx)
             })
         }
+        // Node's `rimraf`/`del`, the `trash` tools: always recursive.
+        "rimraf" | "trash" | "trash-put" | "del" | "del-cli" => {
+            positional(args).into_iter().find_map(|arg| {
+                check_recursive_rm_target(arg, name, ctx).or_else(|| target(arg, true, name, ctx))
+            })
+        }
         "cp" | "install" | "rsync" => writers::check_copier(name, args, ctx),
         "dd" => args.iter().find_map(|arg| {
             arg.strip_prefix("of=")
@@ -118,7 +127,13 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     }
 }
 
-fn check_one_rm_path(raw: &str, path: &Path, verb: &str, ctx: &Ctx) -> Option<Denial> {
+fn check_one_rm_path(
+    raw: &str,
+    path: &Path,
+    verb: &str,
+    holds_repo_ok: bool,
+    ctx: &Ctx,
+) -> Option<Denial> {
     let check_path = if raw.ends_with('/') {
         paths::real(path)
     } else if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
@@ -129,12 +144,20 @@ fn check_one_rm_path(raw: &str, path: &Path, verb: &str, ctx: &Ctx) -> Option<De
     if let Some(why) = paths::is_system_or_home_danger(&check_path, ctx.env.home.as_deref()) {
         return Some(deny(format!("{verb} {raw}: refuses to delete {why}")));
     }
+    // The repository the call started in, or a directory above it, after a
+    // `cd`/`env -C` elsewhere: it is not "inside the workspace".
+    if !holds_repo_ok && (ctx.holds_workspace_repo(&check_path) || ctx.holds_workspace_repo(path)) {
+        return Some(deny(format!(
+            "{verb} {raw}: it contains the whole repository"
+        )));
+    }
     // Fast path: a target strictly inside the real workspace `workspace_cwd`
     // is already inside the repo (or workspace when outside any repo) without
-    // spawning git for `repo_root`.
+    // spawning git for `repo_root`. The workspace directory itself is not
+    // strictly inside it, except as a `find` root whose contents alone go.
     if !ctx.workspace_cwd.as_os_str().is_empty() {
         let real_ws = paths::real(&ctx.workspace_cwd);
-        if check_path != real_ws && check_path.starts_with(&real_ws) {
+        if (holds_repo_ok || check_path != real_ws) && check_path.starts_with(&real_ws) {
             return None;
         }
     }
@@ -155,6 +178,17 @@ fn check_one_rm_path(raw: &str, path: &Path, verb: &str, ctx: &Ctx) -> Option<De
 /// containment (allowing only `/tmp/...` and `$TMPDIR/...` subpaths outside the
 /// repository) for recursive deletion targets (`rm -r`/`-rf`, `shutil.rmtree`, etc.).
 pub(crate) fn check_recursive_rm_target(raw: &str, verb: &str, ctx: &Ctx) -> Option<Denial> {
+    contain(raw, verb, false, ctx)
+}
+
+/// [`check_recursive_rm_target`] for a directory whose contents are deleted
+/// but not the directory itself (`find <root> -delete`): a root holding the
+/// repository is left to the `-name` test analysis.
+pub(crate) fn check_delete_root(raw: &str, verb: &str, ctx: &Ctx) -> Option<Denial> {
+    contain(raw, verb, true, ctx)
+}
+
+fn contain(raw: &str, verb: &str, holds_repo_ok: bool, ctx: &Ctx) -> Option<Denial> {
     if paths::references_home(raw) && ctx.env.home.is_none() {
         return Some(deny(format!(
             "{verb} {raw}: home directory path cannot be safely verified"
@@ -166,135 +200,16 @@ pub(crate) fn check_recursive_rm_target(raw: &str, verb: &str, ctx: &Ctx) -> Opt
         )));
     }
     let path = ctx.expand(raw);
-    if let Some(denial) = check_one_rm_path(raw, &path, verb, ctx) {
+    if let Some(denial) = check_one_rm_path(raw, &path, verb, holds_repo_ok, ctx) {
         return Some(denial);
     }
     if raw.contains("..") {
         let real_dd = paths::expand_real_dotdot(raw, &ctx.cwd, ctx.env.home.as_deref());
         if real_dd != path {
-            return check_one_rm_path(raw, &real_dd, verb, ctx);
+            return check_one_rm_path(raw, &real_dd, verb, holds_repo_ok, ctx);
         }
     }
     None
-}
-
-/// Tools that remove or empty the files `find -exec` hands them. A shell is
-/// one of them: what its script does with `$1` is not analysed.
-const DELETERS: &[&str] = &[
-    "rm", "unlink", "shred", "truncate", "mv", "tee", "sh", "bash", "zsh", "dash", "ksh",
-];
-
-const EXEC_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
-
-/// The argv after `find -exec` runs a deleting tool, seen through the same
-/// wrapper stripping as a typed command (`env rm`, `nice /bin/rm`,
-/// `sh -c …`). A tool chosen at run time, or an argv that cannot be
-/// analysed, could be one.
-fn runs_deleter(argv: &[String]) -> bool {
-    let script = shell::parse_argv(argv);
-    !script.opaque.is_empty()
-        || script
-            .cmds
-            .iter()
-            .any(|cmd| cmd.dynamic_name || DELETERS.contains(&cmd.name()))
-}
-
-/// Where the expression of a `find` starts: its search roots end at the
-/// first test, action or operator.
-fn expression_start(args: &[String]) -> usize {
-    args.iter()
-        .position(|arg| {
-            matches!(arg.as_str(), "(" | "!") || (arg.starts_with('-') && arg.len() > 2)
-        })
-        .unwrap_or(args.len())
-}
-
-/// `find … -delete` (or `-exec rm {}`) removes whatever its tests let
-/// through, protected files included. It is allowed only when a `-name`
-/// test every deleted file must pass cannot match a protected file.
-fn find(args: &[String], ctx: &Ctx) -> Option<Denial> {
-    let word = |at: usize| args.get(at).map_or("", String::as_str);
-    let expression = expression_start(args);
-    let action = (expression..args.len()).find(|at| match word(*at) {
-        "-delete" => true,
-        action if EXEC_ACTIONS.contains(&action) => {
-            let end = (*at + 1..args.len())
-                .find(|end| matches!(word(*end), ";" | "+"))
-                .unwrap_or(args.len());
-            let argv = args.get(*at + 1..end).unwrap_or(&[]);
-            argv.iter().any(|arg| arg.contains("{}")) && runs_deleter(argv)
-        }
-        _ => false,
-    })?;
-    reaches_protected(args, expression, action, ctx).then(|| {
-        Denial::new(
-            RULE,
-            "find would delete every match and its tests do not rule out protected files",
-            "add a -name pattern that cannot match a protected file, or delete explicit paths",
-        )
-    })
-}
-
-/// The names piped into `xargs <deleter>` may include a protected file.
-/// Only a `find` is understood; any other feeder (`ls`, `git ls-files`,
-/// `cat list`, a pipeline stage in between) prints names the hook cannot
-/// know, and that is refused.
-fn feeds_protected(feeder: Option<&Cmd>, ctx: &Ctx) -> bool {
-    let Some(find) = feeder.filter(|cmd| cmd.name() == "find" && !cmd.dynamic_name && !cmd.xargs)
-    else {
-        return true;
-    };
-    let args = find.args();
-    let expression = expression_start(args);
-    let tail = args.get(expression..).unwrap_or(&[]);
-    // What `-exec` or a format string prints need not be the matched name.
-    let prints_other = tail.iter().any(|arg| {
-        EXEC_ACTIONS.contains(&arg.as_str()) || matches!(arg.as_str(), "-printf" | "-fprintf")
-    });
-    // Names are printed where the first action stands, else at the end;
-    // a test after that point filters nothing.
-    let action = tail
-        .iter()
-        .position(|arg| {
-            matches!(
-                arg.as_str(),
-                "-print" | "-print0" | "-ls" | "-fprint" | "-fprint0" | "-fls" | "-delete"
-            )
-        })
-        .map_or(args.len(), |at| expression + at);
-    prints_other || reaches_protected(args, expression, action, ctx)
-}
-
-/// A file of the repository can reach the action at `action` without having
-/// passed a `-name` test that rules protected files out.
-fn reaches_protected(args: &[String], expression: usize, action: usize, ctx: &Ctx) -> bool {
-    let word = |at: usize| args.get(at).map_or("", String::as_str);
-    let mut roots: Vec<&str> = (0..expression)
-        .map(word)
-        .filter(|arg| !arg.starts_with('-'))
-        .collect();
-    if roots.is_empty() {
-        roots.push(".");
-    }
-    let repo = ctx.root().unwrap_or_else(|| ctx.cwd.clone());
-    let reaches_repo = roots.iter().any(|raw| {
-        let root = ctx.expand(raw);
-        paths::is_inside(&root, &repo) || paths::is_inside(&repo, &root)
-    });
-    if !reaches_repo {
-        return false;
-    }
-    // With an operator a file can reach the action without passing the test;
-    // a test after the action filters nothing.
-    let branches = (expression..args.len())
-        .any(|at| matches!(word(at), "-o" | "-or" | "!" | "-not" | "(" | ")" | ","));
-    let filtered = !branches
-        && (expression..action).any(|at| {
-            matches!(word(at), "-name" | "-iname")
-                && at + 1 < action
-                && !paths::may_name_protected(word(at + 1))
-        });
-    !filtered
 }
 
 fn short_has(arg: &str, flags: &[char]) -> bool {
@@ -404,6 +319,7 @@ fn hit(path: &Path, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
             && ctx
                 .workspace_root()
                 .is_some_and(|root| paths::is_inside(&root, path)))
+        || ctx.holds_workspace_repo(path)
     {
         return Some("it contains the whole repository".to_string());
     }

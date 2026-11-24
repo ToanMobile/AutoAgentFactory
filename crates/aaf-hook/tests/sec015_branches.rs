@@ -90,7 +90,8 @@ fn sec015_r2_blocks_clusters_abbreviations_and_sed_in_place() {
             ("base64 --inp=.env", SECRET),
             ("grep --reg=KEY .env", SECRET),
             ("sed --expr=p .env", SECRET),
-            // 4. `sed -i` never swallows the next token.
+            // 4. `sed -i` never swallows the next token. `secret_guard` refuses
+            // reading `.env` before `delete_guard` sees the in-place write.
             ("sed -i -ep .env", SECRET),
             ("sed -i --expression=p .env", SECRET),
             ("sed -i 'w /tmp/leak' .env", SECRET),

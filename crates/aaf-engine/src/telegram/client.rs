@@ -20,6 +20,9 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Hard cap on bytes read from a single Bot API response (2 MiB).
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+/// Updates per `getUpdates` batch: keeps a full batch of maximal messages far
+/// below [`MAX_RESPONSE_BYTES`] so a backlog can always drain.
+const GET_UPDATES_LIMIT: u64 = 20;
 /// Extra headroom added on top of Telegram's server-side long-poll timeout.
 const POLL_TIMEOUT_HEADROOM_SECS: u64 = 15;
 
@@ -198,9 +201,16 @@ impl HttpTelegramApi {
             .with_config()
             .limit(MAX_RESPONSE_BYTES)
             .read_to_string()
-            .map_err(|err| TelegramError::Transport {
-                url: masked.clone(),
-                detail: describe_ureq_error(&err),
+            .map_err(|err| match err {
+                // Re-polling returns the same oversized batch: permanent, not transient.
+                ureq::Error::BodyExceedsLimit(_) => TelegramError::ResponseDecode {
+                    method,
+                    detail: format!("response body exceeds {MAX_RESPONSE_BYTES} bytes"),
+                },
+                other => TelegramError::Transport {
+                    url: masked.clone(),
+                    detail: describe_ureq_error(&other),
+                },
             })?;
 
         if !(200..300).contains(&status) {
@@ -253,6 +263,7 @@ impl TelegramApi for HttpTelegramApi {
         let clamped = timeout_secs.min(MAX_POLL_TIMEOUT_SECS);
         let mut payload = json!({
             "timeout": clamped,
+            "limit": GET_UPDATES_LIMIT,
             "allowed_updates": ["message"],
         });
         if let Some(off) = offset {

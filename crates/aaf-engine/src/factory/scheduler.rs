@@ -3,7 +3,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::Scope;
@@ -22,8 +21,12 @@ pub use super::schedule_order::{
 };
 use super::sweep;
 pub use super::sweep::recover;
-use super::worker::{self, GateJob, Job, Next, Outcome, PreGateAudit};
-use super::{Deps, Mode, RunSummary, is_frozen, unblock};
+use super::worker::{self, GateJob, Job, Outcome, PreGateAudit};
+use super::{Deps, Mode, RunSummary, is_frozen};
+
+mod outcome;
+
+use outcome::gate_loop;
 
 const MAX_GATE_RETRIES: u32 = 3;
 pub(super) const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: i64 = 300;
@@ -61,7 +64,7 @@ pub fn run_with_audit(
     let resumed = recover(deps, hooks.reap)?;
     summary.errors.extend(sweep::startup_sweep(deps));
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
-    let (gate_tx, gate_rx) = mpsc::channel::<GateJob>();
+    let (gate_tx, gate_rx) = mpsc::channel::<Vec<GateJob>>();
     let stats = GateStats::default();
     let result = std::thread::scope(|scope| {
         let (gate_msgs, stats) = (msg_tx.clone(), &stats);
@@ -129,7 +132,8 @@ pub(super) struct Scheduler<'a> {
     pub(super) mode: Mode,
     msg_tx: Sender<Msg>,
     msg_rx: Receiver<Msg>,
-    gate_tx: Sender<GateJob>,
+    /// One message is one set of jobs the gate thread takes together.
+    gate_tx: Sender<Vec<GateJob>>,
     pub(super) parked: HashSet<String>,
     pub(super) gating_in_flight: HashSet<String>,
     pub(super) state: LoopState,
@@ -150,16 +154,16 @@ impl<'a> Scheduler<'a> {
         self.sweep_review(fresh)?;
         self.state.last_review_sweep = Some(Instant::now());
         self.state.last_review_sweep_now = Some(self.deps.now());
-        resumed
-            .into_iter()
-            .try_for_each(|id| self.queue_gating_task(id))?;
+        self.queue_gating_tasks(resumed)?;
         let closed = || PortError::Io("factory message channel closed".to_string());
         loop {
+            // A deadline can pass while the loop waits for any message, not
+            // only on the idle-slot timeout: un-park its task either way.
+            self.expire_waits();
             let frozen = is_frozen(&*self.deps.store)?;
             let halted = self.summary.halted.is_some();
             if !frozen && !halted {
                 if self.mode == Mode::Auto {
-                    self.expire_waits();
                     self.poll_gating()?;
                 }
                 self.start_jobs(scope)?;
@@ -210,20 +214,29 @@ impl<'a> Scheduler<'a> {
     }
 
     pub(super) fn queue_gating_task(&mut self, task_id: String) -> PortResult<()> {
-        match self.deps.git.task_worktree(&task_id) {
-            Ok(worktree) => self.queue_gate(GateJob {
-                task_id,
-                worktree,
-                audited: false,
-                cached_receipt: None,
-            }),
-            Err(err) => {
-                let outcome = worker::block_infra(self.deps, &task_id, &err.to_string());
-                self.summary.errors.extend(outcome.error);
-                self.summary.blocked.push(task_id);
-                Ok(())
+        self.queue_gating_tasks(vec![task_id])
+    }
+
+    /// Hands `Gating` tasks to the gate thread as one round, so they are
+    /// batched together instead of split by when the gate thread wakes up.
+    pub(super) fn queue_gating_tasks(&mut self, task_ids: Vec<String>) -> PortResult<()> {
+        let mut jobs = Vec::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            match self.deps.git.task_worktree(&task_id) {
+                Ok(worktree) => jobs.push(GateJob {
+                    task_id,
+                    worktree,
+                    audited: false,
+                    cached_receipt: None,
+                }),
+                Err(err) => {
+                    let outcome = worker::block_infra(self.deps, &task_id, &err.to_string());
+                    self.summary.errors.extend(outcome.error);
+                    self.summary.blocked.push(task_id);
+                }
             }
         }
+        self.queue_gates(jobs)
     }
 
     fn review_cap(&self) -> Option<usize> {
@@ -234,6 +247,7 @@ impl<'a> Scheduler<'a> {
     /// Single-snapshot board view: ready candidates (deps Done, priority + critical
     /// path order), open-review count, and active (`Running | Gating`) scopes.
     fn load_tick_board(&mut self) -> PortResult<TickBoard> {
+        self.expire_waits();
         let now = self.deps.now();
         let store = &*self.deps.store;
         let can_settle = self.summary.halted.is_none() && !is_frozen(store)?;
@@ -398,6 +412,10 @@ impl<'a> Scheduler<'a> {
                     }
                 }
                 self.state.started.insert(task_id.clone());
+                // The worker moves the task to `Gating` before its outcome is
+                // handled: `poll_gating` must not queue a second gate for it.
+                // `handle_worker` releases it for every non-gate outcome.
+                self.gating_in_flight.insert(task_id.clone());
                 self.parked.remove(task_id);
                 self.summary.requeued.retain(|id| id != task_id);
                 self.summary.agent_runs += 1;
@@ -421,12 +439,21 @@ impl<'a> Scheduler<'a> {
     }
 
     fn queue_gate(&mut self, job: GateJob) -> PortResult<()> {
-        let id = job.task_id.clone();
-        self.gating_in_flight.insert(id.clone());
-        self.state.in_gate += 1;
-        if self.gate_tx.send(job).is_err() {
-            self.gating_in_flight.remove(&id);
-            self.state.in_gate -= 1;
+        self.queue_gates(vec![job])
+    }
+
+    fn queue_gates(&mut self, jobs: Vec<GateJob>) -> PortResult<()> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = jobs.iter().map(|job| job.task_id.clone()).collect();
+        self.gating_in_flight.extend(ids.iter().cloned());
+        self.state.in_gate += ids.len();
+        if self.gate_tx.send(jobs).is_err() {
+            for id in &ids {
+                self.gating_in_flight.remove(id);
+            }
+            self.state.in_gate -= ids.len();
             return Err(PortError::Io("the gate thread is gone".to_string()));
         }
         Ok(())
@@ -435,153 +462,6 @@ impl<'a> Scheduler<'a> {
     pub(super) fn requeue_if_ready(&mut self, task_id: String, state: TaskState) {
         if state == TaskState::Ready && !self.summary.requeued.contains(&task_id) {
             self.summary.requeued.push(task_id);
-        }
-    }
-
-    fn clear_gating(&mut self, task_id: &str) {
-        self.gating_in_flight.remove(task_id);
-        self.state.gate_retries.remove(task_id);
-        self.state.pre_audits.remove(task_id);
-    }
-
-    fn handle_worker(&mut self, outcome: Outcome) -> PortResult<()> {
-        self.state.active -= 1;
-        self.summary.errors.extend(outcome.error);
-        if !matches!(
-            outcome.next,
-            Next::Gate(_) | Next::GateAudited(..) | Next::Unblock { .. } | Next::SwitchJob(_)
-        ) {
-            self.gating_in_flight.remove(&outcome.task_id);
-        }
-        if !matches!(outcome.next, Next::GateAudited(..) | Next::SwitchJob(_)) {
-            self.state.pre_audits.remove(&outcome.task_id);
-        }
-        match outcome.next {
-            Next::Gate(job) => {
-                self.state.transient_retries.remove(&outcome.task_id);
-                self.queue_gate(job)?;
-            }
-            Next::GateAudited(job, pre) => {
-                self.state.pre_audits.insert(outcome.task_id.clone(), pre);
-                self.state.transient_retries.remove(&outcome.task_id);
-                self.queue_gate(job)?;
-            }
-            Next::Unblock {
-                task_id,
-                worktree,
-                signal,
-            } => self.state.jobs.push_back(Job::Unblock {
-                job: GateJob {
-                    task_id,
-                    worktree,
-                    audited: false,
-                    cached_receipt: None,
-                },
-                signal,
-            }),
-            Next::Ready => {
-                self.state.transient_retries.remove(&outcome.task_id);
-                self.summary.requeued.push(outcome.task_id);
-            }
-            Next::Switch => self.handle_switch(outcome.task_id)?,
-            Next::SwitchJob(job) => self.handle_switch_job(outcome.task_id, *job)?,
-            Next::Wait { until } => self.handle_wait(outcome.task_id, until)?,
-            Next::RetryAfter {
-                until,
-                attempt,
-                detail,
-            } => self.handle_retry_after(outcome.task_id, until, attempt, detail)?,
-            Next::Halt(why) => {
-                let state = self.deps.store.get_task(&outcome.task_id)?.state;
-                self.requeue_if_ready(outcome.task_id, state);
-                self.summary.halted.get_or_insert(why);
-            }
-            Next::Blocked => {
-                self.state.transient_retries.remove(&outcome.task_id);
-                self.summary.blocked.push(outcome.task_id);
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_gate(
-        &mut self,
-        job: GateJob,
-        resolution: Result<Resolution, String>,
-    ) -> PortResult<()> {
-        self.state.in_gate -= 1;
-        match resolution {
-            Ok(Resolution::Settled(state)) => {
-                self.clear_gating(&job.task_id);
-                self.state.transient_retries.remove(&job.task_id);
-                match state {
-                    TaskState::Done => self.summary.done.push(job.task_id),
-                    TaskState::Review => self.summary.review.push(job.task_id),
-                    _ => self.summary.blocked.push(job.task_id),
-                }
-            }
-            Ok(Resolution::NeedsAudit { lock_fp }) => {
-                self.state.pre_audits.remove(&job.task_id);
-                self.state.jobs.push_back(Job::Audit { job, lock_fp });
-            }
-            Ok(Resolution::NeedsPostAudit { receipt }) => {
-                let pre_audit = self.state.pre_audits.remove(&job.task_id);
-                self.state.jobs.push_back(Job::PostAudit {
-                    job,
-                    receipt,
-                    pre_audit,
-                });
-            }
-            Ok(Resolution::Failed(signal)) => {
-                self.state.pre_audits.remove(&job.task_id);
-                self.state.jobs.push_back(Job::Unblock { job, signal });
-            }
-            Ok(Resolution::Retry) => {
-                let count = self
-                    .state
-                    .gate_retries
-                    .entry(job.task_id.clone())
-                    .or_default();
-                *count += 1;
-                if *count > MAX_GATE_RETRIES {
-                    self.clear_gating(&job.task_id);
-                    let why =
-                        format!("gate/merge retried {MAX_GATE_RETRIES} times without landing");
-                    unblock::block_untried(self.deps, &job.task_id, &why)?;
-                    self.summary.blocked.push(job.task_id);
-                } else {
-                    self.queue_gate(job)?;
-                }
-            }
-            Err(error) => {
-                self.clear_gating(&job.task_id);
-                let outcome = worker::block_infra(self.deps, &job.task_id, &error);
-                self.summary.errors.extend(outcome.error);
-                self.summary.blocked.push(job.task_id);
-            }
-        }
-        Ok(())
-    }
-}
-
-fn gate_loop(deps: &Deps, queue: &Receiver<GateJob>, tx: &Sender<Msg>, stats: &GateStats) {
-    while let Ok(first) = queue.recv() {
-        let mut jobs = vec![first];
-        jobs.extend(queue.try_iter());
-        let pending = Mutex::new(jobs.clone());
-        let round = catch_unwind(AssertUnwindSafe(|| {
-            judge_round(deps, jobs, stats, &|job, resolution| {
-                if let Ok(mut pending) = pending.lock() {
-                    pending.retain(|p| p.task_id != job.task_id);
-                }
-                let _ = tx.send(Msg::Gate(job, resolution));
-            });
-        }));
-        if round.is_err() {
-            let left = pending.lock().map(|mut p| std::mem::take(&mut *p));
-            for job in left.unwrap_or_default() {
-                let _ = tx.send(Msg::Gate(job, Err("the gate thread panicked".to_string())));
-            }
         }
     }
 }

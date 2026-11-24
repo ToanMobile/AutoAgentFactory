@@ -368,9 +368,14 @@ fn apply_split_atomic_inherits_live_ready_state_over_stale_backlog_snapshot() {
 
 #[test]
 fn audit_turn_read_only_fresh_repair_id_and_fail_closed_repair_guards() {
-    let prompt = build_format_repair_prompt(&build_checklist(&spec(), false), false, "bad", "x");
+    let input = aaf_engine::cross_audit::AuditInput {
+        spec: spec(),
+        diff: "+let x = 1;\n".into(),
+        mobile: false,
+    };
+    let prompt = build_format_repair_prompt(&input, false, "bad", "x");
     assert!(prompt.contains(
-        "For any checklist item not clearly answered \"no\" in your previous response, answer \"yes\"."
+        "For any checklist item not clearly answered \"no\" in your previous response, answer \"yes\" and cite in \"evidence\" the `file:line` in the diff above"
     ));
     let mut repo = RepoConfig::default();
     repo.cross_audit.audit_scope = AuditScope::Always;
@@ -398,14 +403,16 @@ fn audit_turn_read_only_fresh_repair_id_and_fail_closed_repair_guards() {
         if expect_repair {
             assert_eq!(reqs.len(), 2, "{label}: 1-shot repair");
             assert!(reqs[1].sandbox.read_only, "{label}: read-only repair");
-            assert_ne!(reqs[0].run_id, reqs[1].run_id, "{label}: fresh run_id");
             assert_eq!(s.review, vec!["t1"], "{label}: {s:?}");
         } else {
-            assert_eq!(reqs.len(), 1, "{label}: fail closed without retry");
+            // No repair from this reply; one fresh re-audit (a13 O12-1) passes.
+            assert_eq!(reqs.len(), 2, "{label}: one fresh re-audit");
             assert!(
-                s.review.is_empty() && s.requeued == vec!["t1"],
-                "{label}: {s:?}"
+                reqs.iter()
+                    .all(|r| !r.prompt.contains("AAF_UNTRUSTED_PRIOR")),
+                "{label}: no repair prompt"
             );
+            assert_eq!(s.review, vec!["t1"], "{label}: {s:?}");
         }
     }
 }

@@ -123,7 +123,7 @@ fn docs_fast_include_dir_parent_traversal_blocks_while_sibling_stays_fast() {
 }
 
 #[test]
-fn head_lock_approve_matching_rejects_stale_fp_and_approves_exact_match() {
+fn head_lock_approve_expecting_rejects_stale_fp_and_approves_exact_match() {
     let dir = TempDir::new().unwrap();
     let data = TempDir::new().unwrap();
     let root = dir.path();
@@ -145,47 +145,45 @@ fn head_lock_approve_matching_rejects_stale_fp_and_approves_exact_match() {
     // Mutate the locked file after preview to simulate a TOCTOU race.
     fs::write(root.join("CLAUDE.md"), "# tampered after preview\n").unwrap();
 
-    let err = head_lock::approve_matching(
-        data.path(),
-        root,
-        &cfg,
-        "alice",
-        false,
-        &preview.lock_fp,
-        &FixedClock(100),
-    )
-    .unwrap_err();
-    let actual_fp = match err {
-        GateError::LockFpMismatch { expected, actual } => {
-            assert_eq!(expected, preview.lock_fp);
-            assert_ne!(actual, preview.lock_fp);
-            actual
-        }
-        other => panic!("expected LockFpMismatch, got {other:?}"),
+    let base = aaf_engine::gate::base::resolve(root, &cfg.gate.base_ref, TIMEOUT).unwrap();
+    let approve = |expected: &str, clock: &FixedClock| {
+        head_lock::approve_expecting(
+            data.path(),
+            root,
+            &cfg,
+            &base,
+            ("alice", false),
+            clock,
+            expected,
+        )
     };
+    let err = approve(&preview.lock_fp, &FixedClock(100)).unwrap_err();
+    assert!(
+        matches!(err, GateError::LockFpChanged),
+        "expected LockFpChanged, got {err:?}"
+    );
 
-    // No approval may have been written on mismatch.
+    // No approval may have been written on mismatch, and the current
+    // fingerprint is a different one than the stale preview.
     let still_blocked = head_lock::evaluate(data.path(), root, &cfg, "main");
     assert_eq!(still_blocked.status, LockStatus::Blocked);
-    assert_eq!(still_blocked.lock_fp, actual_fp);
+    let actual_fp = still_blocked.lock_fp;
+    assert_ne!(actual_fp, preview.lock_fp);
 
     // Approving with the current fingerprint succeeds and unlocks head_lock.
-    let approval = head_lock::approve_matching(
-        data.path(),
-        root,
-        &cfg,
-        "alice",
-        false,
-        &actual_fp,
-        &FixedClock(101),
-    )
-    .unwrap();
+    let approval = approve(&actual_fp, &FixedClock(101)).unwrap();
     assert_eq!(approval.lock_fp, actual_fp);
     assert_eq!(approval.reviewer, "alice");
     assert!(!approval.same_account);
 
     let after = head_lock::evaluate(data.path(), root, &cfg, "main");
     assert_eq!(after.status, LockStatus::Approved);
+}
+
+fn reaped_pid() -> u32 {
+    let mut child = Command::new("true").spawn().unwrap();
+    child.wait().unwrap();
+    child.id()
 }
 
 #[test]
@@ -204,13 +202,16 @@ fn gc_preserves_live_locked_merge_scratch_and_cleans_crashed_unlocked_scratch() 
     live_guard.try_lock().unwrap();
 
     // 2. Crashed scratch worktree with an unlocked `<dir>.lock` (fresh mtime).
-    let crashed_dir = scratch.join("repoDead-pr2-22222-0");
-    let crashed_lock = scratch.join("repoDead-pr2-22222-0.lock");
+    // Owner pids are reaped children: a pid that names a live process keeps
+    // its scratch (gc owner-pid guard).
+    let dead = reaped_pid();
+    let crashed_dir = scratch.join(format!("repoDead-pr2-{dead}-0"));
+    let crashed_lock = scratch.join(format!("repoDead-pr2-{dead}-0.lock"));
     fs::create_dir_all(&crashed_dir).unwrap();
     let _ = private::open_file(&crashed_lock).unwrap();
 
     // 3. Legacy scratch dir with NO `.lock` file and fresh mtime.
-    let legacy_dir = scratch.join("repoOld-pr3-33333-0");
+    let legacy_dir = scratch.join(format!("repoOld-pr3-{}-0", reaped_pid()));
     fs::create_dir_all(&legacy_dir).unwrap();
 
     // Dry run must leave everything on disk while reporting the crashed dir.

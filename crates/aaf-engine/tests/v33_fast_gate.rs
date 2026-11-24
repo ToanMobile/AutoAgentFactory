@@ -84,7 +84,11 @@ fn scoped_docs_fast_path_skips_commands_but_still_blocks_secrets_and_runs_full()
         "# Guide\nUpdated notes.\n",
     )
     .unwrap();
-    let machine = MachineConfig::default();
+    // The CPU-load wait is off: the host running the tests may be busy.
+    let machine = MachineConfig {
+        max_load_percent: 0,
+        ..MachineConfig::default()
+    };
     let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
     let run = run_gate_observed_reporting(
         data.path(),
@@ -194,7 +198,11 @@ fn gate_passes_verified_changed_files_env_and_reuses_receipt_across_worktrees() 
         capture_file.display()
     );
     let cfg = cfg_with_commands("", "", &scoped_cmd, "true");
-    let machine = MachineConfig::default();
+    // The CPU-load wait is off: the host running the tests may be busy.
+    let machine = MachineConfig {
+        max_load_percent: 0,
+        ..MachineConfig::default()
+    };
     let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
 
     // First run in primary worktree executes test_scoped and sees src/lib.rs in AAF_CHANGED_FILES_FILE.

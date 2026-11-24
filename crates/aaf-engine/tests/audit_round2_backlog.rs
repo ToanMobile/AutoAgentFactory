@@ -326,10 +326,16 @@ fn gc_cleans_terminal_old_sops_and_unlocked_merge_scratch_while_preserving_activ
         }
     }
 
-    let orphan_scratch = scratch.join("repoA-pr12-99999-0");
+    let mut child = Command::new("true").spawn().unwrap();
+    child.wait().unwrap(); // reaped: its pid names a dead scratch owner
+    let orphan_scratch = scratch.join(format!("repoA-pr12-{}-0", child.id()));
     let locked_scratch = scratch.join("repoB-pr34-88888-0");
     fs::create_dir_all(&orphan_scratch).unwrap();
-    fs::write(scratch.join("repoA-pr12-99999-0.lock"), b"").unwrap();
+    fs::write(
+        scratch.join(format!("repoA-pr12-{}-0.lock", child.id())),
+        b"",
+    )
+    .unwrap();
     fs::create_dir_all(&locked_scratch).unwrap();
     let lock_file = private::open_file(&locks.join("repoB.merge.lock")).unwrap();
     lock_file.try_lock().unwrap();

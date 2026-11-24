@@ -10,7 +10,18 @@ use super::cmd;
 fn git_command_disables_gc_and_scrubs_location_env() {
     let command = cmd::git_command(Path::new("/some/repo"), &["status"]).unwrap();
     let args: Vec<&OsStr> = command.get_args().collect();
-    assert_eq!(args, ["-C", "/some/repo", "-c", "gc.auto=0", "status"]);
+    assert_eq!(
+        args,
+        [
+            "-C",
+            "/some/repo",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "core.fsmonitor=false",
+            "status"
+        ]
+    );
     for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
         assert!(
             command

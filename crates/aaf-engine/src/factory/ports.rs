@@ -112,8 +112,12 @@ pub trait GitOps: Send + Sync {
         Ok(None)
     }
     /// Removes orphaned `aaf/batch-*` worktrees/branches not in `active_task_ids`.
-    fn sweep_orphan_batches(&self, _active_task_ids: &HashSet<String>) -> Result<usize, GitError> {
-        Ok(0)
+    /// Returns a warning per orphan git refused to remove without `--force`.
+    fn sweep_orphan_batches(
+        &self,
+        _active_task_ids: &HashSet<String>,
+    ) -> Result<Vec<String>, GitError> {
+        Ok(Vec::new())
     }
     /// Drops stale git worktree registrations whose directories are gone.
     fn prune_worktrees(&self) -> Result<(), GitError> {

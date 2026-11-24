@@ -20,13 +20,33 @@ use aaf_domain::ports::Clock;
 
 use super::heavy::HeavyTool;
 use super::paths::open_pool_file;
-use super::{Backoff, Sleeper};
+use super::slot_file::unlock_all;
+use super::{Backoff, Budget, Sleeper};
 
 /// Held Layer-1 correctness locks; released automatically on drop.
 #[derive(Debug, Default)]
 pub struct CorrectnessGuards {
-    _unity: Option<File>,
-    _worktree: Option<File>,
+    unity: Option<File>,
+    worktree: Option<File>,
+    waited: bool,
+}
+
+impl Drop for CorrectnessGuards {
+    fn drop(&mut self) {
+        // Unlocked explicitly like every other lock here ([`unlock_all`]):
+        // the close alone frees it only once each child being spawned at
+        // this moment has exec'ed, and the next build of this checkout,
+        // or one with `--timeout 0`, would find it still taken.
+        unlock_all(self.worktree.as_slice());
+        unlock_all(self.unity.as_slice());
+    }
+}
+
+impl CorrectnessGuards {
+    /// True when a lock was taken only after sleeping for it.
+    pub fn waited(&self) -> bool {
+        self.waited
+    }
 }
 
 fn try_lock_one(data_dir: &Path, filename: &str) -> io::Result<Option<File>> {
@@ -73,15 +93,24 @@ pub fn acquire_correctness(
     clock: &dyn Clock,
     sleeper: &dyn Sleeper,
 ) -> io::Result<Option<CorrectnessGuards>> {
+    let mut budget = Budget::new(ask.wait_limit_secs, clock.now());
+    acquire_correctness_within(data_dir, ask, clock, sleeper, &mut budget)
+}
+
+/// [`acquire_correctness`] spending `budget` (its limit, not
+/// `ask.wait_limit_secs`), which the Layer-2 wait goes on spending.
+pub(super) fn acquire_correctness_within(
+    data_dir: &Path,
+    ask: &CorrectnessAsk<'_>,
+    clock: &dyn Clock,
+    sleeper: &dyn Sleeper,
+    budget: &mut Budget,
+) -> io::Result<Option<CorrectnessGuards>> {
     let Some(tool) = ask.tool else {
         return Ok(Some(CorrectnessGuards::default()));
     };
-    let started = clock.now();
-    let expired = |now: i64| {
-        let waited = u64::try_from(now - started).unwrap_or(0);
-        ask.wait_limit_secs.is_some_and(|limit| waited >= limit)
-    };
     let mut backoff = Backoff::new(ask.jitter_seed ^ 0x9E37_79B9_7F4A_7C15);
+    let mut waited = false;
 
     // 1. Unity pool lock (Unity only).
     let unity = if tool == HeavyTool::Unity {
@@ -89,10 +118,11 @@ pub fn acquire_correctness(
             if let Some(file) = try_lock_unity(data_dir, ask.max_unity_parallel)? {
                 break Some(file);
             }
-            if expired(clock.now()) {
+            if budget.expired(clock.now()) {
                 return Ok(None);
             }
-            sleeper.sleep(backoff.next_delay());
+            waited = true;
+            budget.sleep(sleeper, backoff.next_delay());
         }
     } else {
         None
@@ -104,15 +134,17 @@ pub fn acquire_correctness(
         if let Some(file) = try_lock_one(data_dir, &wt_name)? {
             break Some(file);
         }
-        if expired(clock.now()) {
+        if budget.expired(clock.now()) {
             return Ok(None);
         }
-        sleeper.sleep(backoff.next_delay());
+        waited = true;
+        budget.sleep(sleeper, backoff.next_delay());
     };
 
     Ok(Some(CorrectnessGuards {
-        _unity: unity,
-        _worktree: worktree,
+        unity,
+        worktree,
+        waited,
     }))
 }
 
@@ -175,6 +207,110 @@ mod tests {
         )
         .unwrap();
         assert!(g4.is_none());
+    }
+
+    /// Dropping the guards frees the locks at once even while a child holds
+    /// a copy of their descriptors, as a child that any thread is spawning
+    /// does until it execs (audit a13 round 4: under parallel load the
+    /// checkout stayed locked after `run` returned).
+    #[test]
+    fn dropped_guards_free_the_locks_while_a_child_holds_a_copy() {
+        let data = TempDir::new().unwrap();
+        let wt = TempDir::new().unwrap();
+        let rig = Rig::calm();
+        let ask = |seed| CorrectnessAsk {
+            tool: Some(HeavyTool::Unity),
+            cwd: wt.path(),
+            max_unity_parallel: 1,
+            wait_limit_secs: Some(0),
+            jitter_seed: seed,
+        };
+        let held = acquire_correctness(data.path(), &ask(1), &*rig.clock, &rig.sleeper)
+            .unwrap()
+            .unwrap();
+        let copy = |file: &Option<File>| file.as_ref().unwrap().try_clone().unwrap();
+        // Stands for the fork-to-exec window of a sibling's spawn: a child
+        // holding both descriptors for longer than the test runs.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(copy(&held.unity))
+            .stdout(copy(&held.worktree))
+            .spawn()
+            .unwrap();
+        drop(held);
+        let again = acquire_correctness(data.path(), &ask(2), &*rig.clock, &rig.sleeper).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            again.is_some(),
+            "the Unity and checkout locks outlived their guards"
+        );
+    }
+
+    /// A clock and sleeper that keep milliseconds; the clock reads whole
+    /// seconds like the real one.
+    struct MillisTime {
+        millis: std::sync::atomic::AtomicU64,
+        slept: std::sync::Mutex<Vec<std::time::Duration>>,
+    }
+
+    impl Clock for MillisTime {
+        fn now(&self) -> i64 {
+            let millis = self.millis.load(std::sync::atomic::Ordering::SeqCst);
+            i64::try_from(millis / 1_000).unwrap()
+        }
+    }
+
+    impl Sleeper for MillisTime {
+        fn sleep(&self, duration: std::time::Duration) {
+            self.slept.lock().unwrap().push(duration);
+            let millis = u64::try_from(duration.as_millis()).unwrap();
+            self.millis
+                .fetch_add(millis, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The Layer-1 wait keeps `--timeout` to the millisecond as admission
+    /// does: neither ended by the second turning just after the start nor
+    /// a whole backoff sleep past the limit (audit a13 L1-R2-1).
+    #[test]
+    fn correctness_wait_limit_is_kept_to_the_millisecond() {
+        use std::time::Duration;
+        for (limit, start_millis, max_millis) in [
+            (1u64, 1_000_999u64, 1_250u64),
+            (1, 1_000_000, 1_250),
+            (10, 1_000_000, 10_250),
+            (10, 1_000_999, 10_250),
+        ] {
+            let data = TempDir::new().unwrap();
+            let wt = TempDir::new().unwrap();
+            let rig = Rig::calm();
+            let ask = |limit, seed| CorrectnessAsk {
+                tool: Some(HeavyTool::Gradle),
+                cwd: wt.path(),
+                max_unity_parallel: 1,
+                wait_limit_secs: Some(limit),
+                jitter_seed: seed,
+            };
+            let _held = acquire_correctness(data.path(), &ask(0, 1), &*rig.clock, &rig.sleeper)
+                .unwrap()
+                .unwrap();
+            let time = MillisTime {
+                millis: std::sync::atomic::AtomicU64::new(start_millis),
+                slept: std::sync::Mutex::new(Vec::new()),
+            };
+            let got = acquire_correctness(data.path(), &ask(limit, 2), &time, &time).unwrap();
+            assert!(got.is_none());
+            let slept: Duration = time.slept.lock().unwrap().iter().sum();
+            assert!(
+                slept >= Duration::from_secs(limit),
+                "limit {limit}: gave up after {slept:?} (start {start_millis} ms)"
+            );
+            assert!(
+                slept <= Duration::from_millis(max_millis),
+                "limit {limit}: overshot to {slept:?} (start {start_millis} ms)"
+            );
+        }
     }
 
     #[cfg(unix)]

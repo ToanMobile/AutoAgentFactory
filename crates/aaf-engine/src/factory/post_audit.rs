@@ -460,11 +460,7 @@ fn execute_post_gate_audit(
                 audit_backend::report_audit_limit(deps, accounts, &task.id, grant, &hit)?;
                 let next = audit_backend::route_audit_limit(accounts, grant, &hit)?;
                 return Ok(match next {
-                    Next::Switch => Next::SwitchJob(Box::new(Job::PostAudit {
-                        job,
-                        receipt: Box::new(receipt),
-                        pre_audit: None,
-                    })),
+                    Next::Switch => Next::SwitchJob(Job::fresh_post_audit(job, receipt)),
                     other => other,
                 });
             }
@@ -521,6 +517,10 @@ fn execute_post_gate_audit(
     } else {
         audit_backend::verdict_text(&verdict)
     };
+    let tree_fp = receipt.tree_fp.as_str();
+    let audited = (&verdict, diff_truncated);
+    let retry =
+        !passed && audit_backend::retry_inconclusive(deps, &task, audited, "tree_fp", tree_fp)?;
 
     deps.emit(
         EventKind::CrossAudit,
@@ -538,8 +538,12 @@ fn execute_post_gate_audit(
             "reasons": reasons,
             "tree_fp": receipt.tree_fp,
             "config_hash": receipt.config_hash,
+            "retry": retry,
         }),
     )?;
+    if retry {
+        return Ok(Next::RetryAudit(Job::fresh_post_audit(job, receipt)));
+    }
 
     if passed {
         let canon =

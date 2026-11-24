@@ -219,7 +219,7 @@ pub fn collect_watch_snapshot_with_tasks(
 fn build_tasks(all_tasks: &[Task]) -> WatchTasks {
     let (mut counts, mut active) = (TaskCounts::default(), Vec::new());
     for t in all_tasks {
-        bump_task(&mut counts, t.state);
+        bump_task(&mut counts, t.state, 1);
         if !t.state.is_terminal() {
             active.push(WatchTask {
                 id: t.id.clone(),

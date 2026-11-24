@@ -7,7 +7,6 @@ pub mod admit;
 pub mod daemons;
 mod drain;
 pub mod heavy;
-mod heavy_family;
 pub mod idle;
 mod legacy;
 pub mod orphans;
@@ -27,7 +26,7 @@ pub mod token;
 pub mod watchdog;
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aaf_domain::config::MachineConfig;
 
@@ -186,6 +185,57 @@ impl Backoff {
         // 75 % to 125 % of the base, in steps of 1/512.
         let factor = 768 + u32::try_from(self.state % 513).unwrap_or(0);
         base * factor / 1024
+    }
+}
+
+/// A wait limit (admission and the Layer-1 locks), kept to the millisecond.
+/// Whole-second clock readings alone ended a 1 s limit a few milliseconds
+/// in when the second turned, and a backoff sleep overshot the limit by up
+/// to its cap.
+struct Budget {
+    limit_secs: Option<u64>,
+    started_secs: i64,
+    began: Instant,
+    /// What was asked of the sleeper: the elapsed time of an injected one.
+    slept: Duration,
+}
+
+impl Budget {
+    fn new(limit_secs: Option<u64>, started_secs: i64) -> Budget {
+        Budget {
+            limit_secs,
+            started_secs,
+            began: Instant::now(),
+            slept: Duration::ZERO,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.began.elapsed().max(self.slept)
+    }
+
+    /// Never before the limit: a whole-second reading shows one second more
+    /// than has passed at most, so only one past the limit proves it.
+    fn expired(&self, now: i64) -> bool {
+        self.limit_secs.is_some_and(|limit| {
+            self.elapsed() >= Duration::from_secs(limit)
+                || u64::try_from(now - self.started_secs).unwrap_or(0) > limit
+        })
+    }
+
+    /// Sleeps `delay` cut to what is left of the limit.
+    fn sleep(&mut self, sleeper: &dyn Sleeper, delay: Duration) {
+        let delay = self.clamp(delay);
+        self.slept += delay;
+        sleeper.sleep(delay);
+    }
+
+    /// `delay`, cut to what is left of the limit.
+    fn clamp(&self, delay: Duration) -> Duration {
+        match self.limit_secs {
+            Some(limit) => delay.min(Duration::from_secs(limit).saturating_sub(self.elapsed())),
+            None => delay,
+        }
     }
 }
 

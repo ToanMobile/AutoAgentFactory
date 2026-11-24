@@ -50,16 +50,16 @@ pub(super) fn classify_interpreter(name: &str) -> Option<Interp> {
     None
 }
 
-struct InterpSpec {
-    code_short: &'static str,
-    code_long: &'static [&'static str],
-    other_valued_short: &'static str,
-    attached_only_short: &'static str,
-    other_valued_long: &'static [&'static str],
-    node_print: bool,
+pub(super) struct InterpSpec {
+    pub(super) code_short: &'static str,
+    pub(super) code_long: &'static [&'static str],
+    pub(super) other_valued_short: &'static str,
+    pub(super) attached_only_short: &'static str,
+    pub(super) other_valued_long: &'static [&'static str],
+    pub(super) node_print: bool,
 }
 
-fn interp_spec(interp: Interp) -> InterpSpec {
+pub(super) fn interp_spec(interp: Interp) -> InterpSpec {
     match interp {
         Interp::Python => InterpSpec {
             code_short: "c",

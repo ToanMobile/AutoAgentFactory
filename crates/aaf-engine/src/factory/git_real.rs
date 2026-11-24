@@ -2,122 +2,48 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use aaf_domain::gate::Receipt;
 use aaf_domain::ports::{PortError, PortResult};
-use aaf_domain::proof::ProofRecord;
 
+use super::base_ref::{BaseRef, DEFAULT_REMOTE};
 use super::commit_lock::{self, CommitLock};
 use super::ports::{GitOps, Integration};
-use crate::gate::base::{AUTO_FALLBACKS, origin_head_branch};
-use crate::git::cmd::{git, git_raw};
+use crate::git::cmd::{Output, failure, git, git_raw, git_timed};
 use crate::git::worktree::{self, BRANCH_PREFIX};
-use crate::git::{
-    GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree, has_remote,
-};
-use crate::process::{CommandOutput, CommandRunner, SystemRunner};
+use crate::git::{GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree};
+use crate::process::{CommandRunner, SystemRunner};
 
-const DEFAULT_REMOTE: &str = "origin";
+mod pr_note;
+#[cfg(test)]
+pub(super) use pr_note::open_pr_noted;
+use pr_note::open_pr_noted_with_proof;
+
 /// A merge waits this long for another `aaf` process merging the same repo.
 const MERGE_LOCK_TIMEOUT: Duration = Duration::from_secs(600);
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 const SQUASH_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Budget of one `git commit`, the repository's hooks included: a pre-commit
+/// hook may first wait for a build slot (`aaf slot`, a wait with no ceiling
+/// of its own; only waiting for CPU load ends after `heavy_wait_secs`)
+/// before it even starts its build, so this budget bounds that wait too.
+pub(super) const COMMIT_TIMEOUT: Duration = Duration::from_secs(2400);
 /// A commit waits this long for another `aaf` process committing in the same
-/// repository; each holder is bounded by the timeout of its own git call.
-const COMMIT_LOCK_TIMEOUT: Duration = Duration::from_secs(600);
+/// repository; a holder runs at most two commits, each bounded by
+/// [`COMMIT_TIMEOUT`].
+pub(super) const COMMIT_LOCK_TIMEOUT: Duration = Duration::from_secs(2 * COMMIT_TIMEOUT.as_secs());
+/// Message of the one commit of what the commit hooks rewrote.
+const HOOK_FILES_MESSAGE: &str = "aaf: files changed by the repository's commit hooks";
+/// Paths of a tree the hooks keep dirty named in the error.
+const DIRTY_PATHS_SHOWN: usize = 10;
+const NO_HOOKS: &str = "core.hooksPath=/dev/null";
 
-/// The branch tasks start from and land on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BaseRef {
-    /// `Some` when the base is a remote-tracking branch.
-    pub remote: Option<String>,
-    /// Short branch name, e.g. `main`.
-    pub branch: String,
-}
-
-impl BaseRef {
-    /// What a new task branch is cut from: `origin/main` or `main`.
-    pub fn start_point(&self) -> String {
-        match &self.remote {
-            Some(remote) => format!("{remote}/{}", self.branch),
-            None => self.branch.clone(),
-        }
-    }
-}
-
-fn err(error: GitError) -> PortError {
+pub(super) fn err(error: GitError) -> PortError {
     PortError::Io(error.to_string())
-}
-
-fn is_commit(repo: &Path, name: &str) -> PortResult<bool> {
-    let spec = format!("{name}^{{commit}}");
-    Ok(git_raw(repo, &["rev-parse", "--verify", "--quiet", &spec])
-        .map_err(err)?
-        .success())
-}
-
-fn split(repo: &Path, name: &str) -> PortResult<BaseRef> {
-    if let Some((remote, branch)) = name.split_once('/')
-        && !remote.starts_with('-')
-        && has_remote(repo, remote).map_err(err)?
-    {
-        return Ok(BaseRef {
-            remote: Some(remote.to_string()),
-            branch: branch.to_string(),
-        });
-    }
-    Ok(BaseRef {
-        remote: None,
-        branch: name.to_string(),
-    })
-}
-
-/// Resolves `gate.base_ref` to the base branch. `auto` follows the same
-/// order as the gate: `origin/HEAD`, `origin/main`, `origin/master`, `main`,
-/// `master`; a repository with none of them uses its current branch.
-pub fn resolve_base(repo: &Path, base_ref: &str) -> PortResult<BaseRef> {
-    let wanted = base_ref.trim();
-    if !wanted.is_empty() && wanted != "auto" {
-        if wanted.starts_with('-') || !is_commit(repo, wanted)? {
-            return Err(PortError::Invalid(format!(
-                "gate.base_ref {wanted:?} does not resolve to a commit"
-            )));
-        }
-        return split(repo, wanted);
-    }
-    let head = git_raw(
-        repo,
-        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    )
-    .map_err(err)?;
-    let origin_head = head.stdout.trim().to_string();
-    let mut candidates = Vec::new();
-    // As in the gate: `origin/HEAD` only as a symref to a non-task branch
-    // of `origin`, and full ref names a tag or branch cannot shadow.
-    if head.success() && origin_head_branch(&origin_head).is_some() {
-        candidates.push(origin_head);
-    }
-    candidates.extend(AUTO_FALLBACKS.map(String::from));
-    for name in candidates {
-        if is_commit(repo, &name)? {
-            let remote = name.strip_prefix("refs/remotes/origin/");
-            let branch = remote.or(name.strip_prefix("refs/heads/"));
-            return Ok(BaseRef {
-                remote: remote.map(|_| DEFAULT_REMOTE.to_string()),
-                branch: branch.unwrap_or(&name).to_string(),
-            });
-        }
-    }
-    let current = git(repo, &["symbolic-ref", "--short", "HEAD"]).map_err(err)?;
-    Ok(BaseRef {
-        remote: None,
-        branch: current,
-    })
 }
 
 pub struct RealGit {
@@ -133,6 +59,7 @@ pub struct RealGit {
     /// stall sibling worktree creation.
     commit: Mutex<()>,
     commit_lock_timeout: Duration,
+    commit_timeout: Duration,
     last_squash_poll: Mutex<Option<Instant>>,
 }
 
@@ -152,6 +79,7 @@ impl RealGit {
             admin: Mutex::new(()),
             commit: Mutex::new(()),
             commit_lock_timeout: COMMIT_LOCK_TIMEOUT,
+            commit_timeout: COMMIT_TIMEOUT,
             last_squash_poll: Mutex::new(None),
         }
     }
@@ -159,6 +87,12 @@ impl RealGit {
     #[cfg(test)]
     pub(super) fn with_commit_lock_timeout(mut self, timeout: Duration) -> RealGit {
         self.commit_lock_timeout = timeout;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_commit_timeout(mut self, timeout: Duration) -> RealGit {
+        self.commit_timeout = timeout;
         self
     }
 
@@ -184,6 +118,24 @@ impl RealGit {
             &fetch,
             runner,
         )
+    }
+
+    /// One `git commit` in `tree` under [`COMMIT_TIMEOUT`], hooks on.
+    fn run_commit(&self, tree: &Path, message: &str) -> PortResult<()> {
+        let args = ["commit", "--quiet", "-m", message];
+        let out = git_timed(tree, &args, self.commit_timeout).map_err(|error| match error {
+            GitError::Timeout { command } => PortError::Io(format!(
+                "`{command}` timed out: the repository's commit hooks ran longer than \
+                 the commit budget of {} s (possibly while waiting for a heavy slot)",
+                self.commit_timeout.as_secs()
+            )),
+            other => err(other),
+        })?;
+        if out.success() {
+            Ok(())
+        } else {
+            Err(err(failure(&args, &out)))
+        }
     }
 
     fn admin(&self) -> MutexGuard<'_, ()> {
@@ -228,78 +180,58 @@ fn abort_rebase(tree: &Path) -> Result<Vec<String>, GitError> {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect();
-    git(tree, &["rebase", "--abort"])?;
+    git(tree, &["-c", NO_HOOKS, "rebase", "--abort"])?;
     Ok(files)
 }
 
-/// Puts a note above the body of `gh pr create`. The body is written inside
-/// [`crate::git::open_pr`], so it is amended on its way to `gh`.
-struct NotedRunner<'a> {
-    inner: &'a dyn CommandRunner,
-    note: &'a str,
-}
-
-impl CommandRunner for NotedRunner<'_> {
-    fn run(&self, program: &str, args: &[&str], cwd: &Path) -> io::Result<CommandOutput> {
-        if program != "gh" {
-            return self.inner.run(program, args, cwd);
-        }
-        if args.starts_with(&["pr", "create"]) {
-            // By position, never by searching: the title is untrusted text and
-            // may itself read `--body`.
-            let ["pr", "create", "--title", _, "--body", body, ..] = args else {
-                // A pull request without the note would present a batch receipt
-                // as the branch's own; none is opened instead.
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "gh pr create: no body to put the batch note in",
-                ));
-            };
-            let noted = format!("{}\n\n{body}", self.note);
-            let mut args = args.to_vec();
-            args[5] = &noted;
-            return self.inner.run(program, &args, cwd);
-        }
-        if args.starts_with(&["pr", "edit"]) {
-            let ["pr", "edit", _, "--body", body, ..] = args else {
-                return self.inner.run(program, args, cwd);
-            };
-            let noted = format!("{}\n\n{body}", self.note);
-            let mut args = args.to_vec();
-            args[4] = &noted;
-            return self.inner.run(program, &args, cwd);
-        }
-        self.inner.run(program, args, cwd)
+/// Whether `tree` differs from its `HEAD` after a commit.
+fn dirty_after_commit(tree: &Path) -> PortResult<bool> {
+    match worktree::ensure_clean(tree) {
+        Ok(()) => Ok(false),
+        Err(GitError::Dirty(_)) => Ok(true),
+        Err(error) => Err(err(error)),
     }
 }
 
-/// [`crate::git::open_pr`] with `note` above the receipt summary of the body.
-#[cfg(test)]
-pub(super) fn open_pr_noted(
-    request: &PrRequest,
-    runner: &dyn CommandRunner,
-    note: Option<&str>,
-) -> Result<PrOutcome, GitError> {
-    open_pr_noted_with_proof(request, None, runner, note)
+/// The error for a tree still dirty after the commit, naming the first
+/// paths. `followed_up`: a follow-up commit of what the hooks wrote was made;
+/// without one, what is left is what `git add` cannot stage.
+fn hook_dirty_error(tree: &Path, followed_up: bool) -> PortError {
+    // Untrimmed: the first line's status column may start with a space.
+    let status = git_raw(tree, &["status", "--porcelain"])
+        .map(|out| out.stdout)
+        .unwrap_or_default();
+    let paths: Vec<&str> = status
+        .lines()
+        .map(|line| line.get(3..).unwrap_or(line))
+        .collect();
+    let mut shown = paths
+        .iter()
+        .take(DIRTY_PATHS_SHOWN)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > DIRTY_PATHS_SHOWN {
+        shown.push_str(&format!(" and {} more", paths.len() - DIRTY_PATHS_SHOWN));
+    }
+    if !followed_up {
+        return PortError::Io(format!(
+            "uncommitted changes in {}: changes `git add` cannot stage remain after \
+             `git commit` (e.g. an embedded repository's own modified or untracked \
+             files): {shown}",
+            tree.display()
+        ));
+    }
+    PortError::Io(format!(
+        "uncommitted changes in {} after `git commit`: a commit hook of the repository \
+         changed these files after the commit, again after one follow-up commit: {shown}",
+        tree.display()
+    ))
 }
 
-fn open_pr_noted_with_proof(
-    request: &PrRequest,
-    proof: Option<&ProofRecord>,
-    runner: &dyn CommandRunner,
-    note: Option<&str>,
-) -> Result<PrOutcome, GitError> {
-    match note {
-        Some(note) => crate::git::open_pr_with_proof(
-            request,
-            proof,
-            &NotedRunner {
-                inner: runner,
-                note,
-            },
-        ),
-        None => crate::git::open_pr_with_proof(request, proof, runner),
-    }
+/// F4-A: git in `tree` running no hook; a repo-relative hooks path is agent-written.
+fn git_no_hooks(tree: &Path, args: &[&str]) -> Result<Output, GitError> {
+    git_raw(tree, &[&["-c", NO_HOOKS][..], args].concat())
 }
 
 impl GitOps for RealGit {
@@ -334,8 +266,30 @@ impl GitOps for RealGit {
         let _queue = self.commit.lock().unwrap_or_else(PoisonError::into_inner);
         let lock = commit_lock::lock_path(&self.locks_dir, &self.repo_root);
         let _lock = CommitLock::acquire(&lock, self.commit_lock_timeout)?;
-        git(tree, &["commit", "--quiet", "-m", message]).map_err(err)?;
-        Ok(())
+        self.run_commit(tree, message)?;
+        // The commit runs the repository's hooks; one that rewrites the
+        // working tree afterwards would let the gate judge a tree other
+        // than the commit that lands. What they wrote is committed once
+        // (hooks on, same locks); a tree still dirty after that is an error.
+        if !dirty_after_commit(tree)? {
+            return Ok(());
+        }
+        git(tree, &["add", "-A"]).map_err(err)?;
+        // Nothing staged (a change `add` cannot take): no commit to make.
+        let args = ["diff", "--cached", "--quiet"];
+        let staged = git_raw(tree, &args).map_err(err)?;
+        let followed_up = match staged.code {
+            Some(0) => false,
+            Some(1) => {
+                self.run_commit(tree, HOOK_FILES_MESSAGE)?;
+                true
+            }
+            _ => return Err(err(failure(&args, &staged))),
+        };
+        if !dirty_after_commit(tree)? {
+            return Ok(());
+        }
+        Err(hook_dirty_error(tree, followed_up))
     }
 
     fn has_changes(&self, worktree: &TaskWorktree) -> PortResult<bool> {
@@ -374,27 +328,29 @@ impl GitOps for RealGit {
             worktree::validate_task_id(task_id).map_err(err)?;
             let branch = format!("{BRANCH_PREFIX}{task_id}");
             let message = format!("aaf batch: {branch}");
-            let merge = git_raw(
+            let merge = git_no_hooks(
                 &integration.tree.path,
                 &["merge", "--no-ff", "--no-edit", "-m", &message, &branch],
             )
             .map_err(err)?;
-            if merge.success() {
-                integration.merged.push(task_id.clone());
-                continue;
+            if !merge.success() {
+                // Fails when the merge never started (nothing to abort); the
+                // status check below is what guards the tree.
+                let _ = git_no_hooks(&integration.tree.path, &["merge", "--abort"]);
             }
-            // Fails when the merge never started (nothing to abort); the
-            // status check below is what guards the tree.
-            let _ = git_raw(&integration.tree.path, &["merge", "--abort"]);
             let dirty = git(&integration.tree.path, &["status", "--porcelain"]).map_err(err)?;
             if !dirty.is_empty() {
                 let cleanup = self.discard(&integration);
                 return Err(PortError::Io(format!(
-                    "integration tree is dirty after a failed merge of {branch} \
+                    "integration tree is dirty after the merge of {branch} \
                      (cleanup: {cleanup:?})"
                 )));
             }
-            integration.conflicted.push(task_id.clone());
+            if merge.success() {
+                integration.merged.push(task_id.clone());
+            } else {
+                integration.conflicted.push(task_id.clone());
+            }
         }
         Ok(integration)
     }
@@ -410,9 +366,10 @@ impl GitOps for RealGit {
         let _admin = self.admin();
         let tree = worktree.path.as_path();
         let start = self.start();
-        let args = ["rebase", start.as_str()];
-        let out = git_raw(tree, &args).map_err(err)?;
+        let out = git_no_hooks(tree, &["rebase", start.as_str()]).map_err(err)?;
         if out.success() {
+            // The gate reads the working tree; what lands is the commit.
+            worktree::ensure_clean(tree).map_err(err)?;
             return Ok(Vec::new());
         }
         // Aborting a rebase that never started hides the original rebase error.
@@ -518,7 +475,10 @@ impl GitOps for RealGit {
         worktree::existing_head(&self.repo_root, &self.worktrees_dir, task_id)
     }
 
-    fn sweep_orphan_batches(&self, active_task_ids: &HashSet<String>) -> Result<usize, GitError> {
+    fn sweep_orphan_batches(
+        &self,
+        active_task_ids: &HashSet<String>,
+    ) -> Result<Vec<String>, GitError> {
         let _admin = self.admin();
         let repo_id = aaf_fp::repo_id(&self.repo_root);
         worktree::remove_orphan_batch_worktrees(
@@ -528,7 +488,7 @@ impl GitOps for RealGit {
             active_task_ids,
             false,
         )
-        .map(|removed| removed.len())
+        .map(|sweep| sweep.warnings)
     }
 
     fn prune_worktrees(&self) -> Result<(), GitError> {

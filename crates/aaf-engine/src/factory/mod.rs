@@ -15,6 +15,7 @@
 pub mod adapters;
 pub mod audit_backend;
 mod audit_turn;
+mod base_ref;
 pub mod batch;
 mod commit_lock;
 mod finish;
@@ -52,7 +53,8 @@ pub use audit_backend::{
     AuditBackend, audit_cmd_is_claude, build_audit_command, configured_audit_provider,
     effective_audit_provider, resolve_audit_policy, same_audit_provider,
 };
-pub use git_real::{BaseRef, RealGit, resolve_base};
+pub use base_ref::{BaseRef, resolve_base};
+pub use git_real::RealGit;
 pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
 pub use post_audit::is_large_diff;
 pub use scheduler::{
@@ -214,8 +216,10 @@ pub struct RunSummary {
     /// would fail the same way, so none was started after it; the task it
     /// happened on is back in Ready, not charged with an attempt.
     pub halted: Option<String>,
-    /// Infrastructure errors. Each one blocked its task, except a pull
-    /// request that could not be opened: that task is in `review`.
+    /// Infrastructure errors and warnings. A task error blocked its task,
+    /// except a pull request that could not be opened: that task is in
+    /// `review`. Startup-sweep warnings (e.g. orphan batch worktrees kept)
+    /// block nothing.
     pub errors: Vec<String>,
 }
 

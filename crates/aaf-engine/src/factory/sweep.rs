@@ -75,8 +75,13 @@ pub(super) fn startup_sweep(deps: &Deps) -> Vec<String> {
             return warnings;
         }
     };
-    if let Err(err) = deps.git.sweep_orphan_batches(&active_ids) {
-        warnings.push(format!("startup_sweep orphan batches: {err}"));
+    match deps.git.sweep_orphan_batches(&active_ids) {
+        Ok(refused) => warnings.extend(
+            refused
+                .into_iter()
+                .map(|w| format!("startup_sweep orphan batches: {w}")),
+        ),
+        Err(err) => warnings.push(format!("startup_sweep orphan batches: {err}")),
     }
     if let Err(err) = deps.git.prune_worktrees() {
         warnings.push(format!("startup_sweep prune worktrees: {err}"));
@@ -267,8 +272,10 @@ impl<'a> Scheduler<'a> {
         if self.is_cooling_down(true) {
             return Ok(());
         }
+        self.expire_waits();
         let now = self.deps.now();
         let repo = Some(self.deps.settings.repo_root.as_str());
+        let mut queue = Vec::new();
         for task in self.deps.store.list_tasks(repo, Some(TaskState::Gating))? {
             let waiting = self
                 .state
@@ -279,9 +286,9 @@ impl<'a> Scheduler<'a> {
             {
                 continue;
             }
-            self.queue_gating_task(task.id)?;
+            queue.push(task.id);
         }
-        Ok(())
+        self.queue_gating_tasks(queue)
     }
 
     /// Throttled review sweep shared by the review-cap and review-dep waiter paths.

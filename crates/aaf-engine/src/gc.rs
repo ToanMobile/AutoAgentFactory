@@ -2,7 +2,7 @@
 //! fingerprint temp files, and expired stream/report artifacts, plus verified
 //! squash-merge matching for the factory review sweep.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File, TryLockError};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -13,11 +13,17 @@ use aaf_domain::task::{Task, TaskState};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Db, DbError, private};
-use crate::git::cmd::{failure, git, git_raw};
-use crate::git::worktree::{self, BRANCH_PREFIX, SNAPSHOT_REF_PREFIX};
+use crate::git::cmd::{git, git_raw};
+use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, path_str};
-use crate::process::CommandRunner;
 use crate::telemetry::is_exclusively_locked;
+
+#[cfg(test)]
+mod orphan_lock_tests;
+mod refs;
+mod squash;
+use refs::RepoRefs;
+pub(crate) use squash::verify_squash_merges;
 
 /// Default retention window for stream `.jsonl` and report `.html` artifacts.
 pub const DEFAULT_OLDER_THAN_DAYS: u64 = 14;
@@ -222,7 +228,10 @@ fn clean_repo(
         &active_ids,
         opts.dry_run,
     ) {
-        Ok(orphans) => report.removed_orphan_batches.extend(orphans),
+        Ok(sweep) => {
+            report.removed_orphan_batches.extend(sweep.removed);
+            report.warnings.extend(sweep.warnings);
+        }
         Err(err) => report
             .warnings
             .push(format!("{}: orphan batch sweep: {err}", repo.display())),
@@ -230,6 +239,7 @@ fn clean_repo(
 
     // 2. Done tasks (and Cancelled tasks when `include_cancelled`).
     let registered = worktree::list(repo)?;
+    let refs = RepoRefs::list(repo)?;
     for task in repo_tasks {
         let eligible = match task.state {
             TaskState::Done => true,
@@ -245,7 +255,7 @@ fn clean_repo(
                 .push(format!("skipped invalid task id {:?}", task.id));
             continue;
         }
-        clean_task_artifacts(repo, worktrees_dir, task, &registered, opts, report)?;
+        clean_task_artifacts(repo, worktrees_dir, task, &registered, &refs, opts, report)?;
     }
 
     // 3. `worktree::prune` + `aaf_fp::sweep_stale`.
@@ -271,6 +281,7 @@ fn clean_task_artifacts(
     worktrees_dir: &Path,
     task: &Task,
     registered: &[worktree::WorktreeEntry],
+    refs: &RepoRefs,
     opts: &GcOptions,
     report: &mut GcReport,
 ) -> Result<(), GcError> {
@@ -279,6 +290,15 @@ fn clean_task_artifacts(
     let reg_entry = registered
         .iter()
         .find(|e| e.branch.as_deref() == Some(branch.as_str()));
+    // git lists the main worktree first; it is never removed, so neither is
+    // the branch checked out in it.
+    if reg_entry.is_some_and(|e| registered.first().is_some_and(|main| main.path == e.path)) {
+        report.warnings.push(format!(
+            "{}: branch is checked out in the main worktree: kept",
+            task.id
+        ));
+        return Ok(());
+    }
     let existing_wt_path = reg_entry
         .filter(|e| e.path.exists())
         .map(|e| e.path.clone())
@@ -292,13 +312,38 @@ fn clean_task_artifacts(
             report.skipped_dirty.push(task.id.clone());
             return Ok(());
         }
+        // A probe git cannot answer (e.g. a broken `.git` link) means the
+        // real run's removal fails too: a per-task warning, not an error.
+        if opts.dry_run
+            && reg_entry.is_some()
+            && let Some(reason) = removal_refusal(wt_path, opts.force)
+                .map_or_else(|err| Some(err.to_string()), |r| r.map(str::to_string))
+        {
+            report.warnings.push(format!(
+                "{}: worktree remove: would be refused: {reason}",
+                task.id
+            ));
+            return Ok(());
+        }
         if !opts.dry_run {
             if reg_entry.is_some() {
                 let p = path_str(wt_path)?;
-                if opts.force {
-                    git(repo, &["worktree", "remove", "--force", p])?;
+                // Git refuses some worktrees: without --force initialised
+                // submodules or a lock, with one --force still a lock (never
+                // `-f -f`). Keep this task's worktree, branch and snapshot
+                // refs; the rest of the run goes on.
+                let out = if opts.force {
+                    git_raw(repo, &["worktree", "remove", "--force", p])?
                 } else {
-                    git(repo, &["worktree", "remove", p])?;
+                    git_raw(repo, &["worktree", "remove", p])?
+                };
+                if !out.success() {
+                    report.warnings.push(format!(
+                        "{}: worktree remove: {}",
+                        task.id,
+                        out.stderr.trim()
+                    ));
+                    return Ok(());
                 }
             } else if let Ok(meta) = fs::symlink_metadata(wt_path)
                 && !meta.file_type().is_symlink()
@@ -308,29 +353,62 @@ fn clean_task_artifacts(
             }
         }
         report.removed_worktrees.push(wt_path.display().to_string());
+    } else if reg_entry.is_some_and(|e| e.locked) {
+        // A locked tree whose directory is gone (a volume not mounted):
+        // prune keeps its record, so git keeps its branch too.
+        report.warnings.push(format!(
+            "{}: worktree is locked and its directory is missing: kept",
+            task.id
+        ));
+        return Ok(());
     } else if reg_entry.is_some() && !opts.dry_run {
         worktree::prune(repo)?;
     }
 
     let branch_ref = format!("refs/heads/{branch}");
-    if git_raw(repo, &["show-ref", "--verify", "--quiet", &branch_ref])?.success() {
+    if refs.has_branch(&branch_ref) {
         if !opts.dry_run {
             let del = git_raw(repo, &["branch", "-D", &branch])?;
             if !del.success() && !del.stderr.to_ascii_lowercase().contains("not found") {
-                return Err(GcError::Git(failure(&["branch", "-D", &branch], &del)));
+                // A branch git keeps (e.g. still checked out somewhere) is
+                // this task's warning; the rest of the run goes on.
+                report
+                    .warnings
+                    .push(format!("{}: branch delete: {}", task.id, del.stderr.trim()));
+                return Ok(());
             }
         }
         report.removed_branches.push(branch);
     }
 
-    let snap_prefix = format!("{SNAPSHOT_REF_PREFIX}{}/", task.id);
+    // Only a task git listed snapshot refs for is asked to delete them.
+    let snapshots = refs.snapshot_count(&task.id);
     if opts.dry_run {
-        let refs = git(repo, &["for-each-ref", "--format=%(refname)", &snap_prefix])?;
-        report.removed_snapshot_refs += refs.lines().filter(|l| !l.is_empty()).count();
-    } else {
-        report.removed_snapshot_refs += worktree::delete_snapshot_refs(repo, &task.id)?;
+        report.removed_snapshot_refs += snapshots;
+    } else if snapshots > 0 {
+        match worktree::delete_snapshot_refs(repo, &task.id) {
+            Ok(deleted) => report.removed_snapshot_refs += deleted,
+            // e.g. a stale ref lock: this task's warning, the run goes on.
+            Err(err) => report
+                .warnings
+                .push(format!("{}: snapshot refs: {err}", task.id)),
+        }
     }
     Ok(())
+}
+
+/// Why the real run's `git worktree remove` of `wt` would be refused. With
+/// `--force` git still refuses a locked worktree (gc never passes `-f -f`:
+/// a lock is explicit intent to keep it); initialised submodules are fine.
+fn removal_refusal(wt: &Path, force: bool) -> Result<Option<&'static str>, GcError> {
+    if !force {
+        return Ok(worktree::removal_refusal(wt)?);
+    }
+    let git_dir = git(wt, &["rev-parse", "--absolute-git-dir"])?;
+    Ok(Path::new(git_dir.trim())
+        .join("locked")
+        .exists()
+        .then_some("cannot remove a locked working tree"))
 }
 
 fn remove_and_record(path: &Path, is_dir: bool, dry_run: bool, report: &mut GcReport) {
@@ -401,11 +479,7 @@ fn clean_expired_artifacts(
         };
         if !meta.is_dir() || meta.file_type().is_symlink() {
             if !opts.dry_run
-                && meta.is_file()
-                && path.extension().and_then(|e| e.to_str()) == Some("lock")
-                && !path.with_extension("").exists()
-                && !is_exclusively_locked(&path)
-                && is_older_than(&meta, max_age, now)
+                && orphan_scratch_lock_removable(&path, &meta, max_age, now, is_exclusively_locked)
             {
                 let _ = fs::remove_file(&path);
             }
@@ -428,6 +502,13 @@ fn clean_expired_artifacts(
         if is_exclusively_locked(&lock_path) || merge_locked {
             continue;
         }
+        // A live owner pid (`<id>-pr<N>-<pid>-<seq>`) means in use even when
+        // its companion lock is not (or no longer) held.
+        if scratch_owner_pid(&path)
+            .is_some_and(|pid| crate::executors::reaper::is_alive(pid).unwrap_or(true))
+        {
+            continue;
+        }
         let has_lock = fs::symlink_metadata(&lock_path).is_ok_and(|m| m.is_file());
         if has_lock || is_older_than(&meta, max_age, now) {
             remove_and_record(&path, true, opts.dry_run, report);
@@ -438,9 +519,39 @@ fn clean_expired_artifacts(
     }
 }
 
+/// Owner pid encoded in a merge-scratch dir name `<id>-pr<N>-<pid>-<seq>`.
+fn scratch_owner_pid(path: &Path) -> Option<u32> {
+    let name = path.file_name()?.to_str()?;
+    let mut parts = name.rsplitn(3, '-');
+    let seq = parts.next()?;
+    let pid = parts.next()?;
+    if !parts.next()?.contains("-pr") || !seq.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse::<u32>().ok().filter(|p| *p > 1)
+}
+
 #[derive(Deserialize)]
 struct SopStatusPeek {
     status: String,
+}
+
+/// A merge-scratch `.lock` whose scratch dir is gone is removable once it is
+/// old and not held. `is_locked` takes a shared flock to probe the lock, so
+/// age is checked first: a fresh lock is never probed, because its owner may
+/// be about to `try_lock` it and would then time out.
+fn orphan_scratch_lock_removable(
+    path: &Path,
+    meta: &fs::Metadata,
+    max_age: Duration,
+    now: SystemTime,
+    is_locked: impl FnOnce(&Path) -> bool,
+) -> bool {
+    meta.is_file()
+        && path.extension().and_then(|e| e.to_str()) == Some("lock")
+        && !path.with_extension("").exists()
+        && is_older_than(meta, max_age, now)
+        && !is_locked(path)
 }
 
 fn is_older_than(meta: &fs::Metadata, max_age: Duration, now: SystemTime) -> bool {
@@ -480,113 +591,4 @@ fn sorted_real_dir_entries(dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
     paths.sort();
     paths
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MergedPrRow {
-    #[serde(default)]
-    head_ref_name: String,
-    #[serde(default)]
-    head_ref_oid: String,
-    #[serde(default)]
-    base_ref_name: String,
-    #[serde(default)]
-    merge_commit: Option<MergeCommitRef>,
-    #[serde(default)]
-    is_cross_repository: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct MergeCommitRef {
-    #[serde(default)]
-    oid: String,
-}
-
-fn is_hex_oid(oid: &str) -> bool {
-    (40..=64).contains(&oid.len()) && oid.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Verifies squash-merged PRs for `(task_id, local_head_oid)` candidates in one
-/// batched `gh pr list` call plus local `git merge-base --is-ancestor` checks.
-///
-/// Offline or failing `gh` calls return an empty map so `--auto` never crashes.
-pub(crate) fn verify_squash_merges(
-    repo_root: &Path,
-    base_branch: &str,
-    base_start: &str,
-    candidates: &[(String, String)],
-    fetch_base: &dyn Fn() -> Result<(), GitError>,
-    runner: &dyn CommandRunner,
-) -> Result<HashMap<String, String>, GitError> {
-    if candidates.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let args = [
-        "pr",
-        "list",
-        "--state",
-        "merged",
-        "--base",
-        base_branch,
-        "--limit",
-        "100",
-        "--json",
-        "headRefName,headRefOid,baseRefName,mergeCommit,isCrossRepository",
-    ];
-    let Ok(out) = runner.run("gh", &args, repo_root) else {
-        return Ok(HashMap::new());
-    };
-    if !out.success() {
-        return Ok(HashMap::new());
-    }
-    let Ok(rows) = serde_json::from_str::<Vec<MergedPrRow>>(&out.stdout) else {
-        return Ok(HashMap::new());
-    };
-
-    let by_ref: HashMap<String, (&str, &str)> = candidates
-        .iter()
-        .map(|(id, oid)| (format!("{BRANCH_PREFIX}{id}"), (id.as_str(), oid.as_str())))
-        .collect();
-
-    let mut matched: Vec<(String, String, String)> = Vec::new();
-    for row in rows {
-        if row.is_cross_repository || row.base_ref_name != base_branch {
-            continue;
-        }
-        let Some(&(task_id, local_head_oid)) = by_ref.get(&row.head_ref_name) else {
-            continue;
-        };
-        if row.head_ref_oid.is_empty() || row.head_ref_oid != local_head_oid {
-            continue;
-        }
-        let Some(merge_oid) = row
-            .merge_commit
-            .map(|c| c.oid)
-            .filter(|oid| is_hex_oid(oid))
-        else {
-            continue;
-        };
-        matched.push((task_id.to_string(), local_head_oid.to_string(), merge_oid));
-    }
-
-    if matched.is_empty() {
-        return Ok(HashMap::new());
-    }
-    if fetch_base().is_err() {
-        return Ok(HashMap::new());
-    }
-
-    let mut verified = HashMap::new();
-    for (task_id, local_head_oid, merge_oid) in matched {
-        let ok = git_raw(
-            repo_root,
-            &["merge-base", "--is-ancestor", &merge_oid, base_start],
-        )
-        .is_ok_and(|res| res.code == Some(0));
-        if ok {
-            verified.insert(task_id, local_head_oid);
-        }
-    }
-    Ok(verified)
 }

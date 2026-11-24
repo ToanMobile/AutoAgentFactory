@@ -3,68 +3,28 @@
 //! Every mutating action requires explicit `y/N` confirmation (default NO on
 //! empty input or EOF) before opening a read-write DB handle or mutating state.
 
-use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, ErrorKind, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use aaf_domain::blocked::BlockedReason;
-use aaf_domain::budget::{BudgetCheck, RootBudget};
-use aaf_domain::event::{EventKind, FactoryEvent};
-use aaf_domain::gate::ChangeKind;
-use aaf_domain::ports::{BudgetStore, Clock, EventSink, PortError, RunStore, TaskStore};
+use aaf_domain::ports::{Clock, RunStore, TaskStore};
 use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::{Db, RoDbCache, TurnSnapshot, private};
 use aaf_engine::executors::stream_log::read_tail_lines;
 use aaf_engine::factory::adapters::SystemClock;
-use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
 use aaf_engine::factory::snapshots::{preview_latest_undo, steer_task, undo_latest_turn};
 use aaf_engine::factory::unfreeze;
-use aaf_engine::gate::{GIT_TIMEOUT, GateError, base, head_lock};
-use aaf_engine::git::worktree::{validate_task_id, worktree_path};
+use aaf_engine::gate::GateError;
+use aaf_engine::git::worktree::validate_task_id;
 use aaf_engine::watch::sanitize_display as san;
-use serde_json::{Value, json};
 
+use super::task_ops::{
+    ApproveRefusal, HeadLockEvalError, TaskOpError, approve_if_unchanged, eval_tree_head_lock,
+    parse_rework_reason, resolve_task_tree, rework_task, unblock_task,
+};
 use crate::ctx::Ctx;
 use crate::output::CmdError;
 
-fn clear_stale_receipts(db: &Db, task: &Task, ctx: &Ctx) {
-    let main_root = Path::new(&task.repo_root);
-    let _ = std::fs::remove_file(aaf_fp::receipt_path(&ctx.data_dir, main_root));
-    let main_id = aaf_fp::repo_id(main_root);
-    let main_approvals_dir = ctx.data_dir.join("approvals").join(&main_id);
-    let mut wt_roots = Vec::new();
-    if let Ok(wt) = worktree_path(main_root, &ctx.worktrees_dir, &task.id) {
-        wt_roots.push(wt);
-    }
-    for r in db.runs_for_task(&task.id).unwrap_or_default() {
-        if !r.worktree_path.is_empty() {
-            wt_roots.push(PathBuf::from(r.worktree_path));
-        }
-    }
-    for root in wt_roots {
-        let _ = std::fs::remove_file(aaf_fp::receipt_path(&ctx.data_dir, &root));
-        let wt_id = aaf_fp::repo_id(&root);
-        if wt_id == main_id {
-            continue;
-        }
-        let wt_approvals = ctx.data_dir.join("approvals").join(&wt_id);
-        for entry in std::fs::read_dir(&wt_approvals)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let name = entry.file_name();
-            if name.to_str().is_some_and(|s| s.ends_with(".json")) {
-                let _ = std::fs::remove_file(main_approvals_dir.join(name));
-            }
-        }
-        let _ = std::fs::remove_dir_all(&wt_approvals);
-    }
-}
-
 pub(crate) const DB_FILE: &str = "aaf.db";
-const PLAN_APPROVAL_PREFIX: &str = "plan approval required:";
-const PLAN_EVENT_LOOKBACK: u32 = 100;
 const TAIL_MAX_LINES: usize = 50;
 
 pub(crate) fn io_err(context: &str, err: impl std::fmt::Display) -> CmdError {
@@ -129,33 +89,6 @@ pub(crate) fn load_ro_task(
     }
 }
 
-fn change_code(kind: ChangeKind) -> &'static str {
-    match kind {
-        ChangeKind::Added => "A",
-        ChangeKind::Modified => "M",
-        ChangeKind::Deleted => "D",
-        ChangeKind::Renamed => "R",
-    }
-}
-
-fn resolve_task_tree(db: &Db, task: &Task, ctx: &Ctx) -> PathBuf {
-    if let Ok(wt) = worktree_path(Path::new(&task.repo_root), &ctx.worktrees_dir, &task.id)
-        && wt.is_dir()
-    {
-        return wt;
-    }
-    if let Ok(runs) = db.runs_for_task(&task.id)
-        && let Some(path) = runs
-            .iter()
-            .rev()
-            .map(|r| PathBuf::from(&r.worktree_path))
-            .find(|p| !p.as_os_str().is_empty() && p.is_dir())
-    {
-        return path;
-    }
-    PathBuf::from(&task.repo_root)
-}
-
 pub(crate) fn run_tail_view(
     ctx: &Ctx,
     ro: &RoDbCache,
@@ -207,6 +140,15 @@ pub(crate) fn run_tail_view(
     Ok(())
 }
 
+/// The cockpit's wording of a failed head-lock evaluation.
+fn eval_error_line(e: &HeadLockEvalError) -> String {
+    match e {
+        HeadLockEvalError::Config(m) => format!("approve config: {}", san(m)),
+        HeadLockEvalError::Base(m) => format!("approve base: {}", san(m)),
+        HeadLockEvalError::Task(m) => format!("approve: {}", san(m)),
+    }
+}
+
 pub(crate) fn action_approve(
     ctx: &Ctx,
     ro: &RoDbCache,
@@ -221,20 +163,10 @@ pub(crate) fn action_approve(
     let target_tree = resolve_task_tree(&db, &task, ctx);
     drop(db);
 
-    let cfg = match ctx.load_config(&target_tree) {
-        Ok(c) => c,
-        Err(e) => return wln(w, &format!("approve config: {}", san(&e.message))),
+    let report = match eval_tree_head_lock(ctx, &target_tree) {
+        Ok((_, report)) => report,
+        Err(e) => return wln(w, &eval_error_line(&e)),
     };
-    let base_info = match base::resolve(&target_tree, &cfg.repo.gate.base_ref, GIT_TIMEOUT) {
-        Ok(b) => b,
-        Err(e) => return wln(w, &format!("approve base: {}", san(&e.to_string()))),
-    };
-    let report = head_lock::evaluate(
-        &ctx.data_dir,
-        &target_tree,
-        &cfg.repo,
-        &base_info.diff_target,
-    );
     let safe_id = san(id);
     if report.locked_changes.is_empty() {
         return wln(
@@ -250,10 +182,7 @@ pub(crate) fn action_approve(
         ),
     )?;
     for ch in &report.locked_changes {
-        wln(
-            w,
-            &format!("  {} {}", change_code(ch.change), san(&ch.path)),
-        )?;
+        wln(w, &format!("  {} {}", ch.change.letter(), san(&ch.path)))?;
     }
     if !confirm(&format!("Confirm approve {safe_id} [y/N]: "), reader, w)? {
         return wln(w, "cancelled");
@@ -262,15 +191,8 @@ pub(crate) fn action_approve(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("cockpit");
-    match head_lock::approve_matching(
-        &ctx.data_dir,
-        &target_tree,
-        &cfg.repo,
-        reviewer,
-        false,
-        &report.lock_fp,
-        &SystemClock,
-    ) {
+    // Sign only the diff the reviewer just saw: re-evaluated after the prompt.
+    match approve_if_unchanged(ctx, &target_tree, &report.lock_fp, reviewer) {
         Ok(a) => wln(
             w,
             &format!(
@@ -279,32 +201,19 @@ pub(crate) fn action_approve(
                 san(&a.lock_fp)
             ),
         ),
-        Err(GateError::NothingLocked) => wln(
+        Err(ApproveRefusal::Eval(e)) => wln(w, &eval_error_line(&e)),
+        // The preview had locked changes, so none now means the diff changed.
+        Err(ApproveRefusal::NothingLocked | ApproveRefusal::FpChanged) => wln(
+            w,
+            &format!(
+                "refused: lock_fp mismatch for {safe_id}: locked diff changed since preview; run approve again"
+            ),
+        ),
+        Err(ApproveRefusal::Sign(GateError::NothingLocked)) => wln(
             w,
             &format!("refused: no locked file is changed for {safe_id}; nothing approved"),
         ),
-        Err(GateError::LockFpMismatch { .. }) => wln(
-            w,
-            &format!("refused: lock_fp mismatch for {safe_id}: locked diff changed since preview"),
-        ),
-        Err(e) => wln(w, &format!("approve failed: {}", san(&e.to_string()))),
-    }
-}
-
-fn reset_exhausted_budget(db: &Db, root_id: &str) -> Result<bool, PortError> {
-    match db.get_budget(root_id) {
-        Ok(budget) if budget.check() != BudgetCheck::Ok => {
-            db.put_budget(&RootBudget {
-                tokens_used: 0,
-                wall_secs_used: 0,
-                cycles_used: 0,
-                frozen: false,
-                ..budget
-            })?;
-            Ok(true)
-        }
-        Ok(_) | Err(PortError::NotFound(_)) => Ok(false),
-        Err(other) => Err(other),
+        Err(ApproveRefusal::Sign(e)) => wln(w, &format!("approve failed: {}", san(&e.to_string()))),
     }
 }
 
@@ -316,13 +225,7 @@ pub(crate) fn action_rework(
     reader: &mut dyn BufRead,
     w: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    let (rerun, reason) = if let Some(after) = rest.strip_prefix("--rerun")
-        && (after.is_empty() || after.starts_with(char::is_whitespace))
-    {
-        (true, after.trim())
-    } else {
-        (false, rest.trim())
-    };
+    let (rerun, reason) = parse_rework_reason(rest);
     if reason.is_empty() {
         return wln(w, "usage: rework <id> [--rerun] <reason>");
     }
@@ -351,29 +254,27 @@ pub(crate) fn action_rework(
     }
 
     let db = open_db_rw(ctx)?;
-    let rw_err = |e: PortError| io_err("rework", e);
-    let fresh = db.get_task(id).map_err(rw_err)?;
-    if fresh.state != TaskState::Review {
-        return wln(
-            w,
-            &format!("refused: {safe_id} is {}, not review", fresh.state.as_str()),
-        );
-    }
     let now = SystemClock.now();
-    let budget_reset =
-        reset_exhausted_budget(&db, &fresh.root_id).map_err(|e| io_err("budget", e))?;
-    clear_stale_receipts(&db, &fresh, ctx);
-    let clean_reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-    db.append_context_note(id, &format!("rework: {clean_reason}"), now)
-        .map_err(rw_err)?;
-    db.set_state(id, target, None, now).map_err(rw_err)?;
-    let p1 = json!({ "reason": reason, "to": target.as_str(), "rerun": rerun, "budget_reset": budget_reset, "by": "human" });
-    db.emit(&FactoryEvent::new(EventKind::ReworkRequested, p1.to_string(), now).for_task(id))
-        .map_err(rw_err)?;
-    let p2 = json!({ "from": TaskState::Review.as_str(), "to": target.as_str(), "why": "aaf cockpit rework", "by": "human" });
-    db.emit(&FactoryEvent::new(EventKind::TaskStateChanged, p2.to_string(), now).for_task(id))
-        .map_err(rw_err)?;
-    wln(w, &format!("{safe_id} sent back to {}", target.as_str()))
+    match rework_task(
+        &db,
+        ctx,
+        id,
+        reason,
+        rerun,
+        "aaf cockpit rework",
+        "human",
+        now,
+    ) {
+        Ok(out) => wln(
+            w,
+            &format!("{safe_id} sent back to {}", out.target.as_str()),
+        ),
+        Err(TaskOpError::WrongState { actual, .. }) => wln(
+            w,
+            &format!("refused: {safe_id} is {}, not review", actual.as_str()),
+        ),
+        Err(TaskOpError::Port(e)) => Err(io_err("rework", e)),
+    }
 }
 
 pub(crate) fn action_steer(
@@ -451,43 +352,6 @@ pub(crate) fn action_undo(
     }
 }
 
-fn latest_generated_plan(db: &Db, task_id: &str) -> Result<Option<String>, PortError> {
-    for event in db.events_for_task(task_id, PLAN_EVENT_LOOKBACK)? {
-        if event.kind != EventKind::PlanGenerated {
-            continue;
-        }
-        if let Ok(payload) = serde_json::from_str::<Value>(&event.payload_json)
-            && let Some(plan) = payload["plan"]
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        {
-            return Ok(Some(plan.to_string()));
-        }
-    }
-    Ok(None)
-}
-
-fn maybe_approve_on_unblock(db: &Db, task: &Task, now: i64) -> Result<bool, PortError> {
-    let Some(BlockedReason::NeedsHuman { why }) = &task.blocked_reason else {
-        return Ok(false);
-    };
-    if !why.starts_with(PLAN_APPROVAL_PREFIX) {
-        return Ok(false);
-    }
-    let plan = match latest_generated_plan(db, &task.id)? {
-        Some(plan) => plan,
-        None => why
-            .strip_prefix(PLAN_APPROVAL_PREFIX)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(why.as_str())
-            .to_string(),
-    };
-    db.append_context_note(&task.id, &format!("{PLAN_APPROVED_PREFIX} {plan}"), now)?;
-    Ok(true)
-}
-
 pub(crate) fn action_unblock(
     ctx: &Ctx,
     ro: &RoDbCache,
@@ -510,32 +374,14 @@ pub(crate) fn action_unblock(
         return wln(w, "cancelled");
     }
     let db = open_db_rw(ctx)?;
-    let ub_err = |e: PortError| io_err("unblock", e);
-    let fresh = db.get_task(id).map_err(ub_err)?;
-    if fresh.state != TaskState::Blocked {
-        return wln(
+    match unblock_task(&db, id, "aaf cockpit unblock", "human", SystemClock.now()) {
+        Ok(_) => wln(w, &format!("{safe_id} is ready")),
+        Err(TaskOpError::WrongState { actual, .. }) => wln(
             w,
-            &format!(
-                "refused: {safe_id} is {}, not blocked",
-                fresh.state.as_str()
-            ),
-        );
+            &format!("refused: {safe_id} is {}, not blocked", actual.as_str()),
+        ),
+        Err(TaskOpError::Port(e)) => Err(io_err("unblock", e)),
     }
-    let now = SystemClock.now();
-    let budget_reset =
-        reset_exhausted_budget(&db, &fresh.root_id).map_err(|e| io_err("budget", e))?;
-    let plan_approved = maybe_approve_on_unblock(&db, &fresh, now).map_err(ub_err)?;
-    db.append_context_note(id, "unblocked: aaf cockpit unblock", now)
-        .map_err(ub_err)?;
-    db.set_state(id, TaskState::Ready, None, now)
-        .map_err(ub_err)?;
-    let payload = json!({
-        "to": "ready", "why": "aaf cockpit unblock", "by": "human",
-        "was": fresh.blocked_reason, "budget_reset": budget_reset, "plan_approved": plan_approved,
-    });
-    db.emit(&FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now).for_task(id))
-        .map_err(ub_err)?;
-    wln(w, &format!("{safe_id} is ready"))
 }
 
 pub(crate) fn action_unfreeze(
@@ -549,47 +395,4 @@ pub(crate) fn action_unfreeze(
     let db = open_db_rw(ctx)?;
     unfreeze(&db, &SystemClock).map_err(|e| io_err("unfreeze", e))?;
     wln(w, "factory is not frozen")
-}
-
-/// Longest directed chain (`blocker -> ... -> dependent`) in a DAG.
-pub(crate) fn compute_critical_path(topo: &[String], edges: &[(String, String)]) -> Vec<String> {
-    if edges.is_empty() {
-        return Vec::new();
-    }
-    let mut blockers: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (task, blocked_by) in edges {
-        blockers.entry(task.as_str()).or_default().push(blocked_by);
-    }
-    let (mut best_len, mut pred) = (HashMap::with_capacity(topo.len()), HashMap::new());
-    let (mut best_end, mut global_max) = (None, 0usize);
-    for node in topo {
-        let (mut len, mut prev) = (1usize, None);
-        for &dep in blockers.get(node.as_str()).into_iter().flatten() {
-            let cand = best_len
-                .get(dep)
-                .copied()
-                .unwrap_or(0usize)
-                .saturating_add(1);
-            if cand > len {
-                (len, prev) = (cand, Some(dep));
-            }
-        }
-        best_len.insert(node.as_str(), len);
-        if let Some(p) = prev {
-            pred.insert(node.as_str(), p);
-        }
-        if len > global_max {
-            (global_max, best_end) = (len, Some(node.as_str()));
-        }
-    }
-    if global_max < 2 {
-        return Vec::new();
-    }
-    let (mut path, mut seen, mut cur) = (Vec::with_capacity(global_max), HashSet::new(), best_end);
-    while let Some(node) = cur.filter(|n| seen.insert(*n)) {
-        path.push(node.to_string());
-        cur = pred.get(node).copied();
-    }
-    path.reverse();
-    path
 }

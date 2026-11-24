@@ -1,9 +1,16 @@
 //! Working-directory tracking across `env -C` / `sudo -D` wrappers, shell
 //! directory builtins (`cd`, `cd -`, `pushd`, `popd`), and subshell boundaries.
 
+use std::mem;
 use std::path::PathBuf;
 
 use crate::{Ctx, Denial, Line, fallback, heavy_guard, judge, paths, shell};
+
+mod cdpath;
+mod dirstack;
+
+use cdpath::{cdpath, searched_dir};
+use dirstack::apply_dir_builtin;
 
 /// Extracts cumulative working-directory changes from `env -C`/`--chdir` and
 /// `sudo -D`/`--chdir` options present in `wrapped`.
@@ -18,8 +25,11 @@ pub(crate) fn wrapped_cwd(wrapped: &[String], ctx: &Ctx) -> Option<PathBuf> {
         let word = wrapped[i].as_str();
         if !word.starts_with('-') || word == "-" {
             let base = shell::basename(word);
-            if matches!(base, "env" | "sudo") {
+            let launcher = DIR_LAUNCHERS.contains(&tool);
+            if base == "env" || base == "sudo" || DIR_LAUNCHERS.contains(&base) {
                 tool = base;
+            } else if launcher && matches!(word, "exec" | "x" | "dlx" | "run") {
+                // The launcher's subcommand: its options still follow.
             } else if matches!(
                 base,
                 "command"
@@ -39,6 +49,34 @@ pub(crate) fn wrapped_cwd(wrapped: &[String], ctx: &Ctx) -> Option<PathBuf> {
                     | "caffeinate"
                     | "xargs"
                     | "aaf"
+                    | "xcrun"
+                    | "arch"
+                    | "bundle"
+                    | "rbenv"
+                    | "npm"
+                    | "npx"
+                    | "bunx"
+                    | "nocorrect"
+                    | "bun"
+                    | "uvx"
+                    | "pipenv"
+                    | "pdm"
+                    | "pipx"
+                    | "nix"
+                    | "nix-shell"
+                    | "direnv"
+                    | "gtime"
+                    | "pixi"
+                    | "hatch"
+                    | "rye"
+                    | "devbox"
+                    | "op"
+                    | "doppler"
+                    | "dotenvx"
+                    | "asdf"
+                    | "chronic"
+                    | "flock"
+                    | "taskset"
             ) {
                 tool = "";
             }
@@ -158,6 +196,43 @@ pub(crate) fn wrapped_cwd(wrapped: &[String], ctx: &Ctx) -> Option<PathBuf> {
                     i += 1;
                 }
             }
+            // Launchers that run their command elsewhere: `mise -C`/`--cd`,
+            // `pnpm -C`/`--dir`, `yarn --cwd`, `uv --directory`, `poetry -C`,
+            // `conda run --cwd`.
+            launcher if DIR_LAUNCHERS.contains(&launcher) => {
+                let options: &[&str] = match tool {
+                    "mise" => &["-C", "--cd"],
+                    "pnpm" => &["-C", "--dir"],
+                    "uv" => &["--directory"],
+                    "poetry" => &["-C", "--directory"],
+                    // `yarn --cwd`, `conda run --cwd`.
+                    _ => &["--cwd"],
+                };
+                let (flag, glued) = match word.split_once('=') {
+                    Some((flag, glued)) => (flag, Some(glued)),
+                    // `mise -C..`: the directory glued to the letter.
+                    None if tool == "mise" && word.len() > 2 && word.starts_with("-C") => {
+                        ("-C", Some(&word[2..]))
+                    }
+                    None => (word, None),
+                };
+                if options.contains(&flag) {
+                    let dir = glued.or_else(|| wrapped.get(i + 1).map(String::as_str));
+                    if let Some(dir) = dir.filter(|dir| !dir.is_empty()) {
+                        let base = cwd.as_deref().unwrap_or(&ctx.cwd);
+                        // Like `env -C`: the launcher `chdir`s, so `..` after
+                        // a symlinked directory is resolved physically.
+                        cwd = Some(paths::expand_real_dotdot(
+                            dir,
+                            base,
+                            ctx.env.home.as_deref(),
+                        ));
+                    }
+                    i += if glued.is_some() { 1 } else { 2 };
+                } else {
+                    i += 1;
+                }
+            }
             _ => {
                 i += 1;
             }
@@ -166,186 +241,56 @@ pub(crate) fn wrapped_cwd(wrapped: &[String], ctx: &Ctx) -> Option<PathBuf> {
     cwd
 }
 
-/// Parses a `pushd`/`popd` stack offset: `+N` (from top/left, `true`) or `-N`
-/// (from bottom/right, `false`).
-fn parse_stack_offset(arg: &str) -> Option<(bool, usize)> {
-    let (from_left, digits) = if let Some(rest) = arg.strip_prefix('+') {
-        (true, rest)
-    } else {
-        let rest = arg.strip_prefix('-')?;
-        (false, rest)
-    };
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    digits.parse::<usize>().ok().map(|n| (from_left, n))
+/// Launchers with an option that moves the command they run.
+const DIR_LAUNCHERS: &[&str] = &[
+    "mise",
+    "pnpm",
+    "yarn",
+    "uv",
+    "poetry",
+    "conda",
+    "mamba",
+    "micromamba",
+];
+
+/// Where the shell may stand: its working directory, `cd -`'s target and
+/// the `pushd` stack.
+#[derive(Clone, PartialEq)]
+struct Place {
+    cwd: PathBuf,
+    old: Option<PathBuf>,
+    stack: Vec<PathBuf>,
 }
 
-fn resolve_stack_idx(from_left: bool, n: usize, total: usize) -> Option<usize> {
-    (n < total).then(|| if from_left { n } else { total - 1 - n })
+/// Bound on the places one line is judged in; past it, places that differ
+/// only in `cd -`/`popd` history are merged, and past that the line is refused.
+const MAX_PLACES: usize = 32;
+
+fn is_dir_builtin(cmd: &shell::Cmd) -> bool {
+    matches!(cmd.name(), "cd" | "pushd" | "popd")
 }
 
-fn apply_dir_builtin(
-    cmd: &shell::Cmd,
-    ctx: &mut Ctx,
-    old_cwd: &mut Option<PathBuf>,
-    dir_stack: &mut Vec<PathBuf>,
-) {
-    match cmd.name() {
-        "cd" => {
-            let mut after_dd = false;
-            let mut dash_only = false;
-            let mut physical = false;
-            let mut target = None;
-            for arg in cmd.args() {
-                if after_dd {
-                    target = Some(arg.as_str());
-                    break;
-                }
-                if arg == "--" {
-                    after_dd = true;
-                } else if arg == "-" {
-                    dash_only = true;
-                    break;
-                } else if let Some(flags) = arg.strip_prefix('-') {
-                    for ch in flags.chars() {
-                        match ch {
-                            'P' => physical = true,
-                            'L' => physical = false,
-                            _ => {}
-                        }
-                    }
-                } else {
-                    target = Some(arg.as_str());
-                    break;
-                }
-            }
-            if let Some(dir) = target {
-                let next = if physical {
-                    paths::real(&ctx.expand_real_dotdot(dir))
-                } else {
-                    ctx.expand(dir)
-                };
-                *old_cwd = Some(ctx.cwd.clone());
-                ctx.set_cwd(next);
-            } else if dash_only {
-                if let Some(prev) = old_cwd.take() {
-                    let next = if physical { paths::real(&prev) } else { prev };
-                    *old_cwd = Some(ctx.cwd.clone());
-                    ctx.set_cwd(next);
-                }
-            } else if let Some(home) = ctx.env.home.as_deref() {
-                let next = if physical {
-                    paths::real(home)
-                } else {
-                    paths::normalize(home)
-                };
-                *old_cwd = Some(ctx.cwd.clone());
-                ctx.set_cwd(next);
-            }
-        }
-        "pushd" => {
-            let mut after_dd = false;
-            let mut no_cd = false;
-            let mut target = None;
-            let mut offset = None;
-            for arg in cmd.args() {
-                if after_dd {
-                    target = Some(arg.as_str());
-                    break;
-                }
-                if arg == "--" {
-                    after_dd = true;
-                } else if arg == "-n" {
-                    no_cd = true;
-                } else if let Some(off) = parse_stack_offset(arg) {
-                    offset = Some(off);
-                    break;
-                } else if !arg.starts_with('-') {
-                    target = Some(arg.as_str());
-                    break;
-                }
-            }
-            if let Some((from_left, n)) = offset {
-                let mut view = Vec::with_capacity(dir_stack.len() + 1);
-                view.push(ctx.cwd.clone());
-                view.extend(dir_stack.iter().rev().cloned());
-                if let Some(k) = resolve_stack_idx(from_left, n, view.len()) {
-                    view.rotate_left(k);
-                    if !no_cd && let Some(new_cwd) = view.first().cloned() {
-                        *old_cwd = Some(ctx.cwd.clone());
-                        ctx.set_cwd(new_cwd);
-                    }
-                    dir_stack.clear();
-                    dir_stack.extend(view.into_iter().skip(1).rev());
-                }
-            } else if let Some(dir) = target {
-                let next = ctx.expand(dir);
-                if no_cd {
-                    dir_stack.push(next);
-                } else {
-                    dir_stack.push(ctx.cwd.clone());
-                    *old_cwd = Some(ctx.cwd.clone());
-                    ctx.set_cwd(next);
-                }
-            } else if !no_cd && let Some(top) = dir_stack.pop() {
-                dir_stack.push(ctx.cwd.clone());
-                *old_cwd = Some(ctx.cwd.clone());
-                ctx.set_cwd(top);
-            }
-        }
-        "popd" => {
-            let mut after_dd = false;
-            let mut no_cd = false;
-            let mut offset = None;
-            for arg in cmd.args() {
-                if after_dd {
-                    if let Some(off) = parse_stack_offset(arg) {
-                        offset = Some(off);
-                    }
-                    break;
-                }
-                if arg == "--" {
-                    after_dd = true;
-                } else if arg == "-n" {
-                    no_cd = true;
-                } else if let Some(off) = parse_stack_offset(arg) {
-                    offset = Some(off);
-                    break;
-                }
-            }
-            if dir_stack.is_empty() {
-                return;
-            }
-            let (from_left, n) = offset.unwrap_or((true, 0));
-            let mut view = Vec::with_capacity(dir_stack.len() + 1);
-            view.push(ctx.cwd.clone());
-            view.extend(dir_stack.iter().rev().cloned());
-            if let Some(k) = resolve_stack_idx(from_left, n, view.len()) {
-                if k == 0 {
-                    if no_cd {
-                        view.remove(1);
-                    } else {
-                        view.remove(0);
-                        if let Some(new_cwd) = view.first().cloned() {
-                            *old_cwd = Some(ctx.cwd.clone());
-                            ctx.set_cwd(new_cwd);
-                        }
-                    }
-                } else {
-                    view.remove(k);
-                }
-                dir_stack.clear();
-                dir_stack.extend(view.into_iter().skip(1).rev());
-            }
-        }
-        _ => {}
-    }
+/// Wrappers that run a builtin in the current shell; any other (`env`,
+/// `nice`, `timeout`, `xargs`, `sudo`, a launcher) starts a process whose
+/// `cd` moves nothing here.
+const IN_SHELL_WRAPPERS: &[&str] = &["command", "builtin", "time", "noglob", "nocorrect", "-"];
+
+fn runs_elsewhere(cmd: &shell::Cmd) -> bool {
+    cmd.wrapped
+        .iter()
+        .any(|word| !word.starts_with('-') && !IN_SHELL_WRAPPERS.contains(&shell::basename(word)))
 }
 
-/// Evaluates each command in `script` in chronological order while tracking
-/// subshell/wrapper scope boundaries and directory builtins (`cd`, `pushd`,
-/// `popd`), invoking `judge_cmd` on every command with the active `Ctx`.
+/// Evaluates each command in `script` in order, tracking subshell/wrapper
+/// scope boundaries and directory-changing builtins (`cd`, `cd -`, `pushd`,
+/// `popd`), and invokes `judge_cmd` on every command in every place the
+/// shell may stand. A move is followed for sure only when the next command
+/// runs because it succeeded in this shell (`cd dir && …`), and only up to
+/// the end of that `&&` chain: past a `;`, a newline, `||`, a pipe or `&`
+/// the `cd` may have failed, so the places it left count again. Otherwise
+/// what follows is judged both where the shell was and where it may be. A
+/// line that defines a function named like a directory builtin has no sure
+/// move at all.
 pub(crate) fn eval_script<'a, F>(
     script: &shell::Script,
     mut ctx: Ctx<'a>,
@@ -354,10 +299,20 @@ pub(crate) fn eval_script<'a, F>(
 where
     F: FnMut(&shell::Cmd, &Ctx<'a>) -> Option<Denial>,
 {
-    let mut old_cwd: Option<PathBuf> = None;
-    let mut dir_stack: Vec<PathBuf> = Vec::new();
-    let mut scope_stack: Vec<(PathBuf, Option<PathBuf>, Vec<PathBuf>)> = Vec::new();
+    let mut places = vec![Place {
+        cwd: ctx.cwd.clone(),
+        old: None,
+        stack: Vec::new(),
+    }];
+    // The places a sure `cd` of the current `&&` chain left behind.
+    let mut left: Vec<Place> = Vec::new();
+    let mut scope_stack: Vec<(Vec<Place>, Vec<Place>)> = Vec::new();
     let mut scope_at = 0;
+    let redefined = script
+        .functions
+        .iter()
+        .any(|name| matches!(name.as_str(), "cd" | "pushd" | "popd"));
+    let search = cdpath(script);
     for (idx, cmd) in script.cmds.iter().enumerate() {
         while let Some((at, event)) = script.scopes.get(scope_at) {
             if *at > idx {
@@ -366,30 +321,94 @@ where
             scope_at += 1;
             match event {
                 shell::ScopeEvent::Enter(wrapped) => {
-                    scope_stack.push((ctx.cwd.clone(), old_cwd.clone(), dir_stack.clone()));
-                    if let Some(next) = wrapped_cwd(wrapped, &ctx) {
-                        ctx.set_cwd(next);
+                    scope_stack.push((places.clone(), mem::take(&mut left)));
+                    // A wrapper (`env -C dir sh -c …`) moves the scope it runs.
+                    for place in &mut places {
+                        ctx.set_cwd(place.cwd.clone());
+                        if let Some(next) = wrapped_cwd(wrapped, &ctx) {
+                            place.cwd = next;
+                        }
                     }
                 }
                 shell::ScopeEvent::Exit => {
-                    if let Some((saved_cwd, saved_old, saved_dirs)) = scope_stack.pop() {
-                        ctx.set_cwd(saved_cwd);
-                        old_cwd = saved_old;
-                        dir_stack = saved_dirs;
+                    if let Some(saved) = scope_stack.pop() {
+                        (places, left) = saved;
                     }
                 }
             }
         }
-        if let Some(denial) = judge_cmd(cmd, &ctx) {
-            return Some(denial);
+        for place in &places {
+            ctx.set_cwd(place.cwd.clone());
+            if let Some(denial) = judge_cmd(cmd, &ctx) {
+                return Some(denial);
+            }
         }
-        apply_dir_builtin(cmd, &mut ctx, &mut old_cwd, &mut dir_stack);
+        let sure = script.sure_steps.contains(&idx);
+        if is_dir_builtin(cmd) && !runs_elsewhere(cmd) {
+            let search = search.at(idx);
+            let searched = searched_dir(cmd).filter(|_| search.is_some());
+            let entries = match (&search, searched) {
+                (Some(None), Some(_)) => {
+                    return Some(Denial::new(
+                        fallback::RULE,
+                        "cannot analyse a cd that CDPATH may send to an unknown directory",
+                        "cd to ./<dir> or an absolute path, or give CDPATH a literal value",
+                    ));
+                }
+                (Some(Some(entries)), Some(_)) => entries.as_slice(),
+                _ => &[],
+            };
+            let mut moved = Vec::with_capacity(places.len());
+            for place in &places {
+                let mut next = place.clone();
+                ctx.set_cwd(next.cwd.clone());
+                apply_dir_builtin(cmd, &mut ctx, &mut next.old, &mut next.stack);
+                next.cwd = ctx.cwd.clone();
+                // For each value the search path may have, each directory
+                // the name may be found in, up to the first where it is:
+                // `cd` stops there.
+                for value in entries {
+                    for entry in value {
+                        let base = match entry.as_str() {
+                            "" => place.cwd.clone(),
+                            entry => paths::expand(entry, &place.cwd, ctx.env.home.as_deref()),
+                        };
+                        let mut found = next.clone();
+                        found.cwd = paths::normalize(&base.join(searched.unwrap_or_default()));
+                        let there = found.cwd.is_dir();
+                        moved.push(found);
+                        if there {
+                            break;
+                        }
+                    }
+                }
+                moved.push(next);
+            }
+            if sure && !redefined {
+                left.append(&mut places);
+            } else {
+                moved.splice(0..0, places);
+            }
+            places = moved;
+        }
+        if !sure {
+            places.append(&mut left);
+        }
+        places = merge(places);
+        left = merge(left);
+        if places.len() > MAX_PLACES || left.len() > MAX_PLACES {
+            return Some(Denial::new(
+                fallback::RULE,
+                "cannot analyse a command that may change directory in too many ways",
+                "split the command into separate calls, joining each cd to what follows with &&",
+            ));
+        }
     }
     None
 }
 
-/// Evaluates a full shell command line, tracking subshell scope boundaries and
-/// directory-changing builtins (`cd`, `cd -`, `pushd`, `popd`).
+/// Evaluates a full shell command line: its opaque parts, heavy commands,
+/// then every command through [`eval_script`].
 pub(crate) fn bash(command: &str, mut ctx: Ctx) -> Option<Denial> {
     let script = shell::parse(command);
     ctx.line = Line::of(&script);
@@ -402,4 +421,24 @@ pub(crate) fn bash(command: &str, mut ctx: Ctx) -> Option<Denial> {
         return Some(denial);
     }
     eval_script(&script, ctx, judge)
+}
+
+/// Drops duplicate places; when there are too many, keeps one per directory.
+fn merge(places: Vec<Place>) -> Vec<Place> {
+    let mut out: Vec<Place> = Vec::with_capacity(places.len());
+    for place in places {
+        if !out.contains(&place) {
+            out.push(place);
+        }
+    }
+    if out.len() > MAX_PLACES {
+        let mut by_dir: Vec<Place> = Vec::new();
+        for place in out {
+            if !by_dir.iter().any(|kept| kept.cwd == place.cwd) {
+                by_dir.push(place);
+            }
+        }
+        return by_dir;
+    }
+    out
 }

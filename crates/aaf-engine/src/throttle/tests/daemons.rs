@@ -282,7 +282,20 @@ fn real_ps_lists_a_process_that_looks_like_a_gradle_daemon() {
         .spawn()
         .unwrap();
     // The listing `list` reads; a `ps` that gave no answer is asked again.
-    let found = answered("daemon listing", read);
+    // Right after `exec`, macOS `ps` can show the new argv with rss 0 (seen
+    // under load, see the next test), so the listing is read again until
+    // the child has a resident page or a minute has passed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let found = loop {
+        let found = answered("daemon listing", read);
+        let resident = found
+            .iter()
+            .any(|daemon| daemon.pid == child.id() && daemon.rss_bytes > 0);
+        if resident || std::time::Instant::now() >= deadline {
+            break found;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     child.kill().unwrap();
     child.wait().unwrap();
 
@@ -292,6 +305,23 @@ fn real_ps_lists_a_process_that_looks_like_a_gradle_daemon() {
     assert!(
         mine.rss_bytes > 0 && mine.started.split(' ').count() == 5,
         "{mine:?}"
+    );
+}
+
+/// The row macOS `ps` printed for the just-started child of the test above
+/// under load (2026-11-24): the argv is already the new one, the resident
+/// size still 0. It is a daemon all the same; the pid and start time name it.
+#[test]
+fn a_daemon_listed_before_its_first_resident_page_is_kept() {
+    let listing = "27182      0 Tue Nov 24 04:26:03 2026     /bin/sh -c while :; do sleep 1; done GradleDaemon\n";
+    assert_eq!(
+        parse_daemons(listing),
+        vec![BuildDaemon {
+            pid: 27182,
+            kind: "gradle",
+            started: "Tue Nov 24 04:26:03 2026".to_string(),
+            rss_bytes: 0,
+        }]
     );
 }
 

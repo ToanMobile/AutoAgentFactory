@@ -12,6 +12,7 @@ use aaf_domain::task::{Task, TaskState};
 
 use super::audit_backend::{AuditBackend, audit_cmd_is_claude};
 use super::ports::{AccountPool, Grant};
+use super::scheduler::DEFAULT_RATE_LIMIT_COOLDOWN_SECS;
 use super::worker;
 use super::{Deps, unblock};
 use crate::cross_audit::{self, AUDIT_EXECUTOR, AuditInput, AuditReport, AuditVerdict};
@@ -149,8 +150,13 @@ fn has_status_code(lower: &str, code: &str) -> bool {
         .any(|p| lower.contains(&format!("{p}{code}")))
 }
 
+/// Reads an auditor's failed log tail for a rate limit, a refused login or a
+/// network failure. A rate limit found this way carries no reset time of its
+/// own, so it gets the default pause from `now` (the account router would
+/// otherwise cool the account down for its 5-hour unknown-reset fallback).
 fn classify_auditor_log_tail(
     tail: &str,
+    now: i64,
     infra: &mut Option<InfraFailure>,
     limit_hit: &mut Option<LimitHit>,
 ) {
@@ -190,7 +196,7 @@ fn classify_auditor_log_tail(
         .any(|c| has_status_code(&lower, c));
     if quota_hit {
         *limit_hit = Some(LimitHit {
-            reset_at: None,
+            reset_at: Some(now.saturating_add(DEFAULT_RATE_LIMIT_COOLDOWN_SECS)),
             raw,
         });
     } else if auth_hit {
@@ -248,7 +254,7 @@ pub(crate) fn run_auditor_turn(
         && infra.is_none()
         && let Some(tail) = failed_tail.as_deref()
     {
-        classify_auditor_log_tail(tail, &mut infra, &mut limit_hit);
+        classify_auditor_log_tail(tail, deps.now(), &mut infra, &mut limit_hit);
     }
 
     if succeeded
@@ -265,7 +271,7 @@ pub(crate) fn run_auditor_turn(
             let mut repair_req = run.request.clone();
             repair_req.run_id = unblock::unique_id();
             repair_req.prompt = cross_audit::prompt::build_format_repair_prompt(
-                &report.checklist,
+                input,
                 require_scores,
                 reason,
                 &final_text,
@@ -281,7 +287,8 @@ pub(crate) fn run_auditor_turn(
                     infra = Some(inf);
                 } else if !repair_out.succeeded() {
                     if !repair_out.log_tail.trim().is_empty() {
-                        classify_auditor_log_tail(&repair_out.log_tail, &mut infra, &mut limit_hit);
+                        let tail = &repair_out.log_tail;
+                        classify_auditor_log_tail(tail, deps.now(), &mut infra, &mut limit_hit);
                     }
                 } else {
                     let (visible_diff, _) = cross_audit::prompt::truncate_diff(&input.diff);

@@ -12,7 +12,8 @@ use super::daemons::{self, BuildDaemon};
 use super::heavy::{self, HeavyTool};
 use super::pools;
 use super::{
-    Ask, HeavyJob, HeavyRun, HeavySample, Progress, Throttle, orphans, stats, token, watchdog,
+    Ask, Budget, HeavyJob, HeavyRun, HeavySample, Progress, Throttle, orphans, stats, token,
+    watchdog,
 };
 use crate::gate::proc;
 
@@ -110,7 +111,7 @@ impl Throttle<'_> {
         inherited: &Inherited,
     ) -> io::Result<Option<Supervised>> {
         let Launch {
-            mut ask,
+            ask,
             tool,
             mut command,
             timeout,
@@ -120,12 +121,15 @@ impl Throttle<'_> {
         // the admission below is waiting for.
         orphans::resume_orphans(data_dir, self.control);
         let total_started = clock.now();
+        // One limit for both layers, kept to the millisecond: the Layer-2
+        // wait gets what the Layer-1 wait left of it.
+        let mut budget = Budget::new(ask.wait_limit_secs, total_started);
         // Layer 1: when `exclusive_build_tools = false` allows concurrent heavy
         // builds to share Layer-2 capacity slots by RAM, acquire correctness locks
         // (Unity pool -> Worktree lock) strictly BEFORE Layer 2 capacity slots.
         // When `exclusive_build_tools = true`, Layer-2 already serializes every
         // build tool exclusively across the machine.
-        let _correctness = if !self.machine.exclusive_build_tools {
+        let correctness = if !self.machine.exclusive_build_tools {
             let cwd_for_lock = command
                 .get_current_dir()
                 .map(Path::to_path_buf)
@@ -139,8 +143,13 @@ impl Throttle<'_> {
                 wait_limit_secs: ask.wait_limit_secs,
                 jitter_seed: self.jitter_seed,
             };
-            let Some(guard) =
-                pools::acquire_correctness(data_dir, &correctness_ask, clock, self.sleeper)?
+            let Some(guard) = pools::acquire_correctness_within(
+                data_dir,
+                &correctness_ask,
+                clock,
+                self.sleeper,
+                &mut budget,
+            )?
             else {
                 return Ok(None);
             };
@@ -148,11 +157,17 @@ impl Throttle<'_> {
         } else {
             None
         };
-        let layer1_waited = u64::try_from(clock.now() - total_started).unwrap_or(0);
-        ask.wait_limit_secs = ask
-            .wait_limit_secs
-            .map(|limit| limit.saturating_sub(layer1_waited));
-        let Some(admitted) = self.admit_ask(data_dir, clock, &ask)? else {
+        // Only a Layer-1 sleep is a wait: a second the clock turned between
+        // two readings is not one.
+        let layer1_slept = correctness
+            .as_ref()
+            .is_some_and(pools::CorrectnessGuards::waited);
+        let layer1_waited = if layer1_slept {
+            u64::try_from(clock.now() - total_started).unwrap_or(0)
+        } else {
+            0
+        };
+        let Some(admitted) = self.admit_ask_within(data_dir, clock, &ask, &mut budget)? else {
             return Ok(None);
         };
         command

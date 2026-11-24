@@ -295,6 +295,10 @@ fn verify_merged_tree(
     let merge_res = git_raw(
         &scratch.path,
         &[
+            // Never run hooks inside the scratch: a repo-relative core.hooksPath
+            // resolves to PR-controlled files that would run before the gate.
+            "-c",
+            "core.hooksPath=/dev/null",
             "-c",
             "user.name=AutoAgentFactory",
             "-c",

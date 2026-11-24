@@ -314,3 +314,79 @@ fn opt12_5_single_snapshot_per_tick_and_idle_slot_wakeup() {
         "t-wait must wake while t-slow runs"
     );
 }
+
+/// Two accounts, but the pool says a limit hit waits (not switches): the
+/// task gets its own deadline in `task_wait_until` and is parked.
+struct WaitPool(Arc<super::fakes::FakePool>);
+impl crate::factory::ports::AccountPool for WaitPool {
+    fn acquire(&self) -> PortResult<Option<crate::factory::ports::Grant>> {
+        self.0.acquire()
+    }
+    fn after_limit(&self) -> PortResult<Option<crate::unblocker::QuotaRoute>> {
+        Ok(Some(crate::unblocker::QuotaRoute::Wait))
+    }
+    fn report_limit(&self, account_id: &str, hit: &LimitHit) -> PortResult<()> {
+        self.0.report_limit(account_id, hit)
+    }
+    fn profiles(&self) -> PortResult<Vec<aaf_domain::account::AccountProfile>> {
+        self.0.profiles()
+    }
+}
+
+/// L5-1: a sibling's message that arrives after a parked task's deadline
+/// must un-park it; dropping only the deadline left it parked until the
+/// whole factory went idle.
+#[test]
+fn an_expired_wait_unparks_its_task_when_another_message_wakes_the_loop() {
+    let mut world = World::with_accounts(&["a", "b"]);
+    world.max_parallel = 2;
+    world.add("t-slow");
+    world.add("t-wait");
+    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+    struct Runner(
+        Arc<(Mutex<bool>, Condvar)>,
+        Arc<super::fakes::FakeClock>,
+        AtomicUsize,
+    );
+    impl AgentRunner for Runner {
+        fn run(&self, req: &AgentRequest) -> PortResult<AgentOutcome> {
+            if req.prompt.contains("task t-slow") {
+                let done = self.0.0.lock().unwrap();
+                let _ = self
+                    .0
+                    .1
+                    .wait_timeout_while(done, Duration::from_secs(4), |d| !*d);
+                return Ok(ok_outcome("slow"));
+            }
+            if self.2.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Ok(ok_outcome("wait"));
+            }
+            let mut out = ok_outcome("");
+            out.exit_code = Some(1);
+            out.limit_hit = Some(LimitHit {
+                reset_at: Some(1_001),
+                raw: "429".into(),
+            });
+            // Past the deadline first, then t-slow ends: its message, not
+            // the idle-slot timeout, is what wakes the loop.
+            let (clock, latch) = (self.1.clone(), self.0.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                clock.0.fetch_add(5, Ordering::SeqCst);
+                *latch.0.lock().unwrap() = true;
+                latch.1.notify_all();
+            });
+            Ok(out)
+        }
+    }
+    let mut deps = world.deps();
+    deps.accounts = Arc::new(WaitPool(world.pool.clone()));
+    deps.runner = Arc::new(Runner(pair, world.clock.clone(), AtomicUsize::new(0)));
+    let hooks = Hooks {
+        idle: &|| false,
+        reap: &|_| Ok(()),
+    };
+    let summary = run(&deps, Mode::Auto, &hooks).unwrap();
+    assert_eq!(world.state("t-wait"), TaskState::Review, "{summary:?}");
+    assert_eq!(world.state("t-slow"), TaskState::Review, "{summary:?}");
+}

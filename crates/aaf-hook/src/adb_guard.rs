@@ -172,11 +172,21 @@ pub fn remote_destructive(remote: &str) -> Option<&'static str> {
             if name == "reboot" && after.first() == Some(&"-p") {
                 return Some("reboot -p (power off)");
             }
+            // `run-as <pkg> rm …` runs in the app's own data directory: a
+            // plain relative path there is the app's data, not a device root.
+            // Only when `run-as <pkg>` is what runs `rm`, and no substitution
+            // could run an `rm` of its own.
+            let app_dir = at >= 2
+                && basename(tokens[at - 2]) == "run-as"
+                && !segment.contains("$(")
+                && !segment.contains('`');
             if name == "rm"
                 && after
                     .iter()
                     .any(|a| a.starts_with('-') && a.contains(['r', 'R']))
-                && after.iter().any(|a| is_device_root(a))
+                && after
+                    .iter()
+                    .any(|a| is_device_root(a) && !(app_dir && in_app_dir(a)))
             {
                 return Some("rm -r on a top-level device directory");
             }
@@ -185,14 +195,33 @@ pub fn remote_destructive(remote: &str) -> Option<&'static str> {
     None
 }
 
-/// `/`, `/*`, `/sdcard`, `/data/*`: at most one real path component.
+/// `/`, `/*`, `/sdcard`, `/data/*`: at most one real path component. A
+/// target the device resolves (a variable, `~`, a `..` step, or a path
+/// relative to a working directory that may be `/`) could be one too.
 fn is_device_root(target: &str) -> bool {
-    target.starts_with('/')
-        && target
-            .split('/')
-            .filter(|part| !part.is_empty() && *part != "*" && *part != ".")
-            .count()
-            <= 1
+    // An option, or a redirection the device shell applies.
+    if target.starts_with('-') || target.contains(['<', '>']) {
+        return false;
+    }
+    if !target.starts_with('/')
+        || target.contains(['$', '`', '~'])
+        || target.split('/').any(|part| part == "..")
+    {
+        return true;
+    }
+    target
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != "*" && *part != ".")
+        .count()
+        <= 1
+}
+
+/// A relative path that stays where it starts: no `..` step, variable,
+/// `~` or substitution the device would resolve.
+fn in_app_dir(target: &str) -> bool {
+    !target.starts_with(['/', '-'])
+        && !target.contains(['$', '`', '~', '<', '>'])
+        && !target.split('/').any(|part| part == "..")
 }
 
 fn serial_rule(cmd: &Cmd, call: &Call, ctx: &Ctx) -> Option<String> {

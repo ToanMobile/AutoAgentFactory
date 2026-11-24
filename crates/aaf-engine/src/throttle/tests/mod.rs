@@ -5,8 +5,10 @@
 mod admit;
 mod daemons;
 mod drain;
+mod fifo_queue;
 mod guest_window;
 mod heavy;
+mod layer1_budget;
 mod legacy;
 mod orphan_slots;
 mod orphans;

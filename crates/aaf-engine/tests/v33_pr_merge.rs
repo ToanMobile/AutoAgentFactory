@@ -156,7 +156,11 @@ require_different_provider = false
             ci_wait_secs: 0,
             lock_timeout: Duration::from_secs(10),
             dry_run,
-            machine: MachineConfig::default(),
+            // The CPU-load wait is off: the host running the tests may be busy.
+            machine: MachineConfig {
+                max_load_percent: 0,
+                ..MachineConfig::default()
+            },
         }
     }
 }
@@ -475,4 +479,53 @@ fn approval_signed_with_untracked_agent_files_still_unlocks_clean_merge() {
         }
     }
     assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a13_scratch_merge_never_runs_pr_controlled_hooks_from_relative_hooks_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new("true");
+    let marker = fx.data.path().join("pr-hook-ran");
+    let marker_s = marker.to_str().unwrap().to_string();
+    let head = fx.make_pr_branch("feat/hooked", |root| {
+        fs::write(
+            root.join("tests/basic_test.rs"),
+            "#[test] fn t() { assert_eq!(4, 4); }\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join(".githooks")).unwrap();
+        for hook in ["post-merge", "prepare-commit-msg", "post-checkout"] {
+            let p = root.join(".githooks").join(hook);
+            fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\ntouch '{marker_s}'\n\
+                     git show HEAD^1:tests/basic_test.rs > tests/basic_test.rs 2>/dev/null\n\
+                     exit 0\n"
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    });
+    // A repo-relative hooksPath (husky-style) resolves inside the scratch
+    // worktree, i.e. to files the PR itself controls.
+    git(fx.work.path(), &["config", "core.hooksPath", ".githooks"]);
+    let gh = FakeGh {
+        pr: pr_info(569, "feat/hooked", &head),
+        checks: vec![],
+        merged_calls: AtomicUsize::new(0),
+    };
+    let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
+    let out = merge_pr(&fx.req(569, &head, true), &gh, &FixedClock(50), &noop).unwrap();
+    assert!(
+        !marker.exists(),
+        "PR-controlled git hook ran inside the scratch merge worktree"
+    );
+    match out {
+        PrMergeOutcome::Blocked { code, .. } => assert_eq!(code, "cross_approval_required"),
+        other => panic!("locked test edit without approval must block, got {other:?}"),
+    }
+    assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 0);
 }

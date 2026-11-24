@@ -32,7 +32,7 @@ use crate::throttle::{Progress, SystemProbe, Throttle};
 pub use base::GateRunOptions;
 pub use hidden::HiddenPolicy;
 use hidden::When;
-pub use reuse::{config_hash, stats_repo_id};
+pub use reuse::{config_hash, repo_root_and_stats_id, stats_repo_id};
 
 /// Budget for one git call of the gate. Larger than `aaf_fp::GIT_TIMEOUT`
 /// because fingerprinting or diffing a big tree is not a ten-second job.
@@ -52,8 +52,8 @@ pub enum GateError {
     Config(String),
     #[error("no locked file is changed; there is nothing to approve")]
     NothingLocked,
-    #[error("locked files changed since preview (expected {expected}, got {actual})")]
-    LockFpMismatch { expected: String, actual: String },
+    #[error("the locked diff changed since it was shown; nothing approved")]
+    LockFpChanged,
 }
 
 fn mode_name(mode: GateMode) -> &'static str {
@@ -300,6 +300,7 @@ pub fn run_gate_with_options(
         common_repo_id: &common_repo_id,
         allow_common_cache: !cfg.proof.required,
         strict_hidden: opts.policy == HiddenPolicy::Remove || release,
+        hidden_on_disk: opts.policy == HiddenPolicy::Warn && !hidden_notes.is_empty(),
         require_independent_approval: opts.require_independent_approval,
         tree_fp: &fp_before,
         base_sha: base.sha.as_deref(),
@@ -387,6 +388,10 @@ pub fn run_gate_with_options(
         && mode == GateMode::Scoped
         && cfg.gate.docs_fast_path
         && !test_command_missing
+        && !docs_fast::commands_name_docs(
+            &[&cfg.commands.lint, &cfg.commands.test_scoped],
+            &set.changes,
+        )
         && docs_fast::is_docs_only_in_repo(
             repo_root,
             &set.changes,

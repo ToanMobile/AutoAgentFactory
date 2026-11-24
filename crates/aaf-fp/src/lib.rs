@@ -148,10 +148,12 @@ pub(crate) fn git_raw(
     };
     let mut cmd = Command::new(bin);
     // Every git command of aaf runs without auto gc (docs/PLAN.md C.8): a
-    // repack must not start inside a call that has a deadline.
+    // repack must not start inside a call that has a deadline. Nor with an
+    // fsmonitor: one named by a repository an agent created inside the work
+    // tree would run in the `git status` git starts there (`-c` reaches it).
     cmd.arg("-C")
         .arg(call.repo)
-        .args(["-c", "gc.auto=0"])
+        .args(["-c", "gc.auto=0", "-c", "core.fsmonitor=false"])
         .args(args);
     for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
         cmd.env_remove(var);

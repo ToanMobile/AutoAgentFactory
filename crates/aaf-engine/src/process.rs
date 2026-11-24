@@ -130,7 +130,7 @@ pub(crate) fn run_with_timeout(
             break None;
         }
         thread::sleep(poll.min(deadline - now));
-        poll = (poll * 2).min(Duration::from_millis(50));
+        poll = (poll * 2).min(Duration::from_millis(10));
     };
     exited.mark();
     let Some(status) = status else {

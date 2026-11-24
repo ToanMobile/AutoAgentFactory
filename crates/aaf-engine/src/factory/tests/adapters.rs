@@ -155,9 +155,9 @@ fn the_real_gate_reports_the_wait_for_a_heavy_slot_with_the_tree_it_gates() {
 
     let (reported_tree, event) = first.expect("no report while the gate waited for a slot");
     assert_eq!(reported_tree, tree.path);
-    assert!(
-        event.contains("WaitingForSlot") && event.contains("test_scoped"),
-        "{event}"
-    );
+    // The real machine probe is in use: when the host is under memory
+    // pressure the gate reports that wait first, still before the slot.
+    let waited = event.contains("WaitingForSlot") || event.contains("WaitingForMemory");
+    assert!(waited && event.contains("test_scoped"), "{event}");
     assert_eq!(receipt.unwrap().status, GateStatus::Clear);
 }

@@ -219,7 +219,7 @@ fn warn_policy_receipt_with_hidden_files_is_isolated_from_common_cache_and_stric
     cfg.commands.test_scoped = "true".to_string();
     let probe = SystemProbe::detect();
     let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
-    let machine = MachineConfig::default();
+    let machine = load_free_machine();
     let throttle = Throttle::system(&machine, &probe, &noop);
 
     let warned = run_gate_policy(
@@ -360,7 +360,7 @@ fn pr_merge_catches_force_added_gitignored_secret_and_validates_remote() {
             ci_wait_secs: 0,
             lock_timeout: Duration::from_secs(5),
             dry_run: true,
-            machine: MachineConfig::default(),
+            machine: load_free_machine(),
         };
         let err = merge_pr(&req, &gh, &FixedClock(1), &noop).unwrap_err();
         assert!(matches!(err, GitError::Invalid(_)), "{bad_remote}: {err:?}");
@@ -380,7 +380,7 @@ fn pr_merge_catches_force_added_gitignored_secret_and_validates_remote() {
         ci_wait_secs: 0,
         lock_timeout: Duration::from_secs(5),
         dry_run: false,
-        machine: MachineConfig::default(),
+        machine: load_free_machine(),
     };
     let out = merge_pr(&req, &gh, &FixedClock(2), &noop).unwrap();
     match out {
@@ -548,4 +548,13 @@ fn db_schema_v2_list_accounts_read_only_and_running_run_ids() {
     assert!(running.contains("r-run"));
     assert!(!running.contains("r-done"));
     assert_eq!(running.len(), 1);
+}
+
+/// The real machine probe with the CPU-load wait disabled, so these tests do
+/// not stall (up to `heavy_wait_secs`) when the host is busy.
+fn load_free_machine() -> MachineConfig {
+    MachineConfig {
+        max_load_percent: 0,
+        ..MachineConfig::default()
+    }
 }

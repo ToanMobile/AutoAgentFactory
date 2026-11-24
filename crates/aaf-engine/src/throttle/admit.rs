@@ -8,7 +8,7 @@ use aaf_domain::ports::Clock;
 use super::heavy::HeavyTool;
 use super::queue::{self, WaitTicket};
 use super::slots::{self, Admission, Busy, DrainGuard, MachineView};
-use super::{Admitted, Backoff, FRONT_OF_QUEUE_CAP, Pressure, Progress, Throttle, stats};
+use super::{Admitted, Backoff, Budget, FRONT_OF_QUEUE_CAP, Pressure, Progress, Throttle, stats};
 
 /// A waiting command reports at most this often while nothing changes.
 const PROGRESS_EVERY_SECS: i64 = 10;
@@ -62,14 +62,11 @@ impl Throttle<'_> {
         }
     }
 
-    /// Waits for a slot, then for the machine to calm down. Waiting for a
-    /// slot or for memory has no ceiling (every holder is bounded by its own
-    /// command timeout); waiting for CPU load ends after `heavy_wait_secs`
-    /// with `degraded` set.
-    ///
-    /// ponytail: waiters poll `try_lock` with backoff and jitter, so order is
-    /// not first come, first served; upgrade to a ticket queue when more
-    /// than 8 processes wait at once.
+    /// Waits for calm memory and CPU load, then for a slot (measured
+    /// commands queue first come, first served through a `WaitTicket`), then
+    /// re-checks memory pressure. Waiting for a slot or for memory has no
+    /// ceiling (every holder is bounded by its own command timeout); waiting
+    /// for CPU load ends after `heavy_wait_secs` with `degraded` set.
     pub fn admit(
         &self,
         data_dir: &Path,
@@ -98,13 +95,22 @@ impl Throttle<'_> {
         clock: &dyn Clock,
         ask: &Ask<'_>,
     ) -> io::Result<Option<Admitted>> {
+        let mut budget = Budget::new(ask.wait_limit_secs, clock.now());
+        self.admit_ask_within(data_dir, clock, ask, &mut budget)
+    }
+
+    /// [`Throttle::admit_ask`] spending `budget` (its limit, not
+    /// `ask.wait_limit_secs`), which an earlier wait may have spent from.
+    pub(super) fn admit_ask_within(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        ask: &Ask<'_>,
+        budget: &mut Budget,
+    ) -> io::Result<Option<Admitted>> {
         let label = ask.label;
         let started = clock.now();
         let waited = |now: i64| waited_from(started, now);
-        let expired = |now: i64| {
-            ask.wait_limit_secs
-                .is_some_and(|limit| waited(now) >= limit)
-        };
         let mut reporter = Reporter {
             last_kind: None,
             last_at: started,
@@ -112,6 +118,7 @@ impl Throttle<'_> {
         let mut free_unreadable = false;
         let mut load_wait_started: Option<i64> = None;
         let mut warned = (false, false);
+        // A second the clock turned while nothing slept is not a wait.
         let mut ever_waited = false;
 
         // Wait for a calm machine BEFORE locking any heavy slot to eliminate
@@ -181,12 +188,12 @@ impl Throttle<'_> {
                         }
                     }
                 };
-                if expired(now) {
+                if budget.expired(now) {
                     return Ok(None);
                 }
                 ever_waited = true;
                 self.report(&mut reporter, now, &event);
-                self.sleeper.sleep(calm_backoff.next_delay());
+                budget.sleep(self.sleeper, calm_backoff.next_delay());
             }
 
             // Phase B: acquire a heavy slot.
@@ -224,9 +231,8 @@ impl Throttle<'_> {
                 // queued ahead and there are not enough free slots for them plus
                 // us, take our own ticket and yield so newcomers polling at 250 ms
                 // never starve long-waiting processes.
-                let mut ahead_now = 0usize;
                 let attempt = if admission != Admission::Unmeasured {
-                    ahead_now = queue::older_waiters(data_dir, ticket.as_ref());
+                    let ahead_now = queue::older_waiters_than(data_dir, ticket.as_ref(), started);
                     if ahead_now > 0 && slots::free_slot_count(data_dir, ceiling) <= ahead_now {
                         Ok(Err(Busy::SlotsTaken))
                     } else {
@@ -267,7 +273,7 @@ impl Throttle<'_> {
                             });
                         }
                         let now = clock.now();
-                        if expired(now) {
+                        if budget.expired(now) {
                             return Ok(None);
                         }
                         if admission != Admission::Unmeasured {
@@ -298,11 +304,13 @@ impl Throttle<'_> {
                             reason,
                             waited_secs: waited(now),
                         };
-                        ever_waited = true;
                         self.report(&mut reporter, now, &event);
                         slot_waited = true;
+                        ever_waited = true;
+                        // A measured waiter queued for a slot polls like the
+                        // head of the queue: one deep in an 8 s sleep when it
+                        // reached the front left a freed slot idle that long.
                         let fast_wakeup = (admission != Admission::Unmeasured
-                            && ahead_now == 0
                             && matches!(reason, Busy::SlotsTaken | Busy::Draining))
                             || drain.is_some();
                         let delay = if fast_wakeup {
@@ -310,7 +318,7 @@ impl Throttle<'_> {
                         } else {
                             slot_backoff.next_delay()
                         };
-                        self.sleeper.sleep(delay);
+                        budget.sleep(self.sleeper, delay);
                     }
                 }
             };

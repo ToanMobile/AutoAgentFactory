@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use super::port;
 use super::store::{open_db, open_db_read_only, refuse_inside_agent_run, repo_root};
+use crate::cmd::task_ops::compute_critical_path;
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -120,7 +121,7 @@ pub fn graph(args: &GraphArgs, ctx: &Ctx) -> CmdResult {
 
     let node_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
     let topo_order = dag::topo_order(&node_ids, &edges).unwrap_or_else(|| node_ids.clone());
-    let critical_path = crate::cmd::cockpit_actions::compute_critical_path(&topo_order, &edges);
+    let critical_path = compute_critical_path(&topo_order, &edges);
     let crit_set: HashSet<&str> = critical_path.iter().map(String::as_str).collect();
 
     let cascade_candidates: Vec<Task> = tasks

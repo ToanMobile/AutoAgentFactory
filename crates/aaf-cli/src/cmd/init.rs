@@ -17,6 +17,7 @@ use aaf_engine::config::{
     LOCAL_CONFIG_REL, REPO_CONFIG_REL, detect_stack, effective_profile, render_repo_config,
 };
 use aaf_engine::executors::find_on_path;
+use aaf_engine::hook_settings::multi_host::{self, HookHostTarget};
 use serde_json::json;
 
 use crate::cmd::skills::{SkillHost, merge_outcomes};
@@ -210,8 +211,7 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
     let repo_root = ctx.repo_root()?;
 
     // Everything that can refuse is decided before the first write.
-    let hook_targets = aaf_engine::hook_settings::multi_host::parse_host_arg(&args.hook_host)
-        .map_err(CmdError::new)?;
+    let hook_targets = multi_host::parse_host_arg(&args.hook_host).map_err(CmdError::new)?;
     let (hook_path, hook_source) = resolve_hook(current_exe, &ctx.path_var).ok_or_else(|| {
         CmdError::new(format!(
             "{HOOK_BINARY} was not found next to the aaf binary or on PATH; \
@@ -245,6 +245,19 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
     let gitignore_path = repo_root.join(".gitignore");
     let new_gitignore = gitignore_with_local(read_optional(&gitignore_path)?.as_deref());
 
+    let mut host_merges = Vec::new();
+    for target in hook_targets {
+        let merge = match target {
+            HookHostTarget::Claude => continue,
+            HookHostTarget::Codex => multi_host::merge_codex_hook,
+            HookHostTarget::Gemini => multi_host::merge_gemini_hook,
+        };
+        let path = repo_root.join(target.settings_rel());
+        let (text, change) =
+            merge(read_optional(&path)?.as_deref(), &raw_hook_cmd).map_err(CmdError::new)?;
+        host_merges.push((target, path, text, change));
+    }
+
     let detected = detect_stack(&repo_root);
     let config_path = repo_root.join(REPO_CONFIG_REL);
     let config_action = match (config_path.exists(), args.force) {
@@ -268,26 +281,11 @@ pub(crate) fn init(args: &InitArgs, ctx: &Ctx, current_exe: Option<&Path>) -> Cm
     }
 
     let mut extra_hooks = Vec::new();
-    for target in &hook_targets {
-        match target {
-            aaf_engine::hook_settings::multi_host::HookHostTarget::Claude => {}
-            aaf_engine::hook_settings::multi_host::HookHostTarget::Codex => {
-                let change = aaf_engine::hook_settings::multi_host::register_codex(
-                    &repo_root,
-                    &raw_hook_cmd,
-                )
-                .map_err(CmdError::new)?;
-                extra_hooks.push((target.as_str(), target.settings_rel(), change.as_str()));
-            }
-            aaf_engine::hook_settings::multi_host::HookHostTarget::Gemini => {
-                let change = aaf_engine::hook_settings::multi_host::register_gemini(
-                    &repo_root,
-                    &raw_hook_cmd,
-                )
-                .map_err(CmdError::new)?;
-                extra_hooks.push((target.as_str(), target.settings_rel(), change.as_str()));
-            }
+    for (target, path, text, change) in &host_merges {
+        if let Some(text) = text {
+            write_file(path, text)?;
         }
+        extra_hooks.push((target.as_str(), target.settings_rel(), change.as_str()));
     }
 
     // After the writes: what git has of the file as it is now.

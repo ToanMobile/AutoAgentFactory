@@ -150,14 +150,15 @@ fn a_task_that_breaks_the_gate_goes_back_with_a_note_and_the_others_pass() {
         json!(note),
         "marker kept"
     );
-    let runs = shown["runs"].as_array().unwrap();
-    assert_eq!(runs.len(), 3, "2 impl runs + 1 T4 proposer run: {runs:?}");
-    assert_eq!(
-        runs.iter()
-            .filter(|r| r["executor"] == json!("unblock-proposer"))
-            .count(),
-        1
-    );
+    // Two agent runs, plus the T4 subtask proposer: its run is recorded too
+    // (`unblock::ProposerRecorder`, budget and history) under its own executor.
+    let executors: Vec<&str> = shown["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["executor"].as_str().unwrap())
+        .collect();
+    assert_eq!(executors, ["custom", "custom", "unblock-proposer"]);
 
     // A human looks at it and sends it back.
     assert_eq!(fx.aaf(&["board", "unblock", &bad]).code, 0);

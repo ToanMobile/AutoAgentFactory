@@ -24,8 +24,10 @@ use aaf_domain::ports::{
     AgentOutcome, AgentRequest, AgentRunner, Clock, LimitHit, PortError, PortResult, TaskStore,
 };
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
-use aaf_engine::cross_audit::build_checklist;
-use aaf_engine::cross_audit::prompt::{MAX_DIFF_BYTES, PRIOR_BEGIN, build_format_repair_prompt};
+use aaf_engine::cross_audit::prompt::{
+    DIFF_BEGIN, MAX_DIFF_BYTES, PRIOR_BEGIN, SPEC_BEGIN, build_format_repair_prompt,
+};
+use aaf_engine::cross_audit::{AuditInput, build_checklist};
 use aaf_engine::db::Db;
 use aaf_engine::factory::{
     AccountPool, AuditBackend, Deps, GateRunner, GitOps, Grant, Hooks, Integration, Mode, Notifier,
@@ -506,14 +508,29 @@ fn opt12_1_12_2_and_12_3_audit_and_diagnostics() {
         )
         .unwrap();
         if want_rev {
-            assert!(
-                sr.review == vec!["t1"] && rr.1.lock().unwrap()[1].prompt.contains(PRIOR_BEGIN)
-            );
+            // The repair turn is a true repeat of the audit: spec, diff and the
+            // fail-closed rule (not clearly "no" -> "yes"), plus the inert prior reply.
+            let repair = rr.1.lock().unwrap()[1].prompt.clone();
+            assert_eq!(sr.review, vec!["t1"]);
+            for needle in [
+                PRIOR_BEGIN,
+                SPEC_BEGIN,
+                DIFF_BEGIN,
+                "+let x = 1;",
+                "not clearly answered \"no\"",
+            ] {
+                assert!(repair.contains(needle), "repair prompt lacks {needle}");
+            }
         } else {
             assert_eq!(sr.requeued, vec!["t1"]);
         }
     }
-    let prompt = build_format_repair_prompt(&build_checklist(&spec(), false), false, "e", "p");
+    let input = AuditInput {
+        spec: spec(),
+        diff: "+let x = 1;\n".into(),
+        mobile: false,
+    };
+    let prompt = build_format_repair_prompt(&input, false, "e", "p");
     assert!(prompt.contains(PRIOR_BEGIN));
 
     // 12.3: Structured gate diagnostics injected in T3 note (ANSI-stripped, tag-neutralized).

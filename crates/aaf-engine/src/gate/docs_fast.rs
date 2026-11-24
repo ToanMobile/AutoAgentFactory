@@ -58,6 +58,18 @@ const EMBED_PATTERN: &str = concat!(
     "book[[:space:]]+test"
 );
 
+/// Extensions (lowercase) of code that can open a doc by name while a test
+/// runs (`read_to_string(format!("{}/GUIDE.md", env!("CARGO_MANIFEST_DIR")))`).
+/// Manifests, data and site configs (`Cargo.toml` `readme = "README.md"`,
+/// `package.json`, `mkdocs.yml`) name docs without running anything and are
+/// left out: with them nearly no README edit would stay fast.
+const CODE_EXTS: &[&str] = &[
+    "rs", "py", "pyi", "js", "mjs", "cjs", "ts", "mts", "cts", "tsx", "jsx", "go", "java", "kt",
+    "kts", "scala", "groovy", "gradle", "swift", "m", "mm", "c", "h", "cc", "cpp", "cxx", "hpp",
+    "cs", "fs", "vb", "rb", "php", "pl", "pm", "lua", "dart", "ex", "exs", "erl", "clj", "r", "jl",
+    "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+];
+
 /// Basenames (lowercase) that end in `.txt` or similar but affect builds,
 /// dependency resolution, or site security policies.
 const DENIED_FILENAMES: &[&str] = &["cmakelists.txt", "robots.txt", "security.txt", "humans.txt"];
@@ -314,7 +326,7 @@ fn block_embeds(block: &str, doc: &str) -> bool {
                 || has("/../\"")
                 || has("cargo_manifest_dir")))
         || (has(concat!("doc", "test")) && ext.as_deref().is_some_and(has))
-        || (has("sphinx-build") && has(concat!("doc", "test")))
+        || (has("sphinx") && has(concat!("doc", "test")))
         || has("mdbook")
         || has(concat!("doc_comment::doc", "test!"))
 }
@@ -341,240 +353,135 @@ pub fn is_docs_only_in_repo(
         .map(|ext| format!(":(exclude,icase)*.{ext}"))
         .collect();
     args.extend(excludes.iter().map(String::as_str));
-    let hits = match aaf_fp::git_or_none(repo_root, &args, timeout) {
-        Ok(Some(out)) => out,
-        Ok(None) => return Ok(true),
-        Err(_) => return Ok(false),
-    };
-    let docs: Vec<String> = changes
+    let docs = lowered_docs(changes);
+    let (code, runner) = (code_words(&docs, false), code_words(&docs, true));
+    let code_specs: Vec<String> = CODE_EXTS
+        .iter()
+        .map(|ext| format!(":(icase)*.{ext}"))
+        .collect();
+    let code_specs: Vec<&str> = code_specs.iter().map(String::as_str).collect();
+    // The scans are independent reads of the index: run them at once.
+    // A scan that fails, or a worker that panics, keeps the tests running.
+    let (embedded, named) = std::thread::scope(|scope| {
+        let named = scope.spawn(|| named_in(repo_root, &code, &code_specs, timeout));
+        let in_runner = scope.spawn(|| named_in(repo_root, &runner, RUNNER_SPECS, timeout));
+        let embedded = match aaf_fp::git_or_none(repo_root, &args, timeout) {
+            Ok(Some(hits)) => {
+                let hits = hits.to_ascii_lowercase();
+                let mut blocks = hits.split("\n--\n");
+                blocks.any(|block| docs.iter().any(|doc| block_embeds(block, doc)))
+            }
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        // Join both before combining: a `||` would leave a panicked runner
+        // scan to the scope's own join, which re-panics instead of failing
+        // closed.
+        let (in_code, in_runner) = (
+            named.join().unwrap_or(true),
+            in_runner.join().unwrap_or(true),
+        );
+        let named = in_code || in_runner;
+        (embedded, named)
+    });
+    Ok(!embedded && !named)
+}
+
+/// Runners (`Makefile`, `GNUmakefile`, `*.mk`, `justfile`, `Rakefile`,
+/// `*.rake`, `Makefile.toml`, `Taskfile.yml`) that run commands reading a doc
+/// as surely as a script does.
+const RUNNER_SPECS: &[&str] = &[
+    ":(icase)*makefile",
+    ":(icase)*.mk",
+    ":(icase)*justfile",
+    ":(icase)*rakefile",
+    ":(icase)*.rake",
+    ":(icase)*makefile.toml",
+    ":(icase)*taskfile.yml",
+    ":(icase)*taskfile.yaml",
+];
+
+/// Changed paths (old names of renames too), lowercased.
+fn lowered_docs(changes: &[Change]) -> Vec<String> {
+    changes
         .iter()
         .flat_map(|c| std::iter::once(c.path.as_str()).chain(c.old_path.as_deref()))
         .map(str::to_ascii_lowercase)
-        .collect();
-    let hits = hits.to_ascii_lowercase();
-    let mut blocks = hits.split("\n--\n");
-    Ok(!blocks.any(|block| docs.iter().any(|doc| block_embeds(block, doc))))
+        .collect()
+}
+
+/// True when a configured command (`lint`, `test_scoped`) spells a
+/// [`code_words`] word of a changed doc or one of its parent directories
+/// alone, as a whole word in any ASCII case (`! grep -rq TODO docs`,
+/// `markdownlint '**/*.md'`): run, it may read the doc (audit a13 R3-L3-2).
+pub fn commands_name_docs(commands: &[&str], changes: &[Change]) -> bool {
+    let words = code_words(&lowered_docs(changes), true);
+    let word_byte = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    commands.iter().any(|command| {
+        let command = command.to_ascii_lowercase();
+        let bytes = command.as_bytes();
+        words.iter().any(|word| {
+            command.match_indices(word.as_str()).any(|(at, _)| {
+                let before = at.checked_sub(1).and_then(|i| bytes.get(i));
+                !word_byte(before) && !word_byte(bytes.get(at + word.len()))
+            })
+        })
+    })
+}
+
+/// Words (`-w -F -i`) that a tracked code file or runner spells when a test
+/// may read a changed doc: its file name, its extension standing alone with
+/// or without the dot (`glob("*.<ext>")`, `endswith(".<ext>")`,
+/// `extension() == Some("<ext>")`, `**/*.{<ext>,x}`), and each parent
+/// directory closed by a quote or a slash (`Path("<dir>")`,
+/// `read_dir("../<dir>/")`, `<dir>/*.<ext>` in a runner) or, with
+/// `bare_dirs` (runners, commands), alone (`markdownlint <dir>`).
+///
+/// Trade-off (audit a13 R2-L3-1): one code file that spells the extension
+/// alone (a test fixture string `"*.<ext>"`, say) takes every doc of that
+/// extension in the repo off the fast path, and one that names a directory
+/// does so for every doc under it. A missed reader would let a doc edit skip
+/// the very test that reads it; a slow docs edit only costs time. The bare
+/// extension (audit a13 R3-L3-1) makes this so for any code that spells it.
+fn code_words(docs: &[String], bare_dirs: bool) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for doc in docs {
+        let mut parts = doc.rsplit('/').filter(|part| !part.is_empty());
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        words.push(name.to_string());
+        if let Some((_, ext)) = name.rsplit_once('.') {
+            words.extend([format!(".{ext}"), ext.to_string()]);
+        }
+        for dir in parts {
+            words.extend(["\"", "'", "/"].map(|end| format!("{dir}{end}")));
+            if bare_dirs {
+                words.push(dir.to_string());
+            }
+        }
+    }
+    words.sort();
+    words.dedup();
+    words
+}
+
+/// True when a tracked file under `specs` (code: [`CODE_EXTS`], or
+/// [`RUNNER_SPECS`]) spells one of `words` ([`code_words`] of the changed
+/// docs): a test may open a doc at run time, however the path is put
+/// together. A scan git cannot answer counts as named.
+fn named_in(repo_root: &Path, words: &[String], specs: &[&str], timeout: Duration) -> bool {
+    if words.is_empty() {
+        return false;
+    }
+    let mut args = vec!["grep", "-l", "-I", "-i", "-w", "-F", "--no-color"];
+    for word in words {
+        args.extend(["-e", word.as_str()]);
+    }
+    args.push("--");
+    args.extend(specs);
+    !matches!(aaf_fp::git_or_none(repo_root, &args, timeout), Ok(None))
 }
 
 #[cfg(test)]
-mod tests {
-    use aaf_domain::config::GateConfig;
-    use aaf_domain::gate::ChangeKind;
-
-    use super::*;
-
-    fn ch(kind: ChangeKind, path: &str, old: Option<&str>) -> Change {
-        Change {
-            kind,
-            path: path.to_string(),
-            old_path: old.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn docs_only_accepts_plain_markdown_and_rejects_empty_and_code() {
-        let globs = GateConfig::default().head_lock_globs;
-        assert!(!is_docs_only(&[], &globs, &[]).unwrap());
-        assert!(
-            is_docs_only(
-                &[
-                    ch(ChangeKind::Modified, "plan/Audit,Review.md", None),
-                    ch(ChangeKind::Added, "docs/notes.rst", None),
-                ],
-                &globs,
-                &[],
-            )
-            .unwrap()
-        );
-        assert!(
-            !is_docs_only(
-                &[
-                    ch(ChangeKind::Modified, "README.md", None),
-                    ch(ChangeKind::Modified, "src/main.rs", None),
-                ],
-                &globs,
-                &[],
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn docs_only_blocks_agent_config_assets_tests_requirements_and_code_renames() {
-        let globs = GateConfig::default().head_lock_globs;
-        for blocked in [
-            ch(ChangeKind::Modified, "AGENTS.md", None),
-            ch(ChangeKind::Modified, "CLAUDE.md", None),
-            ch(ChangeKind::Added, ".claude/skills/x/SKILL.md", None),
-            ch(ChangeKind::Added, "Assets/Design/note.md", None),
-            ch(ChangeKind::Modified, "app/src/main/res/raw/help.txt", None),
-            ch(ChangeKind::Modified, "tests/fixtures/expected.txt", None),
-            ch(ChangeKind::Modified, "requirements.txt", None),
-            ch(ChangeKind::Modified, "CMakeLists.txt", None),
-            ch(ChangeKind::Renamed, "docs/new.md", Some("src/Old.kt")),
-        ] {
-            assert!(
-                !is_docs_only(std::slice::from_ref(&blocked), &globs, &[]).unwrap(),
-                "must NOT take docs fast path for {blocked:?}"
-            );
-        }
-        assert!(
-            !is_docs_only(
-                &[ch(ChangeKind::Modified, "docs/critical.md", None)],
-                &globs,
-                &["docs/critical.md".to_string()],
-            )
-            .unwrap()
-        );
-    }
-
-    /// Temp repo committing `files`. Fixtures spell most macro names from
-    /// pieces or placeholders, so few lines of this source read as embeds.
-    fn repo_with(files: &[(&str, String)]) -> tempfile::TempDir {
-        let dir = tempfile::TempDir::new().unwrap();
-        for (path, body) in files {
-            let full = dir.path().join(path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(full, body).unwrap();
-        }
-        for args in [
-            &["init", "-q"][..],
-            &["add", "."],
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-qm",
-                "i",
-            ],
-        ] {
-            aaf_fp::git(dir.path(), args, &[], Duration::from_secs(30)).unwrap();
-        }
-        dir
-    }
-
-    fn in_repo(dir: &Path, path: &str) -> bool {
-        let globs = GateConfig::default().head_lock_globs;
-        let change = ch(ChangeKind::Modified, path, None);
-        is_docs_only_in_repo(dir, &[change], &globs, &[], Duration::from_secs(30)).unwrap()
-    }
-
-    #[test]
-    fn docs_in_repo_blocks_embedded_docs_and_keeps_plain_docs_fast() {
-        let (inc, dt) = (concat!("include", "_str!"), concat!("doc", "test"));
-        let repo = repo_with(&[
-            ("README.md", "# r\n".into()),
-            ("docs/guide.md", "# g\n".into()),
-            ("book/ch1.rst", "c\n".into()),
-            ("src/lib.rs", format!("#![doc = {inc}(\"../README.md\")]\n")),
-            (
-                "src/data.rs",
-                format!("const D: &str = {inc}(\"notes.txt\");\n"),
-            ),
-            ("pytest.ini", format!("addopts = --{dt}-glob=*.rst\n")),
-        ]);
-        assert!(!in_repo(repo.path(), "README.md"), "embedded via macro");
-        assert!(!in_repo(repo.path(), "book/ch1.rst"), "test glob target");
-        assert!(
-            in_repo(repo.path(), "docs/guide.md"),
-            "plain doc stays fast"
-        );
-        assert!(!in_repo(repo.path(), "templates/skills/x/SKILL.md"));
-        let not_git = tempfile::TempDir::new().unwrap();
-        assert!(!in_repo(not_git.path(), "docs/guide.md"), "fail-closed");
-    }
-
-    /// Rows: (tracked non-doc body, changed doc, may take fast path), one repo
-    /// each. `@` and `%` stand for the include-str/include-dir macros.
-    #[test]
-    fn docs_in_repo_blocks_wrapped_macro_cased_and_whole_dir_embeds() {
-        let rows = [
-            ("#![doc = @(\n    \"../docs/g.md\"\n)]", "docs/g.md", false),
-            (
-                concat!("doc_comment::doc", "test!(\n    \"../g.md\"\n);"),
-                "g.md",
-                false,
-            ),
-            (
-                "($n:literal) => { @(concat!(\"fx/\", $n)) };",
-                "docs/a.md",
-                false,
-            ),
-            ("($p:expr) => { @($p) };", "docs/a.md", false),
-            ("($p:expr) => { %($p) };", "docs/a.md", false),
-            (
-                concat!("doc", "test_glob = [\n    \"*.rst\",\n]"),
-                "book/a.rst",
-                false,
-            ),
-            (
-                concat!("sphinx-build -b doc", "test src out"),
-                "docs/a.md",
-                false,
-            ),
-            (concat!("md", "book  test"), "docs/a.md", false),
-            ("#![doc = @(\"../readme.md\")]", "README.md", false),
-            (concat!("doc", "test_glob = *.rst"), "docs/GUIDE.RST", false),
-            ("static D: Dir = %(\".\");", "README.md", false),
-            (
-                "static D: Dir = %(\"$CARGO_MANIFEST_DIR\");",
-                "docs/g.md",
-                false,
-            ),
-            ("static D: Dir = %(\"docs\");", "docs/g.md", false),
-            ("static D: Dir = %(\"./\");", "README.md", false),
-            (
-                concat!("include_", "bytes!(concat!(\"fx/\", \"b\"))"),
-                "docs/a.md",
-                false,
-            ),
-            (
-                concat!("doc_comment::doc", "test!(\n    \"../x.txt\"\n);"),
-                "g.md",
-                false,
-            ),
-            (
-                "#![doc = @(\"../README.md\")]\n\n\n\n\nfn f() {}",
-                "docs/g.md",
-                true,
-            ),
-            ("static D: Dir = %(\"web\");", "docs/g.md", true),
-            ("#![doc = @(\"../docs/other.md\")]", "docs/g.md", true),
-            ("static D: Dir = %(\"mydocs\");", "docs/g.md", true),
-        ];
-        let wrong: Vec<_> = rows
-            .iter()
-            .filter(|(body, doc, fast)| {
-                let body = body
-                    .replace('@', concat!("include_", "str!"))
-                    .replace('%', concat!("include_", "dir!"));
-                in_repo(repo_with(&[("t.cfg", body)]).path(), doc) != *fast
-            })
-            .collect();
-        assert!(wrong.is_empty(), "wrong verdict: {wrong:#?}");
-    }
-
-    #[test]
-    fn docs_in_repo_blocks_go_embed_tab_backtick_and_quoted_wildcards() {
-        let marker = concat!("//go:", "embed");
-        let rows = [
-            (format!("{marker}\tdocs\n"), "docs/g.md", false),
-            (format!("{marker} `docs`\n"), "docs/g.md", false),
-            (format!("{marker} `docs/sub`\n"), "docs/sub/g.md", false),
-            (format!("{marker}\t*\n"), "docs/g.md", false),
-            (format!("{marker} \"*\"\n"), "docs/g.md", false),
-            (format!("{marker} `*`\n"), "docs/g.md", false),
-            (format!("{marker}\tall:*\n"), "docs/g.md", false),
-            (format!("{marker} \"all:*\"\n"), "docs/g.md", false),
-            (format!("{marker} `all:*`\n"), "docs/g.md", false),
-            (format!("{marker}\tweb\n"), "docs/g.md", true),
-            (format!("{marker} `web`\n"), "docs/g.md", true),
-        ];
-        for (body, doc, fast) in rows {
-            let repo = repo_with(&[("embed.go", format!("package p\n{body}var f string\n"))]);
-            assert_eq!(in_repo(repo.path(), doc), fast, "body={body:?}, doc={doc}");
-        }
-    }
-}
+mod tests;

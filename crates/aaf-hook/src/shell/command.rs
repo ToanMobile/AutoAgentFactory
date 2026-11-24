@@ -4,7 +4,12 @@
 use std::mem;
 
 use super::decode::split_env_s;
-use super::stdin::{ShellInput, clears_env, find_execs, shell_input, split_assign, stdin_scripts};
+use super::launcher::LAUNCHERS;
+use super::options::{env_altpath, script_command, slot_payload, split_string, time_output};
+use super::stdin::{
+    ShellInput, clears_env, find_execs, names_fd, names_stdin, shell_input, split_assign,
+    stdin_scripts,
+};
 use super::{
     Cmd, DATA_CONSUMERS, Lexer, MAX_DEPTH, RESERVED, Redirect, SHELLS, Script, Tok, basename, lex,
 };
@@ -84,46 +89,54 @@ impl Lexer<'_, '_> {
         }
     }
 
-    pub(super) fn end_cmd(&mut self) {
+    /// Ends the simple command being split; returns its index in
+    /// `out.cmds` when one was stored (after any it nests, before the
+    /// heredoc bodies its substitutions defer).
+    pub(super) fn end_cmd(&mut self) -> Option<usize> {
         self.end_word();
         self.pending = None;
         let toks = mem::take(&mut self.toks);
         let redirects = mem::take(&mut self.redirects);
         let deferred = mem::take(&mut self.cmd_deferred);
 
-        let mut iter = toks.into_iter().peekable();
-        loop {
-            match iter.peek() {
-                Some(tok) if !tok.quoted && RESERVED.contains(&tok.text.as_str()) => {
-                    iter.next();
-                }
-                Some(tok) if !tok.quoted && tok.text == "function" => {
-                    iter.next();
-                    // zsh takes several names (`function a b { … }`).
-                    while let Some(name) = iter.next_if(|tok| tok.text != "{") {
-                        self.out.functions.push(name.text);
-                    }
-                }
-                _ => break,
-            }
-        }
+        let plain = self.plain_step(&toks);
+        let lead = self.keywords(&toks);
+        let mut iter = toks.into_iter().skip(lead).peekable();
         let mut assigns = Vec::new();
         while let Some(pair) = iter.peek().and_then(split_assign) {
             assigns.push(pair);
             iter.next();
         }
         let words: Vec<Tok> = iter.collect();
+        let mut stored = None;
         let name = if words.is_empty() && assigns.is_empty() && redirects.is_empty() {
             // A blank between `|` and its command keeps the feeder waiting.
             String::new()
         } else {
             let feeder = self.feeder.take();
             let feeder_idx = self.feeder_idx.take();
+            // A heredoc on the `cat <<'EOF' |` line is read at its newline,
+            // after `pipe` copied the feeder: the bodies it got since.
+            let late = match (
+                feeder.as_deref(),
+                feeder_idx.and_then(|idx| self.out.cmds.get(idx)),
+            ) {
+                (Some(copy), Some(stored)) if copy.heredocs.len() < stored.heredocs.len() => {
+                    Some((copy.clone(), stored.heredocs.clone()))
+                }
+                _ => None,
+            };
+            let from = self.out.cmds.len();
             let name = self.emit(assigns, words, redirects, feeder);
+            if let Some((copy, bodies)) = late {
+                self.give_late_bodies(from, &copy, bodies);
+            }
             // The heredocs this command reads keep its wrapper's cleared
             // environment (`env -i sh <<EOF`): their bodies are split once
             // the line ends, after `emit` restored the outer state.
             let cmd_idx = self.out.cmds.len().checked_sub(1);
+            stored = cmd_idx;
+            self.out.plain_steps.extend(cmd_idx.filter(|_| plain));
             let cleared = self.out.cmds.last().is_some_and(|cmd| cmd.env_cleared);
             for doc in self.heredocs.iter_mut().filter(|doc| doc.cleared.is_none()) {
                 doc.cleared = Some(cleared);
@@ -141,10 +154,56 @@ impl Lexer<'_, '_> {
             name
         };
         if !DATA_CONSUMERS.contains(&name.as_str()) {
+            // Only `eval` runs the text in this shell; any other consumer
+            // that runs it (`sh -c "$(cat <<'EOF' …)"`) starts a shell of
+            // its own, so a `cd` there moves nothing here.
+            let scoped = name != "eval";
             for body in deferred {
+                if scoped {
+                    self.out.enter_scope();
+                }
                 lex(&body, self.depth + 1, self.out, None);
+                if scoped {
+                    self.out.exit_scope();
+                }
             }
         }
+        stored
+    }
+
+    /// Number of leading reserved words, with what they take: `!`, `{`,
+    /// `function NAME…`, `time [-p]`, `coproc [NAME]` before a group, and
+    /// zsh's `repeat N`. A `{` after any of them still opens a group.
+    fn keywords(&mut self, toks: &[Tok]) -> usize {
+        let mut at = 0;
+        while let Some(tok) = toks.get(at).filter(|tok| !tok.quoted) {
+            at += 1;
+            match tok.text.as_str() {
+                word if RESERVED.contains(&word) => {}
+                "function" => {
+                    // zsh takes several names (`function a b { … }`).
+                    while let Some(name) = toks.get(at).filter(|tok| tok.text != "{") {
+                        self.out.functions.push(name.text.clone());
+                        at += 1;
+                    }
+                }
+                "time" => {
+                    let option = |tok: &Tok| tok.text.len() > 1 && tok.text.starts_with('-');
+                    while toks.get(at).is_some_and(option) {
+                        at += 1;
+                    }
+                }
+                "coproc" => {
+                    let group = |tok: &Tok| !tok.quoted && matches!(tok.text.as_str(), "{" | "(");
+                    if toks.get(at + 1).is_some_and(group) {
+                        at += 1;
+                    }
+                }
+                "repeat" => at += 1,
+                _ => return at - 1,
+            }
+        }
+        at.min(toks.len())
     }
 
     /// Stores the command and returns its name (empty when unknown).
@@ -152,7 +211,7 @@ impl Lexer<'_, '_> {
         &mut self,
         mut assigns: Vec<(String, String)>,
         mut words: Vec<Tok>,
-        redirects: Vec<Redirect>,
+        mut redirects: Vec<Redirect>,
         feeder: Option<Box<Cmd>>,
     ) -> String {
         let mut wrapped = Vec::new();
@@ -165,7 +224,13 @@ impl Lexer<'_, '_> {
             // '…'`) clears the environment of what a later one splits.
             self.out.env_cleared |= clears_env(&wrapped);
             let saved_assigns = assigns.len();
-            match self.wrapper_len(&words, &wrapped, &mut assigns) {
+            match self.wrapper_len(
+                &words,
+                &wrapped,
+                &mut assigns,
+                &redirects,
+                feeder.as_deref(),
+            ) {
                 Some(Wrapper::Strip(skip)) => {
                     if skip >= words.len() {
                         break;
@@ -185,6 +250,10 @@ impl Lexer<'_, '_> {
                             self.out.in_slot = true;
                         }
                         Some(first) if basename(first) == "xargs" => xargs = true,
+                        // The external `time -o <file>` writes its report there.
+                        Some(first) if matches!(basename(first), "time" | "gtime") => {
+                            redirects.extend(time_output(&words[1..skip]));
+                        }
                         _ => {}
                     }
                     wrapped.extend(words.drain(..skip).map(|tok| tok.text));
@@ -231,14 +300,30 @@ impl Lexer<'_, '_> {
                     lex(script, self.depth + 1, self.out, None);
                     self.out.exit_scope();
                 }
-                ShellInput::Stdin => {
-                    for script in stdin_scripts(&redirects, feeder.as_deref()) {
+                input @ (ShellInput::Stdin | ShellInput::Fd) => {
+                    // A here-string on `/dev/fd/N`; only fd 0 is the pipe.
+                    let fed = feeder
+                        .as_deref()
+                        .filter(|_| matches!(input, ShellInput::Stdin));
+                    for script in stdin_scripts(&redirects, fed) {
                         self.out.enter_scope_wrapped(wrapped.clone());
                         lex(&script, self.depth + 1, self.out, None);
                         self.out.exit_scope();
                     }
                 }
                 ShellInput::File => {}
+            }
+        } else if matches!(name.as_str(), "." | "source")
+            && words
+                .get(1)
+                .is_some_and(|tok| names_stdin(&tok.text) || names_fd(&tok.text))
+        {
+            // Read in this shell, like `eval`: no scope of its own.
+            let fed = feeder
+                .as_deref()
+                .filter(|_| words.get(1).is_some_and(|tok| names_stdin(&tok.text)));
+            for script in stdin_scripts(&redirects, fed) {
+                lex(&script, self.depth + 1, self.out, None);
             }
         } else if name == "eval" {
             let joined = words
@@ -280,17 +365,27 @@ impl Lexer<'_, '_> {
         words: &[Tok],
         wrapped: &[String],
         assigns: &mut Vec<(String, String)>,
+        redirects: &[Redirect],
+        feeder: Option<&Cmd>,
     ) -> Option<Wrapper> {
         let first = words.first().filter(|tok| !tok.dynamic)?;
         let name = basename(&first.text);
         if name == "aaf" {
             return slot_payload(words).map(Wrapper::Strip);
         }
+        if LAUNCHERS.contains(&name) {
+            return self
+                .launcher_len(name, words, redirects, feeder)
+                .map(Wrapper::Strip);
+        }
         // Options of each wrapper that take a separate value: the
         // single-letter ones, then the long ones. Missing one would make its
         // value the command and hide the real one behind it.
         let (valued, long_valued): (&str, &[&str]) = match name {
-            "command" | "builtin" | "nohup" | "time" | "noglob" | "setsid" => ("", &[]),
+            "command" | "builtin" | "nohup" | "noglob" | "setsid" | "nocorrect" | "-" => ("", &[]),
+            // The external `time` (GNU, BSD) and `gtime`: `-o <file>`,
+            // `-f <format>`; the keyword `time` is read in `keywords`.
+            "time" | "gtime" => ("of", &["--output", "--format"]),
             // `unbuffer` and `script` run their command on a terminal of its
             // own. `script [options] <file> [command]` (BSD), or the command
             // as the value of `-c` (util-linux).
@@ -423,68 +518,4 @@ enum Wrapper {
         step: usize,
         script: String,
     },
-}
-
-/// `aaf [--json] slot [options] -- <command>`: where the command starts, so
-/// the guards judge it like one typed bare. Without the `--` no word is
-/// known to be a command and `aaf` stays the command.
-fn slot_payload(words: &[Tok]) -> Option<usize> {
-    let sub = 1 + words
-        .iter()
-        .skip(1)
-        .position(|tok| !tok.text.starts_with('-'))?;
-    let slot = words.get(sub).filter(|tok| !tok.dynamic)?;
-    if slot.text != "slot" {
-        return None;
-    }
-    let dashes = words
-        .iter()
-        .skip(sub + 1)
-        .position(|tok| tok.text == "--")?;
-    Some(sub + dashes + 2)
-}
-
-/// For an `env` option that carries a command line (`-S`, a cluster ending
-/// in or holding `S`, `--split-string[=…]`): the part glued to it, empty
-/// when the command line is the next word.
-fn split_string(text: &str) -> Option<&str> {
-    if let Some(long) = text.strip_prefix("--split-string") {
-        return match long.strip_prefix('=') {
-            Some(glued) => Some(glued),
-            None => long.is_empty().then_some(""),
-        };
-    }
-    if !text.starts_with('-') || text.starts_with("--") {
-        return None;
-    }
-    // `u`, `C` and `P` come first when they do: `-uS` unsets a variable named S,
-    // `-P/dirS` sets the search path to `/dirS`.
-    let at = text.find(['S', 'u', 'C', 'P'])?;
-    text[at..].strip_prefix('S')
-}
-
-/// For BSD `env -P <dirs>`, `-P<dirs>`, or a cluster ending in `P` (`-iP <dirs>`):
-/// returns the glued directory, or `""` when the directory is the next word.
-fn env_altpath(text: &str) -> Option<&str> {
-    if !text.starts_with('-') || text.starts_with("--") {
-        return None;
-    }
-    let at = text.find(['P', 'u', 'C', 'S'])?;
-    text[at..].strip_prefix('P')
-}
-
-/// For util-linux `script -c <cmd>`, `-c<cmd>`, `-qc<cmd>`, or `--command[=<cmd>]`:
-/// returns the glued command, or `""` when the command is the next word.
-fn script_command(text: &str) -> Option<&str> {
-    if let Some(long) = text.strip_prefix("--command") {
-        return match long.strip_prefix('=') {
-            Some(glued) => Some(glued),
-            None => long.is_empty().then_some(""),
-        };
-    }
-    if !text.starts_with('-') || text.starts_with("--") {
-        return None;
-    }
-    let at = text.find(['c', 't', 'T', 'I', 'O', 'B', 'm', 'E', 'o'])?;
-    text[at..].strip_prefix('c')
 }

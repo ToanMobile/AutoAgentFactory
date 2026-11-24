@@ -9,10 +9,12 @@ use crate::shell::{self, Cmd};
 use crate::{Ctx, Denial, data_guard, delete_guard, git_files, paths, secret_guard};
 
 mod parse;
+mod writes;
 
 use parse::{
     Interp, classify_interpreter, extract_delimited_commands, extract_literals,
-    extract_space_call_commands, has_space_call, inline_payloads, normalize_api_haystack,
+    extract_space_call_commands, has_space_call, inline_payloads, interp_spec,
+    normalize_api_haystack,
 };
 
 pub const RULE: &str = "interp_guard";
@@ -20,6 +22,81 @@ pub const RULE: &str = "interp_guard";
 /// True when `name` is a supported interpreter (including versioned forms like `python3.12`).
 pub(crate) fn is_interpreter(name: &str) -> bool {
     classify_interpreter(name).is_some()
+}
+
+/// A `perl -e`/`-E` script among `args` opens a file for writing (or
+/// `sysopen`s one): it does not only read the files it is handed.
+pub(crate) fn perl_inline_writes(args: &[String]) -> bool {
+    inline_payloads(Interp::Perl, args)
+        .iter()
+        .any(|code| writes::writes_files(code))
+}
+
+/// Options that name the program another way than standard input: Python's
+/// `-m module`, PHP's `-f file` / `-F file`.
+fn names_program(interp: Interp, flag: &str) -> bool {
+    match interp {
+        Interp::Python => flag == "m",
+        Interp::Php => matches!(flag, "f" | "F" | "file" | "process-file"),
+        _ => false,
+    }
+}
+
+/// The interpreter `cmd` runs reads its program from standard input: no
+/// inline code, no module or script file, or the script named `-`. Only
+/// then is a quoted heredoc on it the program and not data a program could
+/// hand to a shell (`perl -e 'exec "sh"' <<'EOF'`).
+pub(crate) fn reads_program_from_stdin(cmd: &Cmd) -> bool {
+    let Some(interp) = classify_interpreter(cmd.name()) else {
+        return false;
+    };
+    let args = cmd.args();
+    if cmd.dynamic_name || !inline_payloads(interp, args).is_empty() {
+        return false;
+    }
+    let spec = interp_spec(interp);
+    let mut i = 0;
+    while let Some(arg) = args.get(i).map(String::as_str) {
+        if arg == "--" {
+            return args.get(i + 1).is_none_or(|op| op == "-");
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let (flag, glued) = long
+                .split_once('=')
+                .map_or((long, None), |(f, v)| (f, Some(v)));
+            if names_program(interp, flag) {
+                return false;
+            }
+            i += if glued.is_none() && spec.other_valued_long.contains(&flag) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            let mut step = 1;
+            for (at, c) in arg.char_indices().skip(1) {
+                let mut buf = [0; 4];
+                if names_program(interp, c.encode_utf8(&mut buf)) {
+                    return false;
+                }
+                if spec.other_valued_short.contains(c) {
+                    if at + c.len_utf8() == arg.len() {
+                        step = 2;
+                    }
+                    break;
+                }
+                if spec.attached_only_short.contains(c) {
+                    break;
+                }
+            }
+            i += step;
+            continue;
+        }
+        return arg == "-";
+    }
+    true
 }
 
 fn deny(reason: String, fix: &str) -> Denial {
@@ -177,6 +254,15 @@ fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> 
         .join("\n");
     let api_haystack = normalize_api_haystack(&active, interp_kind == Interp::Php);
     let literals = extract_literals(&active);
+
+    // 0. The data directory, named anywhere in the script (a heredoc body
+    // is not among the command's words that `data_dir_guard` reads).
+    if let Some(d) = data_guard::check_text(interp, &active, ctx) {
+        return Some(d);
+    }
+    if let Some(d) = writes::check_written(interp, &active, ctx) {
+        return Some(d);
+    }
 
     // 1. Check recursive delete APIs (`shutil.rmtree`, `fs.rmSync`, `FileUtils.rm_rf`, ...).
     if has_any(&api_haystack, RMTREE_APIS) {
