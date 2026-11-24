@@ -516,12 +516,26 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
             opts,
         )
         .unwrap();
-        assert_eq!(
-            run.receipt.status,
-            GateStatus::Clear,
-            "reasons: {:?}",
-            run.receipt.reasons
-        );
+        if run.receipt.status != GateStatus::Clear {
+            // Diagnostic for a Linux-only "tree changed during gate": show
+            // what the gate's commands left in the work tree.
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args([
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    "--ignored",
+                ])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            panic!(
+                "status {:?}, reasons: {:?}\nwork tree:\n{status}",
+                run.receipt.status, run.receipt.reasons
+            );
+        }
         assert!(
             run.receipt
                 .reasons
