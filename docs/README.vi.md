@@ -188,7 +188,9 @@ Chưa nghiệm thu thật, mới có test trên fixture hoặc đồ giả:
 - `aaf run --auto`, gom lô gate nhiều task, và cross-audit với agent thật.
 - Linux: `aaf run` chưa bọc agent bằng bubblewrap (`bwrap`) (đang chờ tích hợp) nên luôn từ chối (exit 2) cho tới khi truyền `--unsandboxed`, kể cả khi có `bwrap` hoặc đang trong container cứng hoá (`packaging/docker/`); `aaf doctor` chỉ báo `bwrap`/container như thông tin. Việc chạy thật `bwrap`/Docker và đường đo tải qua `/proc` trên máy Linux thật vẫn cần người vận hành xác minh thực địa.
 
-Chưa có (đừng tìm): adapter hook riêng cho agent ngoài Claude Code, Codex CLI và Gemini CLI (Antigravity, OpenCode chưa có adapter hook); lệnh mặc định cho iOS, React Native, Expo, Web, Python và cho Unity không có test EditMode; thứ gì tự chạy `commands.repro`.
+Chưa có (đừng tìm): adapter hook riêng cho agent ngoài Claude Code, Codex CLI và Gemini CLI (Antigravity, OpenCode chưa có adapter hook); lệnh gate mặc định cho iOS `.xcodeproj`, build Flutter, dự án Python không có `pyproject.toml`, và Unity không có test EditMode. Web, React Native và Expo lấy lệnh từ script trong `package.json`: test watch-mode như `jest --watchAll` của Expo được đổi thành `npx jest --ci`, còn dự án khai TypeScript có `npx tsc --noEmit` làm lint. `pyproject.toml` có pytest, ruff, mypy, chạy qua `uv`/`poetry`/`pdm` nếu có lockfile. Không có gì tự chạy `commands.repro` (chủ ý chỉ chạy tay).
+
+Chạy không người trực (24/7): `scripts/aaf-supervise.sh <repo>` giữ cho factory chạy ở chế độ auto. Nó khởi động lại sau crash, halt hay khởi động lại máy, có back-off. Khi factory frozen thì nó chờ `aaf board unfreeze` thay vì restart lặp, và dùng `caffeinate` chống ngủ máy trên macOS. Mẫu tự khởi động nằm ở `packaging/launchd/` và `packaging/systemd/`. `aaf notify` đẩy webhook hoặc Telegram khi factory frozen, khi task bị Blocked và khi task chờ Review.
 
 ## Bổ sung hệ sinh thái v3 (`lane/v3-ecosystem`)
 

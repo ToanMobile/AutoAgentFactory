@@ -593,6 +593,7 @@ How `[cross_audit]` merges:
 | **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
 | **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
 | **`v3.4`** `aaf telegram` | Zero-port outbound Telegram companion for status, handover, and opt-in two-step `/confirm` approvals (**human only**) | `--once`, `--all`, `--repo <path>`, `--send-test` |
+| `aaf notify` | Push "needs you" moments (factory frozen, task blocked, ready for review) to the webhook / Telegram, once each | `--once`, `--all`, `--repo <path>`, `--interval <s>`, `--dry-run` |
 | **`v3.5`** `aaf sop` | Declarative TOML SOP workflows (list, show, init, validate, runs, run/resume, approve, send-back) | `list`, `show`, `init`, `validate`, `runs`, `run`, `approve`, `send-back` |
 | **`v3.5`** `aaf executors` | 10-CLI inventory, fallback resolution preview, reusable role profiles, and read-only `.mcp.json` secret audit | `list`, `resolve`, `roles`, `mcp` |
 | **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
@@ -1045,7 +1046,14 @@ If `--timeout` expires while the command is still waiting, `aaf slot` exits **75
 - If no PR can be opened (no `gh`, a remote that is not GitHub, no network), the task still moves to Review. Its branch and signed receipt are kept for you.
 - With `--auto-merge`, the merge queue pushes a fast-forward to the remote when the repository has one. It never force-pushes.
 
-**Notifications (main).** Set `[notifications] webhook_url` in tier 1 to receive a JSON POST whenever a task moves to Blocked.
+**Notifications (main).** Set `[notifications] webhook_url` in tier 1 to receive a JSON POST whenever a task moves to Blocked. `aaf notify` (keep it running, or `--once`) also pushes the other moments that need you: the factory froze, and a task is ready for review. It sends to the webhook and to Telegram when `[telegram]` is enabled (Telegram gets Blocked as well). It tails the event log from a cursor in `<data_dir>/notify/`, so each moment is sent once, history is never replayed, and a failed send is retried on the next pass. `--dry-run` prints what would be sent.
+
+**Running unattended (24/7).** `scripts/aaf-supervise.sh <repo>` keeps the factory running in auto mode for one repository. It restarts it after a crash, a halt or a reboot, with back-off. It waits out a frozen factory, polling until `aaf board unfreeze`, instead of restarting it in a loop. On macOS it keeps the machine awake with `caffeinate`. Templates to start it at login:
+
+- macOS: `packaging/launchd/com.autofactory.run.plist` (one per repository) and `com.autofactory.notify.plist`.
+- Linux: `packaging/systemd/aaf-run@.service` and `aaf-notify.service`.
+
+`--detach` keeps the previous run's log as `<repo_id>.detached.log.1`. Without a person, a change to a head-locked file other than a test lands only with an independent auditor: set `[cross_audit] executor` to another provider you are logged in to. `auto` picks one that is installed with a config dir, but it does not check the login, and an auditor that cannot authenticate keeps the task waiting. Merging without review stays opt-in (`auto_merge = true`).
 
 **GitHub issues and Projects v2 (`v3`):**
 
@@ -1159,11 +1167,12 @@ What has been tested against real tools, and what has not, is tracked in the **T
   - the hook inside real Claude Code sessions, `aaf gate` on real app repositories, a real Gradle unit-test run through the queue, `aaf accounts`, `aaf doctor`, and one real task taken through `aaf run` to Review.
 - **Covered by unit, integration, and fixture/stand-in tests (operator-side verification required when targeting external repos):**
   - live Xcode builds *inside* Seatbelt, `SIGSTOP`/`SIGCONT` under real critical memory pressure, and mutating remote GitHub PR creation / Projects v2 writes / live `mobile-mcp` device proofs;
-  - account switching on a live provider rate limit, `aaf run --auto`, batched gating, and cross-audit with live multi-provider agents;
+  - account switching on a live provider rate limit, batched gating, and cross-audit with live multi-provider agents;
+  - `aaf run --auto` with a stand-in agent through the real binary: it picks up tasks added while it runs, and a run killed mid-task is reaped and finished by the next one (`crates/aaf-cli/tests/factory_auto.rs`); not yet with a live provider;
   - Linux `bwrap` / Docker execution on a real Linux host.
 - **Not available:**
-  - default gate commands for iOS, React Native, Expo, web, Python, and Unity without EditMode tests;
-  - anything that runs `commands.repro`.
+  - default gate commands for iOS `.xcodeproj` projects, Flutter builds, Python projects without `pyproject.toml`, and Unity without EditMode tests. Web, React Native and Expo get them from `package.json` scripts: a watch-mode test such as Expo's `jest --watchAll` becomes `npx jest --ci`, and declared TypeScript gets `npx tsc --noEmit` as lint. `pyproject.toml` projects get pytest, ruff and mypy, run through `uv`, `poetry` or `pdm` when there is a lock file;
+  - anything that runs `commands.repro` automatically (it is manual by design).
 
 ---
 
