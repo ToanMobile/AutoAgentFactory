@@ -354,11 +354,15 @@ impl<'a> Watchdog<'a> {
 
     fn resume(&mut self, pgid: u32) {
         // A failed SIGCONT leaves the group stopped; keep reporting it paused
-        // so the next sample tries again and no timeout is charged.
-        if self.control.resume(pgid) {
-            if !self.tracked.is_empty() {
-                let _ = self.control.signal_members("-CONT", &self.tracked);
-            }
+        // so the next sample tries again and no timeout is charged. The
+        // tracked members are continued either way: helpers in groups of
+        // their own were stopped by pid, and a group that is gone (ESRCH)
+        // would otherwise leave them frozen for good.
+        let resumed = self.control.resume(pgid);
+        if !self.tracked.is_empty() {
+            let _ = self.control.signal_members("-CONT", &self.tracked);
+        }
+        if resumed {
             self.paused = false;
             if let Some(record) = self.record.take() {
                 record.clear();
