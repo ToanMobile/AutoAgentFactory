@@ -516,7 +516,12 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
             opts,
         )
         .unwrap();
-        assert_eq!(run.receipt.status, GateStatus::Clear);
+        assert_eq!(
+            run.receipt.status,
+            GateStatus::Clear,
+            "reasons: {:?}",
+            run.receipt.reasons
+        );
         assert!(
             run.receipt
                 .reasons
