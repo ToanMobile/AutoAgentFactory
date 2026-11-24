@@ -222,14 +222,19 @@ impl AgentRunner for ClaudeCodeRunner {
         )?;
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         let summary = guard.0.summary();
+        let exit_code = if summary.is_error && output.exit_code == Some(0) {
+            Some(1)
+        } else {
+            output.exit_code
+        };
         guard.1.write_claude_finish(
-            output.exit_code,
+            exit_code,
             output.timed_out,
             summary.tokens_in,
             summary.tokens_out,
         );
         Ok(AgentOutcome {
-            exit_code: output.exit_code,
+            exit_code,
             timed_out: output.timed_out,
             final_text: summary.final_text,
             tokens_in: summary.tokens_in,

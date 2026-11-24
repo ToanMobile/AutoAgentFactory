@@ -372,9 +372,8 @@ fn show(id: &str, ctx: &Ctx) -> CmdResult {
     }
     for event in &events {
         text.push(format!(
-            "  event {} {}",
-            event.kind.as_str(),
-            event.payload_json
+            "  event {}",
+            aaf_engine::telemetry::summarize_event_one_line(event.kind, &event.payload_json)
         ));
     }
 

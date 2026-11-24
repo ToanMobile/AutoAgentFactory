@@ -9,7 +9,7 @@ use aaf_domain::config::{
 };
 use aaf_domain::pipeline::{
     GlobalPipelineConfig, GlobalUnblockerConfig, MAX_PLAN_ROUNDS_CAP, StageModelConfig,
-    distinct_real_canonical_providers, validate_reviewers,
+    distinct_real_reviewer_providers, validate_reviewers,
 };
 use serde::Deserialize;
 
@@ -292,10 +292,8 @@ pub(crate) fn merge_cross_audit_dual(
     if repo.reviewers.is_empty() {
         repo.reviewers = global.reviewers.clone();
     } else if global.dual_review == Some(true) {
-        let repo_distinct =
-            distinct_real_canonical_providers(repo.reviewers.iter().map(|r| r.executor.as_str()));
-        let global_distinct =
-            distinct_real_canonical_providers(global.reviewers.iter().map(|r| r.executor.as_str()));
+        let repo_distinct = distinct_real_reviewer_providers(&repo.reviewers);
+        let global_distinct = distinct_real_reviewer_providers(&global.reviewers);
         if repo_distinct < 2 && global_distinct >= 2 {
             warnings.push(format!(
                 "cross_audit.reviewers ignored: only {repo_distinct} distinct real canonical \

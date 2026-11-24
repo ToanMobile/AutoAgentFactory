@@ -4,7 +4,6 @@
 
 use std::path::Path;
 
-use aaf_domain::account::ProviderKind;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{AgentRequest, Clock, EventSink, PortError, TaskStore};
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
@@ -116,7 +115,7 @@ pub fn run(args: &PlanArgs, ctx: &Ctx) -> CmdResult {
     let (grant, pool_opt, all_profiles) =
         acquire_stage_account(ctx, &repo, &cfg, effective_exec, &run_id).map_err(CmdError::new)?;
 
-    let provider = provider_for(effective_exec).unwrap_or(ProviderKind::ClaudeCode);
+    let provider = provider_for(effective_exec);
     let own_account = grant.as_ref().and_then(|g| g.account.as_ref());
     let mut sandbox = sandbox_policy_for(
         true,

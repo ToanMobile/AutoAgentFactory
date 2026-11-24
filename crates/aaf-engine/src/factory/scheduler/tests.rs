@@ -15,7 +15,7 @@ use aaf_domain::ports::{
 };
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 
-use super::{Deps, Hooks, LoopState, Mode, RunSummary, Scheduler, run};
+use super::{Deps, Hooks, LoopState, Mode, ProviderKey, RunSummary, Scheduler, run};
 use crate::cross_audit::build_checklist;
 use crate::db::Db;
 use crate::factory::Settings;
@@ -477,42 +477,89 @@ fn expire_waits_clears_restarts_when_cooldown_elapses() {
     };
     let (msg_tx, msg_rx) = mpsc::channel();
     let (gate_tx, _gate_rx) = mpsc::channel();
+    let work = ProviderKey::from_executor("claude");
     let mut scheduler = Scheduler {
         deps: &deps,
         audit: None,
+        router: None,
         mode: Mode::Auto,
         msg_tx,
         msg_rx,
         gate_tx,
-        parked: HashSet::from(["t1".to_string(), "t2".to_string()]),
+        parked: HashMap::from([
+            ("t1".to_string(), work.clone()),
+            ("t2".to_string(), work.clone()),
+        ]),
         gating_in_flight: HashSet::new(),
         state: LoopState::default(),
         summary: RunSummary::default(),
     };
-    scheduler.state.restarts.insert("t1".to_string(), 2);
-    scheduler.state.restarts.insert("t2".to_string(), 2);
+    scheduler
+        .state
+        .restarts
+        .insert(("t1".to_string(), work.clone()), 2);
+    scheduler
+        .state
+        .restarts
+        .insert(("t2".to_string(), work.clone()), 2);
     scheduler
         .state
         .task_wait_until
         .insert("t1".to_string(), 1_050);
-    scheduler.state.work_default_wait_until = Some(1_100);
+    scheduler
+        .state
+        .default_wait_until
+        .insert(work.clone(), 1_100);
 
     clock.0.store(1_049, Ordering::SeqCst);
     scheduler.expire_waits();
-    assert_eq!(scheduler.state.restarts.get("t1"), Some(&2));
-    assert_eq!(scheduler.state.restarts.get("t2"), Some(&2));
-    assert!(scheduler.parked.contains("t1"));
+    assert_eq!(
+        scheduler
+            .state
+            .restarts
+            .get(&("t1".to_string(), work.clone())),
+        Some(&2)
+    );
+    assert_eq!(
+        scheduler
+            .state
+            .restarts
+            .get(&("t2".to_string(), work.clone())),
+        Some(&2)
+    );
+    assert!(scheduler.parked.contains_key("t1"));
 
     clock.0.store(1_050, Ordering::SeqCst);
     scheduler.expire_waits();
-    assert_eq!(scheduler.state.restarts.get("t1"), None);
-    assert!(!scheduler.parked.contains("t1"));
+    assert_eq!(
+        scheduler
+            .state
+            .restarts
+            .get(&("t1".to_string(), work.clone())),
+        None
+    );
+    assert!(!scheduler.parked.contains_key("t1"));
     assert!(!scheduler.state.task_wait_until.contains_key("t1"));
-    assert_eq!(scheduler.state.restarts.get("t2"), Some(&2));
+    assert_eq!(
+        scheduler
+            .state
+            .restarts
+            .get(&("t2".to_string(), work.clone())),
+        Some(&2)
+    );
 
     clock.0.store(1_100, Ordering::SeqCst);
     scheduler.expire_waits();
-    assert_eq!(scheduler.state.restarts.get("t2"), None);
+    assert_eq!(
+        scheduler
+            .state
+            .restarts
+            .get(&("t2".to_string(), work.clone())),
+        None
+    );
     assert!(scheduler.parked.is_empty());
-    assert_eq!(scheduler.state.work_default_wait_until, None);
+    assert!(!scheduler.state.default_wait_until.contains_key(&work));
 }
+
+#[path = "tests_park.rs"]
+mod park;

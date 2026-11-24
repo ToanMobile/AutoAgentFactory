@@ -8,16 +8,21 @@ use std::path::PathBuf;
 
 use aaf_domain::account::ProviderKind;
 use aaf_domain::ports::{
-    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, InfraKind, LimitHit, PortError,
-    PortResult,
+    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, LimitHit, PortError, PortResult,
 };
 use serde_json::{Map, Value};
 
 use super::pty::{CommandSpec, GENERIC_TAIL_BYTES};
+#[cfg(not(target_os = "linux"))]
 use super::sandbox;
 use super::{AccountPaths, ExecEnv, find_on_path, open_stream_log, run_confined_with_tail};
 
 const RAW_LIMIT_CHARS: usize = 500;
+
+#[path = "agy_classify.rs"]
+mod classify;
+use classify::classify_text_failure;
+
 /// Safe upper bound on a single argv element on Linux (`MAX_ARG_STRLEN` = 128 KiB).
 pub const LINUX_MAX_PROMPT_BYTES: usize = 100_000;
 const VALID_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -56,18 +61,12 @@ pub const AGY_RUNTIME_WRITABLE_SUBDIRS: &[&str] = &[
     "antigravity/tmp",
 ];
 
-const SQLITE_DB_FILES: [&str; 4] = [
-    "antigravity/conversation_summaries.db",
-    "antigravity/conversation_summaries.db-wal",
-    "antigravity/conversation_summaries.db-shm",
-    "antigravity/conversation_summaries.db-journal",
-];
-
 /// Returns absolute write-denied paths for every entry in [`GEMINI_CONFIG_CLOSED`].
 pub fn closed_entries(gemini_root: &str) -> Vec<String> {
+    let root = gemini_root.trim_end_matches('/');
     GEMINI_CONFIG_CLOSED
         .iter()
-        .map(|entry| format!("{gemini_root}/{entry}"))
+        .map(|entry| format!("{root}/{entry}"))
         .collect()
 }
 
@@ -200,14 +199,16 @@ impl AgyRunner {
             .or_else(|| {
                 self.env
                     .home
-                    .as_ref()
+                    .as_deref()
+                    .filter(|h| !h.trim().is_empty())
                     .map(|h| PathBuf::from(h).join(".gemini"))
             });
         let Some(root) = gemini_root else {
             return Ok(AccountPaths::default());
         };
         let root_str = root.to_string_lossy().into_owned();
-        let mut writable = Vec::with_capacity(AGY_RUNTIME_WRITABLE_SUBDIRS.len());
+        let ag_dir = root.join("antigravity");
+        let mut writable = Vec::with_capacity(AGY_RUNTIME_WRITABLE_SUBDIRS.len() + 4);
         for rel in AGY_RUNTIME_WRITABLE_SUBDIRS {
             let dir = root.join(rel);
             if request.sandbox.enabled {
@@ -217,26 +218,58 @@ impl AgyRunner {
             }
             writable.push(dir.to_string_lossy().into_owned());
         }
-        if cfg!(target_os = "linux") {
-            for rel in SQLITE_DB_FILES {
-                let p = root.join(rel);
-                if p.exists() {
-                    writable.push(p.to_string_lossy().into_owned());
+        #[cfg(target_os = "linux")]
+        let writable_regex = {
+            const DB_FILES: [&str; 4] = [
+                "conversation_summaries.db",
+                "conversation_summaries.db-wal",
+                "conversation_summaries.db-shm",
+                "conversation_summaries.db-journal",
+            ];
+            if request.sandbox.enabled {
+                std::fs::create_dir_all(&ag_dir).map_err(|err| {
+                    PortError::Io(format!("create agy dir {}: {err}", ag_dir.display()))
+                })?;
+                let db_path = ag_dir.join(DB_FILES[0]);
+                match std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&db_path)
+                {
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) => {
+                        return Err(PortError::Io(format!(
+                            "create agy db file {}: {err}",
+                            db_path.display()
+                        )));
+                    }
                 }
             }
-        }
-        let canon = sandbox::canonical(&root_str)?;
-        let canon_str = canon.to_str().ok_or_else(|| {
-            PortError::Invalid(format!("gemini path is not UTF-8: {}", canon.display()))
-        })?;
-        let db_regex = format!(
-            "^{}/antigravity/conversation_summaries\\.db(-wal|-shm|-journal)?$",
-            sandbox::regex_escape(canon_str)
-        );
+            for name in DB_FILES {
+                let path = ag_dir.join(name);
+                if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+                    writable.push(path.to_string_lossy().into_owned());
+                }
+            }
+            Vec::new()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let writable_regex = {
+            let ag_str = ag_dir.to_string_lossy();
+            let canon_ag = sandbox::canonical(&ag_str)?;
+            let canon_ag_str = canon_ag.to_str().ok_or_else(|| {
+                PortError::Invalid(format!("gemini path is not UTF-8: {}", canon_ag.display()))
+            })?;
+            vec![format!(
+                "^{}/conversation_summaries\\.db(-wal|-shm|-journal)?$",
+                sandbox::regex_escape(canon_ag_str)
+            )]
+        };
         Ok(AccountPaths {
             writable,
             write_denied: closed_entries(&root_str),
-            writable_regex: vec![db_regex],
+            writable_regex,
         })
     }
 }
@@ -254,21 +287,30 @@ impl AgentRunner for AgyRunner {
         let out =
             run_confined_with_tail(spec, request, &self.env, account, None, GENERIC_TAIL_BYTES)?;
         let mut parsed = parse_agy_output(&out.tail, expect_structured);
-        if out.exit_code != Some(0) && parsed.limit_hit.is_none() && parsed.infra.is_none() {
+        let should_scan_tail =
+            !parsed.usage_present || parsed.is_error || parsed.final_text.is_empty();
+        if out.exit_code != Some(0)
+            && parsed.limit_hit.is_none()
+            && parsed.infra.is_none()
+            && should_scan_tail
+        {
             let (limit, infra) = classify_text_failure(None, &strip_ansi(&out.tail));
             parsed.limit_hit = limit;
             parsed.infra = infra;
         }
-        let exit = out
-            .exit_code
-            .map_or_else(|| "signal".to_string(), |c| c.to_string());
+        let exit_code = if parsed.is_error && out.exit_code == Some(0) {
+            Some(1)
+        } else {
+            out.exit_code
+        };
+        let exit = exit_code.map_or_else(|| "signal".to_string(), |c| c.to_string());
         let finish = format!(
             "exit={exit} timed_out={} tokens_in={} tokens_out={}",
             out.timed_out, parsed.tokens_in, parsed.tokens_out
         );
         log.write_event("finish", Some("antigravity"), Some(&finish));
         Ok(AgentOutcome {
-            exit_code: out.exit_code,
+            exit_code,
             timed_out: out.timed_out,
             final_text: parsed.final_text,
             tokens_in: parsed.tokens_in,
@@ -334,6 +376,10 @@ pub fn parse_agy_output(stdout: &str, expect_structured: bool) -> AgyParsed {
         .and_then(Value::as_bool)
         .unwrap_or(false)
         || obj.get("error").is_some_and(|e| !e.is_null())
+        || obj
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case("error"))
         || obj.get("subtype").and_then(Value::as_str)
             == Some("error_max_structured_output_retries");
     let (limit_hit, infra) = if is_error {
@@ -418,88 +464,6 @@ fn extract_error_details(obj: &Map<String, Value>, fallback: &str) -> (Option<i6
         parts.join(" ")
     };
     (status, detail)
-}
-
-fn any_needle(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| haystack.contains(n))
-}
-
-fn classify_text_failure(
-    status: Option<i64>,
-    text: &str,
-) -> (Option<LimitHit>, Option<InfraFailure>) {
-    const LIMIT: &[&str] = &[
-        "resource_exhausted",
-        "rate limit",
-        "rate_limit",
-        "quota",
-        "too many requests",
-        "http 429",
-        "status 429",
-        "429 ",
-    ];
-    const AUTH: &[&str] = &[
-        "unauthenticated",
-        "unauthorized",
-        "authentication failed",
-        "authentication_error",
-        "login required",
-        "not logged in",
-        "invalid credentials",
-        "invalid_grant",
-        "permission_denied",
-        "http 401",
-        "http 403",
-    ];
-    const NET: &[&str] = &[
-        "connection refused",
-        "connection reset",
-        "econnrefused",
-        "econnreset",
-        "no such host",
-        "dns",
-        "could not resolve host",
-        "network unreachable",
-        "tls handshake",
-        "dial tcp",
-        "timed out",
-        "timeout",
-        "bad gateway",
-        "service unavailable",
-        "http 502",
-        "http 503",
-        "http 504",
-    ];
-    let lower = text.to_ascii_lowercase();
-    let raw: String = text.chars().take(RAW_LIMIT_CHARS).collect();
-    if status == Some(429) || any_needle(&lower, LIMIT) {
-        return (
-            Some(LimitHit {
-                reset_at: None,
-                raw,
-            }),
-            None,
-        );
-    }
-    if matches!(status, Some(401 | 403)) || any_needle(&lower, AUTH) {
-        return (
-            None,
-            Some(InfraFailure {
-                kind: InfraKind::Auth,
-                raw,
-            }),
-        );
-    }
-    if matches!(status, Some(500..=599)) || any_needle(&lower, NET) {
-        return (
-            None,
-            Some(InfraFailure {
-                kind: InfraKind::Network,
-                raw,
-            }),
-        );
-    }
-    (None, None)
 }
 
 fn strip_ansi(input: &str) -> String {

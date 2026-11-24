@@ -1,7 +1,9 @@
 //! Filtering of unverified / evidenceless cross-audit findings before they
 //! reach author-facing rework notes or rejection summaries.
 
-use crate::cross_audit::{AuditVerdict, Finding};
+use aaf_domain::pipeline::ReviewIssue;
+
+use crate::cross_audit::{AuditVerdict, Finding, extract_citations, has_file_line_reference};
 
 const LEAD_WRAP: &[char] = &['(', '[', '{', '`', '\'', '"', '<'];
 const TRAIL_WRAP: &[char] = &[')', ']', '}', ',', ';', '`', '\'', '"', '>', '.'];
@@ -12,6 +14,7 @@ const EXTENSIONLESS_FILES: &[&str] = &[
     "GNUmakefile",
     "Dockerfile",
     "Containerfile",
+    "Jenkinsfile",
     "Justfile",
     "justfile",
     "Procfile",
@@ -21,6 +24,9 @@ const EXTENSIONLESS_FILES: &[&str] = &[
     "gradlew",
     "BUILD",
     "WORKSPACE",
+    "LICENSE",
+    "README",
+    "CHANGELOG",
 ];
 
 fn is_domain_tld(ext: &str) -> bool {
@@ -67,8 +73,12 @@ fn is_valid_path_token(path: &str) -> bool {
 /// True when `evidence` cites at least one concrete `path:line` token
 /// (excluding URLs, `host.tld:port`, timestamps like `12:30`, bare words like
 /// `note:1`, version strings like `v1.2:3`, or `:0`).
+///
+/// Unifies whitespace-token checks with [`crate::cross_audit::has_file_line_reference`]
+/// so normalized `<path>:1` omission citations, `#L` anchors, and quoted paths
+/// with spaces pass cleanly to Implementer rework (R3-PROTO-3).
 pub(crate) fn has_file_line_ref(evidence: &str) -> bool {
-    evidence.split_whitespace().any(|raw| {
+    let token_match = evidence.split_whitespace().any(|raw| {
         let token = raw
             .trim_start_matches(LEAD_WRAP)
             .trim_end_matches(TRAIL_WRAP);
@@ -84,12 +94,47 @@ pub(crate) fn has_file_line_ref(evidence: &str) -> bool {
                 && n.parse::<u32>().is_ok_and(|v| v >= 1)
         });
         is_valid_path_token(path) && line_ok
-    })
+    });
+    if token_match {
+        return true;
+    }
+    has_file_line_reference(evidence)
+        && extract_citations(evidence)
+            .iter()
+            .any(|c| is_valid_path_token(&c.path))
 }
 
-pub(crate) fn is_valid_rework_finding(finding: &Finding) -> bool {
+pub fn is_valid_rework_finding(finding: &Finding) -> bool {
     let evidence = finding.evidence.trim();
     !evidence.is_empty() && (is_score_finding(&finding.id) || has_file_line_ref(evidence))
+}
+
+/// Converts validated dual-review [`ReviewIssue`] findings (including normalized
+/// `<path>:1` omission locations) into [`Finding`] records for rework notes.
+pub fn findings_from_review_issues(issues: &[ReviewIssue]) -> Vec<Finding> {
+    issues
+        .iter()
+        .map(|issue| {
+            let (loc, desc, fix) = (
+                issue.location.trim(),
+                issue.description.trim(),
+                issue.proposed_fix.trim(),
+            );
+            let evidence = match (loc.is_empty(), desc.is_empty(), fix.is_empty()) {
+                (false, false, false) => format!("{loc} — {desc} (fix: {fix})"),
+                (false, false, true) => format!("{loc} — {desc}"),
+                (false, true, false) => format!("{loc} (fix: {fix})"),
+                (false, true, true) => loc.to_string(),
+                (true, false, _) => desc.to_string(),
+                (true, true, _) => String::new(),
+            };
+            Finding {
+                id: issue.id.clone(),
+                question: format!("[{}] {}", issue.severity.as_str(), issue.category),
+                evidence,
+            }
+        })
+        .collect()
 }
 
 /// Formats a fallback rejection summary for author-facing `context_notes` when

@@ -10,7 +10,7 @@ use aaf_domain::ports::{
 };
 use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
 use aaf_domain::task::TaskState;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, Rows, ToSql, params, params_from_iter};
 
 use super::queries::run_from_row;
 use super::{Db, corrupt, sql_err, to_i64, to_u64};
@@ -298,6 +298,22 @@ impl AccountStore for Db {
     }
 }
 
+fn collect_events(mut rows: Rows<'_>) -> PortResult<Vec<FactoryEvent>> {
+    let mut events = Vec::new();
+    while let Some(row) = rows.next().map_err(sql_err)? {
+        let kind: String = row.get(3).map_err(sql_err)?;
+        events.push(FactoryEvent {
+            id: Some(row.get(0).map_err(sql_err)?),
+            task_id: row.get(1).map_err(sql_err)?,
+            run_id: row.get(2).map_err(sql_err)?,
+            kind: EventKind::parse(&kind).ok_or_else(|| corrupt("events.kind", &kind))?,
+            payload_json: row.get(4).map_err(sql_err)?,
+            created_at: row.get(5).map_err(sql_err)?,
+        });
+    }
+    Ok(events)
+}
+
 // `events` is append-only: this impl has no update or delete statement, and
 // the schema's triggers reject both for any other writer.
 impl EventSink for Db {
@@ -330,20 +346,41 @@ impl EventSink for Db {
                      WHERE task_id = ?1 ORDER BY id DESC LIMIT ?2",
                 )
                 .map_err(sql_err)?;
-            let mut rows = stmt.query(params![task_id, limit]).map_err(sql_err)?;
-            let mut events = Vec::new();
-            while let Some(row) = rows.next().map_err(sql_err)? {
-                let kind: String = row.get(3).map_err(sql_err)?;
-                events.push(FactoryEvent {
-                    id: Some(row.get(0).map_err(sql_err)?),
-                    task_id: row.get(1).map_err(sql_err)?,
-                    run_id: row.get(2).map_err(sql_err)?,
-                    kind: EventKind::parse(&kind).ok_or_else(|| corrupt("events.kind", &kind))?,
-                    payload_json: row.get(4).map_err(sql_err)?,
-                    created_at: row.get(5).map_err(sql_err)?,
-                });
+            collect_events(stmt.query(params![task_id, limit]).map_err(sql_err)?)
+        })
+    }
+
+    fn events_for_task_by_kinds(
+        &self,
+        task_id: &str,
+        kinds: &[EventKind],
+        limit: u32,
+    ) -> PortResult<Vec<FactoryEvent>> {
+        if kinds.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut kind_strs: Vec<&'static str> = Vec::with_capacity(kinds.len());
+        for s in kinds.iter().map(|k| k.as_str()) {
+            if !kind_strs.contains(&s) {
+                kind_strs.push(s);
             }
-            Ok(events)
+        }
+        let ph = (2..2 + kind_strs.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, task_id, run_id, kind, payload_json, created_at FROM events \
+             WHERE task_id = ?1 AND kind IN ({ph}) ORDER BY id DESC LIMIT ?{}",
+            2 + kind_strs.len()
+        );
+        let (task_id, limit_val) = (task_id.to_string(), i64::from(limit));
+        self.read(move |conn| {
+            let mut stmt = conn.prepare_cached(&sql).map_err(sql_err)?;
+            let bound = std::iter::once(&task_id as &dyn ToSql)
+                .chain(kind_strs.iter().map(|k| k as &dyn ToSql))
+                .chain(std::iter::once(&limit_val as &dyn ToSql));
+            collect_events(stmt.query(params_from_iter(bound)).map_err(sql_err)?)
         })
     }
 }

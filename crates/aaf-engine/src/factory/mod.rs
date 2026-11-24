@@ -18,10 +18,13 @@ mod audit_turn;
 mod base_ref;
 pub mod batch;
 mod commit_lock;
+pub mod dual_audit;
 mod finish;
 mod finish_land;
 mod git_real;
 mod git_real_base;
+pub(crate) mod plan_job;
+mod plan_legacy;
 pub mod ports;
 mod post_audit;
 pub mod prompt;
@@ -30,6 +33,7 @@ pub mod schedule_order;
 mod scheduler;
 mod select_pool;
 pub mod snapshots;
+pub mod stage_router;
 mod sweep;
 mod unblock;
 mod worker;
@@ -61,10 +65,14 @@ pub use git_real::RealGit;
 pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
 pub use post_audit::is_large_diff;
 pub use scheduler::{
-    Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit,
+    Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit, run_with_router,
     transient_backoff_secs,
 };
 pub use select_pool::{BindingView, SelectingPool};
+pub use stage_router::{
+    AntigravityLockedPool, ProviderKey, StageRouter, StageTarget, any_stage_uses_claude,
+    classify_tier, is_high_risk_path, is_tier_s_skip_debate, rework_count,
+};
 
 /// Every store the loop needs, as one object so a single `Db` handle serves
 /// all of them.

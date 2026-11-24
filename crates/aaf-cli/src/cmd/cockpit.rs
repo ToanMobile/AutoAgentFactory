@@ -17,6 +17,7 @@ use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::{Db, RoDbCache};
 use aaf_engine::factory::schedule_order::blocked_upstream_tasks;
 use aaf_engine::handover::{load_handover, render_markdown};
+use aaf_engine::telemetry::summarize_event_one_line;
 use aaf_engine::watch::{
     WatchQuery, WatchSnapshot, collect_watch_snapshot_with_tasks, format_blocked,
     sanitize_display as san,
@@ -356,16 +357,9 @@ fn format_panels(snap: &WatchSnapshot, extras: &CockpitExtras) -> String {
     }
     for ev in &extras.recent_events {
         let tid = ev.task_id.as_deref().map_or_else(|| "-".into(), san);
-        let excerpt: String = san(&ev.payload_json)
-            .chars()
-            .take(EVENT_EXCERPT_CHARS)
-            .collect();
-        let _ = writeln!(
-            buf,
-            "  [{}] {tid}  {}  {excerpt}",
-            ev.created_at,
-            ev.kind.as_str()
-        );
+        let summary = san(&summarize_event_one_line(ev.kind, &ev.payload_json));
+        let excerpt: String = summary.chars().take(EVENT_EXCERPT_CHARS).collect();
+        let _ = writeln!(buf, "  [{}] {tid}  {excerpt}", ev.created_at);
     }
     let _ = writeln!(
         buf,
@@ -427,13 +421,8 @@ fn show_task_events(ro: &RoDbCache, id: &str, w: &mut dyn Write) -> Result<(), C
         buf.push_str("  (no events)\n");
     }
     for ev in &events {
-        let _ = writeln!(
-            buf,
-            "  [{}] {} {}",
-            ev.created_at,
-            ev.kind.as_str(),
-            san(&ev.payload_json)
-        );
+        let summary = san(&summarize_event_one_line(ev.kind, &ev.payload_json));
+        let _ = writeln!(buf, "  [{}] {summary}", ev.created_at);
     }
     w.write_all(buf.as_bytes()).map_err(|e| io_err("write", e))
 }

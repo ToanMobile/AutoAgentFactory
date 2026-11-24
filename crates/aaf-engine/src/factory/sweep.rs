@@ -2,7 +2,6 @@
 //! [`super::scheduler::Scheduler`].
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use aaf_domain::event::EventKind;
 use aaf_domain::ports::{PortError, PortResult};
@@ -12,6 +11,7 @@ use serde_json::json;
 
 use super::schedule_order::{MAX_TRANSIENT_RETRIES, transient_backoff_secs};
 use super::scheduler::{DEFAULT_RATE_LIMIT_COOLDOWN_SECS, Scheduler};
+use super::stage_router::ProviderKey;
 use super::worker::Job;
 use super::{Deps, Mode, finish, unblock};
 use crate::git::{GitError, TaskWorktree};
@@ -102,35 +102,62 @@ pub(super) fn startup_sweep(deps: &Deps) -> Vec<String> {
 }
 
 impl<'a> Scheduler<'a> {
-    pub(super) fn is_cooling_down(&self, for_audit: bool) -> bool {
-        let slot = if for_audit {
-            self.state.audit_default_wait_until
-        } else {
-            self.state.work_default_wait_until
-        };
-        slot.is_some_and(|u| self.deps.now() < u)
+    pub(super) fn is_cooling_down(&self, provider: &ProviderKey) -> bool {
+        self.state
+            .default_wait_until
+            .get(provider)
+            .is_some_and(|&u| self.deps.now() < u)
     }
 
-    pub(super) fn set_default_wait(&mut self, for_audit: bool, deadline: i64) {
-        let slot = if for_audit {
-            &mut self.state.audit_default_wait_until
-        } else {
-            &mut self.state.work_default_wait_until
-        };
-        *slot = Some(deadline);
+    pub(super) fn set_default_wait(&mut self, provider: ProviderKey, deadline: i64) {
+        self.state
+            .default_wait_until
+            .entry(provider)
+            .and_modify(|d| *d = (*d).max(deadline))
+            .or_insert(deadline);
     }
 
-    pub(super) fn handle_switch(&mut self, task_id: String) -> PortResult<()> {
+    pub(super) fn clear_restarts_for_task(&mut self, task_id: &str) {
+        self.state.restarts.retain(|(id, _), _| id != task_id);
+    }
+
+    /// Parks `task_id` after every account of `provider` was tried, with a
+    /// deadline: without one, only an idle loop would ever un-park it, so a
+    /// busy `Mode::Auto` daemon would starve it. `expire_waits` releases it
+    /// (and its restart count) once the cooldown passes.
+    pub(super) fn park_until_cooldown(&mut self, task_id: String, provider: ProviderKey) {
+        let deadline = self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS;
+        self.state
+            .task_wait_until
+            .entry(task_id.clone())
+            .and_modify(|d| *d = (*d).max(deadline))
+            .or_insert(deadline);
+        self.parked.insert(task_id, provider);
+    }
+
+    pub(super) fn handle_switch(
+        &mut self,
+        task_id: String,
+        provider: ProviderKey,
+    ) -> PortResult<()> {
         let state = self.deps.store.get_task(&task_id)?.state;
         let is_audit = state == TaskState::Gating;
-        let count = self.pool_for(is_audit).provider_account_count()?;
+        let count = self
+            .pool_for_provider(&provider, is_audit)
+            .provider_account_count()?;
         if count == 0 {
-            self.set_default_wait(is_audit, self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
-            self.parked.insert(task_id.clone());
+            let deadline = self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS;
+            self.set_default_wait(provider.clone(), deadline);
+            self.state.task_wait_until.insert(task_id.clone(), deadline);
+            self.parked.insert(task_id.clone(), provider);
             self.requeue_if_ready(task_id, state);
             return Ok(());
         }
-        let restarts = self.state.restarts.entry(task_id.clone()).or_insert(0);
+        let restarts = self
+            .state
+            .restarts
+            .entry((task_id.clone(), provider.clone()))
+            .or_insert(0);
         let can_retry = *restarts < count.max(1);
         if can_retry {
             *restarts += 1;
@@ -139,36 +166,51 @@ impl<'a> Scheduler<'a> {
             if can_retry {
                 self.queue_gating_task(task_id)?;
             } else {
-                self.parked.insert(task_id);
+                self.park_until_cooldown(task_id, provider);
             }
         } else {
             if can_retry {
                 self.state.started.remove(&task_id);
+            } else {
+                self.park_until_cooldown(task_id.clone(), provider);
             }
-            self.summary.requeued.push(task_id);
+            self.requeue_if_ready(task_id, state);
         }
         Ok(())
     }
 
-    pub(super) fn handle_switch_job(&mut self, task_id: String, job: Job) -> PortResult<()> {
+    pub(super) fn handle_switch_job(
+        &mut self,
+        task_id: String,
+        provider: ProviderKey,
+        job: Job,
+    ) -> PortResult<()> {
         let state = self.deps.store.get_task(&task_id)?.state;
         let is_audit = matches!(job, Job::Audit { .. } | Job::PostAudit { .. });
-        let count = self.pool_for(is_audit).provider_account_count()?;
+        let count = self
+            .pool_for_provider(&provider, is_audit)
+            .provider_account_count()?;
         if count == 0 {
             self.gating_in_flight.remove(&task_id);
-            self.set_default_wait(is_audit, self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
-            self.parked.insert(task_id.clone());
+            let deadline = self.deps.now() + DEFAULT_RATE_LIMIT_COOLDOWN_SECS;
+            self.set_default_wait(provider.clone(), deadline);
+            self.state.task_wait_until.insert(task_id.clone(), deadline);
+            self.parked.insert(task_id.clone(), provider);
             self.requeue_if_ready(task_id, state);
             return Ok(());
         }
-        let restarts = self.state.restarts.entry(task_id.clone()).or_insert(0);
+        let restarts = self
+            .state
+            .restarts
+            .entry((task_id.clone(), provider.clone()))
+            .or_insert(0);
         let can_retry = *restarts < count.max(1);
         if can_retry {
             *restarts += 1;
             self.state.jobs.push_back(job);
         } else {
             self.gating_in_flight.remove(&task_id);
-            self.parked.insert(task_id);
+            self.park_until_cooldown(task_id, provider);
         }
         Ok(())
     }
@@ -186,68 +228,63 @@ impl<'a> Scheduler<'a> {
             .collect();
         for id in expired {
             self.state.task_wait_until.remove(&id);
-            self.parked.remove(&id);
-            self.state.restarts.remove(&id);
-        }
-        if self.state.work_default_wait_until.is_some_and(|u| u <= now) {
-            self.state.work_default_wait_until = None;
-            for id in self.parked.drain() {
-                self.state.restarts.remove(&id);
+            if let Some(provider) = self.parked.remove(&id) {
+                self.state.restarts.remove(&(id, provider));
+            } else {
+                self.clear_restarts_for_task(&id);
             }
         }
-        if self
+        let expired_providers: HashSet<ProviderKey> = self
             .state
-            .audit_default_wait_until
-            .is_some_and(|u| u <= now)
-        {
-            self.state.audit_default_wait_until = None;
-            for id in self.parked.drain() {
-                self.state.restarts.remove(&id);
+            .default_wait_until
+            .iter()
+            .filter(|(_, u)| **u <= now)
+            .map(|(p, _)| p.clone())
+            .collect();
+        if !expired_providers.is_empty() {
+            for provider in &expired_providers {
+                self.state.default_wait_until.remove(provider);
+            }
+            let unpark: Vec<(String, ProviderKey)> = self
+                .parked
+                .iter()
+                .filter(|(id, provider)| {
+                    expired_providers.contains(*provider)
+                        && !self
+                            .state
+                            .task_wait_until
+                            .get(*id)
+                            .is_some_and(|&u| u > now)
+                })
+                .map(|(id, p)| (id.clone(), p.clone()))
+                .collect();
+            for (id, provider) in unpark {
+                self.parked.remove(&id);
+                self.state.restarts.remove(&(id, provider));
             }
         }
     }
 
-    /// Computes how long `Scheduler::drive` waits before waking an idle slot in
-    /// `Mode::Auto`, bounded to `[200ms, 5s]`.
-    pub(super) fn next_wake_duration(&self) -> Duration {
-        const MIN_WAKE: Duration = Duration::from_millis(200);
-        const MAX_WAKE: Duration = Duration::from_secs(5);
-        let now = self.deps.now();
-        let earliest = self
-            .state
-            .task_wait_until
-            .values()
-            .copied()
-            .chain(self.state.work_default_wait_until)
-            .chain(self.state.audit_default_wait_until)
-            .min();
-        match earliest {
-            Some(deadline) => {
-                let secs = deadline.saturating_sub(now);
-                if secs <= 0 {
-                    MIN_WAKE
-                } else {
-                    Duration::from_secs(u64::try_from(secs).unwrap_or(5)).clamp(MIN_WAKE, MAX_WAKE)
-                }
-            }
-            None => MAX_WAKE,
-        }
-    }
-
-    pub(super) fn handle_wait(&mut self, task_id: String, until: Option<i64>) -> PortResult<()> {
+    pub(super) fn handle_wait(
+        &mut self,
+        task_id: String,
+        provider: ProviderKey,
+        until: Option<i64>,
+    ) -> PortResult<()> {
         let state = self.deps.store.get_task(&task_id)?.state;
         let is_audit = state == TaskState::Gating;
         let now = self.deps.now();
         let deadline = until
             .filter(|&u| u > now)
             .unwrap_or(now + DEFAULT_RATE_LIMIT_COOLDOWN_SECS);
-        let count = self.pool_for(is_audit).provider_account_count()?;
+        let count = self
+            .pool_for_provider(&provider, is_audit)
+            .provider_account_count()?;
+        self.state.task_wait_until.insert(task_id.clone(), deadline);
         if count == 0 {
-            self.set_default_wait(is_audit, deadline);
-        } else {
-            self.state.task_wait_until.insert(task_id.clone(), deadline);
+            self.set_default_wait(provider.clone(), deadline);
         }
-        self.parked.insert(task_id.clone());
+        self.parked.insert(task_id.clone(), provider);
         self.requeue_if_ready(task_id, state);
         Ok(())
     }
@@ -255,6 +292,7 @@ impl<'a> Scheduler<'a> {
     pub(super) fn handle_retry_after(
         &mut self,
         task_id: String,
+        provider: ProviderKey,
         hint_until: i64,
         hint_attempt: u32,
         detail: String,
@@ -285,7 +323,7 @@ impl<'a> Scheduler<'a> {
         // time, and somebody is told once per outage.
         let wait = outage_wait_secs(tries);
         let deadline = hint_until.max(self.deps.now() + wait);
-        self.set_default_wait(state == TaskState::Gating, deadline);
+        self.set_default_wait(provider, deadline);
         self.state.task_wait_until.insert(task_id.clone(), deadline);
         if tries == MAX_TRANSIENT_RETRIES + 1 {
             self.notify_outage(&task_id, tries, wait, &detail)?;
@@ -327,9 +365,6 @@ impl<'a> Scheduler<'a> {
     /// Picks up live `Gating` tasks (e.g. `aaf board rework` without `--rerun`)
     /// in `Mode::Auto` without restarting the daemon.
     pub(super) fn poll_gating(&mut self) -> PortResult<()> {
-        if self.is_cooling_down(true) {
-            return Ok(());
-        }
         self.expire_waits();
         let now = self.deps.now();
         let repo = Some(self.deps.settings.repo_root.as_str());
@@ -340,7 +375,9 @@ impl<'a> Scheduler<'a> {
                 .task_wait_until
                 .get(&task.id)
                 .is_some_and(|&u| u > now);
-            if self.gating_in_flight.contains(&task.id) || self.parked.contains(&task.id) || waiting
+            if self.gating_in_flight.contains(&task.id)
+                || self.parked.contains_key(&task.id)
+                || waiting
             {
                 continue;
             }
@@ -411,7 +448,7 @@ impl<'a> Scheduler<'a> {
             if let Err(err) = deps.git.cleanup(&task.id) {
                 self.summary.errors.push(format!("{}: {err}", task.id));
             }
-            self.state.restarts.remove(&task.id);
+            self.clear_restarts_for_task(&task.id);
             self.summary.done.push(task.id);
         }
         self.sweep_squash_merged(remaining)
@@ -492,7 +529,7 @@ impl<'a> Scheduler<'a> {
             )?;
             finish::close(deps, &task)?;
             unblock::root_succeeded(deps, &task)?;
-            self.state.restarts.remove(&task.id);
+            self.clear_restarts_for_task(&task.id);
             self.summary.done.push(task.id);
         }
         Ok(())
@@ -546,7 +583,7 @@ impl<'a> Scheduler<'a> {
         )?;
         finish::close(self.deps, task)?;
         unblock::root_succeeded(self.deps, task)?;
-        self.state.restarts.remove(&task.id);
+        self.clear_restarts_for_task(&task.id);
         self.summary.done.push(task.id.clone());
         Ok(true)
     }

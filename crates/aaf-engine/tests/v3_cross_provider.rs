@@ -416,7 +416,7 @@ fn audit_policy_canonicalizes_gemini_antigravity_and_hardens_custom_and_cli_flag
         "claude"
     );
 
-    // build_audit_command accepts antigravity alias and rejects flag/whitespace/control injection.
+    // build_audit_command routes antigravity to `agy` (R3-PROTO-2) and rejects flag/whitespace/control injection.
     let ag = build_audit_command(&CrossAuditConfig {
         executor: "antigravity".into(),
         model: "gemini-2.5-pro".into(),
@@ -426,13 +426,13 @@ fn audit_policy_canonicalizes_gemini_antigravity_and_hardens_custom_and_cli_flag
     assert_eq!(
         ag,
         vec![
-            "gemini",
-            "--approval-mode",
+            "agy",
+            "--disable-slash-commands",
+            "--mode",
             "plan",
-            "-m",
+            "--model",
             "gemini-2.5-pro",
-            "-p",
-            "{prompt}"
+            "-p={prompt}"
         ]
     );
 

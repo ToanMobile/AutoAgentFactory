@@ -191,13 +191,14 @@ pub fn build_format_repair_prompt(
 ) -> String {
     let checklist = build_checklist(&input.spec, input.mobile);
     let ids: Vec<&str> = checklist.iter().map(|item| item.id.as_str()).collect();
-    let reason: String = neutralise(parse_error)
+    let raw_reason: String = parse_error
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
         .take(300)
         .collect();
+    let reason = neutralise(&raw_reason);
     let clipped = clip_repair_prior(previous_output, MAX_REPAIR_PRIOR_CHARS);
     let safe_prior = neutralise(&clipped);
     let mut out = build_scored_prompt(input, require_scores);

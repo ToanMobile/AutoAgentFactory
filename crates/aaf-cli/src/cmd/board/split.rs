@@ -12,7 +12,7 @@ use aaf_domain::task::TaskState;
 use aaf_engine::accounts::{self, DiscoveryEnv, Router};
 use aaf_engine::executors::{self, ExecEnv};
 use aaf_engine::factory::adapters::{RouterPool, SystemClock, provider_for};
-use aaf_engine::factory::prompt::sandbox_policy;
+use aaf_engine::factory::prompt::sandbox_policy_for;
 use aaf_engine::factory::{
     AccountPool, Deps, GitOps, Purpose, RealGit, SelectingPool, is_frozen, resolve_base,
 };
@@ -22,7 +22,7 @@ use serde_json::json;
 
 use super::port;
 use super::store::{err, open_db, refuse_inside_agent_run, repo_root};
-use crate::cmd::run::sandbox_choice;
+use crate::cmd::run::{run_executor_is_claude, sandbox_choice};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -234,7 +234,7 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         base,
     );
     let clean = git.integrate(&[]).map_err(port)?;
-    let hook_required = cfg.repo.run.executor.trim().eq_ignore_ascii_case("claude");
+    let hook_required = run_executor_is_claude(&cfg.repo.run);
     if hook_required {
         let problem = match git.base_sha() {
             Ok(base_sha) => {
@@ -252,10 +252,11 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
     }
 
     let now = clock.now();
-    let mut sandbox = sandbox_policy(
+    let mut sandbox = sandbox_policy_for(
         sandboxed,
         &ctx.data_dir,
         &ctx.home,
+        provider_for(&cfg.repo.run.executor),
         grant.account.as_ref(),
         &all_profiles,
     );
@@ -354,10 +355,11 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
             }
         }
         let now = deps.clock.now();
-        let mut sandbox = sandbox_policy(
+        let mut sandbox = sandbox_policy_for(
             deps.settings.sandboxed,
             &deps.settings.data_dir,
             &deps.settings.home,
+            provider_for(&deps.settings.repo.run.executor),
             grant.account.as_ref(),
             &profiles,
         );

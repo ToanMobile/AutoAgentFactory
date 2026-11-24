@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aaf_domain::account::ProviderKind;
 use aaf_domain::gate::{GateMode, GateStatus, LockStatus, Receipt};
 use aaf_domain::ports::{AgentRequest, Clock};
 use aaf_domain::sop::{
@@ -332,7 +331,7 @@ impl CliStageDriver<'_> {
             Err(reason) => return StageOutcome::Failed { reason },
         };
 
-        let provider = provider_for(effective_exec).unwrap_or(ProviderKind::ClaudeCode);
+        let provider = provider_for(effective_exec);
         let own_account = grant.as_ref().and_then(|g| g.account.as_ref());
         let mut sandbox = sandbox_policy_for(
             true,

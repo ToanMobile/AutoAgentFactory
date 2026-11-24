@@ -15,10 +15,12 @@ mod watch;
 
 pub(super) use watch::InfraWatch;
 
+use super::adapters::provider_for;
 use super::audit_backend::{AuditBackend, audit_cmd_is_claude};
 use super::git_real::COMMIT_DEFERRED;
 use super::ports::{AccountPool, Grant};
 use super::scheduler::DEFAULT_RATE_LIMIT_COOLDOWN_SECS;
+use super::stage_router::StageTarget;
 use super::worker::{self, Next};
 use super::{Deps, unblock};
 use crate::cross_audit::{self, AUDIT_EXECUTOR, AuditInput, AuditReport, AuditVerdict};
@@ -159,11 +161,16 @@ pub(crate) fn run_auditor_turn(
         || (!custom_cmd.is_empty() && audit_cmd_is_claude(custom_cmd));
     let accounts: &dyn AccountPool = audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
     let runner = audit_backend.map_or(&*deps.runner, |a| &*a.runner);
+    let provider = audit_backend.map_or_else(
+        || provider_for(&deps.settings.repo.run.executor),
+        |a| provider_for(&a.provider),
+    );
     let mut run = worker::begin_run_with(
         deps,
         task,
         tree,
         AUDIT_EXECUTOR,
+        provider,
         grant,
         hook_required,
         accounts,
@@ -318,11 +325,12 @@ pub(super) fn halt_message(task_id: &str, what: &str, infra: &InfraFailure, fix:
 /// back to Ready without a ladder step (no note, no cycle, no failed root).
 /// Network failures return [`Next::RetryAfter`]. Auth failures quarantine the
 /// failing account and rotate (`Next::Switch`) when another healthy account
-/// exists in the pool, halting only when none remain.
-pub(super) fn halt_on_infra(
+/// exists in `accounts`, halting only when none remain.
+pub(super) fn halt_on_infra_with(
     deps: &Deps,
     task_id: &str,
     grant: &Grant,
+    accounts: &dyn AccountPool,
     infra: &InfraFailure,
 ) -> PortResult<Next> {
     let (what, fix) = infra_words(grant, infra);
@@ -334,7 +342,7 @@ pub(super) fn halt_on_infra(
         &format!("agent CLI failed: {what} ({raw}); not counted as an attempt"),
     )?;
     let detail = halt_message(task_id, what, infra, &fix);
-    if infra.kind == InfraKind::Auth && switch_after_auth(deps, task_id, grant, infra)? {
+    if infra.kind == InfraKind::Auth && switch_after_auth(deps, task_id, grant, accounts, infra)? {
         return Ok(Next::Switch);
     }
     if infra.kind == InfraKind::Network {
@@ -355,14 +363,13 @@ fn switch_after_auth(
     deps: &Deps,
     task_id: &str,
     grant: &Grant,
+    accounts: &dyn AccountPool,
     infra: &InfraFailure,
 ) -> PortResult<bool> {
     let Some(acct) = &grant.account else {
         return Ok(false);
     };
-    if deps.accounts.provider_account_count()? < 2
-        || deps.accounts.after_limit()? == Some(QuotaRoute::Wait)
-    {
+    if accounts.provider_account_count()? < 2 || accounts.after_limit()? == Some(QuotaRoute::Wait) {
         return Ok(false);
     }
     let now = deps.now();
@@ -372,7 +379,7 @@ fn switch_after_auth(
         reset_at: Some(until),
         raw: raw.clone(),
     };
-    deps.accounts.report_limit(&acct.id, &hit)?;
+    accounts.report_limit(&acct.id, &hit)?;
     deps.store.set_meta(
         &format!("account_auth_quarantine:{}", acct.id),
         &until.to_string(),
@@ -387,11 +394,12 @@ fn switch_after_auth(
             "raw": raw,
         }),
     )?;
-    let can_rotate = match deps.accounts.after_limit()? {
+    let can_rotate = match accounts.after_limit()? {
         Some(QuotaRoute::Switch) => true,
         Some(QuotaRoute::Wait) => false,
-        None => deps.accounts.profiles()?.iter().any(|profile| {
-            profile.id != acct.id
+        None => accounts.profiles()?.iter().any(|profile| {
+            profile.provider == acct.provider
+                && profile.id != acct.id
                 && deps
                     .store
                     .get_meta(&format!("account_auth_quarantine:{}", profile.id))
@@ -453,6 +461,7 @@ pub(super) fn after_commit_failure(
     mut outcome: AgentOutcome,
     error: PortError,
     grant: &Grant,
+    stage: Option<&StageTarget>,
 ) -> PortResult<Next> {
     match error {
         PortError::Conflict(why) => {
@@ -467,7 +476,7 @@ pub(super) fn after_commit_failure(
             outcome.log_tail = why;
             let mut signal = FailureSignal::empty();
             signal.outcome = Some(outcome);
-            unblock::handle(deps, task_id, Some(worktree), signal, grant)
+            unblock::handle_with(deps, task_id, Some(worktree), signal, grant, stage)
         }
         PortError::Io(why) if why.starts_with(COMMIT_DEFERRED) => {
             wait_for_commit(deps, task_id, &why)

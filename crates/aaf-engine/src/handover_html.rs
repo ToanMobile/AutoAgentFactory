@@ -183,6 +183,12 @@ pub fn render_html(data: &HandoverData, data_dir: &Path) -> String {
     }
     let _ = writeln!(html, "  </ol></section>");
     render_scoring_html(&mut html, data);
+    if !data.reviewers.is_empty() {
+        html.push_str(&crate::handover_dual::render_dual_reviewers_html(
+            &data.reviewers,
+            data.adjudicated,
+        ));
+    }
     render_proof_html(&mut html, data, data_dir);
     let _ = writeln!(html, "</main>\n</body>\n</html>");
     html

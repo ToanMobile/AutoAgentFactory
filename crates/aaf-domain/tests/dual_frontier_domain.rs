@@ -12,8 +12,8 @@ use aaf_domain::pipeline::{
     IssueSeverity, MAX_PLAN_CONTRACT_BYTES, PlanChecklistItem, PlanContract, PlanCritique,
     PlanCritiqueVerdict, PlanDisposition, PlanFileChange, RedGreenTestPlan, ResolvedIssue,
     ResolvedStatus, ReviewIssue, ReviewerVerdictRecord, TaskTier, canonical_provider,
-    distinct_real_canonical_providers, is_known_real_provider, validate_reviewer_id,
-    validate_reviewers,
+    distinct_real_canonical_providers, distinct_real_reviewer_providers, is_known_real_provider,
+    is_known_real_reviewer, validate_reviewer_id, validate_reviewers,
 };
 use aaf_domain::ports::{AgentRequest, EventSink, PortResult, SandboxPolicy};
 use serde_json::json;
@@ -75,6 +75,45 @@ fn canonical_provider_and_distinct_counts_exclude_custom_and_deduplicate_gemini(
     assert_eq!(
         distinct_real_canonical_providers(["claude", "antigravity", "gemini", "codex", "custom"]),
         3
+    );
+}
+
+#[test]
+fn distinct_real_reviewer_providers_rejects_non_empty_executor_cmd() {
+    let mk = |id: &str, executor: &str, cmd: &str| ReviewerConfig {
+        id: id.to_string(),
+        executor: executor.to_string(),
+        executor_cmd: cmd.to_string(),
+        ..ReviewerConfig::default()
+    };
+
+    let real_claude = mk("c1", "claude", "");
+    let real_agy = mk("a1", "antigravity", "   ");
+    let spoof_claude = mk("sc", "claude", "/bin/echo PASS");
+    let spoof_agy = mk("sa", "antigravity", "/bin/echo PASS");
+    let custom = mk("x1", "custom", "");
+
+    assert!(is_known_real_reviewer(&real_claude));
+    assert!(is_known_real_reviewer(&real_agy));
+    assert!(!is_known_real_reviewer(&spoof_claude));
+    assert!(!is_known_real_reviewer(&spoof_agy));
+    assert!(!is_known_real_reviewer(&custom));
+
+    assert_eq!(
+        distinct_real_reviewer_providers(&[spoof_claude.clone(), spoof_agy.clone()]),
+        0
+    );
+    assert_eq!(
+        distinct_real_reviewer_providers(&[real_claude.clone(), spoof_agy]),
+        1
+    );
+    assert_eq!(
+        distinct_real_reviewer_providers(&[real_agy.clone(), mk("g1", "gemini", "")]),
+        1
+    );
+    assert_eq!(
+        distinct_real_reviewer_providers(&[real_claude, real_agy, custom, spoof_claude]),
+        2
     );
 }
 

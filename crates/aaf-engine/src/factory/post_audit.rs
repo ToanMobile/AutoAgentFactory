@@ -3,18 +3,20 @@
 
 use std::path::Path;
 
+use aaf_domain::config::{AuditScope, CrossAuditConfig};
 use aaf_domain::event::EventKind;
 use aaf_domain::gate::{PostGateAuditRecord, Receipt};
 use aaf_domain::ports::{InfraKind, PortError, PortResult};
 use serde_json::json;
 
+#[allow(dead_code)]
 #[path = "post_audit_helpers.rs"]
 mod helpers;
 
 pub use helpers::is_large_diff;
 pub(crate) use helpers::{
     audit_infra_next, collect_rework_findings, has_behavioral_red_unproven, is_large_worktree_diff,
-    load_verified_audit_verdict, needs_post_gate_audit, proof_verified,
+    load_verified_audit_verdict, proof_verified,
 };
 use helpers::{collect_mechanical_findings, primary_infra_next, reject_post_audit};
 
@@ -22,6 +24,7 @@ use super::audit_backend::{self, AuditBackend};
 use super::audit_turn::short_circuit_audit_reason;
 use super::ports::{AccountPool, Grant, Purpose};
 use super::rework_filter;
+use super::stage_router::ProviderKey;
 use super::worker::{self, GateJob, Job, Next, Outcome, PreGateAudit};
 use super::{Deps, unblock};
 use crate::cross_audit::{
@@ -47,6 +50,7 @@ pub(crate) fn run_post_gate_audit(
     match execute_post_gate_audit(deps, audit_backend, job, receipt, pre_audit, grant) {
         Ok(next) => Outcome {
             task_id,
+            provider: ProviderKey::from_executor("default"),
             next,
             error: None,
         },
@@ -75,6 +79,74 @@ fn acquire_primary_fallback_grant(deps: &Deps, task_id: &str) -> PortResult<Opti
         .then(|| Grant::new(None, None)))
 }
 
+fn audit_satisfies_policy(record: &PostGateAuditRecord, cfg: &CrossAuditConfig) -> bool {
+    if cfg.dual_review {
+        return super::dual_audit::dual_audit_satisfies_policy(record, cfg);
+    }
+    if record.verdict != "PASS" {
+        return false;
+    }
+    if !cfg.score_gate {
+        return true;
+    }
+    let mech = MechanicalScoreReport {
+        score: record.mechanical_score,
+        reasons: Vec::new(),
+        same_account_warning: false,
+    };
+    let eval = evaluate_score_gate(
+        &mech,
+        &record.scores,
+        cfg.min_average_score,
+        cfg.min_criterion_score,
+    );
+    eval.passed
+        && record.effective_score >= cfg.min_average_score
+        && record.llm_average == eval.llm_average
+}
+
+/// True when a `Verdict::Clear` task still requires a post-gate cross-audit
+/// under `[cross_audit]` policy (or forced by oracle `behavioral_red_unproven`)
+/// and does not yet have a signed `"PASS"` verdict covering
+/// `(repo_root, tree_fp, config_hash)`.
+pub(crate) fn needs_post_gate_audit(deps: &Deps, job: &GateJob, receipt: &Receipt) -> bool {
+    let forced_behavioral = has_behavioral_red_unproven(receipt);
+    let cfg = &deps.settings.repo.cross_audit;
+    if !forced_behavioral
+        && !cfg.dual_review
+        && cfg.audit_scope == AuditScope::HeadLock
+        && !cfg.score_gate
+    {
+        return false;
+    }
+    if let Some(record) = load_verified_audit_verdict(deps, &job.worktree.path, receipt)
+        && audit_satisfies_policy(&record, cfg)
+    {
+        return false;
+    }
+    forced_behavioral
+        || cfg.dual_review
+        || cfg.audit_scope == AuditScope::Always
+        || cfg.score_gate
+        || is_large_worktree_diff(deps, &job.worktree)
+}
+
+fn can_reuse_pre_audit(
+    pre: &PreGateAudit,
+    receipt: &Receipt,
+    cfg: &CrossAuditConfig,
+    forced_behavioral: bool,
+) -> bool {
+    // §D.4.1: PreGateAudit MUST NEVER bypass Dual-Review.
+    if forced_behavioral || cfg.dual_review {
+        return false;
+    }
+    !pre.tree_fp.is_empty()
+        && pre.tree_fp == receipt.tree_fp
+        && pre.base_sha == receipt.base_sha
+        && (!cfg.score_gate || pre.scores.len() == GOLDEN_IDS.len())
+}
+
 fn execute_post_gate_audit(
     deps: &Deps,
     audit_backend: Option<&AuditBackend>,
@@ -86,15 +158,8 @@ fn execute_post_gate_audit(
     let task = deps.store.get_task(&job.task_id)?;
     let cfg = &deps.settings.repo.cross_audit;
     let forced_behavioral = has_behavioral_red_unproven(&receipt);
-    let reusable = (!forced_behavioral)
-        .then_some(pre_audit)
-        .flatten()
-        .filter(|pre| {
-            !pre.tree_fp.is_empty()
-                && pre.tree_fp == receipt.tree_fp
-                && pre.base_sha == receipt.base_sha
-                && (!cfg.score_gate || pre.scores.len() == GOLDEN_IDS.len())
-        });
+    let reusable =
+        pre_audit.filter(|pre| can_reuse_pre_audit(pre, &receipt, cfg, forced_behavioral));
 
     let (audit_provider, reviewer, same_account, pre_mech, verdict, diff_truncated, scores) =
         if let Some(pre) = reusable {

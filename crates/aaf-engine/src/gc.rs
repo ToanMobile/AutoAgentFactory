@@ -7,7 +7,7 @@ mod periodic;
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aaf_domain::ports::{PortError, TaskStore};
 use aaf_domain::task::{Task, TaskState};
@@ -210,6 +210,26 @@ pub fn run_gc(
     let now = SystemTime::now();
     clean_expired_artifacts(data_dir, opts, &running_runs, now, &mut report);
     oracle_scratch::clean_oracle_scratch(data_dir, opts, now, &mut report);
+    let busy_repos: HashSet<String> = report.skipped_busy.iter().cloned().collect();
+    let protected_audits = crate::gc_audits::collect_protected_audit_ids_for_tasks(
+        &all_tasks,
+        &busy_repos,
+        worktrees_dir,
+    );
+    let cutoff = now
+        .checked_sub(Duration::from_secs(
+            opts.older_than_days.saturating_mul(86_400),
+        ))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let audit_stats = crate::gc_audits::clean_expired_audits(
+        data_dir,
+        cutoff,
+        opts.older_than_days,
+        &protected_audits,
+        opts.dry_run,
+    );
+    report.removed_files.extend(audit_stats.removed_files);
+    report.warnings.extend(audit_stats.warnings);
     Ok(report)
 }
 

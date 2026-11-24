@@ -18,6 +18,9 @@ use super::{AccountPaths, ExecEnv, open_stream_log, run_confined_with_tail};
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
 const RAW_ERROR_CHARS: usize = 500;
 
+/// Entries of a Claude config dir closed for writing (matches `ClaudeCodeRunner::CONFIG_CLOSED`).
+const CLAUDE_CONFIG_CLOSED: [&str; 3] = ["settings.json", "settings.local.json", "hooks"];
+
 /// Entries of a Codex config directory that later runs execute or obey.
 const CODEX_CONFIG_CLOSED: [&str; 7] = [
     "config.toml",
@@ -190,10 +193,10 @@ fn denied_under(root: &str, entries: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn codex_account_paths(config_dir: &str) -> AccountPaths {
+fn closed_dir_paths(config_dir: &str, entries: &[&str]) -> AccountPaths {
     AccountPaths {
         writable: vec![config_dir.to_string()],
-        write_denied: denied_under(config_dir, &CODEX_CONFIG_CLOSED),
+        write_denied: denied_under(config_dir, entries),
         writable_regex: Vec::new(),
     }
 }
@@ -220,34 +223,20 @@ fn gemini_account_paths(config_dir: &str, sandbox_enabled: bool) -> AccountPaths
     }
 }
 
-fn opencode_account_paths(config_dir: &str) -> AccountPaths {
-    AccountPaths {
-        writable: vec![config_dir.to_string()],
-        write_denied: denied_under(config_dir, &OPENCODE_CONFIG_CLOSED),
-        writable_regex: Vec::new(),
-    }
-}
-
-/// Builds the confined account paths for a generic CLI run from `request.account`,
-/// or falls back to default home state dirs (`~/.codex`, `~/.gemini`,
-/// `~/.local/share/opencode`) based on `program_name` when `request.account` is `None`.
+/// Builds confined account paths for a generic CLI run from `request.account`,
+/// or falls back to default home state dirs based on `program_name` when `None`.
 pub fn account_paths_for(
     request: &AgentRequest,
     program_name: &str,
     home: Option<&str>,
 ) -> AccountPaths {
     if let Some(account) = &request.account {
+        let dir = &account.config_dir;
         return match account.provider {
-            ProviderKind::Codex => codex_account_paths(&account.config_dir),
-            ProviderKind::Antigravity => {
-                gemini_account_paths(&account.config_dir, request.sandbox.enabled)
-            }
-            ProviderKind::OpenCode => opencode_account_paths(&account.config_dir),
-            _ => AccountPaths {
-                writable: vec![account.config_dir.clone()],
-                write_denied: Vec::new(),
-                writable_regex: Vec::new(),
-            },
+            ProviderKind::ClaudeCode => closed_dir_paths(dir, &CLAUDE_CONFIG_CLOSED),
+            ProviderKind::Codex => closed_dir_paths(dir, &CODEX_CONFIG_CLOSED),
+            ProviderKind::Antigravity => gemini_account_paths(dir, request.sandbox.enabled),
+            ProviderKind::OpenCode => closed_dir_paths(dir, &OPENCODE_CONFIG_CLOSED),
         };
     }
     let Some(home) = home
@@ -256,12 +245,18 @@ pub fn account_paths_for(
     else {
         return AccountPaths::default();
     };
+    let at = |sub: &str| format!("{home}/{sub}");
     match program_name {
-        "codex" => codex_account_paths(&format!("{home}/.codex")),
+        "claude" => AccountPaths {
+            writable: vec![at(".claude"), at(".claude.json")],
+            write_denied: denied_under(&at(".claude"), &CLAUDE_CONFIG_CLOSED),
+            writable_regex: Vec::new(),
+        },
+        "codex" => closed_dir_paths(&at(".codex"), &CODEX_CONFIG_CLOSED),
         "gemini" | "agy" | "antigravity" => {
-            gemini_account_paths(&format!("{home}/.gemini"), request.sandbox.enabled)
+            gemini_account_paths(&at(".gemini"), request.sandbox.enabled)
         }
-        "opencode" => opencode_account_paths(&format!("{home}/.local/share/opencode")),
+        "opencode" => closed_dir_paths(&at(".local/share/opencode"), &OPENCODE_CONFIG_CLOSED),
         _ => AccountPaths::default(),
     }
 }

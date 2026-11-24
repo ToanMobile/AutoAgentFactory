@@ -17,7 +17,6 @@ use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::db::Db;
 use aaf_engine::executors::stream_log::read_tail_lines;
-use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
 use aaf_engine::factory::{snapshots::steer_task, unfreeze};
 use aaf_engine::gate::GateError;
 use aaf_engine::handover::{load_handover, render_markdown};
@@ -39,8 +38,9 @@ use super::board::store::{SharedRoDb, open_db, refuse_inside_agent_run};
 use super::handover::load_repo_config;
 use super::scope::resolve_scope;
 use super::task_ops::{
-    ApproveOpError, PLAN_APPROVAL_PREFIX, approve_and_regate, eval_task_head_lock,
-    latest_generated_plan, unblock_task,
+    ApproveOpError, PLAN_APPROVAL_PREFIX, PLAN_DEBATE_STALLED_PREFIX, approve_and_regate,
+    emit_human_plan_converged, eval_task_head_lock, format_approved_plan_note, latest_plan_info,
+    reset_exhausted_budget, unblock_task,
 };
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
@@ -485,31 +485,37 @@ fn do_approve_plan(db: &Db, task_id: &str) -> Result<Value, String> {
     }
     let waiting = matches!(
         &task.blocked_reason,
-        Some(BlockedReason::NeedsHuman { why }) if why.starts_with(PLAN_APPROVAL_PREFIX)
+        Some(BlockedReason::NeedsHuman { why })
+            if why.starts_with(PLAN_APPROVAL_PREFIX)
+                || why.starts_with(PLAN_DEBATE_STALLED_PREFIX)
     );
     if !waiting {
         return Err(format!(
             "refused: {task_id} is not waiting for plan approval"
         ));
     }
-    let Some(plan) = latest_generated_plan(db, task_id).map_err(s_err)? else {
+    let Some(plan) = latest_plan_info(db, task_id).map_err(s_err)? else {
         return Err(format!(
             "refused: {task_id} has no generated plan event to approve"
         ));
     };
     let now = SystemClock.now();
-    db.append_context_note(task_id, &format!("{PLAN_APPROVED_PREFIX} {plan}"), now)
-        .map_err(s_err)?;
+    let note = format_approved_plan_note(&plan);
+    db.append_context_note(task_id, &note, now).map_err(s_err)?;
+    emit_human_plan_converged(db, task_id, &plan, now).map_err(s_err)?;
+    let budget_reset = reset_exhausted_budget(db, &task.root_id).map_err(s_err)?;
     db.set_state(task_id, TaskState::Ready, None, now)
         .map_err(s_err)?;
-    let ev = FactoryEvent::new(
-        EventKind::TaskStateChanged,
-        json!({"from": "blocked", "to": "ready", "why": "plan_approved", "by": "web-ui"})
-            .to_string(),
-        now,
-    );
+    let payload = json!({
+        "from": "blocked", "to": "ready", "why": "plan_approved",
+        "by": "web-ui", "budget_reset": budget_reset,
+    });
+    let ev = FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now);
     db.emit(&ev.for_task(task_id)).map_err(s_err)?;
-    Ok(json!({ "action": "approve_plan", "task_id": task_id, "state": "ready", "approved": true }))
+    Ok(json!({
+        "action": "approve_plan", "task_id": task_id, "state": "ready",
+        "approved": true, "budget_reset": budget_reset,
+    }))
 }
 
 #[cfg(test)]

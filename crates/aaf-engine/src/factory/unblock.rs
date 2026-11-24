@@ -6,14 +6,18 @@ use aaf_domain::blocked::{BlockedReason, SubtaskPlan, UnblockAction};
 use aaf_domain::budget::BudgetCheck;
 use aaf_domain::config::MAX_AUDIT_REWORKS_CAP;
 use aaf_domain::event::{EventKind, FactoryEvent};
-use aaf_domain::ports::{LimitHit, PortResult};
+use aaf_domain::ports::{AgentRunner, LimitHit, PortResult};
 use aaf_domain::task::{ImmutableSpec, Task, TaskState};
 use serde_json::json;
 
+use super::adapters::provider_for;
 use super::audit_turn::InfraWatch;
-use super::ports::Grant;
+use super::ports::{AccountPool, Grant};
 use super::rework_filter::is_valid_rework_finding;
-use super::worker::{GateJob, Next, ensure_budget, halt_on_infra, hook_problem, request};
+use super::stage_router::StageTarget;
+use super::worker::{
+    GateJob, Next, ensure_budget, halt_on_infra_with, hook_problem_if, request_with,
+};
 use super::{Deps, Store};
 use crate::cross_audit::Finding;
 use crate::git::TaskWorktree;
@@ -24,15 +28,16 @@ use crate::webhook::WebhookEvent;
 mod proposer;
 use proposer::ProposerRecorder;
 
-/// Records an account rate-limit cooldown and emits `AccountCooldown`.
-pub(super) fn report_account_limit(
+/// Records an account rate-limit cooldown on `accounts` and emits `AccountCooldown`.
+pub(super) fn report_limit_on(
     deps: &Deps,
     task_id: &str,
     grant: &Grant,
+    accounts: &dyn AccountPool,
     hit: &LimitHit,
 ) -> PortResult<()> {
     if let Some(account) = grant.account_id() {
-        deps.accounts.report_limit(account, hit)?;
+        accounts.report_limit(account, hit)?;
         deps.emit(
             EventKind::AccountCooldown,
             task_id,
@@ -46,18 +51,22 @@ pub(super) fn report_account_limit(
     Ok(())
 }
 
-/// Decides whether another account may take over after a limit hit or whether
-/// the task must wait for cooldown.
-pub(super) fn route_limit_hit(deps: &Deps, grant: &Grant, hit: &LimitHit) -> PortResult<Next> {
+/// Decides whether another account on `accounts` may take over after a limit
+/// hit or whether the task must wait for cooldown.
+pub(super) fn route_limit_hit_on(
+    grant: &Grant,
+    accounts: &dyn AccountPool,
+    hit: &LimitHit,
+) -> PortResult<Next> {
     let wait = Ok(Next::Wait {
         until: hit.reset_at,
     });
     if grant.account_id().is_none() {
         return wait;
     }
-    match deps.accounts.after_limit()? {
+    match accounts.after_limit()? {
         Some(QuotaRoute::Switch) => Ok(Next::Switch),
-        None if deps.accounts.provider_account_count()? > 1 => Ok(Next::Switch),
+        None if accounts.provider_account_count()? > 1 => Ok(Next::Switch),
         Some(QuotaRoute::Wait) | None => wait,
     }
 }
@@ -67,7 +76,6 @@ pub(super) fn route_limit_hit(deps: &Deps, grant: &Grant, hit: &LimitHit) -> Por
 const MAX_LADDER_PASSES: usize = 3;
 const SUMMARY_MAX_CHARS: usize = 500;
 const AUDIT_FINDINGS_MAX_CHARS: usize = 1500;
-const HISTORY_EVENTS: u32 = 50;
 
 /// 32 hex characters, unique per call: run ids, webhook event ids and
 /// integration-tree names. Not a secret; it only has to never repeat, across
@@ -99,22 +107,22 @@ pub(crate) fn ladder(deps: &Deps) -> Ladder<'_> {
     Ladder::new(s, s, s, s, &*deps.clock, &deps.settings.repo.unblocker)
 }
 
-fn is_human_unblock_event(event: &FactoryEvent) -> bool {
-    event.kind == EventKind::TaskStateChanged
-        && serde_json::from_str::<serde_json::Value>(&event.payload_json)
-            .ok()
-            .is_some_and(|p| {
-                p["to"].as_str() == Some("ready")
-                    && p["why"]
-                        .as_str()
-                        .is_some_and(|w| w == "unblocked" || w.ends_with(" unblock"))
-            })
+pub(crate) fn is_human_unblock_event(event: &FactoryEvent) -> bool {
+    crate::plan_debate::state::is_human_unblock_event(event)
 }
 
 /// Consecutive earlier unblock steps of the task with this digest.
 fn prior_same(deps: &Deps, task_id: &str, digest: &str) -> PortResult<u32> {
     let mut count = 0;
-    for event in deps.store.events_for_task(task_id, HISTORY_EVENTS)? {
+    let kinds = [
+        EventKind::UnblockStep,
+        EventKind::TaskStateChanged,
+        EventKind::ReworkRequested,
+    ];
+    for event in deps
+        .store
+        .events_for_task_by_kinds(task_id, &kinds, u32::MAX)?
+    {
         if event.kind == EventKind::ReworkRequested || is_human_unblock_event(&event) {
             break;
         }
@@ -144,7 +152,15 @@ fn has_unrecorded_human_unblock(deps: &Deps, task: &Task) -> PortResult<bool> {
     if !notes[start..].iter().any(|n| n.starts_with("unblock[")) {
         return Ok(false);
     }
-    for event in deps.store.events_for_task(&task.id, HISTORY_EVENTS)? {
+    let kinds = [
+        EventKind::UnblockStep,
+        EventKind::TaskStateChanged,
+        EventKind::ReworkRequested,
+    ];
+    for event in deps
+        .store
+        .events_for_task_by_kinds(&task.id, &kinds, u32::MAX)?
+    {
         if is_human_unblock_event(&event) {
             return Ok(true);
         }
@@ -156,19 +172,43 @@ fn has_unrecorded_human_unblock(deps: &Deps, task: &Task) -> PortResult<bool> {
 }
 
 /// Classifies the failure, asks the ladder and carries out its decision.
+#[allow(dead_code)]
 pub(crate) fn handle(
+    deps: &Deps,
+    task_id: &str,
+    worktree: Option<&TaskWorktree>,
+    signal: FailureSignal,
+    grant: &Grant,
+) -> PortResult<Next> {
+    handle_with(deps, task_id, worktree, signal, grant, None)
+}
+
+/// Classifies the failure, asks the ladder and carries out its decision using
+/// `stage`'s provider target (runner, account pool, hook policy) when present.
+pub(crate) fn handle_with(
     deps: &Deps,
     task_id: &str,
     worktree: Option<&TaskWorktree>,
     mut signal: FailureSignal,
     grant: &Grant,
+    stage: Option<&StageTarget>,
 ) -> PortResult<Next> {
+    let (runner, accounts, provider_kind, hook_req): (&dyn AgentRunner, &dyn AccountPool, _, bool) =
+        match stage {
+            Some(t) => (&*t.runner, &*t.accounts, t.provider_kind, t.hook_required),
+            None => (
+                &*deps.runner,
+                &*deps.accounts,
+                provider_for(&deps.settings.repo.run.executor),
+                deps.settings.hook_required,
+            ),
+        };
     let cwd = worktree.map_or_else(
         || deps.settings.repo_root.clone(),
         |w| w.path.to_string_lossy().into_owned(),
     );
     let branch = worktree.map_or_else(String::new, |w| w.branch.clone());
-    if let Some(problem) = worktree.and_then(|w| hook_problem(deps, &w.path)) {
+    if let Some(problem) = worktree.and_then(|w| hook_problem_if(deps, &w.path, hook_req)) {
         // The run that just failed changed its own guard (or the base lost
         // it): no further agent starts in this worktree, neither a retry
         // nor the subtask proposer. A person looks at it; what failed is
@@ -185,7 +225,7 @@ pub(crate) fn handle(
         }
         signal.budget = ensure_budget(deps, &task.root_id)?.check();
         signal.same_failure_count = prior_same(deps, task_id, &failure_digest(&signal))? + 1;
-        let watch = InfraWatch::new(&*deps.runner);
+        let watch = InfraWatch::new(runner);
         let recorder = ProposerRecorder {
             deps,
             task: &task,
@@ -193,7 +233,7 @@ pub(crate) fn handle(
             account_id: grant.account_id(),
             inner: &watch,
         };
-        let mut proposer_base = request(deps, &cwd, grant)?;
+        let mut proposer_base = request_with(deps, &cwd, grant, provider_kind, hook_req, accounts)?;
         proposer_base.sandbox.read_only = true;
         let proposer = AgentSubtaskProposer {
             runner: &recorder,
@@ -202,23 +242,23 @@ pub(crate) fn handle(
         };
         // Asked after the limit was reported, so the account that hit it
         // already counts as cooling down.
-        let route = deps.accounts.after_limit()?;
+        let route = accounts.after_limit()?;
         let decision = ladder(deps).next_action_routed(task_id, &signal, Some(&proposer), route)?;
         drop(proposer);
         drop(recorder);
         let (proposer_infra, proposer_limit) = watch.take();
         if let Some(hit) = proposer_limit {
-            report_account_limit(deps, task_id, grant, &hit)?;
+            report_limit_on(deps, task_id, grant, accounts, &hit)?;
             deps.move_to(
                 task_id,
                 TaskState::Ready,
                 None,
                 "subtask proposer hit usage limit; waiting for account",
             )?;
-            return route_limit_hit(deps, grant, &hit);
+            return route_limit_hit_on(grant, accounts, &hit);
         }
         if let Some(infra) = proposer_infra {
-            return halt_on_infra(deps, task_id, grant, &infra);
+            return halt_on_infra_with(deps, task_id, grant, accounts, &infra);
         }
         let why = format!(
             "unblock {}: {}",
@@ -427,11 +467,19 @@ pub(super) fn sanitize_untrusted_close_tag(text: &str) -> String {
 }
 
 /// Counts explicit failing `CrossAudit` events for `task_id` since the latest
-/// `ReworkRequested` or human unblock (`Blocked -> Ready`) using an unbounded
+/// `ReworkRequested` or human unblock (`Blocked -> Ready`) using a filtered
 /// reverse scan so counts are never dropped past 50 events.
 pub(crate) fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<u32> {
     let mut count: u32 = 0;
-    for event in deps.store.events_for_task(task_id, u32::MAX)? {
+    let kinds = [
+        EventKind::CrossAudit,
+        EventKind::TaskStateChanged,
+        EventKind::ReworkRequested,
+    ];
+    for event in deps
+        .store
+        .events_for_task_by_kinds(task_id, &kinds, u32::MAX)?
+    {
         if event.kind == EventKind::ReworkRequested || is_human_unblock_event(&event) {
             break;
         }

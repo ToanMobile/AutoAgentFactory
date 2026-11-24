@@ -8,7 +8,7 @@ use aaf_domain::task::{Priority, Task};
 
 use super::fakes::spec;
 use super::world::World;
-use crate::factory::prompt::{build_prompt, sandbox_policy};
+use crate::factory::prompt::{build_prompt, sandbox_policy, sandbox_policy_for};
 
 fn profile(home: &Path, dir: &str) -> AccountProfile {
     let path = home.join(dir);
@@ -156,4 +156,107 @@ fn a_sandboxed_loop_asks_for_the_sandbox_on_every_run() {
     assert!(request.sandbox.enabled);
     let data = world.tmp.path().to_string_lossy().into_owned();
     assert_eq!(request.sandbox.read_denied_paths, vec![data]);
+}
+
+#[test]
+fn sandbox_policy_for_fails_closed_on_none_and_other_providers_and_exempts_antigravity_gemini() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let data = home.join("data");
+    fs::create_dir_all(&data).unwrap();
+    let claude = profile(home, ".claude");
+    fs::write(home.join(".claude.json"), "{}").unwrap();
+    let gemini_dir = home.join(".gemini");
+    fs::create_dir_all(&gemini_dir).unwrap();
+    let gemini_acct = AccountProfile {
+        id: "gemini".to_string(),
+        provider: ProviderKind::Antigravity,
+        config_dir: gemini_dir.to_string_lossy().into_owned(),
+        name: ".gemini".to_string(),
+    };
+    let other_agy = AccountProfile {
+        id: "agy-work".to_string(),
+        provider: ProviderKind::Antigravity,
+        config_dir: {
+            let p = home.join(".gemini-work");
+            fs::create_dir_all(&p).unwrap();
+            p.to_string_lossy().into_owned()
+        },
+        name: ".gemini-work".to_string(),
+    };
+    let all = vec![claude.clone(), gemini_acct.clone(), other_agy.clone()];
+    let claude_json = home.join(".claude.json").to_string_lossy().into_owned();
+
+    // None (custom/unknown) and Codex fail closed: deny .claude, .claude.json, and .gemini.
+    for provider in [None, Some(ProviderKind::Codex)] {
+        let p = sandbox_policy_for(true, &data, home, provider, None, &all);
+        assert!(p.read_denied_paths.contains(&claude.config_dir));
+        assert!(p.read_denied_paths.contains(&claude_json));
+        assert!(p.read_denied_paths.contains(&gemini_acct.config_dir));
+        assert!(p.read_denied_paths.contains(&other_agy.config_dir));
+    }
+
+    // Legacy wrapper `sandbox_policy(..., None, &all)` also fails closed.
+    let wrapper = sandbox_policy(true, &data, home, None, &all);
+    assert!(wrapper.read_denied_paths.contains(&claude.config_dir));
+    assert!(wrapper.read_denied_paths.contains(&claude_json));
+    assert!(wrapper.read_denied_paths.contains(&gemini_acct.config_dir));
+
+    // Antigravity with own == None exempts ~/.gemini even when listed in `all`,
+    // while denying ~/.claude, ~/.claude.json, and other Antigravity accounts.
+    let agy_default = sandbox_policy_for(
+        true,
+        &data,
+        home,
+        Some(ProviderKind::Antigravity),
+        None,
+        &all,
+    );
+    assert!(
+        !agy_default
+            .read_denied_paths
+            .contains(&gemini_acct.config_dir)
+    );
+    assert!(agy_default.read_denied_paths.contains(&claude.config_dir));
+    assert!(agy_default.read_denied_paths.contains(&claude_json));
+    assert!(
+        agy_default
+            .read_denied_paths
+            .contains(&other_agy.config_dir)
+    );
+
+    // Antigravity with own == Some(other_agy) denies ~/.gemini to isolate accounts.
+    let agy_named = sandbox_policy_for(
+        true,
+        &data,
+        home,
+        Some(ProviderKind::Antigravity),
+        Some(&other_agy),
+        &all,
+    );
+    assert!(
+        agy_named
+            .read_denied_paths
+            .contains(&gemini_acct.config_dir)
+    );
+    assert!(!agy_named.read_denied_paths.contains(&other_agy.config_dir));
+    assert!(agy_named.read_denied_paths.contains(&claude.config_dir));
+    assert!(agy_named.read_denied_paths.contains(&claude_json));
+
+    // Claude exempts ~/.claude and denies ~/.gemini.
+    let claude_pol = sandbox_policy_for(
+        true,
+        &data,
+        home,
+        Some(ProviderKind::ClaudeCode),
+        None,
+        &all,
+    );
+    assert!(!claude_pol.read_denied_paths.contains(&claude.config_dir));
+    assert!(!claude_pol.read_denied_paths.contains(&claude_json));
+    assert!(
+        claude_pol
+            .read_denied_paths
+            .contains(&gemini_acct.config_dir)
+    );
 }

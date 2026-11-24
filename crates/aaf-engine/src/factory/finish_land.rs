@@ -41,10 +41,27 @@ fn batch_note(group: &Group) -> String {
 }
 
 fn compose_task_pr_body(deps: &Deps, job: &GateJob, task: &Task, receipt: &Receipt) -> String {
-    let events = deps
+    let mut events = deps
         .store
         .events_for_task(&task.id, 100)
         .unwrap_or_default();
+    if let Ok(plan_events) = deps.store.events_for_task_by_kinds(
+        &task.id,
+        &[EventKind::PlanConverged, EventKind::PlanGenerated],
+        10,
+    ) {
+        for ev in plan_events {
+            let dup = events.iter().any(|e| {
+                (e.id.is_some() && e.id == ev.id)
+                    || (e.kind == ev.kind
+                        && e.created_at == ev.created_at
+                        && e.payload_json == ev.payload_json)
+            });
+            if !dup {
+                events.push(ev);
+            }
+        }
+    }
     let audit = post_audit::load_verified_audit_verdict(deps, &job.worktree.path, receipt);
     let proof = crate::proof::show_proof(
         &job.worktree.path,
@@ -53,7 +70,7 @@ fn compose_task_pr_body(deps: &Deps, job: &GateJob, task: &Task, receipt: &Recei
     )
     .ok();
     let ca = &deps.settings.repo.cross_audit;
-    let handover = crate::handover::build_handover_from_parts(
+    let handover = crate::handover::build_handover_from_parts_with_dual(
         task,
         &events,
         Some(receipt),
@@ -64,6 +81,7 @@ fn compose_task_pr_body(deps: &Deps, job: &GateJob, task: &Task, receipt: &Recei
         ca.min_average_score,
         ca.min_criterion_score,
         ca.require_different_provider,
+        ca.dual_review,
     );
     crate::handover::compose_pr_body(receipt, Some(&handover))
 }
@@ -91,7 +109,8 @@ fn pr_note(
     gated_in: Option<&Group>,
 ) -> Option<String> {
     let ca = &deps.settings.repo.cross_audit;
-    let has_handover_policy = ca.score_gate || ca.audit_scope != AuditScope::HeadLock;
+    let has_handover_policy =
+        ca.score_gate || ca.dual_review || ca.audit_scope != AuditScope::HeadLock;
     match gated_in {
         Some(group) => Some(batch_note(group)),
         None if has_handover_policy => {

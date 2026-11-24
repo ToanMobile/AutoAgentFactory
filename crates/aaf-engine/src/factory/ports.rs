@@ -187,6 +187,16 @@ impl Grant {
     pub fn account_id(&self) -> Option<&str> {
         self.account.as_ref().map(|a| a.id.as_str())
     }
+
+    /// Attaches an additional RAII guard (such as a provider-level file lock)
+    /// so both the existing lease and `guard` stay alive until this `Grant`
+    /// drops.
+    pub fn with_extra_guard(self, guard: Box<dyn Any + Send>) -> Grant {
+        Grant {
+            account: self.account,
+            _lease: Some(Box::new((self._lease, guard))),
+        }
+    }
 }
 
 /// What a job needs its account for.

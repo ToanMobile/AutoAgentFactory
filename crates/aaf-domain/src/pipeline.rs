@@ -66,6 +66,24 @@ pub fn distinct_real_canonical_providers<'a>(
     providers.len()
 }
 
+/// Returns `true` when `reviewer` uses a known real built-in provider with no
+/// custom `executor_cmd` override.
+pub fn is_known_real_reviewer(reviewer: &ReviewerConfig) -> bool {
+    reviewer.executor_cmd.trim().is_empty() && is_known_real_provider(&reviewer.executor)
+}
+
+/// Counts distinct canonical providers among [`ReviewerConfig`] entries that
+/// pass [`is_known_real_reviewer`].
+pub fn distinct_real_reviewer_providers(reviewers: &[ReviewerConfig]) -> usize {
+    let mut set = BTreeSet::new();
+    for r in reviewers {
+        if is_known_real_reviewer(r) {
+            set.insert(canonical_provider(&r.executor));
+        }
+    }
+    set.len()
+}
+
 /// Executor/model/effort selection for one pipeline stage.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

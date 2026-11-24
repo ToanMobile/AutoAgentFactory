@@ -3,6 +3,7 @@
 use aaf_domain::config::ProofConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::gate::{GateStatus, GoldenScore, PostGateAuditRecord, Receipt, Severity};
+use aaf_domain::pipeline::ReviewerVerdictRecord;
 use aaf_domain::proof::ProofRecord;
 use aaf_domain::task::{Task, TaskState};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,12 @@ pub struct HandoverData {
     pub llm_average: Option<u8>,
     pub effective_score: Option<u8>,
     pub scores: Vec<GoldenScore>,
+    #[serde(default)]
+    pub dual_consensus: bool,
+    #[serde(default)]
+    pub adjudicated: bool,
+    #[serde(default)]
+    pub reviewers: Vec<ReviewerVerdictRecord>,
     pub same_account_warning: bool,
     pub proof_required: bool,
     pub proof: Option<HandoverProof>,
@@ -84,6 +91,33 @@ struct CompactAudit {
     scores: Vec<GoldenScore>,
     tree_fp: Option<String>,
     config_hash: Option<String>,
+    #[serde(default)]
+    dual_consensus: bool,
+    #[serde(default)]
+    adjudicated: bool,
+    #[serde(default)]
+    reviewers: Vec<ReviewerVerdictRecord>,
+}
+
+impl CompactAudit {
+    fn to_dual_record(&self, task: &Task, bundle: &ScoreBundle) -> Option<PostGateAuditRecord> {
+        (self.dual_consensus || !self.reviewers.is_empty()).then(|| PostGateAuditRecord {
+            repo_root: task.repo_root.clone(),
+            tree_fp: self.tree_fp.clone().unwrap_or_default(),
+            config_hash: self.config_hash.clone().unwrap_or_default(),
+            verdict: self.verdict.clone().unwrap_or_default(),
+            reviewer: self.reviewer.clone().unwrap_or_default(),
+            same_account: self.same_account.unwrap_or(false),
+            mechanical_score: bundle.mechanical.unwrap_or(0),
+            llm_average: bundle.llm_average,
+            effective_score: bundle.effective.unwrap_or(0),
+            scores: self.scores.clone(),
+            dual_consensus: self.dual_consensus,
+            adjudicated: self.adjudicated,
+            reviewers: self.reviewers.clone(),
+            created_at: 0,
+        })
+    }
 }
 
 struct ScoreBundle {
@@ -96,9 +130,10 @@ struct ScoreBundle {
 
 struct BuildCtx<'a> {
     task: &'a Task,
-    events: &'a [FactoryEvent],
     receipt: Option<&'a Receipt>,
     cg: Option<&'a CompactGate>,
+    audit: Option<&'a PostGateAuditRecord>,
+    ca: Option<&'a CompactAudit>,
     proof: Option<&'a ProofRecord>,
     proof_required: bool,
     audit_verdict: Option<&'a str>,
@@ -129,15 +164,6 @@ fn enum_label<T: Serialize>(value: &T) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn one_line(s: &str, max_chars: usize) -> String {
-    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out: String = collapsed.chars().take(max_chars).collect();
-    if collapsed.chars().count() > max_chars {
-        out.push_str("...");
-    }
-    out
 }
 
 fn resolve_scores(
@@ -211,6 +237,36 @@ pub fn build_handover_from_parts(
     min_criterion: u8,
     require_different_provider: bool,
 ) -> HandoverData {
+    build_handover_from_parts_with_dual(
+        task,
+        events,
+        receipt,
+        audit,
+        proof,
+        proof_required,
+        score_gate,
+        min_average,
+        min_criterion,
+        require_different_provider,
+        false,
+    )
+}
+
+/// Assembles a [`HandoverData`] report with explicit Dual-Review policy enforcement.
+#[allow(clippy::too_many_arguments)]
+pub fn build_handover_from_parts_with_dual(
+    task: &Task,
+    events: &[FactoryEvent],
+    receipt: Option<&Receipt>,
+    audit: Option<&PostGateAuditRecord>,
+    proof: Option<&ProofRecord>,
+    proof_required: bool,
+    score_gate: bool,
+    min_average: u8,
+    min_criterion: u8,
+    require_different_provider: bool,
+    dual_review: bool,
+) -> HandoverData {
     let cg: Option<CompactGate> = parse_event(events, EventKind::GateResult);
     let ca: Option<CompactAudit> = parse_event(events, EventKind::CrossAudit);
     let same_account = audit
@@ -233,9 +289,10 @@ pub fn build_handover_from_parts(
     );
     let ctx = BuildCtx {
         task,
-        events,
         receipt,
         cg: cg.as_ref(),
+        audit,
+        ca: ca.as_ref(),
         proof,
         proof_required,
         audit_verdict: audit
@@ -251,7 +308,14 @@ pub fn build_handover_from_parts(
             }),
         bundle,
     };
-    let missing = collect_missing(&ctx, score_gate, min_average, min_criterion);
+    let missing = collect_missing(
+        &ctx,
+        dual_review,
+        require_different_provider,
+        score_gate,
+        min_average,
+        min_criterion,
+    );
     let status = if missing.is_empty() {
         "XONG"
     } else {
@@ -272,6 +336,11 @@ pub fn build_handover_from_parts(
                 .and_then(|a| non_empty(&a.tree_fp))
                 .map(str::to_string)
         });
+    let (dual_consensus, adjudicated, reviewers) = match (audit, ca.as_ref()) {
+        (Some(a), _) => (a.dual_consensus, a.adjudicated, a.reviewers.clone()),
+        (None, Some(a)) => (a.dual_consensus, a.adjudicated, a.reviewers.clone()),
+        (None, None) => (false, false, Vec::new()),
+    };
 
     HandoverData {
         task_id: task.id.clone(),
@@ -280,7 +349,7 @@ pub fn build_handover_from_parts(
         repo_root: task.repo_root.clone(),
         tree_fp,
         status,
-        what_done: build_what_done(&ctx),
+        what_done: crate::handover_dual::build_clean_what_done(task, events).join(" · "),
         prevent_old_bug: build_prevent_old_bug(&ctx),
         new_bug_risk: build_new_bug_risk(&ctx),
         code_safety: build_code_safety(&ctx),
@@ -290,6 +359,9 @@ pub fn build_handover_from_parts(
         llm_average: ctx.bundle.llm_average,
         effective_score: ctx.bundle.effective,
         scores: ctx.bundle.scores,
+        dual_consensus,
+        adjudicated,
+        reviewers,
         same_account_warning: ctx.bundle.same_account_warning,
         proof_required,
         proof: proof.map(HandoverProof::from_record),
@@ -297,7 +369,14 @@ pub fn build_handover_from_parts(
     }
 }
 
-fn collect_missing(ctx: &BuildCtx<'_>, score_gate: bool, min_avg: u8, min_crit: u8) -> Vec<String> {
+fn collect_missing(
+    ctx: &BuildCtx<'_>,
+    dual_review: bool,
+    require_different_provider: bool,
+    score_gate: bool,
+    min_avg: u8,
+    min_crit: u8,
+) -> Vec<String> {
     let mut missing = Vec::new();
     if !matches!(ctx.task.state, TaskState::Done | TaskState::Review) {
         missing.push(format!(
@@ -315,10 +394,10 @@ fn collect_missing(ctx: &BuildCtx<'_>, score_gate: bool, min_avg: u8, min_crit: 
             .cg
             .and_then(|g| non_empty(&g.status))
             .is_some_and(|s| s.eq_ignore_ascii_case("clear")) => {}
-        None => missing.push("missing verified CLEAR gate receipt or GateResult event".to_string()),
+        None => missing.push("missing verified CLEAR gate receipt or GateResult event".into()),
     }
     if ctx.proof_required && ctx.proof.is_none() {
-        missing.push("missing verified device proof (proof.required = true)".to_string());
+        missing.push("missing verified device proof (proof.required = true)".into());
     }
     if let Some(v) = ctx.audit_verdict {
         let lower = v.trim().to_ascii_lowercase();
@@ -331,16 +410,15 @@ fn collect_missing(ctx: &BuildCtx<'_>, score_gate: bool, min_avg: u8, min_crit: 
             .audit_verdict
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("pass"))
         {
-            missing.push(
-                "missing passing post-gate cross-audit verdict (score_gate = true)".to_string(),
-            );
+            missing
+                .push("missing passing post-gate cross-audit verdict (score_gate = true)".into());
         }
         match ctx.bundle.effective {
             Some(eff) if eff >= min_avg => {}
             Some(eff) => missing.push(format!(
                 "effective_score {eff}/100 is below min_average {min_avg}"
             )),
-            None => missing.push("missing effective_score (score_gate = true)".to_string()),
+            None => missing.push("missing effective_score (score_gate = true)".into()),
         }
         for (id, _) in GOLDEN_STANDARDS {
             match ctx.bundle.scores.iter().find(|s| s.id == id) {
@@ -353,43 +431,20 @@ fn collect_missing(ctx: &BuildCtx<'_>, score_gate: bool, min_avg: u8, min_crit: 
             }
         }
     }
+    let compact_audit = ctx
+        .audit
+        .is_none()
+        .then(|| ctx.ca.and_then(|a| a.to_dual_record(ctx.task, &ctx.bundle)))
+        .flatten();
+    missing.extend(crate::handover_dual::check_dual_review_missing(
+        ctx.audit.or(compact_audit.as_ref()),
+        dual_review,
+        require_different_provider,
+        score_gate,
+        min_avg,
+        min_crit,
+    ));
     missing
-}
-
-fn build_what_done(ctx: &BuildCtx<'_>) -> String {
-    let t = ctx.task;
-    let mut parts = vec![format!(
-        "{} (task {}, state: {})",
-        one_line(&t.title, 160),
-        t.id,
-        t.state.as_str()
-    )];
-    let desc = one_line(&t.spec.description, 220);
-    if !desc.is_empty() {
-        parts.push(format!("Spec: {desc}"));
-    }
-    if !t.spec.acceptance.is_empty() {
-        parts.push(format!("AC: {} item(s)", t.spec.acceptance.len()));
-    }
-    if let Some(note) = t
-        .context_notes
-        .last()
-        .map(|n| one_line(n, 180))
-        .filter(|n| !n.is_empty())
-    {
-        parts.push(format!("Notes: {note}"));
-    } else if let Some(plan) = latest_event(ctx.events, EventKind::PlanGenerated)
-        .and_then(|e| serde_json::from_str::<Value>(&e.payload_json).ok())
-        .and_then(|v| {
-            v.get("plan")
-                .and_then(Value::as_str)
-                .map(|s| one_line(s, 180))
-        })
-        .filter(|s| !s.is_empty())
-    {
-        parts.push(format!("Plan: {plan}"));
-    }
-    parts.join(" · ")
 }
 
 fn build_prevent_old_bug(ctx: &BuildCtx<'_>) -> String {
@@ -402,12 +457,10 @@ fn build_prevent_old_bug(ctx: &BuildCtx<'_>) -> String {
             .commands
             .iter()
             .map(|c| {
-                let st = if c.passed() {
-                    "PASS"
-                } else if c.timed_out {
-                    "TIMEOUT"
-                } else {
-                    "FAIL"
+                let st = match (c.passed(), c.timed_out) {
+                    (true, _) => "PASS",
+                    (false, true) => "TIMEOUT",
+                    (false, false) => "FAIL",
                 };
                 format!("{}: {st} ({}ms)", c.name, c.duration_ms)
             })

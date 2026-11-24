@@ -5,16 +5,18 @@
 use aaf_domain::blocked::BlockedReason;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{Clock, EventSink, TaskStore};
-use aaf_domain::task::TaskState;
+use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::Db;
 use aaf_engine::factory::adapters::SystemClock;
-use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
 use clap::Parser;
 use serde_json::{Value, json};
 
 use super::port;
 use super::store::{open_db, refuse_inside_agent_run, repo_root};
-use crate::cmd::task_ops::{PLAN_APPROVAL_PREFIX, latest_generated_plan};
+use crate::cmd::task_ops::{
+    LatestPlan, PLAN_APPROVAL_PREFIX, PLAN_DEBATE_STALLED_PREFIX, emit_human_plan_converged,
+    format_approved_plan_note, latest_plan_info, reset_exhausted_budget,
+};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult, Exit};
 
@@ -59,18 +61,14 @@ pub fn run_args(ctx: &Ctx, args: &ApprovePlanArgs) -> CmdResult {
     let mut skipped = Vec::new();
 
     for task in blocked {
-        let waiting_for_plan = matches!(
-            &task.blocked_reason,
-            Some(BlockedReason::NeedsHuman { why }) if why.starts_with(PLAN_APPROVAL_PREFIX)
-        );
-        if !waiting_for_plan {
+        if !is_waiting_for_plan_approval(task.blocked_reason.as_ref()) {
             continue;
         }
-        let Some(plan) = latest_generated_plan(&db, &task.id).map_err(port)? else {
+        let Some(plan) = latest_plan_info(&db, &task.id).map_err(port)? else {
             skipped.push(task.id);
             continue;
         };
-        apply_plan_approval(&db, &task.id, &plan, now)?;
+        apply_plan_approval(&db, &task, &plan, now)?;
         approved_ids.push(task.id);
     }
 
@@ -106,20 +104,16 @@ pub fn run(ctx: &Ctx, task_id: &str) -> Result<CmdOutput, CmdError> {
         let text = format!("{task_id} is {}, not blocked", task.state.as_str());
         return Ok(CmdOutput::policy("refused", text).field("state", json!(task.state)));
     }
-    let waiting_for_plan = matches!(
-        &task.blocked_reason,
-        Some(BlockedReason::NeedsHuman { why }) if why.starts_with(PLAN_APPROVAL_PREFIX)
-    );
-    if !waiting_for_plan {
+    if !is_waiting_for_plan_approval(task.blocked_reason.as_ref()) {
         let text = format!("{task_id} is not waiting for plan approval");
         return Ok(CmdOutput::policy("refused", text).field("state", json!(task.state)));
     }
-    let Some(plan) = latest_generated_plan(&db, task_id).map_err(port)? else {
+    let Some(plan) = latest_plan_info(&db, task_id).map_err(port)? else {
         let text = format!("{task_id} has no generated plan event to approve");
         return Ok(CmdOutput::policy("refused", text).field("task_id", json!(task_id)));
     };
     let now = SystemClock.now();
-    apply_plan_approval(&db, task_id, &plan, now)?;
+    apply_plan_approval(&db, &task, &plan, now)?;
     Ok(
         CmdOutput::ok("ok", format!("{task_id} plan approved; task is ready"))
             .field("task_id", json!(task_id))
@@ -128,19 +122,31 @@ pub fn run(ctx: &Ctx, task_id: &str) -> Result<CmdOutput, CmdError> {
     )
 }
 
-fn apply_plan_approval(db: &Db, task_id: &str, plan: &str, now: i64) -> Result<(), CmdError> {
-    let note = format!("{PLAN_APPROVED_PREFIX} {plan}");
-    db.append_context_note(task_id, &note, now).map_err(port)?;
-    db.set_state(task_id, TaskState::Ready, None, now)
+fn is_waiting_for_plan_approval(reason: Option<&BlockedReason>) -> bool {
+    matches!(
+        reason,
+        Some(BlockedReason::NeedsHuman { why })
+            if why.starts_with(PLAN_APPROVAL_PREFIX)
+                || why.starts_with(PLAN_DEBATE_STALLED_PREFIX)
+    )
+}
+
+fn apply_plan_approval(db: &Db, task: &Task, plan: &LatestPlan, now: i64) -> Result<(), CmdError> {
+    let note = format_approved_plan_note(plan);
+    db.append_context_note(&task.id, &note, now).map_err(port)?;
+    emit_human_plan_converged(db, &task.id, plan, now).map_err(port)?;
+    let budget_reset = reset_exhausted_budget(db, &task.root_id).map_err(port)?;
+    db.set_state(&task.id, TaskState::Ready, None, now)
         .map_err(port)?;
     let payload = json!({
         "from": TaskState::Blocked.as_str(),
         "to": TaskState::Ready.as_str(),
         "why": "plan_approved",
         "by": "human",
+        "budget_reset": budget_reset,
     });
     let event = FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now);
-    db.emit(&event.for_task(task_id)).map_err(port)?;
+    db.emit(&event.for_task(&task.id)).map_err(port)?;
     Ok(())
 }
 

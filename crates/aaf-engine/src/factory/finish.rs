@@ -50,6 +50,7 @@ pub(super) fn judge_round(
 ) {
     let always_solo = deps.settings.repo.proof.required
         || deps.settings.repo.cross_audit.score_gate
+        || deps.settings.repo.cross_audit.dual_review
         || deps.settings.repo.cross_audit.audit_scope == AuditScope::Always;
     let large_scope =
         !always_solo && deps.settings.repo.cross_audit.audit_scope == AuditScope::Large;

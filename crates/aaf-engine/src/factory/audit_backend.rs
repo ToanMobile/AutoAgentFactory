@@ -1,23 +1,141 @@
 //! Cross-provider adversarial audit backend, policy resolution and command
 //! template construction.
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
 use aaf_domain::budget::BudgetCheck;
-use aaf_domain::config::AuditScope;
+use aaf_domain::config::{AuditScope, CrossAuditConfig};
 use aaf_domain::event::EventKind;
+use aaf_domain::pipeline::is_known_real_reviewer;
 use aaf_domain::ports::{AgentOutcome, AgentRunner, LimitHit, PortResult};
 use aaf_domain::task::Task;
 use serde_json::json;
 
+#[allow(dead_code)]
 #[path = "audit_backend_policy.rs"]
 mod policy;
 
-pub use policy::{
-    audit_cmd_is_claude, build_audit_command, configured_audit_provider, resolve_audit_policy,
-    resolve_auto_audit_executor, same_audit_provider,
-};
+pub use super::rework_filter::{findings_from_review_issues, is_valid_rework_finding};
+pub use policy::{audit_cmd_is_claude, resolve_audit_policy, same_audit_provider};
+
+/// Effective audit provider name from config (`[cross_audit].executor` when
+/// non-empty, `"custom"` when only `executor_cmd` is set, `"claude"` when
+/// `executor_cmd` invokes `claude`, otherwise the first real reviewer in
+/// `cross_audit.reviewers` with `canonical_provider != run_executor`, then
+/// first real reviewer, else `[run].executor`) (R3-PROTO-2).
+pub fn configured_audit_provider<'a>(
+    run_executor: &'a str,
+    cross_audit: &'a CrossAuditConfig,
+) -> &'a str {
+    let custom_cmd = cross_audit.executor_cmd.trim();
+    if !custom_cmd.is_empty() && audit_cmd_is_claude(custom_cmd) {
+        return "claude";
+    }
+    let trimmed = cross_audit.executor.trim();
+    if !trimmed.is_empty() {
+        return trimmed;
+    }
+    if !custom_cmd.is_empty() {
+        return "custom";
+    }
+    if !cross_audit.reviewers.is_empty() {
+        if let Some(diff) = cross_audit
+            .reviewers
+            .iter()
+            .find(|r| is_known_real_reviewer(r) && !same_audit_provider(&r.executor, run_executor))
+        {
+            return diff.executor.trim();
+        }
+        if let Some(real) = cross_audit
+            .reviewers
+            .iter()
+            .find(|r| is_known_real_reviewer(r))
+        {
+            return real.executor.trim();
+        }
+    }
+    run_executor.trim()
+}
+
+/// Resolves `[cross_audit].executor = "auto"` once to another installed CLI
+/// with a config directory under `home`, keeping `"antigravity"` distinct from
+/// `"gemini"`, falling back to `run_executor` if none is ready (R3-PROTO-2).
+pub fn resolve_auto_audit_executor(
+    run_executor: &str,
+    configured: &str,
+    path_var: &OsStr,
+    home: &Path,
+) -> String {
+    let trimmed = configured.trim();
+    if trimmed.is_empty() {
+        return run_executor.trim().to_string();
+    }
+    if !trimmed.eq_ignore_ascii_case("auto") {
+        return trimmed.to_string();
+    }
+    let has_claude_dir = |h: &Path| {
+        h.join(".claude").is_dir()
+            || std::fs::read_dir(h).ok().is_some_and(|entries| {
+                entries.flatten().any(|e| {
+                    e.path().is_dir()
+                        && e.file_name()
+                            .to_str()
+                            .is_some_and(|n| n.starts_with(".claude-"))
+                })
+            })
+    };
+    const CANDIDATES: [(&str, &[&str]); 5] = [
+        ("gemini", &[".gemini"]),
+        ("antigravity", &[".gemini"]),
+        ("codex", &[".codex"]),
+        ("claude", &[".claude"]),
+        ("opencode", &[".local/share/opencode", ".config/opencode"]),
+    ];
+    for (candidate, dirs) in CANDIDATES {
+        if same_audit_provider(run_executor, candidate) {
+            continue;
+        }
+        let installed = crate::executors::registry::find_descriptor(candidate)
+            .and_then(|d| crate::executors::registry::resolve_binary(d, path_var))
+            .is_some();
+        let configured_dir = if candidate == "claude" {
+            has_claude_dir(home)
+        } else {
+            dirs.iter().any(|rel| home.join(rel).is_dir())
+        };
+        if installed && configured_dir {
+            return candidate.to_string();
+        }
+    }
+    run_executor.trim().to_string()
+}
+
+/// Builds the `GenericRunner` argv template for non-Claude `[cross_audit]`
+/// executors (`codex`, `gemini`, `antigravity`, `opencode`, `custom`) or an
+/// explicit `executor_cmd` override.
+///
+/// Keeps `"antigravity"` separate from `"gemini"`, invoking `agy` via
+/// [`crate::executors::registry::build_headless_argv`] (R3-PROTO-2).
+pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String> {
+    if cfg.executor_cmd.trim().is_empty() && cfg.executor.trim().eq_ignore_ascii_case("antigravity")
+    {
+        let model = cfg.model.trim();
+        let effort = cfg.effort.trim();
+        let desc = crate::executors::registry::find_descriptor("antigravity")
+            .ok_or_else(|| "antigravity descriptor missing from executor registry".to_string())?;
+        return crate::executors::registry::build_headless_argv(
+            desc,
+            "agy",
+            "{prompt}",
+            (!model.is_empty()).then_some(model),
+            (!effort.is_empty()).then_some(effort),
+            true,
+        );
+    }
+    policy::build_audit_command(cfg)
+}
 
 pub(crate) use super::audit_turn::run_auditor_turn;
 use super::audit_turn::short_circuit_audit_reason;

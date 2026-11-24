@@ -6,13 +6,16 @@ mod deps;
 pub(crate) mod detach;
 mod goal;
 mod progress;
+mod stage_wiring;
 #[cfg(test)]
 mod tests;
 
 use std::fs::{File, TryLockError};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
+use aaf_domain::account::ProviderKind;
 use aaf_domain::config::LandMode;
 use aaf_domain::ports::TaskStore;
 use aaf_domain::task::TaskState;
@@ -20,8 +23,8 @@ use aaf_engine::config::{self, ConfigInputs, ConfigOverlay, EffectiveConfig, Run
 use aaf_engine::db::{Db, private};
 use aaf_engine::executors;
 use aaf_engine::factory::{
-    self, BindingView, Deps, Hooks, Mode, RunSummary, configured_audit_provider,
-    resolve_auto_audit_executor, resolve_base, same_audit_provider,
+    self, BindingView, Deps, Hooks, Mode, RunSummary, any_stage_uses_claude,
+    configured_audit_provider, resolve_auto_audit_executor, resolve_base, same_audit_provider,
 };
 use aaf_engine::hook_settings;
 use serde_json::{Value, json};
@@ -30,6 +33,7 @@ use super::board::store::{err, open_db, refuse_inside_agent_run, repo_root};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
 use deps::build_deps;
+pub(crate) use deps::run_executor_is_claude;
 
 /// How often `--auto` looks for new Ready tasks and ended cooldowns.
 const AUTO_POLL: Duration = Duration::from_secs(5);
@@ -378,7 +382,8 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     };
 
     if args.detach && !args.detached_child {
-        let needs_hook = run_exec == "claude" || audit_exec.eq_ignore_ascii_case("claude");
+        let needs_hook =
+            any_stage_uses_claude(&cfg.repo) || audit_exec.eq_ignore_ascii_case("claude");
         if needs_hook && (created_task_id.is_some() || has_work_in_db(&db, &repo)?) {
             let base =
                 resolve_base(&repo, &cfg.repo.gate.base_ref).map_err(|e| err("base branch", e))?;
@@ -409,8 +414,22 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         meta_task_id.as_deref(),
     )?;
 
-    let (deps, pool, audit) = build_deps(ctx, &repo, &cfg, &db, sandboxed, args.max_parallel)?;
-    let needs_hook = deps.settings.hook_required || audit.as_ref().is_some_and(|a| a.hook_required);
+    let (mut deps, pool) = build_deps(ctx, &repo, &cfg, &db, sandboxed, args.max_parallel)?;
+    let router = stage_wiring::build_stage_router(
+        ctx,
+        &repo,
+        &cfg,
+        &db,
+        Arc::clone(&deps.runner),
+        Arc::clone(&deps.accounts),
+    )?;
+    if router.default_implementer.provider_kind == Some(ProviderKind::Antigravity) {
+        deps.accounts = Arc::clone(&router.default_implementer.accounts);
+    }
+    let audit = stage_wiring::build_native_audit_backend(ctx, &repo, &cfg, &db, Some(&router))?;
+    let needs_hook = deps.settings.hook_required
+        || any_stage_uses_claude(&cfg.repo)
+        || audit.as_ref().is_some_and(|a| a.hook_required);
     if needs_hook && has_work(&deps)? {
         // Once, before any task is taken: a registration that is wrong on
         // the base is wrong for every task alike. Blocking them one by one
@@ -471,7 +490,7 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     } else {
         Mode::Drain
     };
-    let summary = factory::run_with_audit(&deps, audit.as_ref(), mode, &hooks)
+    let summary = factory::run_with_router(&deps, audit.as_ref(), Some(&router), mode, &hooks)
         .map_err(|e| err("factory", e))?;
     // Read after the run: the binding of a repository's first run exists
     // only once that run is recorded.

@@ -8,7 +8,7 @@ use aaf_domain::ports::{EventSink, TaskStore};
 use serde_json::Value;
 
 use super::{
-    CompactAudit, CompactGate, HandoverData, MAX_EVENTS_LOAD, build_handover_from_parts,
+    CompactAudit, CompactGate, HandoverData, MAX_EVENTS_LOAD, build_handover_from_parts_with_dual,
     latest_event, non_empty, parse_event,
 };
 use crate::db::Db;
@@ -22,9 +22,15 @@ pub fn load_handover(
     cfg: &RepoConfig,
 ) -> Result<HandoverData, String> {
     let task = db.get_task(task_id).map_err(|e| e.to_string())?;
-    let events = db
+    let mut events = db
         .events_for_task(task_id, MAX_EVENTS_LOAD)
         .map_err(|e| e.to_string())?;
+    if !events.iter().any(|e| e.kind == EventKind::PlanConverged)
+        && let Ok(mut converged) =
+            db.events_for_task_by_kinds(task_id, &[EventKind::PlanConverged], 1)
+    {
+        events.append(&mut converged);
+    }
     let cg: Option<CompactGate> = parse_event(&events, EventKind::GateResult);
     let ca: Option<CompactAudit> = parse_event(&events, EventKind::CrossAudit);
     let key = aaf_fp::load_key(data_dir).ok();
@@ -100,7 +106,7 @@ pub fn load_handover(
             .ok()
         })
     });
-    let mut data = build_handover_from_parts(
+    let mut data = build_handover_from_parts_with_dual(
         &task,
         &events,
         receipt.as_ref(),
@@ -111,6 +117,7 @@ pub fn load_handover(
         cfg.cross_audit.min_average_score,
         cfg.cross_audit.min_criterion_score,
         cfg.cross_audit.require_different_provider,
+        cfg.cross_audit.dual_review,
     );
     data.proof_config = cfg.proof.clone();
     Ok(data)
