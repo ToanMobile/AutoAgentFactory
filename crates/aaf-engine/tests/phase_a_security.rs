@@ -508,25 +508,26 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
         let layout = aaf_fp::probe_git_layout(repo.path(), aaf_fp::GIT_TIMEOUT).unwrap();
         aaf_fp::tree_fp_with_layout(repo.path(), &layout, aaf_fp::GIT_TIMEOUT).unwrap()
     };
-    let index_debug = || {
+    let git_out = |args: &[&str]| {
         Command::new("git")
             .arg("-C")
             .arg(repo.path())
-            .args([
-                "ls-files",
-                "--debug",
-                "-s",
-                "--others",
-                "--exclude-standard",
-            ])
+            .args(args)
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default()
     };
+    let index_args = [
+        "ls-files",
+        "--debug",
+        "-s",
+        "--others",
+        "--exclude-standard",
+    ];
     let run_case = |ts, opts| {
         let data = TempDir::new().unwrap();
         let fp_pre = probe_fp();
-        let index_pre = index_debug();
+        let index_pre = git_out(&index_args);
         let run = run_gate_with_options(
             data.path(),
             repo.path(),
@@ -538,20 +539,8 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
         )
         .unwrap();
         if run.receipt.status != GateStatus::Clear {
-            // Diagnostic for a Linux-only "tree changed during gate": show
-            // what the gate's commands left in the work tree.
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(repo.path())
-                .args([
-                    "status",
-                    "--porcelain",
-                    "--untracked-files=all",
-                    "--ignored",
-                ])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default();
+            // Diagnostic for a Linux-only "tree changed during gate".
+            let status = git_out(&["status", "--porcelain", "-uall", "--ignored"]);
             panic!(
                 "status {:?}, reasons: {:?}\nwork tree:\n{status}\nfp before gate {fp_pre}\n\
                  receipt tree_fp {}\nfp after gate {}\nindex before:\n{index_pre}\nindex after:\n{}",
@@ -559,7 +548,7 @@ fn strip_compiler_wrappers_strips_light_and_heavy_commands() {
                 run.receipt.reasons,
                 run.receipt.tree_fp,
                 probe_fp(),
-                index_debug()
+                git_out(&index_args)
             );
         }
         assert!(
