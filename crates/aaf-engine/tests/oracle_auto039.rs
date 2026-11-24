@@ -9,10 +9,10 @@ use aaf_domain::config::MachineConfig;
 use aaf_domain::ports::Clock;
 use aaf_engine::throttle::paths::{slot_path, token_path};
 use aaf_engine::throttle::probe::{GroupState, Unreadable};
-use aaf_engine::throttle::stats::{record, HeavySample};
+use aaf_engine::throttle::stats::{HeavySample, record};
 use aaf_engine::throttle::{
-    Admitted, Ask, GroupControl, LoadProbe, Pressure, PriorityTools, Progress, Sleeper, Throttle,
-    SAMPLE_EVERY,
+    Admitted, Ask, GroupControl, LoadProbe, Pressure, PriorityTools, Progress, SAMPLE_EVERY,
+    Sleeper, Throttle,
 };
 use tempfile::TempDir;
 
@@ -49,7 +49,7 @@ struct SteppingSleeper<'a>(&'a FakeClock);
 impl Sleeper for SteppingSleeper<'_> {
     fn sleep(&self, duration: Duration) {
         let secs = i64::try_from(duration.as_secs().max(1)).unwrap();
-        self.0 .0.fetch_add(secs, Ordering::SeqCst);
+        self.0.0.fetch_add(secs, Ordering::SeqCst);
     }
 }
 
