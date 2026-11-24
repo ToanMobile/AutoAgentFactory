@@ -9,7 +9,6 @@
 //! shell script standing in for `claude`.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -20,6 +19,9 @@ use aaf_engine::throttle::slots::{self, Admission};
 
 #[path = "cli_support.rs"]
 mod cli_support;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
 
 const AAF: &str = env!("CARGO_BIN_EXE_aaf");
 const KEY: &str = "not-a-real-key-0123456789";
@@ -63,8 +65,7 @@ fn world() -> World {
 /// Runs `script` as the agent of a sandboxed run and returns what it printed.
 fn agent(world: &World, script: &str) -> String {
     let claude = world.root.join("claude");
-    fs::write(&claude, format!("#!/bin/sh\n{script}")).unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_support::write_executable(&claude, format!("#!/bin/sh\n{script}"));
     let env = ExecEnv {
         home: Some(world.root.join("home").to_string_lossy().into_owned()),
         // Nothing writable by default: the temp dir holds this whole tree.

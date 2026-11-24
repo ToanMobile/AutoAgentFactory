@@ -12,6 +12,7 @@ const DATA: Option<&str> = Some("data_dir_guard");
 const GIT: Option<&str> = Some("git_guard");
 const DELETE: Option<&str> = Some("delete_guard");
 const HUMAN: Option<&str> = Some("human_action_guard");
+const PR_MERGE: Option<&str> = Some("pr_merge_guard");
 
 #[test]
 fn g9_allowlisted_literal_messages_and_heredocs() {
@@ -69,6 +70,96 @@ fn g9_bypass_vectors_remain_blocked() {
             ("cat > .env <<'EOF'\nAAF_DATA_DIR=x\nEOF\n", DELETE),
             ("git commit -m 'docs: AAF_DATA_DIR' --no-verify", GIT),
             ("env -i cat > note.md <<'EOF'\naaf run\nEOF\n", HUMAN),
+        ],
+    );
+}
+
+/// Spellings of a quoted heredoc delimiter that bash reads as `EOF`.
+const QUOTED_EOF: &[&str] = &[
+    "'EOF'",
+    "\"EOF\"",
+    "\\EOF",
+    "$'EOF'",
+    "E'OF'",
+    "E\"OF\"",
+    "'E'OF",
+    "\"E\"OF",
+    "\\E\\O\\F",
+    "E\\OF",
+    "$'E'OF",
+    "$\"EOF\"",
+    "E$\"OF\"",
+    "-'EOF'",
+    " 'EOF'",
+];
+
+/// R10-H6-1: `$"EOF"` is the delimiter `EOF` to bash (a locale-translated
+/// string), not `$EOF`: the body ends at the `EOF` line and what follows it
+/// is a command, not data the body swallowed. Every other spelling of a
+/// quoted `EOF` behaves as before.
+#[test]
+fn r10_h6_1_locale_quoted_delimiter_ends_at_its_text() {
+    run_corpus(
+        &Fixture::new(),
+        &[
+            (
+                "cat <<$\"EOF\" > notes.txt\nbody\nEOF\nrm -rf ../cdp",
+                DELETE,
+            ),
+            (
+                "git commit -F - <<$\"EOF\"\nmsg\nEOF\ngit push --force origin main",
+                GIT,
+            ),
+            (
+                "cat <<$\"EOF\" >> notes.txt\nbody\nEOF\ngh pr merge 1 --squash",
+                PR_MERGE,
+            ),
+            ("cat <<$\"EOF\"\nbody\nEOF\nrm -rf ../cdp", DELETE),
+            (
+                "git commit -m \"$(cat <<$\"EOF\"\nmsg\nEOF\n)\"\ngit push --force origin main",
+                GIT,
+            ),
+            // Still data: the body is quoted.
+            ("cat <<$\"EOF\" > notes.txt\nrm -rf ../cdp\nEOF\n", ALLOW),
+            ("git commit -F - <<$\"EOF\"\nrm -rf ../cdp\nEOF\n", ALLOW),
+        ],
+    );
+    let mut rows = Vec::new();
+    for delim in QUOTED_EOF {
+        rows.push((
+            format!("cat <<{delim} > notes.txt\nrm -rf ../cdp\nEOF\n"),
+            ALLOW,
+        ));
+        rows.push((format!("cat <<{delim}\nrm -rf ../cdp\nEOF\n"), ALLOW));
+        rows.push((
+            format!("git tag -F - <<{delim}\nrm -rf ../cdp\nEOF\n"),
+            ALLOW,
+        ));
+        rows.push((
+            format!("cat <<{delim} > notes.txt\nbody\nEOF\nrm -rf ../cdp"),
+            DELETE,
+        ));
+        rows.push((format!("cat <<{delim}\nbody\nEOF\nrm -rf ../cdp"), DELETE));
+    }
+    let rows: Vec<(&str, Option<&str>)> = rows.iter().map(|(c, r)| (c.as_str(), *r)).collect();
+    run_corpus(&Fixture::new(), &rows);
+}
+
+/// R10-H6-1 hardening: a heredoc whose delimiter line never comes is not
+/// data. The hook and the shell may disagree on the delimiter, and then the
+/// "body" is the rest of the script.
+#[test]
+fn r10_h6_1_unterminated_heredoc_is_never_data() {
+    run_corpus(
+        &Fixture::new(),
+        &[
+            ("cat <<'EOF' > notes.txt\nbody\nrm -rf ../cdp", DELETE),
+            ("cat <<'EOF'\nbody\nrm -rf ../cdp\n", DELETE),
+            (
+                "git commit -F - <<'EOF'\nmsg\ngit push --force origin main",
+                GIT,
+            ),
+            ("cat <<'END' > notes.txt\nbody\nEND\n", ALLOW),
         ],
     );
 }

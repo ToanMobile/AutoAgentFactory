@@ -12,6 +12,9 @@ use std::path::Path;
 
 use support::Fixture;
 
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
@@ -53,8 +56,7 @@ fn accounts_and_run_leave_nothing_others_can_read() {
     let bin = fx.root().join("bin");
     fs::create_dir_all(&bin).unwrap();
     let stub = bin.join("claude");
-    fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_support::write_executable(&stub, "#!/bin/sh\nexit 0\n");
     let path = format!(
         "{}:{}",
         bin.display(),

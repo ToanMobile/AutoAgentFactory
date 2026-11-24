@@ -5,10 +5,10 @@
 //! other than the commit that lands.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use super::git_real::{Fixture, git};
 use crate::factory::ports::GitOps;
+use crate::throttle::tests::exec_support::write_executable;
 
 const EDITED_TEST: &str = "// checks weakened\n";
 
@@ -20,12 +20,10 @@ fn hooked_fixture(names: &[&str]) -> Fixture {
     fs::create_dir_all(&hooks).unwrap();
     for name in names {
         let hook = hooks.join(name);
-        fs::write(
+        write_executable(
             &hook,
             "#!/bin/sh\nprintf '// checks\\n' > tests/app_test.rs\n",
-        )
-        .unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        );
     }
     git(&fx.repo, &["add", "-A"]);
     git(&fx.repo, &["commit", "--quiet", "-m", "hooks"]);

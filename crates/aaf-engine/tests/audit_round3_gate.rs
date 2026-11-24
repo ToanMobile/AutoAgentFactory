@@ -19,8 +19,11 @@ use aaf_engine::git::{
     GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
 };
 use aaf_engine::store_compliance;
-use aaf_engine::throttle::{SystemProbe, Throttle};
 use tempfile::TempDir;
+
+#[path = "throttle_support.rs"]
+mod throttle_support;
+use throttle_support::calm_throttle;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -389,9 +392,8 @@ fn pr_merge_hits_common_receipt_cache_with_auto_base_and_rejects_same_account() 
 
     let repo_cfg: RepoConfig = toml::from_str(&cfg_toml).unwrap();
     let machine = load_free_machine();
-    let probe = SystemProbe::detect();
+    let throttle = calm_throttle(&machine);
     let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
-    let throttle = Throttle::system(&machine, &probe, &noop);
     let runs = || {
         fs::read_to_string(&counter_file)
             .map(|s| s.lines().count())

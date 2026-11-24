@@ -11,8 +11,7 @@ use crate::{Ctx, Denial};
 const RULE: &str = "adb_guard";
 const FIX_SERIAL: &str =
     "pass -s <serial> with a literal serial that the adb allowlist/denylist permits";
-const FIX_DESTRUCTIVE: &str =
-    "do not flash, wipe or reboot devices into bootloader/recovery; ask the user to do it by hand";
+const FIX_DESTRUCTIVE: &str = "do not flash, wipe or reboot devices into bootloader/recovery; this needs a human: finish the task without it and name the step in your final message";
 
 /// Subcommands that talk to the adb server only, never to a device.
 const NO_DEVICE: &[&str] = &[

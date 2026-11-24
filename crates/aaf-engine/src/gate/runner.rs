@@ -302,9 +302,20 @@ fn run_heavy(
         ));
     }
     if run.degraded {
+        let machine = &heavy.throttle.machine;
+        // With the real-CPU check on, load average alone does not hold a
+        // command (`throttle::admit`); an unreadable CPU probe falls back to it.
+        let cpu = if machine.max_cpu_percent > 0 {
+            format!(
+                " and CPU busy ≥ {}% (when measurable)",
+                machine.max_cpu_percent
+            )
+        } else {
+            String::new()
+        };
         notes.push(format!(
-            "{THROTTLE_NOTE}{name} ran degraded: CPU load stayed above {}% for {}s",
-            heavy.throttle.machine.max_load_percent, heavy.throttle.machine.heavy_wait_secs
+            "{THROTTLE_NOTE}{name} ran degraded: CPU load stayed above {}%{cpu} for {}s",
+            machine.max_load_percent, machine.heavy_wait_secs
         ));
     }
     if !run.paused.is_zero() {

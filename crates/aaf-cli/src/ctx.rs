@@ -22,8 +22,6 @@ pub struct Ctx {
     /// `AAF_CONFIG_DIR` or `~/.config/autofactory`.
     pub config_dir: PathBuf,
     /// `AAF_WORKTREE_DIR` or `~/.cache/autofactory/worktrees`.
-    // Read by the factory lane's `run` command only.
-    #[allow(dead_code)]
     pub worktrees_dir: PathBuf,
     pub path_var: OsString,
     /// `AAF_RUN_ID`: set when this process was started by an agent run.

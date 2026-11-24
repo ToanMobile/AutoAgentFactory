@@ -101,7 +101,9 @@ fn heredoc_delim(chars: &[char], from: usize) -> (String, bool, usize) {
         if c.is_whitespace() || ";&|()<>".contains(c) {
             break;
         }
-        if !matches!(c, '\'' | '"' | '\\') {
+        // `$'EOF'` and `$"EOF"` end the body at `EOF`.
+        let quote_prefix = c == '$' && matches!(chars.get(at + 1), Some('\'' | '"'));
+        if !matches!(c, '\'' | '"' | '\\') && !quote_prefix {
             delim.push(c);
         }
         at += 1;
@@ -130,8 +132,14 @@ fn skip_heredoc(chars: &[char], from: usize, delim: &str, strip_tabs: bool) -> O
     None
 }
 
-/// Reads one heredoc body from `chars` starting at `*pos` up to `delim`.
-fn read_heredoc_body(chars: &[char], pos: &mut usize, delim: &str, strip_tabs: bool) -> String {
+/// Reads one heredoc body from `chars` starting at `*pos` up to `delim`;
+/// whether the delimiter line was found.
+pub(super) fn read_heredoc_body(
+    chars: &[char],
+    pos: &mut usize,
+    delim: &str,
+    strip_tabs: bool,
+) -> (String, bool) {
     let mut body = String::new();
     while *pos < chars.len() {
         let end = chars[*pos..]
@@ -146,12 +154,12 @@ fn read_heredoc_body(chars: &[char], pos: &mut usize, delim: &str, strip_tabs: b
             line.as_str()
         };
         if probe == delim {
-            break;
+            return (body, true);
         }
         body.push_str(&line);
         body.push('\n');
     }
-    body
+    (body, false)
 }
 
 /// Decodes `$'…'` starting right after `$'`, so `$'\x67it'` is seen as `git`.
@@ -281,6 +289,18 @@ impl Lexer<'_, '_> {
             && self.out.cmds.last().is_some_and(heredoc_data_sink)
     }
 
+    /// Every pending heredoc body ends at its delimiter line: one that runs
+    /// to the end of the line is not data (`read_heredocs` splits it).
+    fn bodies_end(&self) -> bool {
+        let mut at = self.pos;
+        self.heredocs.iter().all(|doc| {
+            skip_heredoc(&self.chars, at, &doc.delim, doc.strip_tabs).is_some_and(|next| {
+                at = next;
+                true
+            })
+        })
+    }
+
     pub(super) fn read_heredocs_or_defer(&mut self) {
         if self.is_top_level_data_sink()
             && !self.heredocs.is_empty()
@@ -288,9 +308,10 @@ impl Lexer<'_, '_> {
                 .heredocs
                 .iter()
                 .all(|doc| doc.quoted && doc.pipeline.is_empty())
+            && self.bodies_end()
         {
             for doc in mem::take(&mut self.heredocs) {
-                let body =
+                let (body, _) =
                     read_heredoc_body(&self.chars, &mut self.pos, &doc.delim, doc.strip_tabs);
                 let mut wrapped = Vec::new();
                 if let Some(cmd) = doc.cmd_idx.and_then(|idx| self.out.cmds.get_mut(idx)) {

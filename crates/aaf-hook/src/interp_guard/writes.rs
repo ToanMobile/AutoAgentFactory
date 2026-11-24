@@ -515,7 +515,21 @@ fn bare(lit: &str) -> &str {
 fn judge(interp: &str, lit: &str, how: Source, ctx: &Ctx) -> Option<Denial> {
     #[cfg(test)]
     JUDGE_RUNS.with(|runs| runs.set(runs.get() + 1));
-    let path = bare(lit);
+    let denial = judge_path(interp, bare(lit), how, ctx)?;
+    if how != Source::Named {
+        return Some(denial);
+    }
+    // The literal may not be the path written at all: say why it counts.
+    Some(deny(
+        format!(
+            "{}; the script's write target is not a literal, so every path it names was checked",
+            denial.reason
+        ),
+        "write the file with the Write/Edit tool or give open() a literal path",
+    ))
+}
+
+fn judge_path(interp: &str, path: &str, how: Source, ctx: &Ctx) -> Option<Denial> {
     if let Some(d) = delete_guard::target(path, false, interp, ctx) {
         return Some(deny(
             format!("{interp} write to protected path blocked: {}", d.reason),

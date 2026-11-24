@@ -13,26 +13,11 @@ use aaf_domain::gate::{GateMode, GateStatus, LockStatus};
 use aaf_domain::ports::Clock;
 use aaf_engine::factory::{BaseRef, resolve_base};
 use aaf_engine::gate;
-use aaf_engine::throttle::{
-    LoadProbe, Pressure, PriorityTools, SAMPLE_EVERY, SystemGroup, ThreadSleeper, Throttle,
-};
 use tempfile::TempDir;
 
-struct Calm;
-
-impl LoadProbe for Calm {
-    fn load_percent(&self) -> Option<u32> {
-        Some(0)
-    }
-
-    fn pressure(&self) -> Option<Pressure> {
-        Some(Pressure::Normal)
-    }
-
-    fn free_memory_bytes(&self) -> Option<u64> {
-        Some(u64::MAX)
-    }
-}
+#[path = "throttle_support.rs"]
+mod throttle_support;
+use throttle_support::calm_throttle;
 
 struct At(i64);
 
@@ -133,17 +118,7 @@ fn forged_direct_origin_head_must_not_bypass_head_lock() {
     cfg.commands.test_scoped = "true".to_string();
 
     let machine = MachineConfig::default();
-    let throttle = Throttle {
-        machine: &machine,
-        probe: &Calm,
-        sleeper: &ThreadSleeper,
-        control: &SystemGroup,
-        progress: &|_| {},
-        cpus: 4,
-        tools: PriorityTools::detect(),
-        jitter_seed: 1,
-        sample_every: SAMPLE_EVERY,
-    };
+    let throttle = calm_throttle(&machine);
     let receipt = gate::run_gate_throttled(
         data.path(),
         root,

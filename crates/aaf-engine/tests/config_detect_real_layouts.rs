@@ -4,7 +4,6 @@
 //! a monorepo whose Gradle builds live one directory down.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -12,6 +11,10 @@ use aaf_domain::config::CommandsConfig;
 use aaf_engine::config::{Detected, detect_stack};
 use aaf_engine::throttle::{HeavyTool, heavy_tool};
 use tempfile::TempDir;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 fn repo(files: &[(&str, &str)]) -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -177,8 +180,7 @@ fn fake_editor(dir: &Path, results: &str, code: i32, noise: usize) -> String {
     let script = format!(
         "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -testResults ]; then out=\"$2\"; fi\n  shift\ndone\n{write}echo fake editor ran\nprintf '%s' '{shutdown}'\nexit {code}\n"
     );
-    fs::write(&path, script).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, script);
     path.to_string_lossy().into_owned()
 }
 

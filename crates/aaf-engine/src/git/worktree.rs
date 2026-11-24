@@ -391,14 +391,11 @@ pub fn remove_orphan_batch_worktrees(
             .iter()
             .find(|e| e.branch.as_deref() == Some(branch.as_str()));
         if let Some(entry) = reg_entry {
-            // git lists the main worktree first: never removed.
-            if registered
-                .first()
-                .is_some_and(|main| main.path == entry.path)
-            {
-                sweep.warnings.push(format!(
-                    "{id}: branch is checked out in the main worktree: kept"
-                ));
+            // Only the factory's own tree is removed: the branch checked out
+            // anywhere else (the main worktree, a user's linked worktree) is
+            // someone's checkout and is kept.
+            if let Some(warning) = foreign_checkout(&id, entry, &registered, &expected_path) {
+                sweep.warnings.push(warning);
                 continue;
             }
             if entry.path.exists() {
@@ -468,6 +465,46 @@ pub fn remove_orphan_batch_worktrees(
         sweep.removed.push(id);
     }
     Ok(sweep)
+}
+
+/// `"<id>: branch is checked out in <where>: kept"` when `entry` (the
+/// registered tree holding task `id`'s branch) is not the factory's own
+/// worktree at `expected` (see [`worktree_path`]); `None` when it is. git
+/// lists the main worktree first.
+pub(crate) fn foreign_checkout(
+    id: &str,
+    entry: &WorktreeEntry,
+    registered: &[WorktreeEntry],
+    expected: &Path,
+) -> Option<String> {
+    if registered
+        .first()
+        .is_some_and(|main| main.path == entry.path)
+    {
+        return Some(format!(
+            "{id}: branch is checked out in the main worktree: kept"
+        ));
+    }
+    (resolved(&entry.path) != resolved(expected)).then(|| {
+        format!(
+            "{id}: branch is checked out in {}, not its aaf worktree: kept",
+            entry.path.display()
+        )
+    })
+}
+
+/// The canonical path; a missing one through its canonical parent, so a
+/// tree whose directory is gone still matches across symlinked prefixes.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => {
+            fs::canonicalize(parent).map_or_else(|_| path.to_path_buf(), |dir| dir.join(name))
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Why a plain (non-`--force`) `git worktree remove` of `wt` would be

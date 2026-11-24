@@ -117,3 +117,60 @@ fn no_retry_once_the_root_budget_is_spent() {
         .exists()
     );
 }
+
+/// A well-formed reply answering "yes" to STUB (blocking) with `evidence`.
+fn stub_yes(evidence: &str) -> String {
+    let answers: Vec<serde_json::Value> =
+        crate::cross_audit::build_checklist(&super::fakes::spec(), false)
+            .iter()
+            .map(|item| {
+                let hit = item.id == crate::cross_audit::checklist::ID_STUB;
+                serde_json::json!({
+                    "id": item.id,
+                    "answer": if hit { "yes" } else { "no" },
+                    "evidence": if hit { evidence } else { "" },
+                })
+            })
+            .collect();
+    serde_json::json!({ "answers": answers }).to_string()
+}
+
+fn approved(world: &World) -> bool {
+    let wt = std::path::Path::new("/fake/wt/t1");
+    aaf_fp::approval_path(world.tmp.path(), wt, "lockfp1").exists()
+}
+
+/// R10-L3-1: a blocking "yes" without file:line evidence is Inconclusive
+/// (G2), but the auditor did find a blocker. The format repair may cite it;
+/// it must not turn it into a signed pass by answering "no" everywhere.
+#[test]
+fn a_repair_never_turns_an_unbacked_blocking_yes_into_a_pass() {
+    for evidence in ["the new function is a stub", "src/nowhere.rs:999"] {
+        let world = locked_world();
+        let replies = [stub_yes(evidence), audit_answer(&[])];
+        let auditor = Arc::new(Auditor(Mutex::new(replies.into()), Mutex::new(0)));
+
+        let summary = run_once(&world, &auditor);
+
+        assert!(!approved(&world), "{evidence}: signed a pass: {summary:?}");
+        assert_ne!(world.state("t1"), TaskState::Review, "{evidence}");
+    }
+}
+
+/// The repair may still cite the blocker it named: that Fail is accepted
+/// and goes back to the implementer as a finding.
+#[test]
+fn a_repair_that_cites_the_named_blocker_is_accepted() {
+    let world = locked_world();
+    let replies = [
+        stub_yes("the new function is a stub"),
+        audit_answer(&["STUB"]),
+    ];
+    let auditor = Arc::new(Auditor(Mutex::new(replies.into()), Mutex::new(0)));
+
+    let summary = run_once(&world, &auditor);
+
+    assert!(!approved(&world), "{summary:?}");
+    let notes = world.task("t1").context_notes.join("\n");
+    assert!(notes.contains("src/lib.rs:2"), "{notes}\n{summary:?}");
+}

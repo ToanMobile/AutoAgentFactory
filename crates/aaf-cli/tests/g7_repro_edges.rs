@@ -4,16 +4,16 @@
 #[path = "factory_support.rs"]
 mod support;
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use support::Fixture;
 
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_support::write_executable(&path, format!("#!/bin/sh\n{body}\n"));
     path
 }
 

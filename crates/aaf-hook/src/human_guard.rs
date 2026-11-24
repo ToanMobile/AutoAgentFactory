@@ -6,7 +6,7 @@ use crate::shell::{Cmd, basename};
 use crate::{Denial, paths};
 
 const RULE: &str = "human_action_guard";
-const FIX: &str = "stop and ask the user to run it: approve, cockpit, run, init, gc, proof record, skills sync and board mutations are human actions";
+const FIX: &str = "this needs a human: finish the task without it and name the step in your final message (approve, cockpit, run, init, gc, proof record, skills sync and board mutations are human actions)";
 
 /// Words that name a human action wherever they stand, for text that could
 /// not be split into commands.

@@ -5,7 +5,6 @@
 mod support;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use aaf_domain::ports::TaskStore;
@@ -13,10 +12,12 @@ use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 use serde_json::json;
 use support::Fixture;
 
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+
 fn write_exec(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, body).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_support::write_executable(path, body);
 }
 
 #[test]

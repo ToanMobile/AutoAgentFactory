@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use aaf_hook::{Decision, HookEnv, decide};
 use serde_json::json;
@@ -18,6 +19,9 @@ pub struct Fixture {
     pub git_config: RefCell<Option<String>>,
     /// How often the hook asked for it.
     pub config_lookups: Cell<u32>,
+    /// How often the hook asked for the repository root (a `git` spawn in
+    /// the real hook).
+    pub root_lookups: Cell<u32>,
 }
 
 impl Fixture {
@@ -31,6 +35,7 @@ impl Fixture {
             home: base.join("home"),
             git_config: RefCell::new(Some(String::new())),
             config_lookups: Cell::new(0),
+            root_lookups: Cell::new(0),
             _dir: dir,
         };
         for path in [&fixture.root, &fixture.data, &fixture.config, &fixture.home] {
@@ -66,8 +71,10 @@ impl Fixture {
     }
 
     pub fn decide(&self, payload: &serde_json::Value) -> Decision {
-        let root = self.root.clone();
-        let lookup = move |_: &Path| Some(root.clone());
+        let lookup = |_: &Path| {
+            self.root_lookups.set(self.root_lookups.get() + 1);
+            Some(self.root.clone())
+        };
         let config = |_: &Path| {
             self.config_lookups.set(self.config_lookups.get() + 1);
             self.git_config.borrow().clone()
@@ -140,6 +147,29 @@ pub fn run_corpus_in(fixture: &Fixture, cwd: &Path, rows: &[(&str, Option<&str>)
         "{} rows wrong:\n{}",
         wrong.len(),
         wrong.join("\n")
+    );
+}
+
+/// Holds `run` to about linear cost: `run(large)` may take at most
+/// `max_ratio` times `run(small)`, plus 50 ms of slack. A ratio, not a
+/// wall-clock bound, so a slow or busy runner neither fails it nor hides a
+/// quadratic cliff; each size is timed three times, interleaved, and the
+/// best run counts.
+pub fn assert_scales(small: usize, large: usize, max_ratio: u32, mut run: impl FnMut(usize)) {
+    let mut timed = |size: usize| {
+        let started = Instant::now();
+        run(size);
+        started.elapsed()
+    };
+    let (mut best_small, mut best_large) = (Duration::MAX, Duration::MAX);
+    for _ in 0..3 {
+        best_small = best_small.min(timed(small));
+        best_large = best_large.min(timed(large));
+    }
+    let bound = best_small * max_ratio + Duration::from_millis(50);
+    assert!(
+        best_large <= bound,
+        "{large} took {best_large:?}, more than {max_ratio}x the {best_small:?} of {small} (+50 ms)"
     );
 }
 

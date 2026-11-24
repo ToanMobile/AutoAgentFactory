@@ -10,28 +10,11 @@ use aaf_domain::config::{MachineConfig, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus, LockStatus};
 use aaf_domain::ports::Clock;
 use aaf_engine::gate::{self, head_lock};
-use aaf_engine::throttle::{
-    LoadProbe, Pressure, PriorityTools, SAMPLE_EVERY, SystemGroup, ThreadSleeper, Throttle,
-};
 use tempfile::TempDir;
 
-/// An idle machine. With the real probe the heavy command below would wait
-/// for as long as the machine running this test is busy.
-struct Calm;
-
-impl LoadProbe for Calm {
-    fn load_percent(&self) -> Option<u32> {
-        Some(0)
-    }
-
-    fn pressure(&self) -> Option<Pressure> {
-        Some(Pressure::Normal)
-    }
-
-    fn free_memory_bytes(&self) -> Option<u64> {
-        Some(u64::MAX)
-    }
-}
+#[path = "throttle_support.rs"]
+mod throttle_support;
+use throttle_support::calm_throttle;
 
 struct At(i64);
 
@@ -89,17 +72,7 @@ fn gate_approve_gate_round_trip_through_the_public_api() {
     assert!(approval.same_account);
 
     let machine = MachineConfig::default();
-    let throttle = Throttle {
-        machine: &machine,
-        probe: &Calm,
-        sleeper: &ThreadSleeper,
-        control: &SystemGroup,
-        progress: &|_| {},
-        cpus: 4,
-        tools: PriorityTools::detect(),
-        jitter_seed: 1,
-        sample_every: SAMPLE_EVERY,
-    };
+    let throttle = calm_throttle(&machine);
     let clear = gate::run_gate_throttled(
         data.path(),
         root,

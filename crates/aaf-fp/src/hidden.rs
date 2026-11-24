@@ -262,10 +262,10 @@ pub(crate) fn hidden_files_using(call: &GitCall<'_>) -> Result<HiddenFiles, FpEr
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use crate::GIT_TIMEOUT;
+    use crate::tests::exec_support::write_executable;
 
     #[test]
     fn empty_ls_files_tag_is_not_treated_as_assume_unchanged() {
@@ -289,8 +289,7 @@ mod tests {
               fi\n\
             done\n\
             exit 0\n";
-        fs::write(&fake_git, script).unwrap();
-        fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&fake_git, script);
 
         let call = GitCall {
             program: Some(OsStr::new(&fake_git)),
@@ -330,8 +329,7 @@ mod tests {
             exit 0\n",
             log.display()
         );
-        fs::write(&fake_git_tracked, script_tracked).unwrap();
-        fs::set_permissions(&fake_git_tracked, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&fake_git_tracked, script_tracked);
 
         let call = GitCall {
             program: Some(OsStr::new(&fake_git_tracked)),
@@ -367,8 +365,7 @@ mod tests {
             exit 0\n",
             log.display()
         );
-        fs::write(&fake_git_mixed, script_mixed).unwrap();
-        fs::set_permissions(&fake_git_mixed, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&fake_git_mixed, script_mixed);
 
         let call_mixed = GitCall {
             program: Some(OsStr::new(&fake_git_mixed)),

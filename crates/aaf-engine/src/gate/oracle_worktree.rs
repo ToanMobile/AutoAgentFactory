@@ -253,8 +253,37 @@ fn update_block_comment(line: &str, mut in_comment: bool) -> bool {
     in_comment
 }
 
+/// Whether `rel_path` is a gitlink (mode 160000, a submodule pointer) in
+/// `base_sha`: `git show` cannot print one, since its commit lives in the
+/// submodule's repository.
+fn is_gitlink_at(repo_root: &Path, base_sha: &str, rel_path: &str) -> Result<bool, GateError> {
+    let raw = git_bytes(
+        repo_root,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            base_sha,
+            "--",
+            rel_path,
+        ],
+        GIT_TIMEOUT,
+    )?;
+    Ok(raw.split(|b| *b == 0).any(|entry| {
+        let entry = String::from_utf8_lossy(entry);
+        entry
+            .split_once('\t')
+            .is_some_and(|(meta, path)| meta.starts_with("160000 ") && path == rel_path)
+    }))
+}
+
 /// Reverts only `prod_changes` inside `scratch` back to `base_sha`, preserving
-/// test files, fixtures, dev-dependencies, and inline Rust `#[cfg(test)]` blocks.
+/// test files, fixture directories and inline Rust `#[cfg(test)]` blocks (the
+/// caller leaves those out of `prod_changes`). Manifests such as `Cargo.toml`
+/// are production files and are reverted whole, `[dev-dependencies]`
+/// included: a test that needs a new dev-dependency then fails to build,
+/// which the classifier reports as compile-red, never as proven. Gitlinks
+/// (submodule pointers) are skipped: there is no file to restore.
 pub(crate) fn revert_prod_files(
     repo_root: &Path,
     scratch: &Path,
@@ -290,11 +319,15 @@ pub(crate) fn revert_prod_files(
             None
         };
         if existed_at_base {
-            let base_bytes = git_bytes(
+            let base_bytes = match git_bytes(
                 repo_root,
                 &["show", &format!("{base_sha}:{rel_path}")],
                 GIT_TIMEOUT,
-            )?;
+            ) {
+                Ok(bytes) => bytes,
+                Err(_) if is_gitlink_at(repo_root, base_sha, rel_path)? => continue,
+                Err(err) => return Err(err),
+            };
             let dst = prepare_safe_write_target(scratch, rel_path)?;
             if let Some(tail) = inline_tail {
                 let base_str = String::from_utf8_lossy(&base_bytes);

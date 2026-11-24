@@ -28,6 +28,10 @@ use aaf_engine::throttle::stats::{HeavySample, cmd_label, record, recorded_peak_
 use serde_json::json;
 use tempfile::TempDir;
 
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
+
 struct NoopSleeper;
 
 impl Sleeper for NoopSleeper {
@@ -347,8 +351,7 @@ fn claude_runner_clears_limit_hit_when_run_times_out() {
         "printf '%s\\n' '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":1999999999}}'\n",
         "sleep 10\n",
     );
-    fs::write(&fake_bin, script).unwrap();
-    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&fake_bin, script);
 
     let runner = ClaudeCodeRunner::new(fake_bin.to_string_lossy(), ExecEnv::default());
     let outcome = runner

@@ -247,8 +247,11 @@ impl GateRunner for RealGate {
                     .map_err(|e| PortError::Io(e.to_string()))?;
             }
             runs += 1;
+            // One pass is all the classifier needs (`passed > 0`): a second
+            // run of a slow suite would only cost time.
             if result.passed() {
                 passed += 1;
+                break;
             }
             if result.timed_out {
                 break;

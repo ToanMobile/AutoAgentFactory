@@ -23,7 +23,9 @@ pub(super) use pr_note::open_pr_noted;
 use pr_note::open_pr_noted_with_proof;
 
 /// A merge waits this long for another `aaf` process merging the same repo.
-const MERGE_LOCK_TIMEOUT: Duration = Duration::from_secs(600);
+/// `aaf merge` holds this lock across a whole scratch gate (its own
+/// `--lock-timeout` defaults to 1800 s), so the factory waits as long.
+const MERGE_LOCK_TIMEOUT: Duration = Duration::from_secs(1800);
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 const SQUASH_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -60,6 +62,7 @@ pub struct RealGit {
     commit: Mutex<()>,
     commit_lock_timeout: Duration,
     commit_timeout: Duration,
+    merge_lock_timeout: Duration,
     last_squash_poll: Mutex<Option<Instant>>,
 }
 
@@ -80,6 +83,7 @@ impl RealGit {
             commit: Mutex::new(()),
             commit_lock_timeout: COMMIT_LOCK_TIMEOUT,
             commit_timeout: COMMIT_TIMEOUT,
+            merge_lock_timeout: MERGE_LOCK_TIMEOUT,
             last_squash_poll: Mutex::new(None),
         }
     }
@@ -87,6 +91,12 @@ impl RealGit {
     #[cfg(test)]
     pub(super) fn with_commit_lock_timeout(mut self, timeout: Duration) -> RealGit {
         self.commit_lock_timeout = timeout;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_merge_lock_timeout(mut self, timeout: Duration) -> RealGit {
+        self.merge_lock_timeout = timeout;
         self
     }
 
@@ -405,11 +415,17 @@ impl GitOps for RealGit {
             base: self.base.branch.clone(),
             remote: self.remote().to_string(),
             locks_dir: self.locks_dir.clone(),
-            lock_timeout: MERGE_LOCK_TIMEOUT,
+            lock_timeout: self.merge_lock_timeout,
         };
         // Acquire cross-process merge lock before `admin` so waiting on
-        // another process never stalls sibling worker threads.
-        let lock = crate::git::merge_queue::acquire_lock(&request).map_err(err)?;
+        // another process never stalls sibling worker threads. A holder that
+        // outlasts the wait (`aaf merge` gating a scratch tree) is not an
+        // error: the merge is tried again like a base that moved.
+        let lock = match crate::git::merge_queue::acquire_lock(&request) {
+            Ok(lock) => lock,
+            Err(GitError::LockTimeout(_)) => return Ok(MergeOutcome::NotFastForward),
+            Err(error) => return Err(err(error)),
+        };
         // Release `admin` while the gate judges the rebased tree.
         let admin = RefCell::new(Some(self.admin()));
         let regate_unlocked = |tree: &Path, onto_sha: &str| {

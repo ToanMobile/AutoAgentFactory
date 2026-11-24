@@ -66,6 +66,9 @@ impl Lexer<'_, '_> {
                 self.pos += 1;
                 self.ansi_c();
             }
+            // `<<$"EOF"`: bash ends the body at `EOF` (the text of a
+            // locale-translated string, quoted), not at `$EOF`.
+            Some('"') if !in_double && matches!(self.pending.as_deref(), Some("<<" | "<<-")) => {}
             next => {
                 // `$VAR`, `${VAR}`: the value is unknown, keep the text.
                 let word = self.word_mut();

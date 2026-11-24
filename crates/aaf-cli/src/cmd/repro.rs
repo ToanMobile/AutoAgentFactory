@@ -12,7 +12,9 @@
 
 use std::time::Duration;
 
-use aaf_engine::detector::repro::{DEFAULT_RUNS, ReproCommand, ReproOutcome, verify};
+use aaf_engine::detector::repro::{
+    DEFAULT_RUNS, FailureDetail, ReproCommand, ReproOutcome, ReproReport, verify_report,
+};
 use serde_json::json;
 
 use crate::ctx::Ctx;
@@ -39,8 +41,8 @@ pub fn run(args: &ReproArgs, ctx: &Ctx) -> CmdResult {
     let Some((program, extra_args)) = args.argv.split_first() else {
         return Err(CmdError::new("no program specified after --"));
     };
-    let outcome = run_argv(program, extra_args, ctx, args.runs);
-    Ok(outcome_output(&outcome, args.runs, false))
+    let report = run_argv(program, extra_args, ctx, args.runs);
+    Ok(outcome_output(&report, args.runs, false))
 }
 
 /// Runs manual repro pre-flight for `aaf board add --repro-cmd`.
@@ -55,10 +57,10 @@ pub(crate) fn preflight_for_board_add(
     if let Some(refused) = refuse_if_agent(ctx, "aaf board add --repro-cmd") {
         return Some(refused);
     }
-    let outcome = run_argv(program, extra_args, ctx, runs);
-    match outcome {
+    let report = run_argv(program, extra_args, ctx, runs);
+    match report.outcome {
         ReproOutcome::Confirmed => None,
-        other => Some(outcome_output(&other, runs, true)),
+        _ => Some(outcome_output(&report, runs, true)),
     }
 }
 
@@ -71,17 +73,46 @@ fn refuse_if_agent(ctx: &Ctx, what: &str) -> Option<CmdOutput> {
     })
 }
 
-fn run_argv(program: &str, extra_args: &[String], ctx: &Ctx, runs: u32) -> ReproOutcome {
+fn run_argv(program: &str, extra_args: &[String], ctx: &Ctx, runs: u32) -> ReproReport {
     let cmd = ReproCommand::argv(
         program,
         extra_args.to_vec(),
         ctx.cwd.clone(),
         DEFAULT_REPRO_TIMEOUT,
     );
-    verify(&cmd, runs)
+    verify_report(&cmd, runs)
 }
 
-fn outcome_output(outcome: &ReproOutcome, runs: u32, for_board_add: bool) -> CmdOutput {
+/// Adds the last failing run's exit code and stderr tail, when there was
+/// one, to both the human text and the JSON object (extra keys are allowed by
+/// the `--json` contract, see `output.rs`).
+fn with_failure(out: CmdOutput, failure: Option<&FailureDetail>) -> CmdOutput {
+    let Some(failure) = failure else {
+        return out;
+    };
+    let code = failure.exit_code.map_or_else(
+        || "killed by signal".to_string(),
+        |c| format!("exit code {c}"),
+    );
+    let mut out = out
+        .field("last_exit_code", json!(failure.exit_code))
+        .field("stderr_tail", json!(failure.stderr_tail));
+    out.text.push_str(&format!("\nlast failing run: {code}"));
+    if !failure.stderr_tail.is_empty() {
+        out.text.push_str("; stderr tail:");
+        for line in &failure.stderr_tail {
+            out.text.push_str(&format!("\n  {line}"));
+        }
+    }
+    out
+}
+
+fn outcome_output(report: &ReproReport, runs: u32, for_board_add: bool) -> CmdOutput {
+    let out = outcome_only(&report.outcome, runs, for_board_add);
+    with_failure(out, report.last_failure.as_ref())
+}
+
+fn outcome_only(outcome: &ReproOutcome, runs: u32, for_board_add: bool) -> CmdOutput {
     let suffix = if for_board_add {
         "; task not created"
     } else {

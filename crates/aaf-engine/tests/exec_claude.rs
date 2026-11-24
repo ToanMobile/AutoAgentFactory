@@ -13,13 +13,16 @@
 //!   the real fixtures plus the status enum, error enum and message wording
 //!   found in the 2.1.330 binary.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
 use aaf_domain::ports::{AgentRequest, AgentRunner, PortError, SandboxPolicy};
 use aaf_engine::executors::ExecEnv;
 use aaf_engine::executors::claude::{ClaudeCodeRunner, StreamParser, parse_stream};
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -428,8 +431,7 @@ fn fake_claude(dir: &Path, fixture_name: &str, exit_code: i32) -> String {
         fixture_path(fixture_name).display()
     );
     let path = dir.join("claude");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, script);
     path.to_string_lossy().into_owned()
 }
 

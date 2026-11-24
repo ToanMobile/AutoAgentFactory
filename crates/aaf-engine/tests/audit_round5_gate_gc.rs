@@ -300,7 +300,11 @@ fn gate_parallel_preflight_works_for_warn_and_remove_policies() {
     cfg.commands.test_scoped = "true".to_string();
     let probe = SystemProbe::detect();
     let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
-    let machine = MachineConfig::default();
+    // The CPU-load wait is off: the host running the tests may be busy.
+    let machine = MachineConfig {
+        max_load_percent: 0,
+        ..MachineConfig::default()
+    };
     let throttle = Throttle::system(&machine, &probe, &noop);
 
     let warned = run_gate_policy(

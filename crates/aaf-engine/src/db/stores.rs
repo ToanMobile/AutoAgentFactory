@@ -12,6 +12,7 @@ use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
 use aaf_domain::task::TaskState;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use super::queries::run_from_row;
 use super::{Db, corrupt, sql_err, to_i64, to_u64};
 
 const I64_MAX: u64 = i64::MAX as u64;
@@ -123,24 +124,6 @@ impl BudgetStore for Db {
             Ok(())
         })
     }
-}
-
-fn run_from_row(row: &Row<'_>) -> PortResult<RunRecord> {
-    let status: String = row.get(6).map_err(sql_err)?;
-    Ok(RunRecord {
-        id: row.get(0).map_err(sql_err)?,
-        task_id: row.get(1).map_err(sql_err)?,
-        account_id: row.get(2).map_err(sql_err)?,
-        executor: row.get(3).map_err(sql_err)?,
-        worktree_path: row.get(4).map_err(sql_err)?,
-        branch: row.get(5).map_err(sql_err)?,
-        status: RunStatus::parse(&status).ok_or_else(|| corrupt("runs.status", &status))?,
-        exit_code: row.get(7).map_err(sql_err)?,
-        tokens_in: to_u64(row.get(8).map_err(sql_err)?, "runs.tokens_in")?,
-        tokens_out: to_u64(row.get(9).map_err(sql_err)?, "runs.tokens_out")?,
-        started_at: row.get(10).map_err(sql_err)?,
-        ended_at: row.get(11).map_err(sql_err)?,
-    })
 }
 
 impl RunStore for Db {

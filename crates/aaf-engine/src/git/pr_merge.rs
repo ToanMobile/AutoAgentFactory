@@ -1,7 +1,8 @@
 //! Native locked Pull Request merge gate (`aaf merge <PR> --expect-head <sha40>`).
 //!
 //! Security & correctness invariants:
-//! 1. Tier-2 config is always loaded from the immutable `<base_sha>` (`git show`), never from the PR.
+//! 1. Tier-2 config is always loaded from the immutable `<base_sha>` (`git show`), never from the PR;
+//!    the tighten-only tier-1/tier-3/`AAF_*` overlays are layered on top as `aaf gate` does.
 //! 2. `cross_audit.require_different_provider` is enforced unconditionally (`same_account=true`
 //!    approvals never unlock head-locked changes during merge).
 //! 3. Verifies `headRefOid == expect_head` both before and inside the per-repo merge lock,
@@ -22,6 +23,7 @@ use super::cmd::{git, git_raw};
 use super::gh_client::{GhClient, MergeStrategy, PrInfo};
 use super::pr_merge_support::{
     MAX_WAIT_SECS, MergeLockGuard, ScratchWorktree, bounded_deadline, fetch_base_and_pr,
+    load_trusted_base_config,
 };
 use super::{GitError, has_remote};
 use crate::gate::{self, HiddenPolicy};
@@ -93,20 +95,6 @@ fn blocked(code: &str, reason: String, receipt: Option<Receipt>) -> PrMergeOutco
 
 fn valid_sha40(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn load_trusted_base_config(repo_root: &Path, base_sha: &str) -> Result<RepoConfig, GitError> {
-    let spec = format!("{base_sha}:.autofactory/config.toml");
-    let raw = git(repo_root, &["show", &spec]).map_err(|_| {
-        GitError::Gate(format!(
-            "missing or unreadable .autofactory/config.toml at base {base_sha}"
-        ))
-    })?;
-    toml::from_str(&raw).map_err(|e| {
-        GitError::Gate(format!(
-            "invalid .autofactory/config.toml at base {base_sha}: {e}"
-        ))
-    })
 }
 
 fn check_ci(

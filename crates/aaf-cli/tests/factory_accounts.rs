@@ -8,10 +8,12 @@
 mod support;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use serde_json::json;
 use support::Fixture;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
 
 /// A fixture whose machine has one Claude Code profile and a Gemini login.
 fn two_providers() -> (Fixture, String) {
@@ -29,8 +31,7 @@ fn two_providers() -> (Fixture, String) {
     // The Gemini login only counts when its binary is on PATH.
     let bin = fx.root().join("bin");
     fs::create_dir_all(&bin).unwrap();
-    fs::write(bin.join("gemini"), "#!/bin/sh\n").unwrap();
-    fs::set_permissions(bin.join("gemini"), fs::Permissions::from_mode(0o755)).unwrap();
+    exec_support::write_executable(&bin.join("gemini"), "#!/bin/sh\n");
     let path = format!(
         "{}:{}",
         bin.display(),

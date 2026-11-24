@@ -290,13 +290,12 @@ fn clean_task_artifacts(
     let reg_entry = registered
         .iter()
         .find(|e| e.branch.as_deref() == Some(branch.as_str()));
-    // git lists the main worktree first; it is never removed, so neither is
-    // the branch checked out in it.
-    if reg_entry.is_some_and(|e| registered.first().is_some_and(|main| main.path == e.path)) {
-        report.warnings.push(format!(
-            "{}: branch is checked out in the main worktree: kept",
-            task.id
-        ));
+    // Only the task's own aaf worktree is removed: the branch checked out in
+    // the main worktree or a user's linked worktree is kept, and so is it.
+    if let Some(warning) =
+        reg_entry.and_then(|e| worktree::foreign_checkout(&task.id, e, registered, &expected_path))
+    {
+        report.warnings.push(warning);
         return Ok(());
     }
     let existing_wt_path = reg_entry

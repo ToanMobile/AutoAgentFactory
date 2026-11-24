@@ -400,7 +400,8 @@ where
             return Some(Denial::new(
                 fallback::RULE,
                 "cannot analyse a command that may change directory in too many ways",
-                "split the command into separate calls, joining each cd to what follows with &&",
+                "run each directory's step in a subshell of its own, `(cd dir && make)`, or split \
+                 the command into separate calls",
             ));
         }
     }

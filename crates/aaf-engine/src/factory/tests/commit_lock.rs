@@ -3,7 +3,6 @@
 //! real hook scripts, real lock files in a temp dir.
 
 use std::fs::{self, File, TryLockError};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::time::{Duration, Instant};
@@ -12,6 +11,7 @@ use super::git_real::{Fixture, git};
 use crate::factory::ports::GitOps;
 use crate::factory::{RealGit, resolve_base};
 use crate::git::TaskWorktree;
+use crate::throttle::tests::exec_support::write_executable;
 
 /// Long enough that only a hung test reaches it.
 const HANG: Duration = Duration::from_secs(100);
@@ -26,8 +26,7 @@ fn install_hook(fx: &Fixture, script: &str) {
     let hooks = fx.tmp.path().join("hooks");
     fs::create_dir_all(&hooks).unwrap();
     let hook = hooks.join("pre-commit");
-    fs::write(&hook, script).unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&hook, script);
     git(
         &fx.repo,
         &["config", "core.hooksPath", hooks.to_str().unwrap()],

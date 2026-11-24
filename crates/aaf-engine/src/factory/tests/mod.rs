@@ -17,6 +17,7 @@ mod flow;
 mod g3_rework_edges;
 mod git_real;
 mod infra;
+mod merge_lock_retry;
 mod opt12;
 mod oracle_g3_rework_filter;
 mod policy;

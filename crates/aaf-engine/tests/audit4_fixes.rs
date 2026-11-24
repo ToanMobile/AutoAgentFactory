@@ -3,11 +3,14 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
 use aaf_engine::hook_settings::{check_base, check_local, covering_hook};
 use serde_json::json;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 #[test]
 fn hook_entry_requires_command_type_and_positive_integer_timeout() {
@@ -104,8 +107,7 @@ fn settings_env_overrides_and_committed_local_settings_on_base_are_rejected() {
     fs::create_dir_all(repo.join(".claude")).unwrap();
     fs::create_dir_all(&bin).unwrap();
     let hook = bin.join("aaf-hook");
-    fs::write(&hook, "#!/bin/sh\necho '{}'\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&hook, "#!/bin/sh\necho '{}'\n");
     let git = |args: &[&str]| {
         let ok = Command::new("git")
             .arg("-C")
@@ -198,8 +200,7 @@ fn symlinked_write_denied_targets_inside_writable_caches_stay_closed() {
         probe("cache", &gradle.join("caches/ok")),
     );
     let claude = root.join("claude");
-    fs::write(&claude, script).unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, script);
 
     let env = ExecEnv {
         home: Some(home.to_string_lossy().into_owned()),

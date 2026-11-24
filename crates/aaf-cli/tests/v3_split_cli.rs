@@ -12,6 +12,9 @@ use aaf_domain::task::{ImmutableSpec, Task, TaskState};
 use serde_json::json;
 use support::{Fixture, git};
 
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+
 const TWO_SUBTASKS_JSON: &str = r#"[{"key":"part-a","title":"Part A","description":"Implement part A","acceptance":["a.txt exists"],"owned_paths":["src/a.rs"],"depends_on":[]},{"key":"part-b","title":"Part B","description":"Implement part B","acceptance":["b.txt exists"],"owned_paths":["src/b.rs"],"depends_on":[]}]"#;
 
 /// Commits `.autofactory/config.toml` with a custom executor running `script`
@@ -263,12 +266,10 @@ fn board_split_runs_in_throwaway_worktree_and_checks_claude_hooks() {
     // runners where Claude CLI is not installed.
     #[cfg(unix)]
     let extra_path = {
-        use std::os::unix::fs::PermissionsExt;
         let bin = fx2.root().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("claude");
-        fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        exec_support::write_executable(&stub, "#!/bin/sh\nexit 0\n");
         format!(
             "{}:{}",
             bin.display(),

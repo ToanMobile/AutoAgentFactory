@@ -16,8 +16,8 @@ use crate::{Ctx, Denial, paths, sed_script};
 
 const RULE: &str = "git_guard";
 const FIX: &str = "leave git's configuration, hooks, directory and protected refs alone: read them with \
-                   cat/ls/grep, use `git config <key> <value>` for an ordinary setting and ask the \
-                   user for a hook change";
+                   cat/ls/grep and use `git config <key> <value>` for an ordinary setting; a hook \
+                   change: this needs a human: finish the task without it and name the step in your final message";
 
 const HOOK: &str = "a git hook";
 const CONFIG: &str = "git's configuration";

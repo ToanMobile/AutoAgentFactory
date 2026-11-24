@@ -315,6 +315,20 @@ pub fn parse_verdict(text: &str, checklist: &[Item]) -> AuditVerdict {
     parse_scored_verdict(text, checklist, false).verdict
 }
 
+/// Whether `text` holds a readable audit answer that said "yes" to any
+/// blocking checklist item, cited or not. A format repair of such a reply may
+/// cite the blocker but never turn it into a pass.
+pub fn names_blocking_yes(text: &str, checklist: &[Item]) -> bool {
+    single_object(text).is_ok_and(|raw| {
+        raw.answers.iter().any(|answer| {
+            answer.answer == "yes"
+                && checklist
+                    .iter()
+                    .any(|item| item.blocking && item.id == answer.id)
+        })
+    })
+}
+
 /// Validates every finding's `file:line` citation against the parsed diff hunks.
 ///
 /// Blocking findings whose citations do not match any hunk are dropped; if no

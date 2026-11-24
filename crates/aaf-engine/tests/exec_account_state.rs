@@ -6,13 +6,17 @@
 //! silently never written. The real `sandbox-exec` with a stand-in `claude`.
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
 use aaf_domain::ports::{AgentRequest, AgentRunner, SandboxPolicy};
 use aaf_engine::executors::ExecEnv;
 use aaf_engine::executors::claude::ClaudeCodeRunner;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 #[test]
 fn linked_session_state_is_writable_and_linked_settings_are_not() {
@@ -44,8 +48,7 @@ fn linked_session_state_is_writable_and_linked_settings_are_not() {
         echo own > \"$CLAUDE_CONFIG_DIR/.claude.json\" && echo own-ok\n\
         echo evil > \"$CLAUDE_CONFIG_DIR/settings.json\" || echo settings-denied\n\
         echo evil > \"$CLAUDE_CONFIG_DIR/hooks/h.sh\" || echo hooks-denied\n";
-    fs::write(&claude, script).unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, script);
 
     let env = ExecEnv {
         home: Some(root.join("home").to_string_lossy().into_owned()),

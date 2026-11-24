@@ -101,15 +101,6 @@ pub fn acquire_lock(req: &MergeRequest) -> Result<MergeLock, GitError> {
     MergeLock::acquire(&lock, req.lock_timeout)
 }
 
-/// Runs the merge queue with an already-acquired [`MergeLock`].
-pub fn merge_with_lock(
-    req: &MergeRequest,
-    lock: &MergeLock,
-    regate: &dyn Fn(&Path) -> Result<bool, String>,
-) -> Result<MergeOutcome, GitError> {
-    merge_with_lock_onto(req, lock, &|tree, _| regate(tree))
-}
-
 /// Runs the merge queue with an already-acquired [`MergeLock`], passing the
 /// exact resolved `onto_sha` onto which the task branch was rebased to `regate`.
 pub fn merge_with_lock_onto(

@@ -3,8 +3,6 @@
 //! `aaf slot --timeout 3` behind a worktree lock gave up after 3.82 s).
 
 use std::ffi::OsString;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,6 +16,7 @@ use super::super::run::Inherited;
 use super::super::slots::{Admission, try_acquire};
 use super::super::stats::{HeavySample, record};
 use super::super::{Sleeper, SlotJob};
+use super::exec_support::write_executable;
 use super::support::{GIB, Rig};
 
 type Hook = Box<dyn FnMut(usize) + Send>;
@@ -57,8 +56,7 @@ fn both_layers_together_keep_the_limit_to_the_millisecond() {
         let data = TempDir::new().unwrap();
         let work = TempDir::new().unwrap();
         let tool = work.path().join("gradlew");
-        fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&tool, "#!/bin/sh\nexit 0\n");
         let mut rig = Rig::calm();
         rig.machine.max_heavy_parallel = 1;
         rig.machine.exclusive_build_tools = false;

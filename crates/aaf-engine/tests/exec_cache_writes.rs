@@ -7,13 +7,17 @@
 //! them. The real `sandbox-exec` with a stand-in `claude` that probes.
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
 use aaf_domain::ports::{AgentRequest, AgentRunner, SandboxPolicy};
 use aaf_engine::executors::ExecEnv;
 use aaf_engine::executors::claude::ClaudeCodeRunner;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 /// Caches builds write: `(marker, path below the home directory)`.
 const OPEN: [(&str, &str); 14] = [
@@ -103,8 +107,7 @@ fn world() -> World {
 
 fn run(world: &World, script: &str) -> String {
     let claude = world.root.join("claude");
-    fs::write(&claude, format!("#!/bin/sh\n{script}")).unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, format!("#!/bin/sh\n{script}"));
     let env = ExecEnv {
         home: Some(world.home.to_string_lossy().into_owned()),
         // Nothing writable by default: the temp dir holds this whole tree.

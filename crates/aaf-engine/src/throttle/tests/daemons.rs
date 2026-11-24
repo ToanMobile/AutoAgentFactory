@@ -4,7 +4,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -21,6 +20,7 @@ use super::super::slots::{Admission, Busy, try_acquire};
 use super::super::stats::{HeavySample, record};
 use super::super::token::SlotToken;
 use super::super::{Ask, HeavyJob, HeavyRun, heavy_tool};
+use super::exec_support::write_executable;
 use super::support::{GIB, Rig, answered};
 
 const REPO: &str = "repo";
@@ -46,8 +46,7 @@ fn job<'a>(cwd: &'a Path, command: &'a str) -> HeavyJob<'a> {
 fn fake_gradle_project() -> TempDir {
     let work = TempDir::new().unwrap();
     let gradlew = work.path().join("gradlew");
-    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gradlew, "#!/bin/sh\nexit 0\n");
     work
 }
 

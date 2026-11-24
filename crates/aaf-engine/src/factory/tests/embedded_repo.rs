@@ -4,10 +4,10 @@
 //! `core.fsmonitor` names, outside the agent's sandbox.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use super::git_real::{Fixture, git};
 use crate::factory::ports::GitOps;
+use crate::throttle::tests::exec_support::write_executable;
 
 #[test]
 fn committing_a_worktree_runs_no_fsmonitor_of_an_embedded_repository() {
@@ -33,12 +33,10 @@ fn committing_a_worktree_runs_no_fsmonitor_of_an_embedded_repository() {
     );
     let marker = fx.tmp.path().join("fsmonitor-ran");
     let monitor = fx.tmp.path().join("monitor.sh");
-    fs::write(
+    write_executable(
         &monitor,
         format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     git(
         &sub,
         &["config", "core.fsmonitor", monitor.to_str().unwrap()],

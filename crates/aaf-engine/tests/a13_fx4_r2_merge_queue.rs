@@ -8,7 +8,6 @@ mod support;
 
 use std::cell::RefCell;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -17,6 +16,10 @@ use aaf_engine::git::GitError;
 use aaf_engine::git::merge_queue::{self, MergeOutcome, MergeRequest};
 use aaf_engine::git::worktree::{self, TaskWorktree};
 use support::{Fixture, commit_file, git};
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 const BASE_TEST: &str = "#[test]\nfn guarded() { assert!(true); }\n";
 const LOCKED_EDIT: &str = "#[test]\nfn guarded() {}\n";
@@ -33,8 +36,7 @@ fn request(fx: &Fixture, wt: &TaskWorktree) -> MergeRequest {
 }
 
 fn write_exec(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(path, text);
 }
 
 /// F4-A: a `post-rewrite` hook committed by the task (in-tree

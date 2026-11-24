@@ -5,12 +5,15 @@
 //! report and what gets deleted stay the same.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
 use aaf_engine::db::Db;
 use aaf_engine::gc::{GcOptions, run_gc};
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 #[path = "gc_support.rs"]
 mod gc_support;
@@ -23,8 +26,7 @@ const SNAP: &str = "refs/aaf/snapshots/";
 const MAX_CALLS: usize = 15;
 
 fn write_exec(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(path, body);
 }
 
 fn calls(log: &Path) -> Vec<String> {

@@ -10,6 +10,8 @@ use aaf_domain::blocked::{BlockedReason, SubtaskPlan};
 use aaf_domain::ports::{AgentRequest, AgentRunner, BudgetStore, PortError, PortResult};
 use aaf_domain::task::Task;
 
+use super::classifier::neutralize_untrusted_tags;
+
 /// `runs.executor` value recorded for T4 subtask-proposer runs.
 pub const PROPOSER_EXECUTOR: &str = "unblock-proposer";
 
@@ -282,37 +284,10 @@ impl SubtaskProposer for AgentSubtaskProposer<'_> {
     }
 }
 
-fn sanitize_untrusted_tags(text: &str) -> String {
-    const TAGS: [&[u8]; 2] = [b"</untrusted-data", b"<untrusted-data"];
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut copied = 0usize;
-    let mut at = 0usize;
-    while at < bytes.len() {
-        let matched = TAGS.iter().copied().find(|tag| {
-            at + tag.len() <= bytes.len() && bytes[at..at + tag.len()].eq_ignore_ascii_case(tag)
-        });
-        if let Some(tag) = matched {
-            out.push_str(&text[copied..at]);
-            if tag.starts_with(b"</") {
-                out.push_str("&lt;/untrusted-data");
-            } else {
-                out.push_str("&lt;untrusted-data");
-            }
-            at += tag.len();
-            copied = at;
-        } else {
-            at += 1;
-        }
-    }
-    out.push_str(&text[copied..]);
-    out
-}
-
 fn concise_snippet(text: &str, max_chars: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let clipped: String = flat.chars().take(max_chars).collect();
-    sanitize_untrusted_tags(&clipped)
+    neutralize_untrusted_tags(&clipped)
 }
 
 fn reason_detail(reason: &BlockedReason) -> &str {
@@ -334,7 +309,7 @@ fn build_prompt(task: &Task, reason: &BlockedReason, digest: &str) -> String {
         .spec
         .acceptance
         .iter()
-        .map(|a| format!("- {}\n", sanitize_untrusted_tags(a)))
+        .map(|a| format!("- {}\n", neutralize_untrusted_tags(a)))
         .collect();
     let mut failure_block = String::new();
     let detail = concise_snippet(reason_detail(reason), MAX_FAILURE_SNIPPET_CHARS);
@@ -376,7 +351,7 @@ fn build_prompt(task: &Task, reason: &BlockedReason, digest: &str) -> String {
          {failure_block}\
          </untrusted-data>\n",
         kind = reason.kind(),
-        title = sanitize_untrusted_tags(&task.title),
-        description = sanitize_untrusted_tags(&task.spec.description),
+        title = neutralize_untrusted_tags(&task.title),
+        description = neutralize_untrusted_tags(&task.spec.description),
     )
 }

@@ -111,7 +111,7 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | Area | What you get | Where |
 |---|---|---|
 | **Board and factory** | A SQLite-backed task board (`aaf board`) and a factory loop (`aaf run`). Each task gets its own git worktree and its own agent run. Gate runs are batched, and a failing batch is split in halves until the culprit is found. A five-tier unblocker retries, adds context, splits a task or escalates it to you. | `main` |
-| **Sandbox** | Agents started by `aaf run` run inside a generated Seatbelt profile (`/usr/bin/sandbox-exec`) on macOS, or bubblewrap (`bwrap`) / a hardened container (`packaging/docker/`) on Linux (`v3.4`). | `main` / **`v3.4`** |
+| **Sandbox** | Agents started by `aaf run` run inside a generated Seatbelt profile (`/usr/bin/sandbox-exec`) on macOS. On Linux `aaf run` does not wrap agents yet (bwrap integration pending) and needs `--unsandboxed`; the bubblewrap policy builder and container detection ship in `v3.4` but are not wired into `aaf run`. | `main` / **`v3.4`** |
 | **Hook guards** | `aaf-hook` is a multi-host guard hook (`--host <auto\|claude\|codex\|gemini>`) covering Claude Code `PreToolUse` (`Bash`, `Write`, `Edit`, `MultiEdit`, `Read`), Codex CLI `PreToolUse` (including `apply_patch`), and Gemini CLI `BeforeTool` (`v3.4`). It has guards for git, protected files, the data directory, `adb`/`fastboot`, store submission, human-only actions and heavy commands. | `main` / **`v3.4`** |
 | **Gate and receipts** | Scoped, full and release modes. Static checks run on added lines. Head lock, App Store / Google Play compliance scan, and HMAC-SHA256 receipts and approvals. | `main` |
 | **Throttle and `aaf slot`** | One queue for heavy commands, shared by the gate, agents, git hooks and CI runners on the same machine. | `main` |
@@ -129,7 +129,7 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | **Live streams, snapshots and TTY cockpit** | Sanitized `2 MiB` live stream logs (`streams/<run_id>.jsonl`), protected pre-turn snapshots (`refs/aaf/snapshots/*` + `turn_snapshots`), `board undo`/`steer`, and synchronous interactive TTY `aaf cockpit` (0 ports, 0 new crates, ANSI/OSC sanitized). | **`v3.2`** |
 | **Remote Telegram companion (`aaf telegram`)** | Zero-port outbound Telegram Bot API long-polling (Tier-1 config only, fail-closed `allowed_chat_ids`, env-only token) for read-only `/status`, `/board`, `/show`, `/handover` and opt-in two-step `/confirm <code>` approvals/mutations. | **`v3.4`** |
 | **Multi-host hook adapters** | `aaf-hook --host <auto\|claude\|codex\|gemini>` and `aaf init --hook-host <claude\|codex\|gemini\|all>` extend the full guard suite to Codex CLI (including `apply_patch` path checks) and Gemini CLI (`BeforeTool`). | **`v3.4`** |
-| **Packaging, `[secret NAME]` masking & Linux `bwrap`** | Streaming chunk-boundary `[secret NAME]` masking, GitHub Release workflow + SHA-256 verified `scripts/install.sh` + Homebrew formula + hardened Docker runner, and Linux bubblewrap (`bwrap`) / container isolation dispatch. | **`v3.4`** |
+| **Packaging, `[secret NAME]` masking & Linux `bwrap`** | Streaming chunk-boundary `[secret NAME]` masking, GitHub Release workflow + SHA-256 verified `scripts/install.sh` + Homebrew formula + hardened Docker runner, and the Linux bubblewrap (`bwrap`) policy builder / container detection (not yet used by `aaf run`; Linux needs `--unsandboxed`). | **`v3.4`** |
 | **Declarative SOP workflows (`aaf sop`)** | TOML SOP pipelines (`Agent`, `Script`, `Gate`, `HumanGate`) with DAG validation, bounded `on_fail_goto` rework edges, 5 built-in blueprints (`backend`, `frontend`, `mobile-android`, `unity-game`, `bugfix`), and crash-safe checkpoint resume (`approve`, `send-back`). | **`v3.5`** |
 | **10-CLI executor registry, roles & MCP audit (`aaf executors`)** | Unified descriptors and PATH inventory for 10 coding CLIs (`claude`, `codex`, `gemini`, `opencode`, `cursor`, `antigravity`, `codebuddy`, `kimi`, `pi`, `deepseek`), ordered fallback routing with audit trail, `.autofactory/roles/*.toml`, and read-only `.mcp.json` inline-secret scanning. | **`v3.5`** |
 | **Web & Mobile Cockpit (`aaf ui`)** | Zero-dependency embedded warm-paper/dark SPA over `std::net::TcpListener` + SSE live stream, Needs Review approval inbox, scannable terminal QR pairing (`#token=` fragment), strict CSP, Bearer auth, Origin/Host CSRF protection, and fail-closed LAN bind enforcement. | **`v3.5`** |
@@ -142,7 +142,7 @@ Coding agents are fast. Left alone in a real repository, they also cause the sam
 | Requirement | Notes |
 |---|---|
 | **macOS** | The agent sandbox uses Seatbelt (`/usr/bin/sandbox-exec`), including narrow per-UID `/Volumes/<Vol>/.TemporaryItems/folders.<uid>` allowance for Unity on secondary volumes. |
-| **Linux** | Uses bubblewrap (`bwrap`) or a hardened container (`packaging/docker/`) when available; otherwise `aaf run` refuses (exit 2) until you pass `--unsandboxed`. Real Linux `/proc` load behavior remains operator-verified on Linux hosts. |
+| **Linux** | `aaf run` has no agent sandbox yet (bwrap integration pending): it refuses (exit 2) until you pass `--unsandboxed`, even when bubblewrap (`bwrap`) or a hardened container (`packaging/docker/`) is present. `aaf doctor` reports a detected `bwrap`/container as information only. Real Linux `/proc` load behavior remains operator-verified on Linux hosts. |
 | **Rust toolchain** | The workspace declares `rust-version = "1.89"`. The repository pins its toolchain in `rust-toolchain.toml` (channel `1.100.0`, with `clippy` and `rustfmt`), and rustup uses that pinned toolchain inside the checkout. |
 | **git ≥ 2.34** | Required. `aaf doctor` fails its `git` check below 2.34, because the tree fingerprint uses `git add --sparse`. |
 | **Claude Code CLI (`claude`)** | Must be on `PATH` and logged in. This is the default executor of `aaf run`. `aaf doctor` warns when `claude` is missing. |
@@ -320,7 +320,7 @@ stateDiagram-v2
 5. **Review or Done.** By default a `CLEAR` task gets a pull request that carries its gate receipt, and moves to **Review**. With `--auto-merge`, it goes through the merge queue instead. The queue takes one merge at a time, rebases onto the base, runs the gate again on the rebased tree and fast-forwards, never forcing. The task then becomes **Done**.
 6. **Unblocker.** Every failure goes up a ladder:
    - **T1** classifies the failure.
-   - **T2** applies mechanical fixes: cooldown and account switch, or a wait, for quota; a 2-of-2 rerun for flaky failures; rebase and re-gate for conflicts.
+   - **T2** applies mechanical fixes: cooldown and account switch, or a wait, for quota; up to two reruns for flaky failures, stopping at the first rerun that passes; rebase and re-gate for conflicts.
    - **T3** retries with a fresh context and a failure summary.
    - **T4** splits the task into subtasks at depth 1, sharing the root's budget.
    - **T5** moves the task to Blocked for a human, and sends a webhook if you configured one.
@@ -360,6 +360,7 @@ Tiers above 2 can only make the result safer. The rules:
 [machine]
 max_heavy_parallel = 0     # heavy commands at once; 0 = a quarter of the CPUs, at least 1
 max_load_percent   = 150   # wait while the 1-min load average is above this % of CPU count; 0 disables
+max_cpu_percent    = 85    # ...and real CPU busy % is at least this; 0 = load average alone decides
 heavy_wait_secs    = 1800  # longest wait for CPU load; after it the command runs anyway, at low priority
 low_priority       = true  # run heavy commands at low CPU and I/O priority
 
@@ -834,7 +835,7 @@ sequenceDiagram
 
 *One tool call, layer by layer. The agent, the hook and every command it runs share the Seatbelt sandbox; the hook answers each call with exit `0` or `2`; the gate that signs the receipt runs only after the agent's turn, outside the sandbox, with a key the agent cannot read.*
 
-**1. The sandbox (macOS Seatbelt / Linux `bwrap` or hardened container, `aaf run` only).** This is the main boundary. On Linux (`v3.4`), `aaf run` uses bubblewrap (`bwrap`) when available (enforcing per-run worktree and `AAF_DATA_DIR` confinement) or detects a hardened container (`packaging/docker/`), and refuses (exit 2) until `--unsandboxed` if neither is present. On macOS, the generated Seatbelt profile allows by default, then denies file writes, except to:
+**1. The sandbox (macOS Seatbelt, `aaf run` only).** This is the main boundary. On Linux, `aaf run` does not use bubblewrap (`bwrap`) yet (integration pending): it refuses (exit 2) until `--unsandboxed`, whether or not `bwrap` or a hardened container (`packaging/docker/`) is present, so a Linux run has no sandbox (a hardened container is then the only boundary). On macOS, the generated Seatbelt profile allows by default, then denies file writes, except to:
 
 - the task's own worktree, and the shared git directory of the repo;
 - temporary directories;
@@ -849,7 +850,8 @@ Inside those writable places, it still denies:
 - Gradle init scripts and `gradle.properties`;
 - `~/.cargo/bin` and other `PATH` directories;
 - the debug keystore;
-- Claude Code `settings.json` and `hooks`.
+- Claude Code `settings.json` and `hooks`;
+- in the account config dir of other CLIs, what their later sessions run or trust: Codex `config.toml` and `hooks.json`; Gemini/Antigravity `settings.json`, `trusted_hooks.json`, `trustedFolders.json`, `extensions`, `commands` and the Antigravity `bin`/`mcp`/plugin entries; OpenCode `opencode.json[c]`, `config.json`, `plugin(s)`, `tool(s)`, `command(s)`. Session state (OAuth credentials, `tmp`, history) stays writable.
 
 It also denies both reading and writing `aaf`'s data directory, where the signing key, receipts and approvals live. The one exception is a small queue area, so that sandboxed agents can wait for a heavy slot.
 
@@ -978,13 +980,14 @@ flowchart LR
 
 - While memory pressure is not Normal, waiting commands keep waiting. This wait has no time ceiling.
 - When pressure reaches Critical, the command in the latest slot is paused with `SIGSTOP`. It resumes with `SIGCONT` when pressure returns to Normal. Slot 0 is never paused.
-- High CPU load (above `max_load_percent`) makes a command wait for at most `heavy_wait_secs`. After that it runs anyway, at low priority, so load alone never stalls a task.
+- High CPU load makes a command wait for at most `heavy_wait_secs`. After that it runs anyway, at low priority, so load alone never stalls a task. The check has two tiers: a command waits only while the 1-minute load average is above `max_load_percent` **and** the real CPU busy percentage (macOS `iostat`, Linux `/proc/stat`) is at least `max_cpu_percent` (default 85). The second tier exists because macOS counts I/O-waiting threads in its load average. `max_cpu_percent = 0` turns it off (load average alone decides); when the CPU probe cannot be read, load average alone decides too.
 
 While a command waits, stderr explains why. Examples:
 
 ```text
 aaf slot: ./gradlew: waiting for a heavy slot (it runs alone: never measured, or a build tool that works through daemons), 42s
 aaf slot: ./gradlew: waiting for memory pressure to ease (Warn), 12s
+aaf slot: ./gradlew: waiting for CPU busy 93% to drop below 85% (loadavg 210%), 30s (runs anyway after 1800s)
 aaf slot: ./gradlew: paused under critical memory pressure (slot 1)
 ```
 

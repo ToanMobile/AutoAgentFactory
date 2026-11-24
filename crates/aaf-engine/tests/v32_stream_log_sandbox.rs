@@ -19,6 +19,10 @@ use aaf_engine::executors::stream_log::{
 };
 use serde_json::Value;
 
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
+
 #[test]
 fn open_rejects_invalid_run_id_and_none_data_dir_is_noop() {
     let dir = tempfile::tempdir().unwrap();
@@ -302,12 +306,10 @@ fn claude_runner_writes_sanitized_projections_not_raw_stream_json() {
     .join("\n");
 
     let fake_bin = dir.path().join("fake-claude");
-    fs::write(
+    write_executable(
         &fake_bin,
         format!("#!/bin/sh\ncat <<'EOF'\n{stream_body}\nEOF\n"),
-    )
-    .unwrap();
-    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let env = ExecEnv {
         data_dir: Some(data_dir.to_string_lossy().into_owned()),

@@ -4,11 +4,14 @@
 //! allowed case.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::json;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 /// A Claude Code settings file whose only hook is `aaf-hook` with `entry`
 /// merged into the hook entry.
@@ -123,8 +126,7 @@ fn dangling_and_chained_links_to_closed_cache_paths_stay_closed() {
     ]
     .concat();
     let claude = root.join("claude");
-    fs::write(&claude, script).unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, script);
 
     let path_var = format!("/usr/bin:/bin:{}", gradle.join("pbin").display());
     let env = ExecEnv {
@@ -258,8 +260,7 @@ fn repo_with_settings(
     fs::create_dir_all(repo.join(".claude")).unwrap();
     fs::create_dir_all(&bin).unwrap();
     let hook = bin.join("aaf-hook");
-    fs::write(&hook, "#!/bin/sh\necho '{}'\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&hook, "#!/bin/sh\necho '{}'\n");
     git_in(&repo, &["init", "-q", "-b", "main"]);
     fs::write(
         repo.join(".claude/settings.json"),

@@ -20,7 +20,8 @@ pub struct BoardEnrichment {
     pub latest_run_by_task: HashMap<String, String>,
 }
 
-fn run_from_row(row: &Row<'_>) -> PortResult<RunRecord> {
+/// One `runs` row, columns in table order (shared with `stores.rs`).
+pub(super) fn run_from_row(row: &Row<'_>) -> PortResult<RunRecord> {
     let status: String = row.get(6).map_err(sql_err)?;
     Ok(RunRecord {
         id: row.get(0).map_err(sql_err)?,

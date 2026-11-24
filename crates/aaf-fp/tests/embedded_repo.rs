@@ -4,9 +4,12 @@
 //! program its `core.fsmonitor` names.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+
+#[path = "exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -38,12 +41,10 @@ fn the_fingerprint_runs_no_fsmonitor_of_an_embedded_repository() {
     git(&repo, &["commit", "--quiet", "-m", "init"]);
     let marker = dir.path().join("fsmonitor-ran");
     let monitor = dir.path().join("monitor.sh");
-    fs::write(
+    write_executable(
         &monitor,
         format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     git(
         &sub,
         &["config", "core.fsmonitor", monitor.to_str().unwrap()],

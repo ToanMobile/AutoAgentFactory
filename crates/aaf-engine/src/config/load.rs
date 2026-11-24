@@ -137,21 +137,74 @@ pub fn load_from_env_with(
 
 pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
     let mut sources = Vec::new();
-    let mut warnings = Vec::new();
-
-    let global: GlobalConfig = match &inputs.global_config {
-        Some(path) => read_tier(path, &mut sources)?.unwrap_or_default(),
-        None => GlobalConfig::default(),
-    };
+    let global = read_global(inputs, &mut sources)?;
     let repo_path = inputs.repo_root.join(REPO_CONFIG_REL);
-    let mut repo: RepoConfig = read_tier(&repo_path, &mut sources)?.unwrap_or_default();
+    let repo: RepoConfig = read_tier(&repo_path, &mut sources)?.unwrap_or_default();
+    layer(
+        inputs,
+        global,
+        repo,
+        &repo_path.display().to_string(),
+        sources,
+    )
+}
+
+/// [`load`] over a tier 2 the caller read elsewhere (`aaf merge` reads it
+/// from the base commit, never from the checkout): tier 1, tier 3 under
+/// `inputs.repo_root`, the environment and the command line are layered on
+/// top with the same tighten-only rules. `repo_source` names it in
+/// [`EffectiveConfig::sources`] and warnings.
+pub fn load_over_repo(
+    inputs: &ConfigInputs<'_>,
+    repo: RepoConfig,
+    repo_source: &str,
+) -> Result<EffectiveConfig, ConfigError> {
+    let mut sources = Vec::new();
+    let global = read_global(inputs, &mut sources)?;
+    sources.push(repo_source.to_string());
+    layer(inputs, global, repo, repo_source, sources)
+}
+
+/// [`load_over_repo`] with the real environment and no command-line overrides.
+pub fn load_over_repo_from_env(
+    repo_root: &Path,
+    repo: RepoConfig,
+    repo_source: &str,
+) -> Result<EffectiveConfig, ConfigError> {
+    load_over_repo(
+        &ConfigInputs {
+            global_config: global_config_path(&process_env),
+            repo_root: repo_root.to_path_buf(),
+            env: &process_env,
+            cli: ConfigOverlay::default(),
+        },
+        repo,
+        repo_source,
+    )
+}
+
+fn read_global(
+    inputs: &ConfigInputs<'_>,
+    sources: &mut Vec<String>,
+) -> Result<GlobalConfig, ConfigError> {
+    Ok(match &inputs.global_config {
+        Some(path) => read_tier(path, sources)?.unwrap_or_default(),
+        None => GlobalConfig::default(),
+    })
+}
+
+/// Tier 1 floors into tier 2, then tier 3, the environment and the command line.
+fn layer(
+    inputs: &ConfigInputs<'_>,
+    global: GlobalConfig,
+    mut repo: RepoConfig,
+    repo_source: &str,
+    mut sources: Vec<String>,
+) -> Result<EffectiveConfig, ConfigError> {
+    let mut warnings = Vec::new();
     merge_cross_audit(&global.cross_audit, &mut repo.cross_audit, &mut warnings);
     merge_max_open_review(global.run.max_open_review, &mut repo.run.max_open_review);
-    clamp_pipeline(
-        &mut repo.pipeline,
-        &repo_path.display().to_string(),
-        &mut warnings,
-    );
+    clamp_pipeline(&mut repo.pipeline, repo_source, &mut warnings);
 
     let local_path = inputs.repo_root.join(LOCAL_CONFIG_REL);
     if let Some(local) = read_tier::<LocalFile>(&local_path, &mut sources)? {

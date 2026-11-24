@@ -6,9 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aaf_domain::config::RepoConfig;
+
 use super::cmd::{git, git_raw};
 use super::gh_client::PrInfo;
 use super::{GitError, check_branch_name, path_str};
+use crate::config::{self, REPO_CONFIG_REL};
 
 /// Maximum wait duration (24 hours) for lock or CI polling to prevent overflow
 /// when computing `Instant` deadlines.
@@ -21,6 +24,27 @@ pub(super) fn bounded_deadline(timeout: Duration) -> Instant {
     let clamped = timeout.min(Duration::from_secs(MAX_WAIT_SECS));
     let now = Instant::now();
     now.checked_add(clamped).unwrap_or(now)
+}
+
+/// Tier 2 from the immutable `<base_sha>` (`git show`: never the PR's or the
+/// checkout's copy), with the tighten-only tier-1, tier-3 (from `repo_root`)
+/// and `AAF_*` environment overlays layered on top exactly as for `aaf gate`.
+pub(super) fn load_trusted_base_config(
+    repo_root: &Path,
+    base_sha: &str,
+) -> Result<RepoConfig, GitError> {
+    let spec = format!("{base_sha}:{REPO_CONFIG_REL}");
+    let raw = git(repo_root, &["show", &spec]).map_err(|_| {
+        GitError::Gate(format!(
+            "missing or unreadable {REPO_CONFIG_REL} at base {base_sha}"
+        ))
+    })?;
+    let base: RepoConfig = toml::from_str(&raw).map_err(|e| {
+        GitError::Gate(format!("invalid {REPO_CONFIG_REL} at base {base_sha}: {e}"))
+    })?;
+    config::load_over_repo_from_env(repo_root, base, &spec)
+        .map(|effective| effective.repo)
+        .map_err(|e| GitError::Gate(format!("config over base {base_sha}: {e}")))
 }
 
 /// Isolated detached scratch worktree for verifying a merged PR tree; always

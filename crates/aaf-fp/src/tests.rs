@@ -9,6 +9,10 @@ use std::process::Command;
 
 use crate::{GIT_TIMEOUT, GitCall, stale, tree_fp, tree_fp_using};
 
+#[path = "../tests/exec_support.rs"]
+pub(crate) mod exec_support;
+use exec_support::write_executable;
+
 fn real_git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
@@ -38,7 +42,6 @@ fn repo() -> tempfile::TempDir {
 /// A `git` from before 2.34: `add` does not know `--sparse` and answers the
 /// way git answers any unknown option. Everything else is the real git.
 fn git_without_add_sparse(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = "#!/bin/sh\n\
         for arg in \"$@\"; do\n\
         \x20 if [ \"$arg\" = \"--sparse\" ]; then\n\
@@ -49,8 +52,7 @@ fn git_without_add_sparse(dir: &Path) -> PathBuf {
         done\n\
         exec git \"$@\"\n";
     let path = dir.join("old-git");
-    fs::write(&path, script).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, script);
     path
 }
 
@@ -172,15 +174,13 @@ impl Drop for KillOnDrop {
 /// holds its stdout and stderr open: what a copy of the pipe that leaked
 /// into another child does (see `output.rs`), and a detached helper too.
 fn git_leaving_a_holder(dir: &Path, code: u8) -> (PathBuf, KillOnDrop) {
-    use std::os::unix::fs::PermissionsExt;
     let pid_file = dir.join(format!("holder-{code}.pid"));
     let script = format!(
         "#!/bin/sh\n/bin/sleep 30 &\necho $! > '{}'\necho answer\necho complaint >&2\nexit {code}\n",
         pid_file.display()
     );
     let path = dir.join(format!("git-{code}"));
-    fs::write(&path, script).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, script);
     (path, KillOnDrop(pid_file))
 }
 

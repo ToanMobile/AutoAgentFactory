@@ -403,7 +403,7 @@ fn audit_turn_read_only_fresh_repair_id_and_fail_closed_repair_guards() {
         if expect_repair {
             assert_eq!(reqs.len(), 2, "{label}: 1-shot repair");
             assert!(reqs[1].sandbox.read_only, "{label}: read-only repair");
-            assert_eq!(s.review, vec!["t1"], "{label}: {s:?}");
+            assert_ne!(reqs[0].run_id, reqs[1].run_id, "{label}: fresh run_id");
         } else {
             // No repair from this reply; one fresh re-audit (a13 O12-1) passes.
             assert_eq!(reqs.len(), 2, "{label}: one fresh re-audit");
@@ -412,8 +412,8 @@ fn audit_turn_read_only_fresh_repair_id_and_fail_closed_repair_guards() {
                     .all(|r| !r.prompt.contains("AAF_UNTRUSTED_PRIOR")),
                 "{label}: no repair prompt"
             );
-            assert_eq!(s.review, vec!["t1"], "{label}: {s:?}");
         }
+        assert_eq!(s.review, vec!["t1"], "{label}: {s:?}");
     }
 }
 

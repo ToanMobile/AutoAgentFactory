@@ -8,7 +8,7 @@ Hợp đồng kỹ thuật: [`docs/PLAN.md`](PLAN.md). Mô hình đe doạ và c
 
 ## Build và cài
 
-Cần Rust theo `rust-toolchain.toml` (1.100.0) và `git` ≥ 2.34. Chạy được trên macOS (Seatbelt) và Linux (bubblewrap `bwrap` hoặc container cứng hoá trong `packaging/docker/`, xem mục Trạng thái). Ngoài build từ mã nguồn bên dưới, v3.4 cung cấp thêm script cài đặt `scripts/install.sh` (tải tarball release có kiểm SHA-256 hoặc `--from-source`), công thức Homebrew (`packaging/homebrew/aaf.rb`) và Docker image (`packaging/docker/`).
+Cần Rust theo `rust-toolchain.toml` (1.100.0) và `git` ≥ 2.34. Chạy được trên macOS (Seatbelt) và Linux (chưa có sandbox: `aaf run` cần `--unsandboxed`, tích hợp bubblewrap `bwrap` đang chờ; xem mục Trạng thái). Ngoài build từ mã nguồn bên dưới, v3.4 cung cấp thêm script cài đặt `scripts/install.sh` (tải tarball release có kiểm SHA-256 hoặc `--from-source`), công thức Homebrew (`packaging/homebrew/aaf.rb`) và Docker image (`packaging/docker/`).
 
 ```sh
 cargo build --release -p aaf-cli -p aaf-hook
@@ -87,7 +87,7 @@ Cờ chung `--json`: stdout đúng một JSON object `{ok, command, status, …,
    - `least_used`: mỗi lượt lấy account không cooldown, lease rảnh, ít token nhất trong 5 giờ; chạm limit thì task chạy tiếp trên account khác còn rảnh.
 
    `aaf accounts next --json` và `aaf doctor --json` có `selection` và `binding` (account đã gắn, nguồn, cooldown). Ở `pinned`, cross-audit chạy trên chính account của repo và ghi `same_account: true`.
-5. **Sandbox** (macOS Seatbelt; trên Linux dùng bubblewrap `bwrap` hoặc container cứng hoá từ v3.4): xem `SECURITY.md` mục 5 cho danh sách ghi được và bị đóng.
+5. **Sandbox** (macOS Seatbelt; trên Linux `aaf run` chưa dùng bubblewrap `bwrap` và cần `--unsandboxed`): xem `SECURITY.md` mục 5 cho danh sách ghi được và bị đóng.
 
 ## Cấu hình ba tầng
 
@@ -106,7 +106,7 @@ Biến môi trường: `AAF_DATA_DIR` (mặc định `~/.local/share/autofactory
 1. **Khe nặng**: `commands.build`, `test_scoped`, `test_full` của gate, `commands.lint` khi chuỗi lệnh của nó gọi công cụ build (`./gradlew lint`, `xcodebuild …`; lint khác chạy ngay), và mọi `aaf slot -- <cmd>` dùng chung khe toàn máy (`throttle/heavy.<n>.lock` trong data dir). Agent trong sandbox của `aaf run` cũng xếp hàng ở đó: sandbox mở riêng thư mục `throttle/` (chỉ đọc và khoá) và `throttle/guest/` (ghi), phần còn lại của data dir vẫn đóng. `aaf gate` thì không chạy được trong sandbox (không tới được khoá ký); gate là việc của `aaf run`, chạy sau lượt của agent. Trần là `machine.max_heavy_parallel`; `0` = số CPU / 4, ít nhất 1. Khe thứ hai trở đi chỉ nhận lệnh đã có số đo RAM đỉnh và khi RAM trống đủ 1,25 lần số đó; lệnh chưa đo chạy một mình. Lần đọc 0 byte không tính là số đo, nên lệnh xong quá nhanh để đo được vẫn là "chưa đo" và vẫn chạy một mình.
 2. **Độc quyền**: lệnh gọi `gradle`/`gradlew`, `xcodebuild`, `Unity`/`unity-editor`, hoặc có `-batchmode`/`-runTests`/`-executeMethod`, luôn chạy một mình, kể cả `gradle --version`.
 3. **Tắt daemon**: lệnh nặng nhận thêm `GRADLE_OPTS=-Dorg.gradle.daemon=false -Dorg.gradle.project.kotlin.compiler.execution.strategy=in-process`. Daemon còn sống sau lệnh thì có cảnh báo, không bị giết.
-4. **Tải và bộ nhớ**: áp lực bộ nhớ khác Normal thì chờ; tải CPU vượt `max_load_percent` (150) thì chờ tối đa `heavy_wait_secs` (1800) rồi vẫn chạy. Lệnh chạy ở `nice -n 10` (macOS thêm `taskpolicy -b`). Bộ nhớ lên Critical thì lệnh ở khe muộn nhất bị `SIGSTOP`, về Normal thì `SIGCONT`; khe 0 không bao giờ bị dừng.
+4. **Tải và bộ nhớ**: áp lực bộ nhớ khác Normal thì chờ; tải CPU vượt `max_load_percent` (150) VÀ CPU bận thật ≥ `max_cpu_percent` (85; 0 hoặc không đo được thì chỉ xét tải) thì chờ tối đa `heavy_wait_secs` (1800) rồi vẫn chạy. Lệnh chạy ở `nice -n 10` (macOS thêm `taskpolicy -b`). Bộ nhớ lên Critical thì lệnh ở khe muộn nhất bị `SIGSTOP`, về Normal thì `SIGCONT`; khe 0 không bao giờ bị dừng.
 5. **`aaf` bị giết**: Ctrl-C ở terminal tới lệnh nặng qua relay. `kill <pid>` gửi riêng cho `aaf slot`/`aaf gate` (TERM, INT, HUP, kể cả KILL) cũng kết thúc lệnh nặng: relay thấy `aaf` chết, gửi TERM cho group của lệnh, sau 10 giây thì KILL. Lệnh chỉ chạy tiếp khi relay cũng chết (SIGKILL cả process group của `aaf`); khi đó khe vẫn tính là bận cho tới khi lệnh kết thúc (file khoá còn ghi process group và thời điểm bắt đầu của lệnh), lệnh đang chờ in ra `process group <pgid> is recorded as the command of a killed aaf and still has processes` kèm cách xem group đó trước khi tự kết thúc nó, và không gì bị giết tự động.
 6. **Lồng nhau**: lệnh do `aaf` khởi chạy mang `AAF_HEAVY_SLOT=<slot>:<token>`. `aaf slot` bên dưới nó chạy ngay, không xếp hàng, chỉ khi khe đó đang có người giữ và token khớp file token của khe (`locks/heavy.<n>.token`, agent trong sandbox không đọc được). Giá trị tự gán (`AAF_HEAVY_SLOT=0`) không có tác dụng, và hook chặn agent gán biến này.
 
@@ -186,7 +186,7 @@ Chưa nghiệm thu thật, mới có test trên fixture hoặc đồ giả:
 - Đường GitHub: `gh pr create` tới một remote GitHub, `gh issue list`; webhook thông báo.
 - Chuyển account khi chạm limit THẬT (mới có fixture tổng hợp); nhận diện chạm limit từ output thật.
 - `aaf run --auto`, gom lô gate nhiều task, và cross-audit với agent thật.
-- Linux: từ `v3.4` hỗ trợ cô lập qua bubblewrap (`bwrap`) hoặc container cứng hoá (`packaging/docker/`); chỉ khi không phát hiện cả hai thì `aaf run` mới từ chối (exit 2) cho tới khi truyền `--unsandboxed`. Việc chạy thật `bwrap`/Docker và đường đo tải qua `/proc` trên máy Linux thật vẫn cần người vận hành xác minh thực địa.
+- Linux: `aaf run` chưa bọc agent bằng bubblewrap (`bwrap`) (đang chờ tích hợp) nên luôn từ chối (exit 2) cho tới khi truyền `--unsandboxed`, kể cả khi có `bwrap` hoặc đang trong container cứng hoá (`packaging/docker/`); `aaf doctor` chỉ báo `bwrap`/container như thông tin. Việc chạy thật `bwrap`/Docker và đường đo tải qua `/proc` trên máy Linux thật vẫn cần người vận hành xác minh thực địa.
 
 Chưa có (đừng tìm): adapter hook riêng cho agent ngoài Claude Code, Codex CLI và Gemini CLI (Antigravity, OpenCode chưa có adapter hook); lệnh mặc định cho iOS, React Native, Expo, Web, Python và cho Unity không có test EditMode; thứ gì tự chạy `commands.repro`.
 
@@ -232,4 +232,4 @@ Các lệnh và cấu hình mới đã có unit/integration test trên fixture, 
 
 - **Remote Telegram companion (`aaf telegram`)**: long-polling outbound tới Telegram Bot API (0 cổng nghe, chỉ đọc `[telegram]` tầng 1, fail-closed khi `allowed_chat_ids` rỗng, token chỉ đọc từ biến môi trường) cho `/status`, `/board`, `/show`, `/handover` chỉ-đọc và xác nhận 2 bước `/confirm <code>` cho thao tác duyệt/thay đổi.
 - **Adapter hook đa host**: `aaf-hook --host <auto|claude|codex|gemini>` và `aaf init --hook-host <claude|codex|gemini|all>` mở rộng toàn bộ bộ guard sang Codex CLI (`.codex/hooks.json`, gồm kiểm đường dẫn `apply_patch`) và Gemini CLI (`.gemini/settings.json`, sự kiện `BeforeTool`).
-- **Che bí mật theo luồng, đóng gói và Linux `bwrap`**: lọc `[secret NAME]` qua ranh giới chunk trên stream output; phát hành đa nền tảng qua `.github/workflows/release.yml` + `scripts/install.sh` (kiểm SHA-256) + công thức Homebrew (`packaging/homebrew/aaf.rb`) + Docker runner cứng hoá (`packaging/docker/`); điều phối sandbox Linux qua bubblewrap (`bwrap`) hoặc container cứng hoá; và kiểm chứng Seatbelt thực tế trên macOS (`docs/VERIFICATION_LIVE.md`, `scripts/live_verify.sh`).
+- **Che bí mật theo luồng, đóng gói và Linux `bwrap`**: lọc `[secret NAME]` qua ranh giới chunk trên stream output; phát hành đa nền tảng qua `.github/workflows/release.yml` + `scripts/install.sh` (kiểm SHA-256) + công thức Homebrew (`packaging/homebrew/aaf.rb`) + Docker runner cứng hoá (`packaging/docker/`); bộ dựng policy bubblewrap (`bwrap`) và nhận diện container cho Linux (chưa được `aaf run` dùng; Linux cần `--unsandboxed`); và kiểm chứng Seatbelt thực tế trên macOS (`docs/VERIFICATION_LIVE.md`, `scripts/live_verify.sh`).

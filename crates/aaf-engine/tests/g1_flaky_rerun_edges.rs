@@ -427,11 +427,12 @@ fn deterministic_failure_zero_of_two_stays_gate_failed() {
     assert_eq!(payload["tier"].as_str(), Some("T3"));
 }
 
-#[test]
-fn real_gate_rerun_sets_diff_env_removes_hidden_and_uses_cfg_command() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo_dir = tmp.path().join("repo");
-    let worktrees_dir = tmp.path().join("worktrees");
+/// Runs `RealGate::rerun_failed_test` with `test_scoped = cmd` on a task
+/// worktree (one commit ahead of `main`) that holds `sneaky.txt`, a file
+/// hidden by `.git/info/exclude`. Returns the answer and the worktree.
+fn real_gate_rerun(tmp: &Path, cmd: String) -> (Option<RerunResult>, PathBuf) {
+    let repo_dir = tmp.join("repo");
+    let worktrees_dir = tmp.join("worktrees");
     let wt_dir = worktrees_dir.join("t1");
     fs::create_dir_all(&repo_dir).unwrap();
     fs::create_dir_all(&worktrees_dir).unwrap();
@@ -470,21 +471,12 @@ fn real_gate_rerun_sets_diff_env_removes_hidden_and_uses_cfg_command() {
     fs::write(repo_dir.join(".git/info/exclude"), "sneaky.txt\n").unwrap();
     fs::write(wt_dir.join("sneaky.txt"), "hidden\n").unwrap();
 
-    // Fails on rerun 1, passes on rerun 2; also verifies diff-env file exists
-    // and sneaky.txt was removed.
-    let marker = tmp.path().join("count.flag");
-    let cmd = format!(
-        "test -f \"$AAF_CHANGED_FILES_FILE\" && test ! -f sneaky.txt && if [ ! -f '{}' ]; then touch '{}'; exit 1; fi; exit 0",
-        marker.display(),
-        marker.display()
-    );
-
     let mut cfg = RepoConfig::default();
     cfg.gate.base_ref = "main".to_string();
     cfg.commands.test_scoped = cmd;
 
     let gate = RealGate {
-        data_dir: tmp.path().join("data"),
+        data_dir: tmp.join("data"),
         cfg,
         clock: Arc::new(SystemClock),
         machine: MachineConfig {
@@ -499,7 +491,37 @@ fn real_gate_rerun_sets_diff_env_removes_hidden_and_uses_cfg_command() {
     let mut receipt = base_test_receipt();
     receipt.commands[0].command = "exit 99".to_string();
 
-    let res = gate.rerun_failed_test(&wt_dir, &receipt).unwrap();
+    (gate.rerun_failed_test(&wt_dir, &receipt).unwrap(), wt_dir)
+}
+
+#[test]
+fn real_gate_rerun_sets_diff_env_removes_hidden_and_uses_cfg_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Fails on rerun 1, passes on rerun 2; also verifies diff-env file exists
+    // and sneaky.txt was removed.
+    let marker = tmp.path().join("count.flag");
+    let cmd = format!(
+        "test -f \"$AAF_CHANGED_FILES_FILE\" && test ! -f sneaky.txt && if [ ! -f '{}' ]; then touch '{}'; exit 1; fi; exit 0",
+        marker.display(),
+        marker.display()
+    );
+
+    let (res, wt_dir) = real_gate_rerun(tmp.path(), cmd);
     assert_eq!(res, Some(RerunResult { runs: 2, passed: 1 }));
     assert!(!wt_dir.join("sneaky.txt").exists());
+}
+
+/// One passing rerun is all the classifier needs (`passed > 0`): a second
+/// run of a slow suite would only cost time.
+#[test]
+fn real_gate_rerun_stops_at_the_first_rerun_that_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("runs.log");
+    let cmd = format!("echo run >> '{}'; exit 0", log.display());
+
+    let (res, _) = real_gate_rerun(tmp.path(), cmd);
+
+    let executions = fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(executions, 1, "the test command ran {executions} times");
+    assert_eq!(res, Some(RerunResult { runs: 1, passed: 1 }));
 }

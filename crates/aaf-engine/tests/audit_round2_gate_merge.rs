@@ -25,9 +25,12 @@ use aaf_engine::git::{
     GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
 };
 use aaf_engine::store_compliance;
-use aaf_engine::throttle::{SystemProbe, Throttle};
 use rusqlite::Connection;
 use tempfile::TempDir;
+
+#[path = "throttle_support.rs"]
+mod throttle_support;
+use throttle_support::calm_throttle;
 
 struct FixedClock(i64);
 impl Clock for FixedClock {
@@ -217,10 +220,8 @@ fn warn_policy_receipt_with_hidden_files_is_isolated_from_common_cache_and_stric
     let mut cfg = RepoConfig::default();
     cfg.commands.lint = "true".to_string();
     cfg.commands.test_scoped = "true".to_string();
-    let probe = SystemProbe::detect();
-    let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
     let machine = load_free_machine();
-    let throttle = Throttle::system(&machine, &probe, &noop);
+    let throttle = calm_throttle(&machine);
 
     let warned = run_gate_policy(
         data.path(),

@@ -17,7 +17,9 @@ use aaf_domain::gate::{ChangeKind, GateMode, GateStatus};
 
 use super::changes::{AddedLines, Change};
 use super::oracle_classify::{OracleOutcome, classify};
-use super::oracle_worktree::{ScratchWorktree, overlay_live_changes, revert_prod_files};
+use super::oracle_worktree::{
+    ScratchWorktree, overlay_live_changes, revert_prod_files, split_inline_cfg_test,
+};
 use super::runner::HeavyContext;
 use super::{GateError, static_checks};
 use crate::throttle::HeavyJob;
@@ -50,6 +52,17 @@ const RUNTIME_DATA_DIRS: &[&str] = &[
     "schemas",
 ];
 
+/// Directories whose files are test data (Go `testdata`, golden files, Jest
+/// `__snapshots__`, ...): an updated golden goes with the test that reads it,
+/// so the oracle never reverts these and counts them as test changes.
+const FIXTURE_DIRS: &[&str] = &[
+    "testdata",
+    "fixtures",
+    "golden",
+    "snapshots",
+    "__snapshots__",
+];
+
 /// Result of running the opt-in red->green oracle after a `Clear` gate run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OracleVerdict {
@@ -78,14 +91,39 @@ pub fn apply_verdict(
     }
 }
 
-/// Recognizes test paths via `static_checks::is_test_path` plus `test.*`/`tests.*` stems.
+/// Recognizes test paths via `static_checks::is_test_path`, `test.*`/`tests.*`
+/// stems, and files under a [`FIXTURE_DIRS`] directory.
 pub fn is_oracle_test_path(path: &str) -> bool {
     if static_checks::is_test_path(path) {
+        return true;
+    }
+    let mut dirs: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    dirs.pop();
+    // Data files only: source code that lives in a module named like a
+    // fixture dir (`src/snapshots/mod.rs`) stays production (fail closed).
+    if !is_source_file(path)
+        && dirs
+            .iter()
+            .any(|d| FIXTURE_DIRS.contains(&d.to_ascii_lowercase().as_str()))
+    {
         return true;
     }
     let name = path.rsplit('/').next().unwrap_or(path);
     let stem = name.split('.').next().unwrap_or(name);
     matches!(stem, "test" | "tests")
+}
+
+/// Source-code extensions that are never treated as fixture data.
+const SOURCE_EXTS: &[&str] = &[
+    "rs", "go", "py", "js", "jsx", "mjs", "cjs", "ts", "tsx", "java", "kt", "kts", "swift", "c",
+    "cc", "cpp", "cxx", "h", "hh", "hpp", "m", "mm", "rb", "php", "cs", "dart", "scala", "sh",
+    "bash", "zsh", "ex", "exs", "erl", "hs", "lua", "pl", "pm", "r", "jl", "zig", "vue", "svelte",
+];
+
+fn is_source_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 /// True when `line` starts with a `#[cfg(test)]` attribute (ignoring leading
@@ -136,13 +174,56 @@ fn is_ignored_non_prod(path: &str) -> bool {
             .any(|d| RUNTIME_DATA_DIRS.contains(&d.to_ascii_lowercase().as_str()))
 }
 
-fn inline_rust_test_files(added: &[AddedLines]) -> BTreeSet<String> {
+/// First line (1-based) of the inline `#[cfg(test)]` tail of the current
+/// `repo_root/path`, as [`split_inline_cfg_test`] splits it.
+fn inline_tail_start_line(repo_root: &Path, path: &str) -> Option<u32> {
+    let full = repo_root.join(path);
+    // Symlinks are not followed: their target may be outside the repo.
+    if !fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let source = fs::read_to_string(full).ok()?;
+    let (prod, tail) = split_inline_cfg_test(&source);
+    tail?;
+    u32::try_from(prod.matches('\n').count())
+        .ok()?
+        .checked_add(1)
+}
+
+/// Production `.rs` files whose diff adds a `#[cfg(test)]` attribute or adds
+/// any line inside the file's inline `#[cfg(test)]` tail (a new `#[test]` in
+/// an existing `mod tests`).
+fn inline_rust_test_files(repo_root: &Path, added: &[AddedLines]) -> BTreeSet<String> {
     added
         .iter()
         .filter(|f| f.path.ends_with(".rs") && !is_oracle_test_path(&f.path))
-        .filter(|f| f.lines.iter().any(|(_, text)| is_cfg_test_attr_line(text)))
+        .filter(|f| {
+            f.lines.iter().any(|(_, text)| is_cfg_test_attr_line(text))
+                || inline_tail_start_line(repo_root, &f.path)
+                    .is_some_and(|start| f.lines.iter().any(|(number, _)| *number >= start))
+        })
         .map(|f| f.path.clone())
         .collect()
+}
+
+/// G6b+G6c: the scratch worktree with the live changes overlaid and the
+/// production files reverted to `base_sha`.
+fn prepare_reverted_tree(
+    repo_root: &Path,
+    base_sha: &str,
+    prod_changes: &[&Change],
+    inline_rust_tests: &BTreeSet<String>,
+) -> Result<ScratchWorktree, GateError> {
+    let scratch = ScratchWorktree::create(repo_root)?;
+    overlay_live_changes(repo_root, scratch.path())?;
+    revert_prod_files(
+        repo_root,
+        scratch.path(),
+        base_sha,
+        prod_changes,
+        inline_rust_tests,
+    )?;
+    Ok(scratch)
 }
 
 struct TestFilesEnv(PathBuf);
@@ -265,7 +346,7 @@ pub fn evaluate(
     if prod_changes.is_empty() {
         return Ok(OracleVerdict::Skipped);
     }
-    let inline_rust_tests = inline_rust_test_files(added);
+    let inline_rust_tests = inline_rust_test_files(repo_root, added);
     if test_files.is_empty() && inline_rust_tests.is_empty() {
         let msg = "oracle: no test changes detected for production diff";
         return Ok(match oracle_mode {
@@ -284,15 +365,19 @@ pub fn evaluate(
         return Ok(OracleVerdict::Skipped);
     };
 
-    let scratch = ScratchWorktree::create(repo_root)?;
-    overlay_live_changes(repo_root, scratch.path())?;
-    revert_prod_files(
-        repo_root,
-        scratch.path(),
-        base_sha,
-        &prod_changes,
-        &inline_rust_tests,
-    )?;
+    // A tree the oracle cannot build proves nothing either way: block mode
+    // reports Unverified, warn mode a warning, never a gate error with no
+    // receipt.
+    let scratch =
+        match prepare_reverted_tree(repo_root, base_sha, &prod_changes, &inline_rust_tests) {
+            Ok(scratch) => scratch,
+            Err(err) => {
+                return Ok(map_outcome(
+                    oracle_mode,
+                    OracleOutcome::Inconclusive(format!("could not prepare reverted tree: {err}")),
+                ));
+            }
+        };
 
     let mut env_files = test_files;
     env_files.extend(inline_rust_tests);

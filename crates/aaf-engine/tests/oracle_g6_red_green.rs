@@ -13,26 +13,11 @@ use aaf_domain::gate::{GateMode, GateStatus, Receipt};
 use aaf_domain::ports::Clock;
 use aaf_engine::config::{ConfigInputs, ConfigOverlay, REPO_CONFIG_REL, load};
 use aaf_engine::gate::run_gate_throttled;
-use aaf_engine::throttle::{
-    LoadProbe, Pressure, PriorityTools, SAMPLE_EVERY, SystemGroup, ThreadSleeper, Throttle,
-};
 use tempfile::TempDir;
 
-struct Calm;
-
-impl LoadProbe for Calm {
-    fn load_percent(&self) -> Option<u32> {
-        Some(0)
-    }
-
-    fn pressure(&self) -> Option<Pressure> {
-        Some(Pressure::Normal)
-    }
-
-    fn free_memory_bytes(&self) -> Option<u64> {
-        Some(u64::MAX)
-    }
-}
+#[path = "throttle_support.rs"]
+mod throttle_support;
+use throttle_support::calm_throttle;
 
 struct FixedClock(i64);
 
@@ -107,17 +92,7 @@ fn run_gate(repo_root: &Path, data_dir: &Path) -> Receipt {
     .expect("config with [gate].red_green_oracle must load cleanly");
 
     let machine = MachineConfig::default();
-    let throttle = Throttle {
-        machine: &machine,
-        probe: &Calm,
-        sleeper: &ThreadSleeper,
-        control: &SystemGroup,
-        progress: &|_| {},
-        cpus: 4,
-        tools: PriorityTools::detect(),
-        jitter_seed: 1,
-        sample_every: SAMPLE_EVERY,
-    };
+    let throttle = calm_throttle(&machine);
     run_gate_throttled(
         data_dir,
         repo_root,

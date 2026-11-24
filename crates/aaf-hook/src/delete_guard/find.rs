@@ -246,17 +246,9 @@ pub(super) fn feeds_protected(feeder: Option<&Cmd>, ctx: &Ctx) -> bool {
 /// passed a `-name` test that rules protected files out.
 fn reaches_protected(args: &[String], expression: usize, action: usize, ctx: &Ctx) -> bool {
     let word = |at: usize| args.get(at).map_or("", String::as_str);
-    let roots = roots(args);
-    let repo = ctx.root().unwrap_or_else(|| ctx.cwd.clone());
-    let reaches_repo = roots.iter().any(|raw| {
-        let root = ctx.expand(raw);
-        paths::is_inside(&root, &repo) || paths::is_inside(&repo, &root)
-    });
-    if !reaches_repo {
-        return false;
-    }
     // With an operator a file can reach the action without passing the test;
-    // a test after the action filters nothing.
+    // a test after the action filters nothing. Settled from the words alone,
+    // before the root lookup spawns git.
     let branches = (expression..args.len())
         .any(|at| matches!(word(at), "-o" | "-or" | "!" | "-not" | "(" | ")" | ","));
     let filtered = !branches
@@ -265,5 +257,12 @@ fn reaches_protected(args: &[String], expression: usize, action: usize, ctx: &Ct
                 && at + 1 < action
                 && !paths::may_name_protected(word(at + 1))
         });
-    !filtered
+    if filtered {
+        return false;
+    }
+    let repo = ctx.root().unwrap_or_else(|| ctx.cwd.clone());
+    roots(args).iter().any(|raw| {
+        let root = ctx.expand(raw);
+        paths::is_inside(&root, &repo) || paths::is_inside(&repo, &root)
+    })
 }

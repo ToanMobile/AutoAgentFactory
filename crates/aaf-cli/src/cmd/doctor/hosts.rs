@@ -7,7 +7,7 @@ use std::path::Path;
 use aaf_domain::config::RepoConfig;
 use aaf_domain::telegram::TelegramConfig;
 use aaf_engine::config::EffectiveConfig;
-use aaf_engine::executors::linux_sandbox;
+use aaf_engine::executors::linux_sandbox::{self, LinuxIsolation};
 use aaf_engine::factory::configured_audit_provider;
 use aaf_engine::github_board::has_trusted_login;
 use aaf_engine::hook_settings::multi_host::{
@@ -47,12 +47,17 @@ pub(super) fn multi_host_hooks(repo_root: &Path) -> Result<String, String> {
 
 /// Reports Linux bubblewrap / container isolation on Linux hosts.
 pub(super) fn linux_sandbox_check() -> Result<String, String> {
-    let iso = linux_sandbox::detect_host_linux_isolation();
-    if iso.is_isolated() {
-        Ok(iso.summary())
-    } else {
-        Err(format!("{}; aaf run needs --unsandboxed", iso.summary()))
-    }
+    linux_sandbox_report(&linux_sandbox::detect_host_linux_isolation())
+}
+
+/// `aaf run` does not wrap agents in bwrap yet (`run::sandbox_choice`
+/// refuses off macOS without `--unsandboxed`), so what was detected is only
+/// informational and the check always warns.
+fn linux_sandbox_report(iso: &LinuxIsolation) -> Result<String, String> {
+    Err(format!(
+        "aaf run on Linux needs --unsandboxed (bwrap integration pending); detected: {}",
+        iso.summary()
+    ))
 }
 
 /// Reports Tier-1 Telegram companion readiness without exposing the bot token.
@@ -189,4 +194,38 @@ pub(super) fn executor_token_budget(repo: &RepoConfig) -> Result<String, String>
         generic.join(", "),
         repo.unblocker.max_token_budget
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// R10-L7-2: `aaf run` on Linux never wraps agents in bwrap yet
+    /// (`run::sandbox_choice` refuses without `--unsandboxed` off macOS), so
+    /// doctor must not report a detected bwrap or container as a working
+    /// sandbox.
+    #[test]
+    fn linux_sandbox_report_says_run_needs_unsandboxed_even_with_bwrap() {
+        for iso in [
+            LinuxIsolation::Bubblewrap {
+                bwrap_bin: PathBuf::from("/usr/bin/bwrap"),
+            },
+            LinuxIsolation::HardenedContainer {
+                indicator: "docker",
+            },
+            LinuxIsolation::None,
+        ] {
+            let Err(text) = linux_sandbox_report(&iso) else {
+                panic!("reported as a working sandbox: {iso:?}");
+            };
+            assert!(
+                text.contains("aaf run on Linux needs --unsandboxed"),
+                "{text}"
+            );
+            assert!(text.contains("bwrap integration pending"), "{text}");
+            assert!(text.contains(&iso.summary()), "{text}");
+        }
+    }
 }

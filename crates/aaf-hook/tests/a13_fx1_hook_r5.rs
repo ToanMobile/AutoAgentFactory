@@ -145,18 +145,28 @@ fn o11_11_long_line_of_assignments_is_linear() {
 }
 
 /// O11-12: a write of unknown path in a script of thousands of literals is
-/// judged in about linear time, and still denied below `.git`.
+/// judged in about linear time (eight times the literals cost well under
+/// 24 times as much), and still denied below `.git`.
 #[test]
 fn o11_12_unknown_path_with_many_literals_is_linear() {
     let fx = fixture();
-    let lits: String = (0..8000).map(|n| format!("x{n} = 'k{n}'\n")).collect();
-    let command = py(&format!(
-        "import sys\n{lits}open(sys.argv[1], 'w').write('x')\n"
-    ));
-    let started = Instant::now();
-    assert_eq!(common::rule(&fx.bash(&command)), ALLOW);
-    let took = started.elapsed();
-    assert!(took < Duration::from_secs(1), "took {took:?}");
+    let literals =
+        |count: usize| -> String { (0..count).map(|n| format!("x{n} = 'k{n}'\n")).collect() };
+    let scripts: Vec<(usize, String)> = [1000, 8000]
+        .into_iter()
+        .map(|count| {
+            let lits = literals(count);
+            let command = py(&format!(
+                "import sys\n{lits}open(sys.argv[1], 'w').write('x')\n"
+            ));
+            (count, command)
+        })
+        .collect();
+    common::assert_scales(1000, 8000, 24, |count| {
+        let (_, command) = scripts.iter().find(|(n, _)| *n == count).unwrap();
+        assert_eq!(common::rule(&fx.bash(command)), ALLOW);
+    });
+    let lits = literals(8000);
     let denied = py(&format!(
         "import sys\n{lits}t = '.git/hooks/pre-commit'\nopen(sys.argv[1], 'w').write(t)\n"
     ));

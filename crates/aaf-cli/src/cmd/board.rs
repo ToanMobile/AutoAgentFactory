@@ -202,17 +202,6 @@ fn add(args: &AddArgs, ctx: &Ctx) -> CmdResult {
         }
     }
 
-    if let Some(program) = &args.repro_cmd
-        && let Some(rejected) = crate::cmd::repro::preflight_for_board_add(
-            program,
-            &args.repro_arg,
-            args.repro_runs,
-            ctx,
-        )
-    {
-        return Ok(rejected);
-    }
-
     let repo = repo_root(ctx)?.to_string_lossy().into_owned();
     let db = open_db(ctx)?;
     // Checked before anything is written, so a bad id leaves no task behind.
@@ -224,6 +213,19 @@ fn add(args: &AddArgs, ctx: &Ctx) -> CmdResult {
                 other.repo_root
             )));
         }
+    }
+
+    // The repro command is the slow, side-effecting step: it runs only once
+    // every cheap argument above has been validated.
+    if let Some(program) = &args.repro_cmd
+        && let Some(rejected) = crate::cmd::repro::preflight_for_board_add(
+            program,
+            &args.repro_arg,
+            args.repro_runs,
+            ctx,
+        )
+    {
+        return Ok(rejected);
     }
 
     let now = SystemClock.now();

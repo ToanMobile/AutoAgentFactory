@@ -31,9 +31,21 @@ pub fn write(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
 }
 
+/// Makes `path` executable as a fresh inode written only by an exited
+/// `/bin/cp`: a test thread's fork may still hold a writable descriptor on
+/// the file the caller just wrote, and exec of that inode fails on Linux
+/// with ETXTBSY (see aaf-fp/tests/exec_support.rs).
 pub fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    let staged = path.with_extension("exe-staged");
+    let status = std::process::Command::new("/bin/cp")
+        .arg(path)
+        .arg(&staged)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cp {}", path.display());
+    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&staged, path).unwrap();
 }
 
 impl Sandbox {

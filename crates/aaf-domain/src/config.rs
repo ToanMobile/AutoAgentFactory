@@ -50,8 +50,9 @@ pub struct MachineConfig {
     /// recorded peak; a command never measured before runs alone.
     pub max_heavy_parallel: u32,
     /// A heavy command waits while the 1-minute load average exceeds this
-    /// percentage of the CPU count, or while memory pressure is not normal.
-    /// 0 disables the load check.
+    /// percentage of the CPU count and real CPU busy is at least
+    /// `max_cpu_percent` (when measurable), or while memory pressure is not
+    /// normal. 0 disables the load check.
     pub max_load_percent: u32,
     /// Real CPU busy percentage ceiling (0..=100) verified via OS CPU counters
     /// when load average exceeds `max_load_percent`. Default 85 prevents macOS

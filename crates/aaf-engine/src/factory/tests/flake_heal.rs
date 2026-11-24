@@ -34,9 +34,9 @@ impl AgentRunner for WriteOnce {
     }
 }
 
-/// A gate command that fails on its first run only; the run counter lives
+/// A gate command that fails on its first `fails` runs; the run counter lives
 /// outside the worktree, so the tree the gate judges is the same each time.
-fn flaky_world(fx: &Fixture) -> (World, Deps, PathBuf) {
+fn flaky_world(fx: &Fixture, fails: u32) -> (World, Deps, PathBuf) {
     let counter = fx.tmp.path().join("gate-runs");
     let world = World::with_accounts(&[]);
     world.add("t1");
@@ -49,7 +49,7 @@ fn flaky_world(fx: &Fixture) -> (World, Deps, PathBuf) {
     ));
     let c = counter.display();
     deps.gate = Arc::new(fx.gate(&format!(
-        "n=$(cat '{c}' 2>/dev/null || echo 0); echo $((n+1)) > '{c}'; [ \"$n\" -ge 1 ]"
+        "n=$(cat '{c}' 2>/dev/null || echo 0); echo $((n+1)) > '{c}'; [ \"$n\" -ge {fails} ]"
     )));
     deps.runner = Arc::new(WriteOnce(AtomicUsize::new(0)));
     (world, deps, counter)
@@ -74,18 +74,19 @@ fn gate_results(world: &World) -> usize {
 #[test]
 fn a_flaky_gate_failure_heals_on_a_rerun_that_changes_nothing() {
     let fx = Fixture::new();
-    let (world, deps, counter) = flaky_world(&fx);
+    let (world, deps, counter) = flaky_world(&fx, 1);
     let hooks = Hooks {
         idle: &|| false,
         reap: &|_| Ok(()),
     };
 
     // The pure test failure is rerun on the same tree (flaky-test rerun,
-    // main G1: two reruns, then a real re-gate): the passes heal it
-    // without another agent run. 4 = gate + 2 reruns + re-gate.
+    // main G1: up to two reruns, stopping at the first that passes, then a
+    // real re-gate): the pass heals it without another agent run.
+    // 3 = gate + 1 passing rerun + re-gate.
     let first = run(&deps, Mode::Once, &hooks).unwrap();
     assert_eq!((first.agent_runs, first.gate_runs), (1, 2), "{first:?}");
-    assert_eq!(gate_command_runs(&counter), 4, "the gate command ran again");
+    assert_eq!(gate_command_runs(&counter), 3, "the gate command ran again");
     assert_eq!(first.review, vec!["t1"], "{first:?}");
     assert!(first.blocked.is_empty(), "{first:?}");
     assert_eq!(world.state("t1"), TaskState::Review);
@@ -93,13 +94,13 @@ fn a_flaky_gate_failure_heals_on_a_rerun_that_changes_nothing() {
     // Healed for good: nothing is run again.
     let second = run(&deps, Mode::Once, &hooks).unwrap();
     assert_eq!((second.agent_runs, second.gate_runs), (0, 0), "{second:?}");
-    assert_eq!(gate_command_runs(&counter), 4);
+    assert_eq!(gate_command_runs(&counter), 3);
 }
 
 #[test]
 fn a_flaky_gate_failure_heals_in_auto_mode_with_one_gate_per_agent_run() {
     let fx = Fixture::new();
-    let (world, deps, counter) = flaky_world(&fx);
+    let (world, deps, counter) = flaky_world(&fx, 1);
     let hooks = Hooks {
         idle: &|| false,
         reap: &|_| Ok(()),
@@ -116,15 +117,46 @@ fn a_flaky_gate_failure_heals_in_auto_mode_with_one_gate_per_agent_run() {
     assert_eq!(world.state("t1"), TaskState::Review, "{summaries:?}");
     let agent_runs: u32 = summaries.iter().map(|s| s.agent_runs).sum();
     let gate_runs: u32 = summaries.iter().map(|s| s.gate_runs).sum();
-    // One agent run; the failed tests rerun twice on that tree, then one
-    // real re-gate (main G1): gate + 2 reruns + re-gate, and no more.
+    // One agent run; the failed tests rerun on that tree until one passes
+    // (here the first), then one real re-gate (main G1): gate + 1 rerun +
+    // re-gate, and no more.
     assert_eq!((agent_runs, gate_runs), (1, 2), "{summaries:?}");
     assert_eq!(
         gate_command_runs(&counter),
-        4,
+        3,
         "no further gate of one tree"
     );
     assert_eq!(gate_results(&world), 2, "the gate and the re-gate");
+    assert!(
+        summaries.iter().all(|s| s.blocked.is_empty()),
+        "{summaries:?}"
+    );
+}
+
+/// R2-O12-3a: the tests fail on the gate and on both reruns, so the task
+/// goes back to its agent. The agent's rerun changes nothing; the same tree
+/// is gated for real again (no red receipt reused) and that pass is Review.
+#[test]
+fn an_agent_rerun_that_changes_nothing_is_gated_for_real() {
+    let fx = Fixture::new();
+    let (world, deps, counter) = flaky_world(&fx, 3);
+    let hooks = Hooks {
+        idle: &|| false,
+        reap: &|_| Ok(()),
+    };
+
+    let mut summaries = Vec::new();
+    for _ in 0..3 {
+        if world.state("t1") == TaskState::Review {
+            break;
+        }
+        summaries.push(run(&deps, Mode::Once, &hooks).unwrap());
+    }
+    assert_eq!(world.state("t1"), TaskState::Review, "{summaries:?}");
+    let agent_runs: u32 = summaries.iter().map(|s| s.agent_runs).sum();
+    assert_eq!(agent_runs, 2, "{summaries:?}");
+    // gate + 2 failed reruns, then the real gate of the agent's rerun.
+    assert_eq!(gate_command_runs(&counter), 4, "{summaries:?}");
     assert!(
         summaries.iter().all(|s| s.blocked.is_empty()),
         "{summaries:?}"

@@ -10,8 +10,7 @@ use crate::shell::Cmd;
 use crate::{Ctx, Denial, paths};
 
 pub const RULE: &str = "secret_guard";
-const FIX: &str =
-    "do not read secret/credential files; use .env.example or ask the user for non-secret config";
+const FIX: &str = "do not read secret/credential files; use .env.example for non-secret config; a secret: this needs a human: finish the task without it and name the step in your final message";
 
 fn deny(reason: String) -> Denial {
     Denial::new(RULE, reason, FIX)

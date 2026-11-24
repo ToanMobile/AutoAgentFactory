@@ -5,6 +5,8 @@
 mod admit;
 mod daemons;
 mod drain;
+#[path = "../../../../aaf-fp/tests/exec_support.rs"]
+pub(crate) mod exec_support;
 mod fifo_queue;
 mod guest_window;
 mod heavy;

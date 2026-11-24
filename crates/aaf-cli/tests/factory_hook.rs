@@ -12,11 +12,13 @@
 mod support;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use support::{Fixture, Out, git};
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
 
 const REGISTERED: &str = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash|Write|Edit|MultiEdit|Read","hooks":[{"type":"command","command":"aaf-hook"}]}]}}"#;
 const NARROW: &str = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"aaf-hook"}]}]}}"#;
@@ -28,8 +30,7 @@ const DISABLED: &str = r#"{"disableAllHooks":true,"hooks":{"PreToolUse":[{"match
 const CONFIG: &str = "[commands]\ntest_scoped = \"test -f done.txt\"\n\n[run]\nrun_timeout_secs = 60\n\n[unblocker]\nglobal_freeze_consecutive_fails = 1\n";
 
 fn executable(path: &Path, text: &str) {
-    fs::write(path, text).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_support::write_executable(path, text);
 }
 
 struct Claude {

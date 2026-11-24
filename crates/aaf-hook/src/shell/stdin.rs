@@ -7,6 +7,7 @@ use std::mem;
 use super::decode::{
     base64_ignores_garbage, base64_is_decode, decode_base64, decode_escapes, expand_printf,
 };
+use super::scan::read_heredoc_body;
 use super::{Cmd, HeredocBody, Lexer, MAX_DEPTH, Redirect, SHELLS, Script, Tok, basename, lex};
 
 /// Where a shell (`sh`, `bash`, `zsh`, …) takes the script it runs from.
@@ -237,25 +238,11 @@ impl Lexer<'_, '_> {
             let cmd_idx = pending[h].cmd_idx;
             let pipeline = mem::take(&mut pending[h].pipeline);
 
-            let mut body = String::new();
-            while self.pos < self.chars.len() {
-                let end = self.chars[self.pos..]
-                    .iter()
-                    .position(|c| *c == '\n')
-                    .map_or(self.chars.len(), |offset| self.pos + offset);
-                let line: String = self.chars[self.pos..end].iter().collect();
-                self.pos = (end + 1).min(self.chars.len());
-                let probe = if strip_tabs {
-                    line.trim_start_matches('\t')
-                } else {
-                    line.as_str()
-                };
-                if probe == delim {
-                    break;
-                }
-                body.push_str(&line);
-                body.push('\n');
-            }
+            let (body, ended) = read_heredoc_body(&self.chars, &mut self.pos, &delim, strip_tabs);
+            // No delimiter line: the shell may end the body where the hook
+            // did not, so the "body" may be the rest of the script. Never
+            // data then.
+            let quoted = quoted && ended;
             let mut is_interp = false;
             let mut is_shell = false;
             let mut owner_wrapped = Vec::new();
@@ -416,19 +403,29 @@ impl Lexer<'_, '_> {
     /// twice more at each level they nest.
     pub(super) fn give_late_bodies(&mut self, from: usize, copy: &Cmd, bodies: Vec<String>) {
         let mut cleared = false;
+        let mut wrapped = None;
         for cmd in self.out.cmds.iter_mut().skip(from) {
             let env_cleared = cmd.env_cleared;
+            let shell_wrapped = (SHELLS.contains(&cmd.name()) && !cmd.wrapped.is_empty())
+                .then(|| cmd.wrapped.clone());
             if let Some(feeder) = cmd.feeder.as_deref_mut()
                 && *feeder == *copy
             {
                 feeder.heredocs.clone_from(&bodies);
                 cleared |= env_cleared;
+                wrapped = shell_wrapped.or(wrapped);
             }
         }
-        // They run under the environment the consumer clears.
+        // They run under the environment the consumer clears, in the
+        // directory its wrapper (`env -C ..`, `sudo -D ..`) moves to.
         let late = bodies.get(copy.heredocs.len()..).unwrap_or(&[]);
         for item in &mut self.bodies {
-            item.cleared |= cleared && late.contains(&item.body);
+            if late.contains(&item.body) {
+                item.cleared |= cleared;
+                if let Some(wrapped) = &wrapped {
+                    item.wrapped.clone_from(wrapped);
+                }
+            }
         }
     }
 

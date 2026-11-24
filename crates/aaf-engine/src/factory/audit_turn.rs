@@ -301,7 +301,13 @@ pub(crate) fn run_auditor_turn(
                         ),
                         &hunks,
                     );
-                    if !matches!(parsed.verdict, AuditVerdict::Inconclusive { .. }) {
+                    // A blocker the first reply named (but left uncited or
+                    // cited outside the diff) may be cited now, never dropped.
+                    let named_blocker =
+                        cross_audit::verdict::names_blocking_yes(&final_text, &report.checklist);
+                    if !matches!(parsed.verdict, AuditVerdict::Inconclusive { .. })
+                        && !(named_blocker && parsed.verdict.is_pass())
+                    {
                         report.verdict = parsed.verdict;
                         report.scores = parsed.scores;
                     }

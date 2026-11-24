@@ -481,7 +481,10 @@ fn is_high_signal_line(line: &str) -> bool {
     HIGH_SIGNAL_NEEDLES.iter().any(|n| lower.contains(n))
 }
 
-fn neutralize_untrusted_tags(text: &str) -> String {
+/// Escapes every `<untrusted-data` / `</untrusted-data` (any ASCII case) so
+/// text quoted inside an untrusted-data block cannot close or reopen it.
+/// Shared with the proposer's prompt builder.
+pub(super) fn neutralize_untrusted_tags(text: &str) -> String {
     const TAGS: [&[u8]; 2] = [b"</untrusted-data", b"<untrusted-data"];
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());

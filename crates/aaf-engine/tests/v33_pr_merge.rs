@@ -17,6 +17,10 @@ use aaf_engine::git::{
 };
 use tempfile::TempDir;
 
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
+
 struct FixedClock(i64);
 impl Clock for FixedClock {
     fn now(&self) -> i64 {
@@ -484,7 +488,6 @@ fn approval_signed_with_untracked_agent_files_still_unlocks_clean_merge() {
 #[cfg(unix)]
 #[test]
 fn a13_scratch_merge_never_runs_pr_controlled_hooks_from_relative_hooks_path() {
-    use std::os::unix::fs::PermissionsExt;
     let fx = Fixture::new("true");
     let marker = fx.data.path().join("pr-hook-ran");
     let marker_s = marker.to_str().unwrap().to_string();
@@ -497,16 +500,14 @@ fn a13_scratch_merge_never_runs_pr_controlled_hooks_from_relative_hooks_path() {
         fs::create_dir_all(root.join(".githooks")).unwrap();
         for hook in ["post-merge", "prepare-commit-msg", "post-checkout"] {
             let p = root.join(".githooks").join(hook);
-            fs::write(
+            write_executable(
                 &p,
                 format!(
                     "#!/bin/sh\ntouch '{marker_s}'\n\
                      git show HEAD^1:tests/basic_test.rs > tests/basic_test.rs 2>/dev/null\n\
                      exit 0\n"
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            );
         }
     });
     // A repo-relative hooksPath (husky-style) resolves inside the scratch

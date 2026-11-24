@@ -14,6 +14,7 @@ use super::super::{run_gate_in, run_gate_throttled, run_gate_with, stats_repo_id
 use super::support::{FixedClock, Repo, fake_secret, passing_cfg};
 use crate::throttle::slots::{Admission, try_acquire};
 use crate::throttle::stats::recorded_peak;
+use crate::throttle::tests::exec_support::write_executable;
 use crate::throttle::tests::support::{MarksSampled, Rig, after_file};
 use crate::throttle::{BuildDaemon, Pressure, SlotGuard, Throttle};
 
@@ -183,8 +184,27 @@ fn load_that_never_drops_runs_degraded_and_stays_clear() {
         receipt.reasons,
         vec![
             format!("throttle: test_scoped waited {waited}s for a heavy slot or a calmer machine"),
-            "throttle: test_scoped ran degraded: CPU load stayed above 150% for 30s".to_string(),
+            "throttle: test_scoped ran degraded: CPU load stayed above 150% \
+             and CPU busy ≥ 85% (when measurable) for 30s"
+                .to_string(),
         ]
+    );
+}
+
+/// R10-L1-1: with `max_cpu_percent = 0` load average alone decides, and the
+/// note says only that.
+#[test]
+fn degraded_note_without_cpu_check_names_only_the_load() {
+    let repo = Repo::new();
+    let mut rig = Rig::calm();
+    rig.machine.heavy_wait_secs = 30;
+    rig.machine.max_cpu_percent = 0;
+    rig.probe.load.set(vec![Some(400)]);
+    let receipt = repo.gate_on(&rig, &passing_cfg(), GateMode::Scoped, &*rig.clock);
+    assert_eq!(receipt.status, GateStatus::Clear);
+    assert_eq!(
+        receipt.reasons.last().map(String::as_str),
+        Some("throttle: test_scoped ran degraded: CPU load stayed above 150% for 30s")
     );
 }
 
@@ -265,13 +285,9 @@ fn gate_records_the_heavy_command_under_the_shared_statistics_key() {
 
 #[test]
 fn gradle_daemon_left_running_is_a_reason_and_the_gate_stays_clear() {
-    use std::os::unix::fs::PermissionsExt;
-
     let repo = Repo::new();
     // A stand-in that does nothing: no real Gradle is started.
-    repo.write("gradlew", "#!/bin/sh\nexit 0\n");
-    let mode = std::fs::Permissions::from_mode(0o755);
-    std::fs::set_permissions(repo.path("gradlew"), mode).unwrap();
+    write_executable(&repo.path("gradlew"), "#!/bin/sh\nexit 0\n");
     repo.commit("wrapper");
     repo.git(&["branch", "-f", "main", "HEAD"]);
     let rig = Rig::calm();

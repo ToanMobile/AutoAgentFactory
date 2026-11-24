@@ -18,6 +18,48 @@ const PROMPT_PLACEHOLDER: &str = "{prompt}";
 /// (matching `ClaudeCodeRunner::CONFIG_CLOSED`).
 const CODEX_CONFIG_CLOSED: [&str; 2] = ["config.toml", "hooks.json"];
 
+/// Entries of a Gemini / Antigravity config dir (`~/.gemini`) that later
+/// sessions, also unsandboxed ones, run or obey: settings with `hooks` and
+/// `mcpServers`, trusted hooks and folders, extensions and custom commands
+/// (`!{...}` runs shell), and the binaries, MCP servers and plugins the
+/// Antigravity apps keep there. Session state (`oauth_creds.json`, `tmp`,
+/// `history`, `projects.json`, `state.json`, `installation_id`) stays
+/// writable. `config/config.json` is rewritten by the app itself and, like
+/// Claude's `.claude.json`, has not been tried read-only with a real session.
+const GEMINI_CONFIG_CLOSED: [&str; 16] = [
+    "settings.json",
+    "trusted_hooks.json",
+    "trustedFolders.json",
+    "extensions",
+    "commands",
+    "antigravity/bin",
+    "antigravity/mcp",
+    "antigravity/lib",
+    "antigravity-cli/bin",
+    "antigravity-cli/mcp",
+    "antigravity-cli/settings.json",
+    "antigravity-ide/bin",
+    "config/hooks.json",
+    "config/mcp_config.json",
+    "config/plugins",
+    "config/node_modules",
+];
+
+/// Entries of an OpenCode config dir (`~/.config/opencode`) that later
+/// sessions load: the config (MCP servers, commands) and plugin / custom
+/// tool code.
+const OPENCODE_CONFIG_CLOSED: [&str; 9] = [
+    "opencode.json",
+    "opencode.jsonc",
+    "config.json",
+    "plugin",
+    "plugins",
+    "tool",
+    "tools",
+    "command",
+    "commands",
+];
+
 #[derive(Debug)]
 pub struct GenericRunner {
     template: Vec<String>,
@@ -79,13 +121,17 @@ fn account_paths(request: &AgentRequest) -> AccountPaths {
     let Some(account) = &request.account else {
         return AccountPaths::default();
     };
-    let write_denied = match account.provider {
-        ProviderKind::Codex => CODEX_CONFIG_CLOSED
-            .iter()
-            .map(|name| format!("{}/{name}", account.config_dir))
-            .collect(),
-        _ => Vec::new(),
+    let closed: &[&str] = match account.provider {
+        ProviderKind::Codex => &CODEX_CONFIG_CLOSED,
+        ProviderKind::Antigravity => &GEMINI_CONFIG_CLOSED,
+        ProviderKind::OpenCode => &OPENCODE_CONFIG_CLOSED,
+        // Claude accounts run through `ClaudeCodeRunner`, which closes its own.
+        ProviderKind::ClaudeCode => &[],
     };
+    let write_denied = closed
+        .iter()
+        .map(|name| format!("{}/{name}", account.config_dir))
+        .collect();
     AccountPaths {
         writable: vec![account.config_dir.clone()],
         write_denied,
@@ -253,6 +299,75 @@ mod tests {
     use aaf_domain::ports::SandboxPolicy;
 
     use super::*;
+
+    fn paths_for(provider: ProviderKind, dir: &str) -> AccountPaths {
+        account_paths(&AgentRequest {
+            run_id: "r1".to_string(),
+            cwd: "/tmp".to_string(),
+            prompt: "audit".to_string(),
+            account: Some(aaf_domain::account::AccountProfile {
+                id: "acct".to_string(),
+                provider,
+                config_dir: dir.to_string(),
+                name: "acct".to_string(),
+            }),
+            timeout_secs: 60,
+            sandbox: SandboxPolicy::default(),
+        })
+    }
+
+    /// R10-L7-1: what a later unsandboxed Gemini / Antigravity session runs
+    /// or trusts stays closed; its session state stays writable.
+    #[test]
+    fn antigravity_account_closes_hooks_settings_and_executables() {
+        let paths = paths_for(ProviderKind::Antigravity, "/h/.gemini");
+        assert_eq!(paths.writable, vec!["/h/.gemini".to_string()]);
+        for name in [
+            "settings.json",
+            "trusted_hooks.json",
+            "trustedFolders.json",
+            "extensions",
+            "commands",
+            "antigravity/bin",
+            "antigravity/mcp",
+            "antigravity-cli/bin",
+            "antigravity-cli/mcp",
+            "antigravity-cli/settings.json",
+            "config/hooks.json",
+            "config/mcp_config.json",
+        ] {
+            let entry = format!("/h/.gemini/{name}");
+            assert!(
+                paths.write_denied.contains(&entry),
+                "{entry} not closed: {:?}",
+                paths.write_denied
+            );
+        }
+        for name in [
+            "oauth_creds.json",
+            "tmp",
+            "history",
+            "projects.json",
+            "state.json",
+            "installation_id",
+        ] {
+            let entry = format!("/h/.gemini/{name}");
+            assert!(!paths.write_denied.contains(&entry), "{entry} closed");
+        }
+    }
+
+    #[test]
+    fn opencode_account_closes_config_and_plugins() {
+        let paths = paths_for(ProviderKind::OpenCode, "/h/.config/opencode");
+        for name in ["opencode.json", "opencode.jsonc", "plugin", "plugins"] {
+            let entry = format!("/h/.config/opencode/{name}");
+            assert!(
+                paths.write_denied.contains(&entry),
+                "{entry} not closed: {:?}",
+                paths.write_denied
+            );
+        }
+    }
 
     #[test]
     fn gemini_command_sets_headless_workspace_trust_env() {

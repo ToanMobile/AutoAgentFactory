@@ -4,7 +4,6 @@
 //! Real `git`, real hook scripts.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use super::git_real::{Fixture, git};
@@ -13,14 +12,14 @@ use crate::factory::git_real::{COMMIT_LOCK_TIMEOUT, COMMIT_TIMEOUT};
 use crate::factory::ports::GitOps;
 use crate::factory::resolve_base;
 use crate::git::cmd::GIT_TIMEOUT;
+use crate::throttle::tests::exec_support::write_executable;
 
 /// Makes `script` the `name` hook of the repository and all its worktrees.
 fn install_hook(fx: &Fixture, name: &str, script: &str) {
     let hooks = fx.tmp.path().join("hooks");
     fs::create_dir_all(&hooks).unwrap();
     let hook = hooks.join(name);
-    fs::write(&hook, script).unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&hook, script);
     git(
         &fx.repo,
         &["config", "core.hooksPath", hooks.to_str().unwrap()],

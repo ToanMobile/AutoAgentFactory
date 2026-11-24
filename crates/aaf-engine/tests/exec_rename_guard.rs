@@ -7,13 +7,17 @@
 //! directories of the owner's PATH that lie inside a writable root.
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
 use aaf_domain::ports::{AgentRequest, AgentRunner, SandboxPolicy};
 use aaf_engine::executors::ExecEnv;
 use aaf_engine::executors::claude::ClaudeCodeRunner;
+
+#[path = "../../aaf-fp/tests/exec_support.rs"]
+mod exec_support;
+use exec_support::write_executable;
 
 /// `(marker, writable root below the world, closed file below that root)`.
 const ROOTS: [(&str, &str, &str); 8] = [
@@ -65,8 +69,7 @@ fn world() -> World {
 
 fn run_with_path(world: &World, path: &str, script: &str) -> String {
     let claude = world.path("claude");
-    fs::write(&claude, format!("#!/bin/sh\n{script}")).unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, format!("#!/bin/sh\n{script}"));
     let text = |rel: &str| world.path(rel).to_string_lossy().into_owned();
     let env = ExecEnv {
         home: Some(text("home")),

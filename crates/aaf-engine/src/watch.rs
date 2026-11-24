@@ -125,25 +125,6 @@ pub struct WatchOverlay {
     pub receipt: Option<WatchReceipt>,
 }
 
-/// Collects only `heavy_slots`, `accounts` (reusing pre-loaded telemetry
-/// summaries), and `receipt` so `/api/status` avoids duplicate DB queries.
-pub fn collect_watch_overlay(
-    query: &WatchQuery<'_>,
-    db: Option<&Db>,
-    accounts: &[AccountSummary],
-) -> PortResult<WatchOverlay> {
-    let pressure = SystemProbe::detect().pressure();
-    let (throttle, entries) = scan_throttle(query.data_dir);
-    collect_watch_overlay_with_scan(
-        query,
-        db,
-        accounts,
-        pressure,
-        throttle.drain_lock_present,
-        &entries,
-    )
-}
-
 /// Collects `heavy_slots`, `accounts`, and `receipt` reusing a pre-probed
 /// `pressure` reading and a pre-scanned `<data_dir>/throttle` pass.
 pub fn collect_watch_overlay_with_scan(

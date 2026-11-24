@@ -3,7 +3,6 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -16,6 +15,7 @@ use super::super::slots::{Admission, is_held, try_acquire};
 use super::super::stats::{HeavySample, record, recorded_peak};
 use super::super::token::SlotToken;
 use super::super::{SlotJob, SlotRun};
+use super::exec_support::write_executable;
 use super::support::{GIB, MarksSampled, Rig, after_file};
 
 const REPO: &str = "dir";
@@ -110,8 +110,7 @@ fn gradle_under_a_path_with_a_space_runs_alone_too() {
     let work = TempDir::new().unwrap();
     let gradlew = work.path().join("my app/gradlew");
     fs::create_dir_all(gradlew.parent().unwrap()).unwrap();
-    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gradlew, "#!/bin/sh\nexit 0\n");
     let mut rig = Rig::calm();
     rig.machine.max_heavy_parallel = 2;
     let sample = HeavySample {
@@ -206,8 +205,7 @@ fn gradle_given_as_an_argument_vector_runs_alone_too() {
     let data = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let gradlew = work.path().join("gradlew");
-    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gradlew, "#!/bin/sh\nexit 0\n");
     let rig = Rig::calm();
     let sample = HeavySample {
         peak_rss_bytes: 1024,
@@ -256,8 +254,7 @@ fn measured_build_tool_shares_slots_when_exclusive_build_tools_is_false() {
     let data = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let gradlew = work.path().join("gradlew");
-    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gradlew, "#!/bin/sh\nexit 0\n");
     let mut rig = Rig::calm();
     rig.machine.max_heavy_parallel = 2;
     rig.machine.exclusive_build_tools = false;
@@ -302,8 +299,7 @@ fn layer1_wait_counts_toward_waited_secs_and_subtracts_from_layer2_wait_limit() 
     let data = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let gradlew = work.path().join("gradlew");
-    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gradlew, "#!/bin/sh\nexit 0\n");
     let mut rig = Rig::calm();
     rig.machine.max_heavy_parallel = 1;
     rig.machine.exclusive_build_tools = false;
@@ -350,8 +346,7 @@ fn layer1_wait_counts_toward_waited_secs_and_subtracts_from_layer2_wait_limit() 
     // `layer1_budget.rs`, so Layer 2 may still sleep the remainder.)
     let work2 = TempDir::new().unwrap();
     let gradlew2 = work2.path().join("gradlew");
-    fs::write(&gradlew2, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&gradlew2, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gradlew2, "#!/bin/sh\nexit 0\n");
     let rig2 = {
         let mut r = Rig::calm();
         r.machine.max_heavy_parallel = 1;
@@ -411,8 +406,7 @@ fn no_wait_in_either_layer_reports_zero_waited_secs_on_a_ticking_clock() {
     let data = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let gradlew = work.path().join("gradlew");
-    fs::write(&gradlew, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&gradlew, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gradlew, "#!/bin/sh\nexit 0\n");
     let mut rig = Rig::calm();
     rig.machine.exclusive_build_tools = false;
     let sample = HeavySample {

@@ -100,37 +100,105 @@ pub enum ReproOutcome {
     /// reported failure, and later runs are skipped rather than paying the
     /// timeout again.
     TimedOut,
-    /// The command could not be started, or `runs` was zero.
+    /// The command could not be started, a run exited 126/127 (the shell's
+    /// "not executable" / "command not found"), or `runs` was zero.
     Unrunnable { reason: String },
+}
+
+/// Lines of stderr kept from the last failing run.
+pub const STDERR_TAIL_LINES: usize = 10;
+
+/// Characters kept per stderr line, so one huge line cannot flood the report.
+const STDERR_LINE_CHARS: usize = 500;
+
+/// How the last failing run ended.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FailureDetail {
+    /// `None` when the run died from a signal.
+    pub exit_code: Option<i32>,
+    /// The last [`STDERR_TAIL_LINES`] lines of its stderr.
+    pub stderr_tail: Vec<String>,
+}
+
+/// [`ReproOutcome`] plus why the last failing run failed, if any run did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReproReport {
+    pub outcome: ReproOutcome,
+    pub last_failure: Option<FailureDetail>,
+}
+
+fn stderr_tail(stderr: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(STDERR_TAIL_LINES);
+    lines[start..]
+        .iter()
+        .map(|line| line.chars().take(STDERR_LINE_CHARS).collect())
+        .collect()
 }
 
 /// Runs `cmd` `runs` times in a row ([`DEFAULT_RUNS`] is the plan's 2/2),
 /// each in its own process group with `cmd`'s timeout.
 pub fn verify(cmd: &ReproCommand, runs: u32) -> ReproOutcome {
+    verify_report(cmd, runs).outcome
+}
+
+/// [`verify`], also returning the exit code and stderr tail of the last
+/// failing run so the operator can see *why* it failed.
+pub fn verify_report(cmd: &ReproCommand, runs: u32) -> ReproReport {
+    let report = |outcome, last_failure| ReproReport {
+        outcome,
+        last_failure,
+    };
     if runs == 0 {
-        return ReproOutcome::Unrunnable {
-            reason: "zero runs requested".to_string(),
-        };
+        return report(
+            ReproOutcome::Unrunnable {
+                reason: "zero runs requested".to_string(),
+            },
+            None,
+        );
     }
     let mut failed = 0u32;
     let mut passed = 0u32;
+    let mut last_failure = None;
     for _ in 0..runs {
-        match run_with_timeout(cmd.to_command(), cmd.timeout, false) {
+        let finished = match run_with_timeout(cmd.to_command(), cmd.timeout, true) {
             Err(err) => {
-                return ReproOutcome::Unrunnable {
-                    reason: err.to_string(),
-                };
+                let reason = err.to_string();
+                return report(ReproOutcome::Unrunnable { reason }, last_failure);
             }
-            Ok(finished) => match finished.status {
-                None => return ReproOutcome::TimedOut,
-                Some(status) if status.success() => passed += 1,
-                Some(_) => failed += 1,
-            },
+            Ok(finished) => finished,
+        };
+        let Some(status) = finished.status else {
+            return report(ReproOutcome::TimedOut, last_failure);
+        };
+        if status.success() {
+            passed += 1;
+            continue;
         }
+        let detail = FailureDetail {
+            exit_code: status.code(),
+            stderr_tail: stderr_tail(&finished.stderr),
+        };
+        // POSIX shells and `env`/`npx`-style wrappers exit 127 when the
+        // program is missing and 126 when it cannot be executed: the
+        // command never ran, so its failure proves nothing about the bug.
+        let never_ran = match status.code() {
+            Some(127) => Some("exit 127: command not found / not executable"),
+            Some(126) => Some("exit 126: command not executable"),
+            _ => None,
+        };
+        if let Some(reason) = never_ran {
+            let reason = reason.to_string();
+            return report(ReproOutcome::Unrunnable { reason }, Some(detail));
+        }
+        failed += 1;
+        last_failure = Some(detail);
     }
-    match (failed, passed) {
+    let outcome = match (failed, passed) {
         (_, 0) => ReproOutcome::Confirmed,
         (0, _) => ReproOutcome::NotReproduced,
         _ => ReproOutcome::Flaky,
-    }
+    };
+    report(outcome, last_failure)
 }
