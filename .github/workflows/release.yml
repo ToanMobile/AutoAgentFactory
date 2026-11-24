@@ -18,8 +18,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  resolve:
+    name: resolve release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Validate release tag
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            if [ "${GITHUB_REF}" != "refs/tags/${TAG}" ]; then
+              echo "Release must be triggered from a tag ref" >&2
+              exit 1
+            fi
+          fi
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if [[ ! "${TAG}" =~ $re ]]; then
+            echo "Invalid release tag: expected vMAJOR.MINOR.PATCH[-prerelease]" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
   build:
     name: build (${{ matrix.target }})
+    needs: resolve
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -41,33 +75,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
           persist-credentials: false
-
-      - name: Resolve release tag
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          case "${TAG}" in
-            v[0-9]*) ;;
-            *)
-              echo "Invalid release tag '${TAG}': expected v<semver>" >&2
-              exit 1
-              ;;
-          esac
-          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Install Rust toolchain and target
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           rustup toolchain install
-          rustup target add "${{ matrix.target }}"
+          rustup target add "${TARGET}"
           rustc --version
           cargo --version
 
@@ -78,17 +96,20 @@ jobs:
 
       - name: Build release binaries
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          cargo build --release --locked --target "${{ matrix.target }}" -p aaf-cli -p aaf-hook
+          cargo build --release --locked --target "${TARGET}" -p aaf-cli -p aaf-hook
 
       - name: Package tarball (Unix)
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.meta.outputs.tag }}"
-          TARGET="${{ matrix.target }}"
           PKG_DIR="aaf-${TAG}-${TARGET}"
           mkdir -p "staging/${PKG_DIR}" dist
           cp "target/${TARGET}/release/aaf" "staging/${PKG_DIR}/aaf"
@@ -101,10 +122,13 @@ jobs:
       - name: Package zip archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          TARGET: ${{ matrix.target }}
         run: |
           $ErrorActionPreference = "Stop"
-          $Tag = "${{ steps.meta.outputs.tag }}"
-          $Target = "${{ matrix.target }}"
+          $Tag = $env:TAG
+          $Target = $env:TARGET
           $PkgDir = "aaf-$Tag-$Target"
           $StageDir = Join-Path "staging" $PkgDir
           New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
@@ -124,7 +148,7 @@ jobs:
 
   publish:
     name: publish release
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -149,7 +173,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.resolve.outputs.tag }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
