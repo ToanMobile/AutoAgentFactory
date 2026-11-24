@@ -1,0 +1,18 @@
+# Pushes "needs you" moments of every repository with `aaf notify --all`.
+# Install: copy to ~/.config/systemd/user/, then
+#   systemctl --user enable --now aaf-notify.service
+# Put the Telegram token variable (telegram.bot_token_env) in
+# ~/.config/autofactory/notify.env if you use Telegram.
+[Unit]
+Description=AutoAgentFactory owner notifications
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/autofactory/notify.env
+ExecStart=%h/.local/bin/aaf notify --all
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=default.target

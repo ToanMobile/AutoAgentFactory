@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Keeps the unattended factory (run in auto mode) alive for one repository,
+  through crashes, reboots and sleep, via scripts/aaf-supervise.sh, which
+  waits out a frozen factory instead of restarting it in a loop.
+
+  Install (replace the three __PLACEHOLDERS__ first):
+    cp packaging/launchd/com.autofactory.run.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.autofactory.run.plist
+  Stop:
+    launchctl bootout gui/$(id -u)/com.autofactory.run
+  One copy per repository: change the Label and the file name for each.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autofactory.run</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__AAF_SOURCE__/scripts/aaf-supervise.sh</string>
+    <string>__REPO__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- The script never exits on its own; this only spaces out restarts of the script itself. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <!-- Interactive: no CPU / I/O throttling, which Background (and an unset
+       ProcessType) would apply to the agent's builds and tests. -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/autofactory-run.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/autofactory-run.log</string>
+</dict>
+</plist>

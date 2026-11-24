@@ -1,0 +1,23 @@
+# Keeps the unattended factory (run in auto mode) alive for one repository,
+# as a user service, via scripts/aaf-supervise.sh.
+# The instance name is the repository path, systemd-escaped:
+#   systemctl --user enable --now "aaf-run@$(systemd-escape --path /home/me/src/app).service"
+# %f is that path unescaped with its leading "/" restored (%I would drop it).
+# Install: copy to ~/.config/systemd/user/ and set AAF_SOURCE below to the aaf checkout.
+# Note: on Linux the factory does not sandbox agents yet; pass --unsandboxed
+# (as an extra argument after %f) only if you accept that (README "Sandbox").
+# Untested template: written on macOS, not yet run under systemd.
+[Unit]
+Description=AutoAgentFactory unattended run for %f
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=AAF_SOURCE=%h/src/AutoAgentFactory
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/sh ${AAF_SOURCE}/scripts/aaf-supervise.sh %f
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=default.target

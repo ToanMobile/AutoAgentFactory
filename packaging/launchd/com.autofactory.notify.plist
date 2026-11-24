@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Pushes "needs you" moments (factory frozen, task blocked, ready for review)
+  of every repository to [notifications] webhook_url and/or [telegram] with
+  `aaf notify --all`. Needs one of them configured in
+  ~/.config/autofactory/config.toml; the Telegram token comes from the
+  environment variable named by telegram.bot_token_env (add it under
+  EnvironmentVariables).
+
+  Install (replace __HOME__ first):
+    cp packaging/launchd/com.autofactory.notify.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.autofactory.notify.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autofactory.notify</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/aaf</string>
+    <string>notify</string>
+    <string>--all</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/autofactory-notify.log</string>
+</dict>
+</plist>

@@ -50,6 +50,21 @@ pub(crate) fn detached_log_path(data_dir: &Path, repo: &Path) -> PathBuf {
         .join(format!("{}.detached.log", aaf_fp::repo_id(repo)))
 }
 
+/// Moves a non-empty log of the previous detached run to `<log>.1` (one
+/// generation), so restarting after a crash keeps the crash's evidence.
+pub(crate) fn rotate_detached_log(log_path: &Path) -> std::io::Result<()> {
+    match std::fs::metadata(log_path) {
+        Ok(meta) if meta.len() > 0 => {
+            let mut rotated = log_path.as_os_str().to_owned();
+            rotated.push(".1");
+            std::fs::rename(log_path, PathBuf::from(rotated))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Writes `<data_dir>/locks/<repo_id>.run.meta.json` with `0600` permissions.
 pub(crate) fn write_run_meta(
     data_dir: &Path,
@@ -112,6 +127,7 @@ pub(super) fn spawn_detached(
     let runs_dir = ctx.data_dir.join("runs");
     private::create_dir(&runs_dir).map_err(|e| err("runs dir", e))?;
     let log_path = detached_log_path(&ctx.data_dir, repo);
+    rotate_detached_log(&log_path).map_err(|e| err(&log_path.display().to_string(), e))?;
     let log_file =
         private::open_file(&log_path).map_err(|e| err(&log_path.display().to_string(), e))?;
     log_file
@@ -207,4 +223,36 @@ pub(super) fn spawn_detached(
         out = out.field("task_id", json!(task_id));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restarting_keeps_the_previous_log_as_one_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("r.detached.log");
+        let old = tmp.path().join("r.detached.log.1");
+        rotate_detached_log(&log).unwrap();
+        assert!(!old.exists(), "nothing to keep yet");
+
+        std::fs::write(&log, "crash 1\n").unwrap();
+        rotate_detached_log(&log).unwrap();
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "crash 1\n");
+        assert!(!log.exists());
+
+        std::fs::write(&log, "").unwrap();
+        rotate_detached_log(&log).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&old).unwrap(),
+            "crash 1\n",
+            "empty log is not kept"
+        );
+
+        std::fs::write(&log, "crash 2\n").unwrap();
+        rotate_detached_log(&log).unwrap();
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "crash 2\n");
+    }
 }
