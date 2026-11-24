@@ -4,6 +4,7 @@ use aaf_domain::blocked::BlockedReason;
 use aaf_domain::budget::BudgetCheck;
 use aaf_domain::gate::{GateStatus, LockStatus, Receipt, Severity, StoreStatus};
 use aaf_domain::ports::AgentOutcome;
+use serde_json::Value;
 
 use crate::gate::REASON_TREE_CHANGED;
 
@@ -42,23 +43,73 @@ const TRANSIENT_INFRA_PATTERNS: &[&str] = &[
     "\"type\": \"api_error\"",
 ];
 
+/// Claude `stream-json` events that carry the agent's own words or a tool's
+/// output: a 5xx quoted there (a test expecting HTTP 503) is not an outage.
+const AGENT_STREAM_EVENTS: [&str; 3] = ["assistant", "user", "result"];
+
+/// Whether the CLI marked `event` as an API error of its own. Real `result`
+/// events always carry `"api_error_status": null`, and a status outside 5xx
+/// (400, 429) is no transient outage, so neither counts.
+fn is_api_error_event(event: &serde_json::Map<String, Value>) -> bool {
+    let error = event.get("error").is_some_and(|v| match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+        Value::Number(_) => true,
+    });
+    let status_5xx = ["api_error_status", "status_code"].iter().any(|key| {
+        event
+            .get(*key)
+            .and_then(Value::as_i64)
+            .is_some_and(|status| (500..600).contains(&status))
+    });
+    let flagged = event.get("is_api_error_message").and_then(Value::as_bool) == Some(true);
+    let terminal = event.get("terminal_reason").and_then(Value::as_str) == Some("api_error");
+    let errors = event
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    error || status_5xx || flagged || terminal || errors
+}
+
+/// True for a `stream-json` agent/tool/result event the CLI did not mark as
+/// an API error; its text is never evidence of an upstream outage.
+fn is_agent_stream_event(line: &str) -> bool {
+    let Ok(Value::Object(event)) = serde_json::from_str(line.trim()) else {
+        return false;
+    };
+    let agent = event
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| AGENT_STREAM_EVENTS.contains(&kind));
+    agent && !is_api_error_event(&event)
+}
+
 fn transient_infra_detail(outcome: &AgentOutcome) -> Option<String> {
     if outcome.succeeded() {
         return None;
     }
-    let hay_tail = outcome.log_tail.to_ascii_lowercase();
-    let matched = TRANSIENT_INFRA_PATTERNS
-        .iter()
-        .any(|needle| hay_tail.contains(needle));
-    if !matched {
+    let matched: Vec<&str> = outcome
+        .log_tail
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            TRANSIENT_INFRA_PATTERNS
+                .iter()
+                .any(|needle| lower.contains(needle))
+        })
+        .filter(|line| !is_agent_stream_event(line))
+        .collect();
+    if matched.is_empty() {
         return None;
     }
-    let flat = one_line(&outcome.log_tail);
-    if flat.is_empty() {
-        Some("transient upstream infrastructure failure".to_string())
-    } else {
-        Some(truncate_chars(&flat, SUMMARY_MAX_CHARS))
-    }
+    // Only the matching lines: agent prose stays out of the detail.
+    Some(truncate_chars(
+        &one_line(&matched.join("\n")),
+        SUMMARY_MAX_CHARS,
+    ))
 }
 
 /// Result of rerunning the failed tests without any code change.
@@ -425,6 +476,74 @@ fn push_word(word: &str, out: &mut String) {
         } else {
             in_digits = false;
             out.push(c);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(log_tail: &str) -> FailureSignal {
+        let mut signal = FailureSignal::empty();
+        signal.outcome = Some(AgentOutcome {
+            exit_code: Some(1),
+            timed_out: false,
+            final_text: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            limit_hit: None,
+            infra: None,
+            log_tail: log_tail.to_string(),
+        });
+        signal
+    }
+
+    fn is_infra(log_tail: &str) -> bool {
+        matches!(classify(&failed(log_tail)), BlockedReason::Infra { .. })
+    }
+
+    #[test]
+    fn agent_stream_events_quoting_5xx_are_not_infra() {
+        for line in [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"mock returns HTTP 503"}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"got status 500"}]}}"#,
+            r#"{"type":"result","is_error":true,"api_error_status":null,"result":"HTTP 503 in test"}"#,
+            r#"{"type":"result","is_error":true,"api_error_status":400,"result":"HTTP 503 in test"}"#,
+            r#"{"type":"result","error":false,"terminal_reason":"completed","result":"HTTP 503"}"#,
+            r#"{"type":"assistant","error":"","errors":[],"message":{"content":[{"type":"text","text":"status 500"}]}}"#,
+        ] {
+            assert!(!is_infra(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn structured_api_errors_stay_infra() {
+        for line in [
+            r#"{"type":"assistant","error":"unknown","message":{"content":[{"type":"text","text":"API Error: 503 Service Unavailable"}]}}"#,
+            r#"{"type":"assistant","is_api_error_message":true,"message":{"content":[{"type":"text","text":"HTTP 529 overloaded"}]}}"#,
+            r#"{"type":"result","is_error":true,"api_error_status":503,"result":"HTTP 503"}"#,
+            r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+            r#"{"type":"overloaded_error"}"#,
+            r#"{"type":"result","is_error":true,"terminal_reason":"api_error","result":"API Error: HTTP 503"}"#,
+            r#"{"type":"result","is_error":true,"errors":["upstream"],"result":"HTTP 503"}"#,
+            "Error: HTTP 503 Service Unavailable",
+        ] {
+            assert!(is_infra(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn infra_detail_keeps_only_matching_unskipped_lines() {
+        let tail = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"secret plan: status 500"}]}}"#,
+            "compiling...",
+            "Error: HTTP 502 Bad Gateway",
+        ]
+        .join("\n");
+        match classify(&failed(&tail)) {
+            BlockedReason::Infra { detail } => assert_eq!(detail, "Error: HTTP 502 Bad Gateway"),
+            other => panic!("expected Infra, got {other:?}"),
         }
     }
 }
