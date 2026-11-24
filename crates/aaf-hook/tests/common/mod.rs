@@ -26,7 +26,24 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Fixture {
-        let dir = tempfile::tempdir().unwrap();
+        // Not under /tmp: on Linux the system temp dir is /tmp, where the
+        // delete guard deliberately allows sibling deletes (scratch space),
+        // which would change what the corpora below expect. Cargo's
+        // per-target temp dir is inside the build directory on every host.
+        let dir = tempfile::Builder::new()
+            .prefix("aaf-hook-fx")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+            .unwrap();
+        Fixture::in_dir(dir)
+    }
+
+    /// A fixture whose repository and home live in the system temp dir
+    /// (`$TMPDIR`), for the rows that are about that directory.
+    pub fn in_system_temp() -> Fixture {
+        Fixture::in_dir(tempfile::tempdir().unwrap())
+    }
+
+    fn in_dir(dir: tempfile::TempDir) -> Fixture {
         let base = dir.path().canonicalize().unwrap();
         let fixture = Fixture {
             root: base.join("repo"),

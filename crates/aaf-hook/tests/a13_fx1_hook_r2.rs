@@ -145,6 +145,8 @@ fn r2_h6_3_find_roots_after_global_options() {
 /// it, like `rm -rf /tmp/<name>`; other roots keep `rm -r`'s containment.
 #[test]
 fn r2_e10_1_find_rooted_at_temp_dir() {
+    // Repository and home outside every temp directory: on Linux the system
+    // temp dir is /tmp itself, which the rows below treat as scratch space.
     let fx = Fixture::new();
     fs::create_dir_all(fx.home.join("Documents")).unwrap();
     run_corpus(
@@ -164,9 +166,14 @@ fn r2_e10_1_find_rooted_at_temp_dir() {
             ("find .. -name '*.rs' -delete", DELETE),
             ("find /tmp/.. -name '*.rs' -delete", DELETE),
             ("find /private -name '*.rs' -delete", DELETE),
-            // The fixture's repository and home live in `$TMPDIR`.
-            ("find \"$TMPDIR\" -name 'aaf-*' -delete", DELETE),
         ],
+    );
+    // A repository and home inside the system temp dir (`$TMPDIR`, /tmp
+    // itself on Linux): a find rooted there reaches them and is denied.
+    let in_tmp = Fixture::in_system_temp();
+    run_corpus(
+        &in_tmp,
+        &[("find \"$TMPDIR\" -name 'aaf-*' -delete", DELETE)],
     );
     // A repository outside every temp directory, as on a real machine.
     let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join("a13-fx1-r2-e10");
