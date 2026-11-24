@@ -10,14 +10,15 @@ use aaf_domain::gate::Receipt;
 use aaf_domain::ports::{PortError, PortResult};
 
 use super::base_ref::{BaseRef, DEFAULT_REMOTE};
-use super::commit_lock::{self, CommitLock};
 use super::ports::{GitOps, Integration};
-use crate::git::cmd::{Output, failure, git, git_raw, git_timed};
+use crate::git::cmd::{Output, git, git_raw};
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree};
 use crate::process::{CommandRunner, SystemRunner};
 
+mod commit;
 mod pr_note;
+pub(crate) use commit::COMMIT_DEFERRED;
 #[cfg(test)]
 pub(super) use pr_note::open_pr_noted;
 use pr_note::open_pr_noted_with_proof;
@@ -38,10 +39,6 @@ pub(super) const COMMIT_TIMEOUT: Duration = Duration::from_secs(2400);
 /// repository; a holder runs at most two commits, each bounded by
 /// [`COMMIT_TIMEOUT`].
 pub(super) const COMMIT_LOCK_TIMEOUT: Duration = Duration::from_secs(2 * COMMIT_TIMEOUT.as_secs());
-/// Message of the one commit of what the commit hooks rewrote.
-const HOOK_FILES_MESSAGE: &str = "aaf: files changed by the repository's commit hooks";
-/// Paths of a tree the hooks keep dirty named in the error.
-const DIRTY_PATHS_SHOWN: usize = 10;
 const NO_HOOKS: &str = "core.hooksPath=/dev/null";
 
 pub(super) fn err(error: GitError) -> PortError {
@@ -130,24 +127,6 @@ impl RealGit {
         )
     }
 
-    /// One `git commit` in `tree` under [`COMMIT_TIMEOUT`], hooks on.
-    fn run_commit(&self, tree: &Path, message: &str) -> PortResult<()> {
-        let args = ["commit", "--quiet", "-m", message];
-        let out = git_timed(tree, &args, self.commit_timeout).map_err(|error| match error {
-            GitError::Timeout { command } => PortError::Io(format!(
-                "`{command}` timed out: the repository's commit hooks ran longer than \
-                 the commit budget of {} s (possibly while waiting for a heavy slot)",
-                self.commit_timeout.as_secs()
-            )),
-            other => err(other),
-        })?;
-        if out.success() {
-            Ok(())
-        } else {
-            Err(err(failure(&args, &out)))
-        }
-    }
-
     fn admin(&self) -> MutexGuard<'_, ()> {
         self.admin.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -194,51 +173,6 @@ fn abort_rebase(tree: &Path) -> Result<Vec<String>, GitError> {
     Ok(files)
 }
 
-/// Whether `tree` differs from its `HEAD` after a commit.
-fn dirty_after_commit(tree: &Path) -> PortResult<bool> {
-    match worktree::ensure_clean(tree) {
-        Ok(()) => Ok(false),
-        Err(GitError::Dirty(_)) => Ok(true),
-        Err(error) => Err(err(error)),
-    }
-}
-
-/// The error for a tree still dirty after the commit, naming the first
-/// paths. `followed_up`: a follow-up commit of what the hooks wrote was made;
-/// without one, what is left is what `git add` cannot stage.
-fn hook_dirty_error(tree: &Path, followed_up: bool) -> PortError {
-    // Untrimmed: the first line's status column may start with a space.
-    let status = git_raw(tree, &["status", "--porcelain"])
-        .map(|out| out.stdout)
-        .unwrap_or_default();
-    let paths: Vec<&str> = status
-        .lines()
-        .map(|line| line.get(3..).unwrap_or(line))
-        .collect();
-    let mut shown = paths
-        .iter()
-        .take(DIRTY_PATHS_SHOWN)
-        .copied()
-        .collect::<Vec<_>>()
-        .join(", ");
-    if paths.len() > DIRTY_PATHS_SHOWN {
-        shown.push_str(&format!(" and {} more", paths.len() - DIRTY_PATHS_SHOWN));
-    }
-    if !followed_up {
-        return PortError::Io(format!(
-            "uncommitted changes in {}: changes `git add` cannot stage remain after \
-             `git commit` (e.g. an embedded repository's own modified or untracked \
-             files): {shown}",
-            tree.display()
-        ));
-    }
-    PortError::Io(format!(
-        "uncommitted changes in {} after `git commit`: a commit hook of the repository \
-         changed these files after the commit, again after one follow-up commit: {shown}",
-        tree.display()
-    ))
-}
-
 /// F4-A: git in `tree` running no hook; a repo-relative hooks path is agent-written.
 fn git_no_hooks(tree: &Path, args: &[&str]) -> Result<Output, GitError> {
     git_raw(tree, &[&["-c", NO_HOOKS][..], args].concat())
@@ -264,42 +198,7 @@ impl GitOps for RealGit {
     }
 
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()> {
-        let tree = worktree.path.as_path();
-        git(tree, &["add", "-A"]).map_err(err)?;
-        if git(tree, &["status", "--porcelain"])
-            .map_err(err)?
-            .is_empty()
-        {
-            return Ok(());
-        }
-        // One `git commit` per repository at a time so pre-commit hooks serialize.
-        let _queue = self.commit.lock().unwrap_or_else(PoisonError::into_inner);
-        let lock = commit_lock::lock_path(&self.locks_dir, &self.repo_root);
-        let _lock = CommitLock::acquire(&lock, self.commit_lock_timeout)?;
-        self.run_commit(tree, message)?;
-        // The commit runs the repository's hooks; one that rewrites the
-        // working tree afterwards would let the gate judge a tree other
-        // than the commit that lands. What they wrote is committed once
-        // (hooks on, same locks); a tree still dirty after that is an error.
-        if !dirty_after_commit(tree)? {
-            return Ok(());
-        }
-        git(tree, &["add", "-A"]).map_err(err)?;
-        // Nothing staged (a change `add` cannot take): no commit to make.
-        let args = ["diff", "--cached", "--quiet"];
-        let staged = git_raw(tree, &args).map_err(err)?;
-        let followed_up = match staged.code {
-            Some(0) => false,
-            Some(1) => {
-                self.run_commit(tree, HOOK_FILES_MESSAGE)?;
-                true
-            }
-            _ => return Err(err(failure(&args, &staged))),
-        };
-        if !dirty_after_commit(tree)? {
-            return Ok(());
-        }
-        Err(hook_dirty_error(tree, followed_up))
+        self.commit_tree(&worktree.path, message)
     }
 
     fn has_changes(&self, worktree: &TaskWorktree) -> PortResult<bool> {

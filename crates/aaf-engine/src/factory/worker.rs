@@ -13,6 +13,7 @@ use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
 use super::audit_backend::{self, AuditBackend};
+use super::audit_turn::{after_commit_failure, commit_earlier_attempt, note_no_change_reason};
 pub(super) use super::audit_turn::{halt_message, halt_on_infra, infra_words};
 use super::ports::{AccountPool, Grant};
 use super::post_audit;
@@ -115,8 +116,8 @@ pub(crate) enum Next {
     Wait {
         until: Option<i64>,
     },
-    /// Ready again, untried: transient network failure. The scheduler applies
-    /// jittered backoff in `Mode::Auto` or halts after retries / in `Mode::Once`.
+    /// Ready again, untried: transient network failure. `Mode::Auto` retries
+    /// with jittered backoff, then waits out an outage; `Mode::Once` halts.
     RetryAfter {
         until: i64,
         attempt: u32,
@@ -394,12 +395,9 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
         // A failed or interrupted run leaves its edits uncommitted, and git
         // refuses to rebase a dirty tree: keep them as a commit, the next
         // attempt builds on them.
-        deps.git
-            .commit_all(&worktree, &format!("aaf: {} (earlier attempt)", task.title))?;
-        // A rerun picks up what landed on the base since (finished
-        // subtasks, other tasks). A conflict is aborted and left for the
-        // merge step, where it is classified as one.
-        deps.git.rebase(&worktree)?;
+        if let Some(next) = commit_earlier_attempt(deps, &task, &worktree)? {
+            return Ok(next);
+        }
     } else if hook_problem(deps, &worktree.path).is_some() {
         // The worktree may have been cut before the registration was
         // committed on the base: nothing ran in it yet, so it can follow.
@@ -441,8 +439,12 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
     }
 
     if outcome.succeeded() {
-        deps.git
-            .commit_all(&worktree, &format!("aaf: {}", task.title))?;
+        if let Err(error) = deps
+            .git
+            .commit_all(&worktree, &format!("aaf: {}", task.title))
+        {
+            return after_commit_failure(deps, task_id, &worktree, outcome, error, grant);
+        }
         if let Some(problem) = hook_problem(deps, &worktree.path) {
             // The run changed its own guard. Nothing of it goes on to the
             // gate, a pull request or the base, where the changed file
@@ -463,6 +465,7 @@ fn agent(deps: &Deps, task_id: &str, grant: &Grant) -> PortResult<Next> {
         outcome.log_tail = NO_CHANGE.to_string();
         deps.store
             .append_context_note(task_id, NO_CHANGE, deps.now())?;
+        note_no_change_reason(deps, task_id, &outcome.final_text)?;
     }
     let mut signal = FailureSignal::empty();
     signal.outcome = Some(outcome);

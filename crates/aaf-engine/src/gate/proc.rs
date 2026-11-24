@@ -123,6 +123,8 @@ fn drain(
 const KILL_LIMIT: Duration = Duration::from_secs(30);
 /// Pause between two kills of a group that still has members.
 const KILL_AGAIN: Duration = Duration::from_millis(10);
+/// Pause before the second look that confirms a killed group is empty.
+const CONFIRM_EMPTY: Duration = Duration::from_millis(50);
 
 /// `/bin/kill <args>`; true when it exited 0.
 fn kill(args: &[&str]) -> bool {
@@ -190,7 +192,14 @@ fn kill_group_until_empty(pgid: u32, limit: Duration) -> bool {
         // A non-zero exit is "no such process": the group ended by itself.
         kill(&["-KILL", "--", &group]);
         if !group_has_live_member(pgid) {
-            return true;
+            // A child forked at the instant of the snapshot can be missed by
+            // it (seen on Linux CI): empty only when a second look, after
+            // one more kill, still finds no member.
+            thread::sleep(CONFIRM_EMPTY);
+            kill(&["-KILL", "--", &group]);
+            if !group_has_live_member(pgid) {
+                return true;
+            }
         }
         if Instant::now() >= end {
             return false;

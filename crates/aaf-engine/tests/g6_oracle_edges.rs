@@ -187,11 +187,13 @@ fn block_mode_marks_compile_red_and_zero_tests_as_unverified() {
     fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
     fs::write(repo.path().join("tests/test_api.sh"), "echo test\n").unwrap();
     let r = run_gate(repo.path(), data.path());
-    assert_eq!(r.status, GateStatus::Unverified, "{:?}", r.reasons);
+    // CompileRed goes back to the agent (Blocked, with guidance) instead of
+    // waiting for a human (O12-R10-7); it never lands as Clear.
+    assert_eq!(r.status, GateStatus::Blocked, "{:?}", r.reasons);
     assert!(
         r.reasons
             .iter()
-            .any(|m| m.contains("oracle: inconclusive (compile_red:")),
+            .any(|m| m.contains("oracle: compile_red (")),
         "{:?}",
         r.reasons
     );

@@ -213,8 +213,9 @@ fn prepare_reverted_tree(
     base_sha: &str,
     prod_changes: &[&Change],
     inline_rust_tests: &BTreeSet<String>,
+    heavy: &HeavyContext<'_>,
 ) -> Result<ScratchWorktree, GateError> {
-    let scratch = ScratchWorktree::create(repo_root)?;
+    let scratch = ScratchWorktree::create(repo_root, heavy.data_dir, heavy.stats_repo_id)?;
     overlay_live_changes(repo_root, scratch.path())?;
     revert_prod_files(
         repo_root,
@@ -294,9 +295,16 @@ fn map_outcome(mode: OracleMode, outcome: OracleOutcome) -> OracleVerdict {
             "warning: oracle: vacuous test — tests still pass after reverting production changes"
                 .to_string(),
         ),
+        // Goes back to the agent through the unblock ladder; without a
+        // proven red nothing lands either way.
         (OracleMode::Block, OracleOutcome::CompileRed(msg)) => applied(
-            Some(GateStatus::Unverified),
-            format!("oracle: inconclusive (compile_red: {msg})"),
+            Some(GateStatus::Blocked),
+            format!(
+                "oracle: compile_red ({msg}): the changed tests do not build against the \
+                 base version, so they cannot show the change fixes anything. Add a test \
+                 that compiles against the base API (call only code that exists before \
+                 your change) and fails there, then passes with your change"
+            ),
         ),
         (OracleMode::Warn, OracleOutcome::CompileRed(msg)) => applied(
             None,
@@ -368,16 +376,21 @@ pub fn evaluate(
     // A tree the oracle cannot build proves nothing either way: block mode
     // reports Unverified, warn mode a warning, never a gate error with no
     // receipt.
-    let scratch =
-        match prepare_reverted_tree(repo_root, base_sha, &prod_changes, &inline_rust_tests) {
-            Ok(scratch) => scratch,
-            Err(err) => {
-                return Ok(map_outcome(
-                    oracle_mode,
-                    OracleOutcome::Inconclusive(format!("could not prepare reverted tree: {err}")),
-                ));
-            }
-        };
+    let scratch = match prepare_reverted_tree(
+        repo_root,
+        base_sha,
+        &prod_changes,
+        &inline_rust_tests,
+        heavy,
+    ) {
+        Ok(scratch) => scratch,
+        Err(err) => {
+            return Ok(map_outcome(
+                oracle_mode,
+                OracleOutcome::Inconclusive(format!("could not prepare reverted tree: {err}")),
+            ));
+        }
+    };
 
     let mut env_files = test_files;
     env_files.extend(inline_rust_tests);

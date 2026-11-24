@@ -100,6 +100,18 @@ pub const AGENT_CONFIG_GLOBS: [&str; 5] = [
     "**/AGENTS.md",
 ];
 
+/// Commit-hook managers' configuration: what runs on the owner's machine at
+/// every commit once merged. Part of the default `head_lock_globs`.
+pub const COMMIT_HOOK_GLOBS: &[&str] = &[
+    "**/.husky/**",
+    "**/.githooks/**",
+    "**/.pre-commit-config.yaml",
+    "**/lefthook*.yml",
+    "**/lefthook*.yaml",
+    "**/.lefthook*.yml",
+    "**/.lefthook*.yaml",
+];
+
 /// Build the default `gate.head_lock_globs` list from all constant groups.
 pub fn default_head_lock_globs() -> Vec<String> {
     TEST_FILE_GLOBS
@@ -107,6 +119,7 @@ pub fn default_head_lock_globs() -> Vec<String> {
         .chain(RUNNER_CONFIG_GLOBS.iter())
         .chain(CI_AND_MANIFEST_GLOBS.iter())
         .chain(AGENT_CONFIG_GLOBS.iter())
+        .chain(COMMIT_HOOK_GLOBS.iter())
         .map(|g| (*g).to_string())
         .collect()
 }

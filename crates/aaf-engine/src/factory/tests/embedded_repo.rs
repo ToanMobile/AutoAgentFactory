@@ -5,6 +5,8 @@
 
 use std::fs;
 
+use aaf_domain::ports::PortError;
+
 use super::git_real::{Fixture, git};
 use crate::factory::ports::GitOps;
 use crate::throttle::tests::exec_support::write_executable;
@@ -44,19 +46,23 @@ fn committing_a_worktree_runs_no_fsmonitor_of_an_embedded_repository() {
     fs::write(tree.path.join("app.txt"), "two\n").unwrap();
 
     let committed = fx.ops.commit_all(&tree, "aaf: t1");
-    let rebased = fx.ops.rebase(&tree);
 
     assert!(!marker.exists(), "the embedded repository's fsmonitor ran");
-    committed.unwrap();
-    assert!(rebased.unwrap().is_empty());
+    // O12-R10-3 (d): the nested repository is refused (it would land as a
+    // bare gitlink), and it is the agent's to fix.
+    assert!(
+        matches!(committed, Err(PortError::Conflict(_))),
+        "{committed:?}"
+    );
+    assert_eq!(git(&tree.path, &["rev-list", "--count", "main..HEAD"]), "0");
 }
 
-/// R5-L5-1: with no hook at all, what stays dirty after the commit is what
-/// `git add` cannot stage (here an embedded repository's untracked file).
-/// The error says so instead of blaming a commit hook and a follow-up
-/// commit that never ran.
+/// R5-L5-1 / O12-R10-3 (d): an embedded repository is never committed as a
+/// gitlink nobody declared in `.gitmodules`: it is unstaged, nothing is
+/// committed, and the error tells the agent what to do about the directory
+/// instead of blaming a commit hook.
 #[test]
-fn unstageable_embedded_changes_are_not_blamed_on_a_commit_hook() {
+fn an_undeclared_embedded_repository_is_unstaged_and_handed_back() {
     let fx = Fixture::new();
     let tree = fx.ops.task_worktree("t1").unwrap();
     let sub = tree.path.join("sub");
@@ -82,12 +88,18 @@ fn unstageable_embedded_changes_are_not_blamed_on_a_commit_hook() {
     let count = || git(&tree.path, &["rev-list", "--count", "HEAD"]);
     let before: u32 = count().parse().unwrap();
 
-    let error = fx.ops.commit_all(&tree, "aaf: t1").unwrap_err().to_string();
+    let error = fx.ops.commit_all(&tree, "aaf: t1").unwrap_err();
 
+    assert!(matches!(error, PortError::Conflict(_)), "{error}");
+    let error = error.to_string();
     assert!(error.contains("sub"), "{error}");
-    assert!(error.contains("cannot stage"), "{error}");
+    assert!(error.contains("nested"), "{error}");
     assert!(!error.contains("commit hook"), "{error}");
-    assert!(!error.contains("follow-up commit"), "{error}");
     let after: u32 = count().parse().unwrap();
-    assert_eq!(after, before + 1, "exactly one new commit");
+    assert_eq!(after, before, "nothing committed");
+    let staged = git(&tree.path, &["diff", "--cached", "--raw"]);
+    assert!(
+        !staged.contains("160000"),
+        "the gitlink stays unstaged: {staged}"
+    );
 }

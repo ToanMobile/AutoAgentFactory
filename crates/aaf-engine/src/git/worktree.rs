@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 use super::cmd::{failure, git, git_raw};
 use super::{GitError, path_str};
 
+mod submodules;
+
 pub const BRANCH_PREFIX: &str = "aaf/";
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/aaf/snapshots/";
 const BATCH_PREFIX: &str = "batch-";
+const SUBMODULES_REFUSAL: &str = "working trees containing submodules cannot be moved or removed";
 
 /// Fails with [`GitError::Dirty`] when `tree` differs from its `HEAD`
 /// (staged, unstaged or untracked): what the gate reads must be what lands.
@@ -85,13 +88,28 @@ pub fn worktree_path(
 
 /// Creates the task's worktree on a new branch `aaf/<task_id>` at `base_ref`.
 /// An existing worktree directory or branch is an error: reusing one would
-/// hand a new task another task's leftovers.
+/// hand a new task another task's leftovers. Submodules checked out in the
+/// main checkout are checked out too; failing that is only a warning.
 pub fn create(
     repo_root: &Path,
     worktrees_dir: &Path,
     task_id: &str,
     base_ref: &str,
 ) -> Result<TaskWorktree, GitError> {
+    let (tree, warning) = create_with_warning(repo_root, worktrees_dir, task_id, base_ref)?;
+    if let Some(warning) = warning {
+        eprintln!("aaf: warning: {warning}");
+    }
+    Ok(tree)
+}
+
+/// [`create`], handing back the submodule warning instead of printing it.
+pub fn create_with_warning(
+    repo_root: &Path,
+    worktrees_dir: &Path,
+    task_id: &str,
+    base_ref: &str,
+) -> Result<(TaskWorktree, Option<String>), GitError> {
     let path = worktree_path(repo_root, worktrees_dir, task_id)?;
     let branch = format!("{BRANCH_PREFIX}{task_id}");
     if base_ref.is_empty() || base_ref.starts_with('-') {
@@ -117,7 +135,8 @@ pub fn create(
         repo_root,
         &["worktree", "add", "-b", &branch, path_str(&path)?, base_ref],
     )?;
-    Ok(TaskWorktree { path, branch })
+    let warning = submodules::init(repo_root, &path);
+    Ok((TaskWorktree { path, branch }, warning))
 }
 
 /// Removes the worktree and, when asked, its branch.
@@ -166,7 +185,18 @@ pub fn remove(
         }
     }
     let path = path_str(&worktree.path)?;
-    if force {
+    // Clean, submodule contents included whatever `.gitmodules` says to
+    // ignore: git's blanket refusal of checked-out submodules protects
+    // nothing then.
+    let submodules =
+        !force && removal_refusal(&worktree.path).is_ok_and(|r| r == Some(SUBMODULES_REFUSAL));
+    if submodules {
+        let args = ["status", "--porcelain", "--ignore-submodules=none"];
+        if !git(&worktree.path, &args)?.is_empty() {
+            return Err(GitError::Dirty(worktree.path.clone()));
+        }
+    }
+    if force || submodules {
         git(repo_root, &["worktree", "remove", "--force", path])?;
     } else {
         git(repo_root, &["worktree", "remove", path])?;
@@ -516,9 +546,8 @@ pub fn removal_refusal(wt: &Path) -> Result<Option<&'static str>, GitError> {
     if git_dir.join("locked").exists() {
         return Ok(Some("cannot remove a locked working tree"));
     }
-    const SUBMODULES: &str = "working trees containing submodules cannot be moved or removed";
     if git_dir.join("modules").is_dir() {
-        return Ok(Some(SUBMODULES));
+        return Ok(Some(SUBMODULES_REFUSAL));
     }
     let index = git(wt, &["ls-files", "--stage", "-z"])?;
     let populated = index.split('\0').any(|entry| {
@@ -527,7 +556,7 @@ pub fn removal_refusal(wt: &Path) -> Result<Option<&'static str>, GitError> {
                 .split_once('\t')
                 .is_some_and(|(_, path)| wt.join(path).join(".git").exists())
     });
-    Ok(populated.then_some(SUBMODULES))
+    Ok(populated.then_some(SUBMODULES_REFUSAL))
 }
 
 /// Every worktree of the repository, the main one first.

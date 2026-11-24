@@ -364,7 +364,12 @@ fn an_agent_that_changes_nothing_is_a_failure_with_a_note() {
     assert_eq!(summary.gate_runs, 0, "nothing to gate");
     let notes = world.task("t1").context_notes;
     assert!(notes[0].contains("without changing anything"), "{notes:?}");
-    assert!(notes[1].starts_with("unblock[T3] digest="), "{notes:?}");
+    // O12-R10-6: what the agent said about it, framed as untrusted data.
+    assert_eq!(
+        notes[1], "no_change_reason: <untrusted-data>done</untrusted-data>",
+        "{notes:?}"
+    );
+    assert!(notes[2].starts_with("unblock[T3] digest="), "{notes:?}");
 }
 
 #[test]

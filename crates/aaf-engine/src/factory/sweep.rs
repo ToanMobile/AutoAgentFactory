@@ -15,6 +15,18 @@ use super::scheduler::{DEFAULT_RATE_LIMIT_COOLDOWN_SECS, Scheduler};
 use super::worker::Job;
 use super::{Deps, Mode, finish, unblock};
 use crate::git::{GitError, TaskWorktree};
+use crate::webhook::WebhookEvent;
+
+/// First pause after the quick retries of a network failure; it doubles
+/// with every further failure up to [`OUTAGE_WAIT_MAX_SECS`].
+const OUTAGE_WAIT_SECS: i64 = 300;
+const OUTAGE_WAIT_MAX_SECS: i64 = 1800;
+
+/// `min(300 * 2^(tries - MAX_TRANSIENT_RETRIES - 1), 1800)` seconds.
+fn outage_wait_secs(tries: u32) -> i64 {
+    let doublings = tries.saturating_sub(MAX_TRANSIENT_RETRIES + 1).min(8);
+    (OUTAGE_WAIT_SECS << doublings).min(OUTAGE_WAIT_MAX_SECS)
+}
 
 fn reap_running_runs(
     deps: &Deps,
@@ -256,14 +268,55 @@ impl<'a> Scheduler<'a> {
         *tries = (*tries)
             .max(hint_attempt.saturating_sub(1))
             .saturating_add(1);
-        if *tries <= MAX_TRANSIENT_RETRIES {
-            let wait = i64::try_from(transient_backoff_secs(*tries)).unwrap_or(60);
+        let tries = *tries;
+        if tries <= MAX_TRANSIENT_RETRIES {
+            let wait = i64::try_from(transient_backoff_secs(tries)).unwrap_or(60);
             let deadline = hint_until.max(self.deps.now() + wait);
             self.state.task_wait_until.insert(task_id, deadline);
-        } else {
-            self.summary.halted.get_or_insert(detail);
+            return Ok(());
+        }
+        // O12-R10-1: an unattended daemon outlives an outage. The provider
+        // is down for every task of this kind: all of them wait, longer each
+        // time, and somebody is told once per outage.
+        let wait = outage_wait_secs(tries);
+        let deadline = hint_until.max(self.deps.now() + wait);
+        self.set_default_wait(state == TaskState::Gating, deadline);
+        self.state.task_wait_until.insert(task_id.clone(), deadline);
+        if tries == MAX_TRANSIENT_RETRIES + 1 {
+            self.notify_outage(&task_id, tries, wait, &detail)?;
         }
         Ok(())
+    }
+
+    fn notify_outage(&self, task_id: &str, tries: u32, wait: i64, detail: &str) -> PortResult<()> {
+        let deps = self.deps;
+        // The halt text's advice to start the run again does not apply here.
+        let detail = detail.split(". The run stopped").next().unwrap_or(detail);
+        let event = WebhookEvent {
+            event_id: unblock::unique_id(),
+            kind: EventKind::AccountCooldown,
+            task_id: Some(task_id.to_string()),
+            status: "network_wait".to_string(),
+            summary: unblock::one_line(
+                &format!(
+                    "the provider could not be reached {tries} times in a row; the factory \
+                     keeps running and tries again in {wait} s (waits grow up to \
+                     {OUTAGE_WAIT_MAX_SECS} s). Last failure: {detail}"
+                ),
+                500,
+            ),
+            created_at: deps.now(),
+        };
+        // A failed notification is recorded; it never stops the loop.
+        match deps.notifier.notify(&event) {
+            Ok(true) => deps.emit(EventKind::WebhookSent, task_id, json!({ "ok": true })),
+            Ok(false) => Ok(()),
+            Err(e) => deps.emit(
+                EventKind::WebhookSent,
+                task_id,
+                json!({ "ok": false, "error": e }),
+            ),
+        }
     }
 
     /// Picks up live `Gating` tasks (e.g. `aaf board rework` without `--rerun`)

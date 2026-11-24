@@ -8,7 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use aaf_domain::gate::ChangeKind;
 
@@ -19,6 +19,9 @@ use super::{GIT_TIMEOUT, GateError};
 
 static WORKTREE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Directory under the data dir holding the oracle's scratch worktrees.
+pub const ORACLE_SCRATCH_DIR: &str = "oracle-scratch";
+
 /// Targeted RAII guard for a throwaway detached git worktree.
 pub(crate) struct ScratchWorktree {
     repo_root: PathBuf,
@@ -26,16 +29,21 @@ pub(crate) struct ScratchWorktree {
 }
 
 impl ScratchWorktree {
-    pub(crate) fn create(repo_root: &Path) -> Result<Self, GateError> {
-        let tmp = fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    /// Creates the scratch at `<data_dir>/oracle-scratch/<common_id>-<pid>-<seq>`:
+    /// a gate killed before `Drop` leaves it where `aaf gc` sweeps dead owners.
+    pub(crate) fn create(
+        repo_root: &Path,
+        data_dir: &Path,
+        common_id: &str,
+    ) -> Result<Self, GateError> {
+        let base = data_dir.join(ORACLE_SCRATCH_DIR);
+        fs::create_dir_all(&base)?;
+        let base = fs::canonicalize(&base)?;
         let pid = std::process::id();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
         let mut path = loop {
             let seq = WORKTREE_SEQ.fetch_add(1, Ordering::Relaxed);
-            let candidate = tmp.join(format!("aaf-oracle-wt-{pid}-{seq}-{nanos}"));
-            if !candidate.exists() {
+            let candidate = base.join(format!("{common_id}-{pid}-{seq}"));
+            if fs::symlink_metadata(&candidate).is_err() {
                 break candidate;
             }
         };

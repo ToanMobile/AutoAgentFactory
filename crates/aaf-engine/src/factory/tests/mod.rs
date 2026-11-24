@@ -2,6 +2,9 @@
 //! in-memory fakes; the store is a real `Db` in a temp dir. `git_real` runs
 //! the production git and gate adapters on real repositories.
 
+mod a13_fx1_r10b_commit;
+mod a13_fx1_r10b_loop;
+mod a13_fx2_r10b_gate_retry;
 mod adapters;
 mod audit_retry;
 mod auto_double_gate;

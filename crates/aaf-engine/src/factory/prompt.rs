@@ -40,7 +40,12 @@ pub fn build_prompt(task: &Task, branch: &str) -> String {
          Rules: stay on this branch and inside this directory; write the test first, then the \
          change; commit your work on this branch when it is complete; do not push, do not \
          merge, do not edit the task description. Existing tests and build configuration are \
-         locked: change them only when the task requires it.\n\n\
+         locked: change them only when the task requires it.\n\
+         You run unattended; nobody answers questions. When the safety hook denies a command, \
+         follow its fix (use the Write/Edit tools for file content, simpler or split commands \
+         — e.g. run a heredoc that writes a file as its own command, then git commands \
+         separately). If only a human can do a step, finish without it and name the step in \
+         your final message.\n\n\
          # Task: {}\n\n{}\n\n# Acceptance criteria\n\n",
         task.title, task.spec.description
     );

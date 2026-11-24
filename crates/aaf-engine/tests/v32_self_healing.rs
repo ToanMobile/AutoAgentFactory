@@ -203,9 +203,11 @@ impl AccountPool for FakePool {
     }
 }
 
-struct FakeNotifier;
+#[derive(Default)]
+struct FakeNotifier(Mutex<Vec<WebhookEvent>>);
 impl Notifier for FakeNotifier {
-    fn notify(&self, _: &WebhookEvent) -> Result<bool, String> {
+    fn notify(&self, event: &WebhookEvent) -> Result<bool, String> {
+        self.0.lock().unwrap().push(event.clone());
         Ok(false)
     }
 }
@@ -387,6 +389,7 @@ struct TestWorld {
     pool: Arc<FakePool>,
     git: Arc<FakeGit>,
     runner: Arc<ScriptedRunner>,
+    notifier: Arc<FakeNotifier>,
     repo: RepoConfig,
     max_parallel: u32,
     auto_merge: bool,
@@ -403,6 +406,7 @@ impl TestWorld {
             clock: Arc::new(FakeClock::new(10_000)),
             pool: Arc::new(FakePool::new(accounts)),
             runner: Arc::default(),
+            notifier: Arc::default(),
             repo: RepoConfig::default(),
             max_parallel: 1,
             auto_merge: false,
@@ -433,7 +437,7 @@ impl TestWorld {
             accounts: self.pool.clone(),
             git: self.git.clone(),
             gate: Arc::new(ClearGate),
-            notifier: Arc::new(FakeNotifier),
+            notifier: self.notifier.clone(),
             settings: Settings {
                 repo_root: REPO.to_string(),
                 repo: self.repo.clone(),
@@ -489,34 +493,48 @@ fn auto_mode_transient_network_releases_grant_retries_and_recovers() {
     assert_eq!(world.pool.leased_count(), 0);
 }
 
+/// O12-R10-1: an outage longer than the quick retries does not stop an
+/// unattended daemon: it waits with a growing pause (one notification), keeps
+/// the task Ready, and picks it up again once the network is back.
 #[test]
-fn auto_mode_transient_network_halts_after_max_retries() {
+fn auto_mode_transient_network_waits_out_a_long_outage_and_recovers() {
     let world = TestWorld::new(&["acct-a"]);
     world.add_ready("t1");
-    let failures: Vec<_> = (0..(MAX_TRANSIENT_RETRIES + 2))
+    let mut outcomes: Vec<_> = (0..6)
         .map(|i| infra_outcome(InfraKind::Network, &format!("HTTP 503 attempt {i}")))
         .collect();
-    world.runner.script("t1", failures);
+    outcomes.push(ok_outcome());
+    world.runner.script("t1", outcomes);
 
     let ticks = AtomicU32::new(0);
     let hooks = Hooks {
         idle: &|| {
             assert_eq!(world.pool.leased_count(), 0);
-            if ticks.fetch_add(1, Ordering::SeqCst) >= 10 {
+            let done = world.db.get_task("t1").unwrap().state == TaskState::Review;
+            if done || ticks.fetch_add(1, Ordering::SeqCst) >= 400 {
                 return false;
             }
-            world.clock.advance(MAX_TRANSIENT_BACKOFF_SECS as i64 + 5);
+            world.clock.advance(30);
             true
         },
         reap: &|_| Ok(()),
     };
 
     let summary = run(&world.deps(), Mode::Auto, &hooks).unwrap();
-    assert!(summary.halted.is_some(), "expected halt: {summary:?}");
-    assert_eq!(summary.agent_runs, MAX_TRANSIENT_RETRIES + 1);
-    assert_eq!(summary.requeued, vec!["t1"]);
-    assert_eq!(world.db.get_task("t1").unwrap().state, TaskState::Ready);
+    assert_eq!(summary.halted, None, "{summary:?}");
+    assert_eq!(summary.agent_runs, 7, "{summary:?}");
+    assert_eq!(world.db.get_task("t1").unwrap().state, TaskState::Review);
     assert_eq!(world.pool.leased_count(), 0);
+    let notified = world.notifier.0.lock().unwrap();
+    assert_eq!(notified.len(), 1, "one notification per outage");
+    assert_eq!(notified[0].task_id.as_deref(), Some("t1"));
+    // The failures after the MAX_TRANSIENT_RETRIES (3) quick retries wait
+    // 300 + 600 + 1200 s, at least.
+    assert!(
+        world.clock.now() >= 10_000 + 300 + 600 + 1200,
+        "{}",
+        world.clock.now()
+    );
 }
 
 #[test]

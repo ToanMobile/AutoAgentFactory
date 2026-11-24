@@ -408,7 +408,7 @@ pub(crate) fn root_succeeded(deps: &Deps, task: &Task) -> PortResult<()> {
 
 /// Neutralises any closing `</untrusted-data` tag (ASCII case-insensitive) so
 /// untrusted audit findings cannot escape their wrapper block.
-fn sanitize_untrusted_close_tag(text: &str) -> String {
+pub(super) fn sanitize_untrusted_close_tag(text: &str) -> String {
     const NEEDLE: &[u8] = b"</untrusted-data";
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
