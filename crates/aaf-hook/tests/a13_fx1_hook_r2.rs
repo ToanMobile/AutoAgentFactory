@@ -191,8 +191,15 @@ fn r2_e10_1_find_rooted_at_temp_dir() {
         home: Some(home.clone()),
         cwd: None,
     };
+    let tmpdir_expected = if std::env::var_os("TMPDIR").is_some_and(|dir| !dir.is_empty()) {
+        ALLOW
+    } else {
+        DELETE
+    };
     for (command, expected) in [
-        ("find \"$TMPDIR\" -name 'aaf-*' -delete", ALLOW),
+        // An unset `$TMPDIR` (the Linux CI runner) is a root filled in at run
+        // time, which stays denied.
+        ("find \"$TMPDIR\" -name 'aaf-*' -delete", tmpdir_expected),
         ("find /tmp -maxdepth 1 -name 'aaf-e2e-*' -delete", ALLOW),
         ("find \"$TMPDIR/..\" -name 'aaf-*' -delete", DELETE),
         ("find .. -name '*.rs' -delete", DELETE),
