@@ -491,6 +491,7 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         .map_err(|err| err.message.clone());
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut checks = vec![
+        advisory("version", Ok(env!("AAF_BUILD_VERSION").to_string())),
         required("git", git_res),
         repo_root_check,
         required("config", config_detail),

@@ -14,7 +14,11 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "aaf", version, about = "AutoAgentFactory")]
+#[command(
+    name = "aaf",
+    version = env!("AAF_BUILD_VERSION"),
+    about = "AutoAgentFactory"
+)]
 struct Cli {
     /// Print exactly one JSON object on stdout.
     #[arg(long, global = true)]
