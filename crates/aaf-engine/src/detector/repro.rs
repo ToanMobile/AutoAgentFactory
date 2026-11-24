@@ -8,7 +8,7 @@
 //! - Only [`ReproCommand::argv`] (direct argv execution without a shell) is intended
 //!   for manual confirmation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -67,6 +67,35 @@ impl ReproCommand {
 
     pub fn uses_shell(&self) -> bool {
         matches!(self.invocation, Invocation::Shell(_))
+    }
+
+    /// The script an interpreter would run (`sh missing.sh`) when that file
+    /// does not exist. Shells disagree on the exit code of a missing script
+    /// (bash 127, dash 2), so the failure of such a run cannot tell a typo
+    /// from the bug: it is checked before any run.
+    fn missing_script(&self) -> Option<String> {
+        const INTERPRETERS: &[&str] = &[
+            "sh", "bash", "dash", "zsh", "ksh", "python", "python3", "node", "ruby", "perl",
+        ];
+        const INLINE: &[&str] = &["-c", "-e", "-E", "-m", "-p", "-r", "--eval", "--print"];
+        let Invocation::Argv { program, args } = &self.invocation else {
+            return None;
+        };
+        let name = Path::new(program).file_name()?.to_str()?;
+        if !INTERPRETERS.contains(&name) {
+            return None;
+        }
+        for arg in args {
+            if INLINE.contains(&arg.as_str()) || arg == "-" {
+                return None;
+            }
+            if arg.starts_with('-') {
+                continue;
+            }
+            let path = self.cwd.join(arg);
+            return (!path.exists()).then(|| format!("script not found: {arg}"));
+        }
+        None
     }
 
     fn to_command(&self) -> Command {
@@ -157,6 +186,9 @@ pub fn verify_report(cmd: &ReproCommand, runs: u32) -> ReproReport {
             },
             None,
         );
+    }
+    if let Some(reason) = cmd.missing_script() {
+        return report(ReproOutcome::Unrunnable { reason }, None);
     }
     let mut failed = 0u32;
     let mut passed = 0u32;

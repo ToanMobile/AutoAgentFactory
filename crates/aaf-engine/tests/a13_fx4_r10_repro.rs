@@ -55,10 +55,22 @@ fn missing_script_under_sh_is_unrunnable() {
         dir.path(),
         TIMEOUT,
     );
-    assert!(
-        matches!(verify(&cmd, DEFAULT_RUNS), ReproOutcome::Unrunnable { .. }),
-        "a missing script under sh exits 127"
+    // bash exits 127 for a missing script but dash (Debian /bin/sh) exits
+    // 2: the file is checked before running, so both shells agree.
+    match verify(&cmd, DEFAULT_RUNS) {
+        ReproOutcome::Unrunnable { reason } => {
+            assert!(reason.contains("script not found: missing.sh"), "{reason}");
+        }
+        other => panic!("a missing script must be Unrunnable, got {other:?}"),
+    }
+    // An inline script (`sh -c`) is not a file and is never checked.
+    let inline = ReproCommand::argv(
+        "/bin/sh",
+        vec!["-c".to_string(), "exit 1".to_string()],
+        dir.path(),
+        TIMEOUT,
     );
+    assert_eq!(verify(&inline, DEFAULT_RUNS), ReproOutcome::Confirmed);
 }
 
 #[test]

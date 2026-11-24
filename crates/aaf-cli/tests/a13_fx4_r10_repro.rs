@@ -28,7 +28,10 @@ fn missing_script_under_sh_is_unrunnable_and_creates_no_task() {
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert_eq!(out.json["status"], "unrunnable", "{}", out.json);
     assert!(
-        out.json["reason"].as_str().unwrap_or("").contains("127"),
+        out.json["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("script not found: missing.sh"),
         "{}",
         out.json
     );
