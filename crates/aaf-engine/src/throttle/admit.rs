@@ -2,7 +2,6 @@
 
 use std::io;
 use std::path::Path;
-use std::time::Duration;
 
 use aaf_domain::ports::Clock;
 
@@ -290,15 +289,12 @@ impl Throttle<'_> {
                         if matches!(reason, Busy::Orphaned { .. }) {
                             let since = *orphan_wait_started.get_or_insert(now);
                             let timed_out = waited_from(since, now) >= self.machine.heavy_wait_secs;
+                            // The orphan's age counts from when this waiter first
+                            // saw it, never from the lock file's mtime: that is when
+                            // its command started, which may be long before `aaf`
+                            // died, and reaping on it would run beside a live group.
                             let reaped = if timed_out {
                                 slots::reap_orphaned_slots(data_dir, ceiling).unwrap_or(0)
-                            } else if self.machine.heavy_wait_secs > 0 {
-                                slots::reap_stale_orphans(
-                                    data_dir,
-                                    ceiling,
-                                    Duration::from_secs(self.machine.heavy_wait_secs),
-                                )
-                                .unwrap_or(0)
                             } else {
                                 0
                             };
