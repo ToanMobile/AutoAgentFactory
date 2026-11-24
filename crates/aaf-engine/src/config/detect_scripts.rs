@@ -136,16 +136,47 @@ fn is_placeholder_npm_test(script: &str) -> bool {
     trimmed.is_empty() || trimmed.to_ascii_lowercase().contains("no test specified")
 }
 
+/// True when the test script asks for a watcher that never exits on its own
+/// (`jest --watch`, `jest --watchAll` as in the Expo template, `vitest
+/// watch`): as a gate command it would hang until the timeout instead of
+/// passing or failing. A bare `vitest` is fine: gate commands have no TTY,
+/// so it runs once.
+fn is_watch_mode_test(script: &str) -> bool {
+    let tokens: Vec<&str> = script.split_whitespace().collect();
+    let watch_flag = tokens.iter().any(|t| {
+        let flag = t.split('=').next().unwrap_or(t);
+        matches!(flag, "--watch" | "--watchAll") && !t.ends_with("=false")
+    });
+    let vitest_watch = tokens
+        .windows(2)
+        .any(|w| (w[0] == "vitest" || w[0].ends_with("/vitest")) && w[1] == "watch");
+    watch_flag || vitest_watch
+}
+
+/// A one-shot replacement for a watch-mode test script, or empty (the gate
+/// then stays Unverified until someone sets `commands.test_*`).
+fn one_shot_test(package: &serde_json::Value, script: &str) -> String {
+    if depends_on(package, "vitest") || script.contains("vitest") {
+        "npx vitest run".to_string()
+    } else if depends_on(package, "jest")
+        || depends_on(package, "jest-expo")
+        || script.contains("jest")
+    {
+        "npx jest --ci".to_string()
+    } else {
+        String::new()
+    }
+}
+
 pub(super) fn package_json_commands(
     repo_root: &Path,
     package: &serde_json::Value,
 ) -> CommandsConfig {
-    let Some(scripts) = package
+    let empty = serde_json::Map::new();
+    let scripts = package
         .get("scripts")
         .and_then(serde_json::Value::as_object)
-    else {
-        return CommandsConfig::default();
-    };
+        .unwrap_or(&empty);
     let runner = if repo_root.join("pnpm-lock.yaml").is_file() {
         "pnpm"
     } else if repo_root.join("yarn.lock").is_file() {
@@ -164,15 +195,19 @@ pub(super) fn package_json_commands(
     };
     let run = |name: &str| format!("{runner} {name}");
 
-    let test = if script_val("test").is_some_and(|s| !is_placeholder_npm_test(s)) {
-        run("test")
-    } else {
-        String::new()
+    let test = match script_val("test") {
+        Some(s) if is_watch_mode_test(s) => one_shot_test(package, s),
+        Some(s) if !is_placeholder_npm_test(s) => run("test"),
+        _ => String::new(),
     };
+    // `npx tsc` only when TypeScript is a declared dependency: npx must not
+    // download a compiler from the network inside a gate.
     let lint = if script_val("lint").is_some() {
         run("lint")
     } else if script_val("typecheck").is_some() {
         run("typecheck")
+    } else if repo_root.join("tsconfig.json").is_file() && depends_on(package, "typescript") {
+        "npx tsc --noEmit".to_string()
     } else {
         String::new()
     };
@@ -242,10 +277,26 @@ fn pyproject_has_pytest_dep(doc: &toml::Value) -> bool {
     false
 }
 
+/// `uv run `, `poetry run ` or `pdm run ` when the project's lock file says
+/// which environment manager owns it, so tools run inside its virtualenv.
+fn python_runner(repo_root: &Path) -> &'static str {
+    if repo_root.join("uv.lock").is_file() {
+        "uv run "
+    } else if repo_root.join("poetry.lock").is_file() {
+        "poetry run "
+    } else if repo_root.join("pdm.lock").is_file() {
+        "pdm run "
+    } else {
+        ""
+    }
+}
+
 pub(super) fn pyproject_commands(repo_root: &Path) -> CommandsConfig {
     let text = read_marker(&repo_root.join("pyproject.toml")).unwrap_or_default();
     let mut has_pytest = repo_root.join("tests").is_dir();
-    let mut has_ruff = false;
+    let mut has_ruff =
+        repo_root.join("ruff.toml").is_file() || repo_root.join(".ruff.toml").is_file();
+    let mut has_mypy = repo_root.join("mypy.ini").is_file();
     if let Ok(doc) = toml::from_str::<toml::Value>(&text) {
         if let Some(tool) = doc.get("tool") {
             if tool.get("pytest").is_some() {
@@ -253,6 +304,9 @@ pub(super) fn pyproject_commands(repo_root: &Path) -> CommandsConfig {
             }
             if tool.get("ruff").is_some() {
                 has_ruff = true;
+            }
+            if tool.get("mypy").is_some() {
+                has_mypy = true;
             }
         }
         if !has_pytest && pyproject_has_pytest_dep(&doc) {
@@ -266,11 +320,24 @@ pub(super) fn pyproject_commands(repo_root: &Path) -> CommandsConfig {
             if line.starts_with("[tool.ruff") {
                 has_ruff = true;
             }
+            if line.starts_with("[tool.mypy") {
+                has_mypy = true;
+            }
         }
     }
-    let test = if has_pytest { "pytest" } else { "" };
-    let lint = if has_ruff { "ruff check ." } else { "" };
-    commands("", test, test, lint)
+    let runner = python_runner(repo_root);
+    let tool = |on: bool, cmd: &str| {
+        if on {
+            format!("{runner}{cmd}")
+        } else {
+            String::new()
+        }
+    };
+    let test = tool(has_pytest, "pytest");
+    let mut cmds = commands("", &test, &test, &tool(has_ruff, "ruff check ."));
+    // Project-wide type checking is slow: full gates only.
+    cmds.lint_full = tool(has_mypy, "mypy .");
+    cmds
 }
 
 pub(super) fn depends_on(package: &serde_json::Value, dependency: &str) -> bool {
