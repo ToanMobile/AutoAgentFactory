@@ -260,7 +260,8 @@ impl Throttle<'_> {
                             },
                             group_state: &|pgid| self.control.group_state(pgid),
                         };
-                        slots::try_acquire_in(data_dir, ceiling, admission, &view)
+                        let read_group = |pgid| self.control.read_group_state(pgid);
+                        slots::try_acquire_reading(data_dir, ceiling, admission, &view, &read_group)
                     }
                 } else {
                     let view = MachineView {
@@ -273,7 +274,8 @@ impl Throttle<'_> {
                         },
                         group_state: &|pgid| self.control.group_state(pgid),
                     };
-                    slots::try_acquire_in(data_dir, ceiling, admission, &view)
+                    let read_group = |pgid| self.control.read_group_state(pgid);
+                    slots::try_acquire_reading(data_dir, ceiling, admission, &view, &read_group)
                 };
                 match attempt? {
                     Ok(slot) => break slot,
