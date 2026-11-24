@@ -100,6 +100,56 @@ pub(super) fn rules(git_dir: &Path, subs: &[PathBuf]) -> PortResult<String> {
     Ok(out)
 }
 
+/// When `worktree` is a linked worktree of `git_dir`, the deny rules for the
+/// state `git_dir` keeps for its own checkout (SEC-023): `HEAD`, `index` and
+/// the merge, rebase and bisect state next to them. A linked worktree keeps
+/// its own under `worktrees/<name>/` and writes only shared parts here.
+/// Direct children only: the entry of `git_dir` itself is closed, so none of
+/// them can be renamed away, changed and renamed back.
+pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> PortResult<String> {
+    if !worktree.is_some_and(|worktree| is_linked_worktree_of(worktree, git_dir)) {
+        return Ok(String::new());
+    }
+    let escaped = regex_escape(path_str(git_dir)?);
+    let mut out = String::new();
+    for pattern in [
+        "/([^/]*HEAD|index|AUTO_MERGE|MERGE_(MSG|MODE|RR|AUTOSTASH)|SQUASH_MSG|COMMIT_EDITMSG|BISECT_[^/]*|sharedindex\\.[^/]*)(\\.lock)?$",
+        "/(rebase-merge|rebase-apply|sequencer)(/|$)",
+    ] {
+        let regex = sbpl_regex(&format!("^{escaped}{pattern}"))?;
+        out.push_str(&format!("(deny file-write* (regex {regex}))\n"));
+    }
+    Ok(out)
+}
+
+/// Whether the first `.git` met walking up from `worktree` is a plain file
+/// whose `gitdir:` leads below `<git_dir>/worktrees/`. A normal checkout (or
+/// a subdirectory of one), a submodule and a `--separate-git-dir` checkout
+/// own the `HEAD` and `index` in `git_dir`, so they are not linked.
+fn is_linked_worktree_of(worktree: &Path, git_dir: &Path) -> bool {
+    let mut dot_gits = worktree.ancestors().map(|dir| dir.join(".git"));
+    let Some(dot_git) = dot_gits.find(|dot_git| dot_git.symlink_metadata().is_ok()) else {
+        return false;
+    };
+    // A `.git` link to a gitfile is followed, as git follows it.
+    let text = match std::fs::metadata(&dot_git) {
+        Ok(meta) if meta.is_file() => std::fs::read_to_string(&dot_git).unwrap_or_default(),
+        _ => return false,
+    };
+    let Some(target) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+    else {
+        return false;
+    };
+    let base = dot_git.parent().unwrap_or(worktree);
+    let admins = git_dir.join("worktrees");
+    let admins = std::fs::canonicalize(&admins).unwrap_or(admins);
+    std::fs::canonicalize(base.join(target.trim()))
+        .is_ok_and(|target| target != admins && target.starts_with(&admins))
+}
+
 /// The linked worktrees of `root` (the git dir or one existing submodule
 /// git dir, audit a13 F7-R5-1). A linked worktree's admin dir carries its
 /// own hooks and config, and finds its common dir (and so the hooks and
