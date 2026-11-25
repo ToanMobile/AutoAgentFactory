@@ -18,12 +18,14 @@ use serde_json::{Value, json};
 
 use super::{
     APPROVE_DISABLED_MSG, HTML_CSP, RequestSecurityContext, SecurityRejection, UiBackend, UiConfig,
-    UiError, parse_query, percent_decode, validate_ui_config, verify_request_security,
-    with_meta_policy, wrap_ok, write_backend_result, write_http_response, write_json_error,
-    write_json_response, write_sse_event,
+    UiError, parse_query, validate_ui_config, verify_request_security, with_meta_policy, wrap_ok,
+    write_backend_result, write_http_response, write_json_error, write_json_response,
+    write_sse_event,
 };
 use crate::executors::reaper::validate_run_id;
 use crate::git::worktree::validate_task_id;
+
+use super::routes::{Route, match_route};
 
 pub const MAX_CONCURRENT_CONNS: usize = 32;
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -34,6 +36,7 @@ const SSE_PUSH_INTERVAL: Duration = Duration::from_millis(1500);
 const DEFAULT_STREAM_LINES: usize = 120;
 const MAX_STREAM_LINES: usize = 500;
 const INDEX_HTML: &str = include_str!("index.html");
+const STUDIO_HTML: &str = include_str!("studio.html");
 
 type ShutdownState = Arc<(Mutex<bool>, Condvar)>;
 
@@ -328,69 +331,8 @@ pub(super) fn read_http_request_with_timeout(
     })
 }
 
-enum Route {
-    Index,
-    Health,
-    Meta,
-    Status,
-    Board,
-    TaskDetail(String),
-    Handover(String),
-    ApprovePreview(String),
-    StreamTail(String),
-    Events,
-    ApproveCommit,
-    Action,
-    MethodNotAllowed,
-    BadRequest(&'static str),
-    NotFound,
-}
-
 fn send_err(stream: &mut TcpStream, code: u16, msg: &str) {
     let _ = write_json_error(stream, code, msg);
-}
-
-fn match_route(method: &str, path: &str) -> Route {
-    let exact = |want: &str, r: Route| {
-        if method == want {
-            r
-        } else {
-            Route::MethodNotAllowed
-        }
-    };
-    match path {
-        "/" => return exact("GET", Route::Index),
-        "/api/health" => return exact("GET", Route::Health),
-        "/api/meta" => return exact("GET", Route::Meta),
-        "/api/status" => return exact("GET", Route::Status),
-        "/api/board" => return exact("GET", Route::Board),
-        "/api/events" => return exact("GET", Route::Events),
-        "/api/approve" => return exact("POST", Route::ApproveCommit),
-        "/api/action" => return exact("POST", Route::Action),
-        _ => {}
-    }
-    type RouteCtor = fn(String) -> Route;
-    let prefixes: [(&str, RouteCtor); 4] = [
-        ("/api/task/", Route::TaskDetail),
-        ("/api/handover/", Route::Handover),
-        ("/api/approve/preview/", Route::ApprovePreview),
-        ("/api/streams/", Route::StreamTail),
-    ];
-    for (prefix, build) in prefixes {
-        if let Some(raw_id) = path.strip_prefix(prefix)
-            && !raw_id.is_empty()
-            && !raw_id.contains('/')
-        {
-            if method != "GET" {
-                return Route::MethodNotAllowed;
-            }
-            return match percent_decode(raw_id) {
-                Some(id) if !id.is_empty() => build(id),
-                _ => Route::BadRequest("invalid URL percent encoding"),
-            };
-        }
-    }
-    Route::NotFound
 }
 
 fn dispatch_request(
@@ -409,7 +351,7 @@ fn dispatch_request(
         origin_header: req.headers.get("origin").map(String::as_str),
         auth_header: req.headers.get("authorization").map(String::as_str),
         query_token: req.query.get("token").map(String::as_str),
-        require_auth: !matches!(route, Route::Index | Route::Health),
+        require_auth: !matches!(route, Route::Index | Route::Studio | Route::Health),
         allow_query_token: matches!(route, Route::Events),
         is_mutating: matches!(route, Route::ApproveCommit | Route::Action),
     };
@@ -423,11 +365,13 @@ fn dispatch_request(
     }
 
     match route {
-        Route::Index => {
-            let csp = format!("Content-Security-Policy: {HTML_CSP}\r\n");
-            let ct = "text/html; charset=utf-8";
-            let _ = write_http_response(stream, 200, ct, &csp, INDEX_HTML.as_bytes());
+        Route::Index => write_html(stream, INDEX_HTML),
+        Route::Studio => write_html(stream, STUDIO_HTML),
+        Route::Report => {
+            let since = req.query.get("since").and_then(|s| s.parse::<u64>().ok());
+            write_backend_result(stream, backend.report_json(since));
         }
+        Route::Doctor => write_backend_result(stream, backend.doctor_json()),
         Route::Health => {
             let _ = write_json_response(stream, 200, &json!({ "ok": true }));
         }
@@ -471,6 +415,17 @@ fn dispatch_request(
         Route::MethodNotAllowed => send_err(stream, 405, "method not allowed"),
         Route::NotFound => send_err(stream, 404, "not found"),
     }
+}
+
+fn write_html(stream: &mut TcpStream, html: &str) {
+    let csp = format!("Content-Security-Policy: {HTML_CSP}\r\n");
+    let _ = write_http_response(
+        stream,
+        200,
+        "text/html; charset=utf-8",
+        &csp,
+        html.as_bytes(),
+    );
 }
 
 fn with_task_id(stream: &mut TcpStream, id: &str, f: impl FnOnce(&str) -> Result<Value, String>) {

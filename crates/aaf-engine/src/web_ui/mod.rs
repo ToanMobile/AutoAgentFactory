@@ -14,7 +14,10 @@
 //!   attached to every response.
 
 pub mod qr;
+mod routes;
 pub mod server;
+#[cfg(test)]
+mod studio_tests;
 #[cfg(test)]
 mod tests;
 
@@ -33,7 +36,7 @@ pub use qr::{pairing_url, render_pairing_card, render_qr_ascii};
 pub use server::{UiServerHandle, start_server};
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
-pub const DEFAULT_PORT: u16 = 4319;
+pub const DEFAULT_PORT: u16 = 4317;
 pub const MIN_LAN_TOKEN_LEN: usize = 16;
 pub const APPROVE_DISABLED_MSG: &str = "POST /api/approve is disabled by default; start `aaf ui --allow-approve` or use interactive `aaf approve` on a TTY";
 
@@ -163,6 +166,14 @@ pub trait UiBackend: Send + Sync {
     fn mutate_task(&self, action: &str, task_id: &str, note: &str) -> Result<Value, String>;
     fn stream_tail_lines(&self, run_id: &str, max_lines: usize) -> Result<Vec<String>, String>;
     fn meta_json(&self) -> Result<Value, String>;
+    /// `aaf report` data for the last `since_hours` (all history when `None`).
+    fn report_json(&self, _since_hours: Option<u64>) -> Result<Value, String> {
+        Err("not found: report is not available in this backend".into())
+    }
+    /// `aaf doctor` checks of this machine and repository.
+    fn doctor_json(&self) -> Result<Value, String> {
+        Err("not found: doctor is not available in this backend".into())
+    }
 }
 
 /// Returns `true` strictly for loopback hosts (`127.0.0.1`, `localhost`, `::1`).

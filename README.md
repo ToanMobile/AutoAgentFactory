@@ -602,7 +602,8 @@ How `[cross_audit]` merges:
 | `aaf notify` | Push "needs you" moments (factory frozen, factory halted, task blocked, ready for review) or a one-shot `--message` to webhook / Telegram (**human only**) | `--once`, `--all`, `--repo <path>`, `--interval <s>`, `--dry-run`, `--message <text>` |
 | **`v3.5`** `aaf sop` | Declarative TOML SOP workflows (list, show, init, validate, runs, run/resume, approve, send-back) | `list`, `show`, `init`, `validate`, `runs`, `run`, `approve`, `send-back` |
 | **`v3.5`** `aaf executors` | 10-CLI inventory, fallback resolution preview, reusable role profiles, and read-only `.mcp.json` secret audit | `list`, `resolve`, `roles`, `mcp` |
-| **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
+| **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing, plus the `/studio` metrics page (default `http://127.0.0.1:4317/studio`) (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
+| `aaf report` | Period report: tasks done, lead time, time per lifecycle stage (p50/p90), cost per executor, blocked reasons, autonomy | `--since <hours>`, `--all` |
 | **`v3.5`** `aaf upgrade` / `completions` | SHA-256 verified self-updater (**human only**) and shell completions (`bash`, `zsh`, `fish`, `powershell`) | `upgrade`: `--check`, `--version`, `--dry-run`; `completions <shell>` |
 
 `aaf-hook` is not a command you type. Your coding-agent host runs it (with optional `--host <auto|claude|codex|gemini|antigravity|opencode>`, defaulting to `auto`): it reads the Claude Code / Codex CLI / OpenCode `PreToolUse` or Gemini CLI / Antigravity `BeforeTool` JSON payload on stdin and exits `0` to allow or `2` to block. A block message has the form `<rule>: <reason> — fix: <action>`.

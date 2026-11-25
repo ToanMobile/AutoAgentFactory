@@ -126,13 +126,20 @@ aaf run
 
 ---
 
-## 6. Local Web UI & Mobile QR Pairing
+## 6. Studio: every number on one page
 
-Launch the zero-dependency local web dashboard and print a terminal QR code to pair from your phone on the local network:
+Start the local web UI and open the **Studio** link it prints
+(`http://127.0.0.1:4317/studio#token=…`; `aaf ui --open` opens it for you on macOS):
 
 ```sh
-aaf ui --qr
+aaf ui          # add --qr to pair a phone on the local network
 ```
+
+Studio shows, for the last 24 hours, 7 days, 30 days or all history: tasks done,
+autonomy and first-pass gate rate, estimated cost per executor, lead time, time per
+lifecycle stage (p50/p90), why tasks are blocked, each task's acceptance criteria,
+live runs and accounts, and the `aaf doctor` checks on one click. It refreshes every
+15 seconds. The same report is available in the terminal as `aaf report [--since HOURS]`.
 
 ---
 

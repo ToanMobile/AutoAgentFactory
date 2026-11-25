@@ -17,6 +17,7 @@ pub mod merge;
 pub mod notify;
 pub mod plan;
 pub mod proof;
+pub mod report;
 pub mod repro;
 pub mod run;
 pub(crate) mod scope;
