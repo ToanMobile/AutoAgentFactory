@@ -102,6 +102,31 @@ pub(crate) fn record_block(
     )
 }
 
+/// True when `task_id` is already `Done` with a recent `MergeResult` recorded
+/// by `pr_cleanup_db` (`aaf_merge`) for `pr_number`.
+pub(super) fn completed_by_pr_cleanup(
+    deps: &Deps,
+    task_id: &str,
+    pr_number: u64,
+) -> PortResult<bool> {
+    if deps.store.get_task(task_id)?.state != TaskState::Done {
+        return Ok(false);
+    }
+    let events = deps
+        .store
+        .events_for_task_by_kinds(task_id, &[EventKind::MergeResult], 5)?;
+    Ok(events.iter().any(|ev| {
+        serde_json::from_str::<serde_json::Value>(&ev.payload_json)
+            .ok()
+            .is_some_and(|p| {
+                p["merged"] == true
+                    && p["pr_number"].as_u64() == Some(pr_number)
+                    && (p["by"].as_str() == Some("aaf_merge")
+                        || p["kind"].as_str() == Some("pr_merge"))
+            })
+    }))
+}
+
 /// Retries the merge of one Review task when its backoff has elapsed.
 /// Returns `Ok(true)` when the task was merged (moved to Done).
 pub(crate) fn retry_task(deps: &Deps, task: &Task) -> PortResult<bool> {
@@ -138,29 +163,67 @@ pub(crate) fn retry_task(deps: &Deps, task: &Task) -> PortResult<bool> {
         }
     };
     match outcome {
-        PrMergeOutcome::Merged { pr_number, .. }
-        | PrMergeOutcome::AlreadyMerged { pr_number, .. } => {
-            if deps.store.get_task(&task.id)?.state != TaskState::Review {
-                return Ok(false);
-            }
+        PrMergeOutcome::Merged {
+            pr_number,
+            head_sha,
+            ..
+        } => {
             let why = format!("merged pull request #{pr_number} ({}) on retry", p.url);
             let merge_payload = json!({
                 "merged": true,
                 "kind": "pr_merge",
                 "pr_number": pr_number,
+                "head_sha": head_sha,
                 "retry": true,
             });
-            if !deps
-                .store
-                .complete_review_task(&task.id, &why, Some(&merge_payload), deps.now())?
-            {
+            let completed = deps.store.complete_review_task(
+                &task.id,
+                &why,
+                Some(&merge_payload),
+                deps.now(),
+            )?;
+            if !completed && !completed_by_pr_cleanup(deps, &task.id, pr_number)? {
                 return Ok(false);
             }
             if let Err(err) = deps.git.fetch_base() {
                 eprintln!("aaf: post-merge fetch {}: {err}", task.id);
             }
-            if let Err(err) = deps.git.cleanup_verified_merged(&task.id) {
+            if let Err(err) = deps.git.cleanup_verified_merged(&task.id, &head_sha) {
                 eprintln!("aaf: post-merge cleanup {}: {err}", task.id);
+            }
+            if !completed {
+                super::finish::close(deps, task)?;
+                super::unblock::root_succeeded(deps, task)?;
+            }
+            Ok(true)
+        }
+        PrMergeOutcome::AlreadyMerged { pr_number, .. } => {
+            let why = format!("merged pull request #{pr_number} ({}) on retry", p.url);
+            let merge_payload = json!({
+                "merged": true,
+                "kind": "pr_merge",
+                "pr_number": pr_number,
+                "already_merged": true,
+                "retry": true,
+            });
+            let completed = deps.store.complete_review_task(
+                &task.id,
+                &why,
+                Some(&merge_payload),
+                deps.now(),
+            )?;
+            if !completed && !completed_by_pr_cleanup(deps, &task.id, pr_number)? {
+                return Ok(false);
+            }
+            if let Err(err) = deps.git.fetch_base() {
+                eprintln!("aaf: post-merge fetch {}: {err}", task.id);
+            }
+            if let Err(err) = deps.git.cleanup(&task.id) {
+                eprintln!("aaf: post-merge cleanup {}: {err}", task.id);
+            }
+            if !completed {
+                super::finish::close(deps, task)?;
+                super::unblock::root_succeeded(deps, task)?;
             }
             Ok(true)
         }

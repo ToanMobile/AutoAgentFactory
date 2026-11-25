@@ -157,8 +157,8 @@ impl GitOps for RealGit {
         self.cleanup_impl(task_id)
     }
 
-    fn cleanup_verified_merged(&self, task_id: &str) -> PortResult<()> {
-        self.cleanup_verified_merged_impl(task_id)
+    fn cleanup_verified_merged(&self, task_id: &str, expected_head: &str) -> PortResult<()> {
+        self.cleanup_verified_merged_impl(task_id, expected_head)
     }
 
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()> {

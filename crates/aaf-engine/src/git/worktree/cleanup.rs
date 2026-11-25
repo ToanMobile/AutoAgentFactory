@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use super::super::cmd::{failure, git, git_raw};
 use super::super::{GitError, path_str};
 use super::{
-    BRANCH_PREFIX, SNAPSHOT_REF_PREFIX, TaskWorktree, ensure_clean, list, prune, resolved,
-    validate_task_id, worktree_path,
+    BRANCH_PREFIX, SNAPSHOT_REF_PREFIX, SUBMODULES_REFUSAL, TaskWorktree, ensure_clean, list,
+    prune, removal_refusal, resolved, validate_task_id, worktree_path,
 };
 
 /// True when `wt` has an active git rebase, merge, cherry-pick, or revert.
@@ -244,46 +244,118 @@ pub fn remove_verified_merged(
     Ok(())
 }
 
+fn delete_branch_if_at_head(
+    repo_root: &Path,
+    branch: &str,
+    expected_head: &str,
+) -> Result<(), GitError> {
+    let branch_ref = format!("refs/heads/{branch}");
+    let rev = git_raw(
+        repo_root,
+        &["rev-parse", "--verify", "--quiet", &branch_ref],
+    )?;
+    if !rev.success() {
+        return Ok(());
+    }
+    let tip = rev.stdout.trim();
+    if !tip.eq_ignore_ascii_case(expected_head) {
+        return Err(GitError::Unmerged(format!(
+            "{branch} (tip {tip} != expected {expected_head})"
+        )));
+    }
+    let expected_lower = expected_head.to_ascii_lowercase();
+    let del = git_raw(
+        repo_root,
+        &["update-ref", "-d", &branch_ref, &expected_lower],
+    )?;
+    if !del.success() && branch_exists(repo_root, &branch_ref)? {
+        return Err(GitError::Unmerged(format!(
+            "{branch} (ref changed concurrently: {})",
+            del.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Cleans a task whose PR has already been verified as merged (merge, squash, or
-/// rebase) without requiring `for-each-ref --contains` ancestry.
+/// rebase) at `expected_head` without requiring `for-each-ref --contains` ancestry.
 ///
-/// Refuses dirty, locked, unregistered, or mid-operation (rebase/merge) trees.
-/// Also handles missing worktree directories with leftover branch/snapshots.
+/// Refuses invalid/empty `expected_head`, dirty, locked, unregistered,
+/// mid-operation (rebase/merge), or HEAD/tip-mismatched trees. Deletes the
+/// branch atomically via `git update-ref -d` before deleting snapshot refs.
 pub fn cleanup_verified_merged_task(
     repo_root: &Path,
     worktrees_dir: &Path,
     task_id: &str,
+    expected_head: &str,
 ) -> Result<(), GitError> {
     validate_task_id(task_id)?;
+    let expected_head = expected_head.trim();
+    if !is_valid_oid(expected_head) {
+        return Err(GitError::Invalid(format!(
+            "invalid expected head oid {expected_head:?}"
+        )));
+    }
     let path = worktree_path(repo_root, worktrees_dir, task_id)?;
     let branch = format!("{BRANCH_PREFIX}{task_id}");
     if path.exists() || fs::symlink_metadata(&path).is_ok() {
-        let wt = TaskWorktree {
-            path: path.clone(),
-            branch,
-        };
-        // Validate registration before running git inside `path`.
         let wanted = fs::canonicalize(&path)?;
-        let registered = list(repo_root)?.into_iter().any(|entry| {
-            entry.branch.as_deref() == Some(wt.branch.as_str())
+        let reg_entry = list(repo_root)?.into_iter().find(|entry| {
+            entry.branch.as_deref() == Some(branch.as_str())
                 && fs::canonicalize(&entry.path).is_ok_and(|p| p == wanted)
         });
-        if !registered {
+        let Some(entry) = reg_entry else {
             return Err(GitError::Invalid(format!(
-                "{} is not a worktree of branch {}",
-                path.display(),
-                wt.branch
+                "{} is not a worktree of branch {branch}",
+                path.display()
+            )));
+        };
+        if entry.locked {
+            return Err(GitError::Invalid(format!(
+                "worktree {} is locked",
+                path.display()
             )));
         }
-        let head_oid = git(&path, &["rev-parse", "HEAD"])?;
-        return remove_verified_merged(repo_root, &wt, &head_oid);
+        if is_operation_in_progress(&path)? {
+            return Err(GitError::Invalid(format!(
+                "git operation in progress in {}",
+                path.display()
+            )));
+        }
+        ensure_clean(&path)?;
+        let actual_head = git(&path, &["rev-parse", "HEAD"])?;
+        if !actual_head.eq_ignore_ascii_case(expected_head) {
+            return Err(GitError::Unmerged(format!(
+                "{branch} (HEAD {actual_head} != expected {expected_head})"
+            )));
+        }
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_tip = git(repo_root, &["rev-parse", "--verify", &branch_ref])?;
+        if !branch_tip.eq_ignore_ascii_case(expected_head) {
+            return Err(GitError::Unmerged(format!(
+                "{branch} (tip {branch_tip} != expected {expected_head})"
+            )));
+        }
+        let submodules = removal_refusal(&path).is_ok_and(|r| r == Some(SUBMODULES_REFUSAL));
+        if submodules {
+            let args = ["status", "--porcelain", "--ignore-submodules=none"];
+            if !git(&path, &args)?.is_empty() {
+                return Err(GitError::Dirty(path.clone()));
+            }
+        }
+        let path_s = path_str(&path)?;
+        if submodules {
+            git(repo_root, &["worktree", "remove", "--force", path_s])?;
+        } else {
+            git(repo_root, &["worktree", "remove", path_s])?;
+        }
+        delete_branch_if_at_head(repo_root, &branch, expected_head)?;
+        delete_snapshot_refs(repo_root, task_id)?;
+        return Ok(());
     }
     ensure_no_conflicting_worktree(repo_root, &path, &branch)?;
     prune(repo_root)?;
-    let branch_ref = format!("refs/heads/{branch}");
-    if branch_exists(repo_root, &branch_ref)? {
-        git(repo_root, &["branch", "-D", &branch])?;
-    }
+    delete_branch_if_at_head(repo_root, &branch, expected_head)?;
     delete_snapshot_refs(repo_root, task_id)?;
     Ok(())
 }

@@ -78,10 +78,19 @@ impl RealGit {
         }
     }
 
-    pub(super) fn cleanup_verified_merged_impl(&self, task_id: &str) -> PortResult<()> {
+    pub(super) fn cleanup_verified_merged_impl(
+        &self,
+        task_id: &str,
+        expected_head: &str,
+    ) -> PortResult<()> {
         let _admin = self.admin();
-        worktree::cleanup_verified_merged_task(&self.repo_root, &self.worktrees_dir, task_id)
-            .map_err(err)
+        worktree::cleanup_verified_merged_task(
+            &self.repo_root,
+            &self.worktrees_dir,
+            task_id,
+            expected_head,
+        )
+        .map_err(err)
     }
 
     pub(super) fn sweep_offline_done_impl(

@@ -296,6 +296,13 @@ fn snapshots_of(repo: &Path, id: &str) -> String {
     git(repo, &["for-each-ref", "--format=%(refname)", &prefix])
 }
 
+fn branch_exists(repo: &Path, branch: &str) -> bool {
+    git(
+        repo,
+        &["branch", "--list", "--format=%(refname:short)", branch],
+    ) == branch
+}
+
 #[test]
 fn c1_1_cleanup_removes_merged_branch_and_snapshots_when_worktree_dir_missing() {
     let fx = Fixture::new();
@@ -308,7 +315,7 @@ fn c1_1_cleanup_removes_merged_branch_and_snapshots_when_worktree_dir_missing() 
     fs::remove_dir_all(&wt.path).unwrap();
     real.cleanup("t1").unwrap();
 
-    assert_eq!(git(&fx.repo, &["branch", "--list", "aaf/t1"]), "");
+    assert!(!branch_exists(&fx.repo, "aaf/t1"));
     assert_eq!(snapshots_of(&fx.repo, "t1"), "");
 }
 
@@ -327,18 +334,12 @@ fn c1_2_cleanup_refuses_unmerged_branch_with_self_tracking_remote_and_snapshot()
         "unexpected error: {err}"
     );
     assert!(wt.path.is_dir(), "worktree must remain intact");
-    assert_eq!(
-        git(
-            &fx.repo,
-            &["branch", "--list", "--format=%(refname:short)", "aaf/t2"]
-        ),
-        "aaf/t2"
-    );
+    assert!(branch_exists(&fx.repo, "aaf/t2"));
     assert_eq!(snapshots_of(&fx.repo, "t2"), "refs/aaf/snapshots/t2/s1");
 }
 
 #[test]
-fn c1_3_cleanup_verified_merged_handles_squash_clean_and_refuses_dirty() {
+fn c1_3_cleanup_verified_merged_handles_squash_clean_and_refuses_dirty_or_mismatch() {
     let fx = Fixture::new();
     let real = real_git(&fx);
     let wt = real.task_worktree("t3").unwrap();
@@ -346,26 +347,27 @@ fn c1_3_cleanup_verified_merged_handles_squash_clean_and_refuses_dirty() {
     git(&fx.repo, &["update-ref", "refs/aaf/snapshots/t3/s1", &head]);
     commit_file(&fx.repo, "t3.txt", "squash\n", "squash PR #3");
     assert!(!real.is_merged("t3").unwrap());
-
-    // Dirty worktree is refused; worktree, branch, and snapshots stay intact.
-    fs::write(wt.path.join("wip.txt"), "keep\n").unwrap();
-    assert!(real.cleanup_verified_merged("t3").is_err());
-    assert!(wt.path.join("wip.txt").is_file());
-    assert_eq!(
-        git(
-            &fx.repo,
-            &["branch", "--list", "--format=%(refname:short)", "aaf/t3"]
-        ),
-        "aaf/t3"
-    );
+    let wrong = "0".repeat(40);
+    assert!(real.cleanup_verified_merged("t3", &wrong).is_err());
+    assert!(wt.path.is_dir() && branch_exists(&fx.repo, "aaf/t3"));
     assert_eq!(snapshots_of(&fx.repo, "t3"), "refs/aaf/snapshots/t3/s1");
-
-    // Clean worktree is removed with its squash-merged branch and snapshots.
+    fs::write(wt.path.join("wip.txt"), "keep\n").unwrap();
+    assert!(real.cleanup_verified_merged("t3", &head).is_err());
+    assert!(wt.path.join("wip.txt").is_file() && branch_exists(&fx.repo, "aaf/t3"));
+    assert_eq!(snapshots_of(&fx.repo, "t3"), "refs/aaf/snapshots/t3/s1");
     fs::remove_file(wt.path.join("wip.txt")).unwrap();
-    real.cleanup_verified_merged("t3").unwrap();
-    assert!(!wt.path.exists());
-    assert_eq!(git(&fx.repo, &["branch", "--list", "aaf/t3"]), "");
+    real.cleanup_verified_merged("t3", &head).unwrap();
+    assert!(!wt.path.exists() && !branch_exists(&fx.repo, "aaf/t3"));
     assert_eq!(snapshots_of(&fx.repo, "t3"), "");
+    let wt2 = real.task_worktree("t3m").unwrap();
+    let h2 = commit_file(&wt2.path, "t3m.txt", "h2\n", "h2");
+    git(&fx.repo, &["update-ref", "refs/aaf/snapshots/t3m/s1", &h2]);
+    fs::remove_dir_all(&wt2.path).unwrap();
+    assert!(real.cleanup_verified_merged("t3m", &wrong).is_err());
+    assert!(branch_exists(&fx.repo, "aaf/t3m"));
+    assert_eq!(snapshots_of(&fx.repo, "t3m"), "refs/aaf/snapshots/t3m/s1");
+    real.cleanup_verified_merged("t3m", &h2).unwrap();
+    assert!(!branch_exists(&fx.repo, "aaf/t3m") && snapshots_of(&fx.repo, "t3m").is_empty());
 }
 
 #[test]

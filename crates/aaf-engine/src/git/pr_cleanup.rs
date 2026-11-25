@@ -265,8 +265,13 @@ fn delete_remote_branch(
         ));
         return;
     }
+    let lease = format!(
+        "--force-with-lease=refs/heads/{}:{}",
+        pr.head_ref_name,
+        req.expect_head.to_ascii_lowercase()
+    );
     let refspec = format!(":refs/heads/{}", pr.head_ref_name);
-    match git_raw(main_repo, &["push", "--", &req.remote, &refspec]) {
+    match git_raw(main_repo, &["push", &lease, "--", &req.remote, &refspec]) {
         Ok(out) if out.success() => report.remote_branch_deleted = true,
         Ok(out)
             if out
@@ -505,13 +510,21 @@ fn delete_local_branch(
         ));
         return false;
     }
-    match git_raw(main_repo, &["branch", "-D", branch]) {
+    let expected_lower = expect_head.to_ascii_lowercase();
+    match git_raw(
+        main_repo,
+        &["update-ref", "-d", &branch_ref, &expected_lower],
+    ) {
         Ok(out) if out.success() => {
             report.branch_deleted = true;
             true
         }
-        Ok(out) if out.stderr.to_ascii_lowercase().contains("not found") => true,
         Ok(out) => {
+            if !git_raw(main_repo, &["show-ref", "--verify", "--quiet", &branch_ref])
+                .is_ok_and(|s| s.success())
+            {
+                return true;
+            }
             report.warnings.push(format!(
                 "could not delete local branch `{branch}`: {}",
                 out.stderr.trim()

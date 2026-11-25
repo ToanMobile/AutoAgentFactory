@@ -228,9 +228,13 @@ fn mark_task_done(
     }
     let db = open_db(ctx)?;
     let now = SystemClock.now();
-    db.set_state(task_id, TaskState::Done, None, now)
+    let changed = db
+        .compare_and_set_state(task_id, prev_state, TaskState::Done, None, now)
         .map_err(|e| CmdError::new(format!("merge: mark {task_id} done: {e}")))?;
-    let payload = json!({
+    if !changed {
+        return Ok(false);
+    }
+    let state_payload = json!({
         "from": prev_state.as_str(),
         "to": TaskState::Done.as_str(),
         "why": format!("merged PR #{pr_number}"),
@@ -239,7 +243,19 @@ fn mark_task_done(
         "head_sha": head_sha,
     });
     let _ = db.emit(
-        &FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now).for_task(task_id),
+        &FactoryEvent::new(EventKind::TaskStateChanged, state_payload.to_string(), now)
+            .for_task(task_id),
+    );
+    let merge_payload = json!({
+        "merged": true,
+        "kind": "pr_merge",
+        "by": "human",
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+    });
+    let _ = db.emit(
+        &FactoryEvent::new(EventKind::MergeResult, merge_payload.to_string(), now)
+            .for_task(task_id),
     );
     Ok(true)
 }

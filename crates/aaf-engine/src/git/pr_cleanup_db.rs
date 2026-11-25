@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use aaf_domain::event::EventKind;
+use aaf_domain::ports::META_CONSECUTIVE_ROOT_FAILS;
 use aaf_domain::task::TaskState;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
@@ -53,15 +54,15 @@ pub(super) fn transition_review_task_done(
     if version <= 0 || version > SCHEMA_VERSION {
         return Err(format!("unsupported database schema version {version}"));
     }
-    let row: Option<(String, String, Option<String>)> = tx
+    let row: Option<(String, String, String, Option<String>)> = tx
         .query_row(
-            "SELECT state, repo_root, fingerprint FROM tasks WHERE id = ?1",
+            "SELECT state, root_id, repo_root, fingerprint FROM tasks WHERE id = ?1",
             params![task_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((state_str, task_repo_root, fingerprint)) = row else {
+    let Some((state_str, root_id, task_repo_root, fingerprint)) = row else {
         return Ok(DbDecision::Proceed { marked_done: false });
     };
     if !same_repo(&task_repo_root, main_repo) {
@@ -96,6 +97,7 @@ pub(super) fn transition_review_task_done(
             let merge_ev = json!({
                 "merged": true,
                 "kind": "pr_merge",
+                "by": "aaf_merge",
                 "pr_number": pr_number,
                 "head_sha": expect_head,
             });
@@ -115,6 +117,14 @@ pub(super) fn transition_review_task_done(
                     "INSERT INTO closed_fingerprints (fingerprint, repo_root, task_id, closed_at) \
                      VALUES (?1, ?2, ?3, ?4)",
                     params![fp, task_repo_root, task_id, now],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if task_id == root_id {
+                tx.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![META_CONSECUTIVE_ROOT_FAILS, "0"],
                 )
                 .map_err(|e| e.to_string())?;
             }

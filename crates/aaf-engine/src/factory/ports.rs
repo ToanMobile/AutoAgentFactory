@@ -182,9 +182,10 @@ pub trait GitOps: Send + Sync {
     /// discards work: a dirty worktree or an unmerged branch is an error.
     fn cleanup(&self, task_id: &str) -> PortResult<()>;
     /// Removes the worktree, branch, and snapshots of a task whose PR was
-    /// already verified as merged (merge, squash, or rebase). Refuses dirty,
-    /// locked, or mid-operation trees, without requiring git ancestry.
-    fn cleanup_verified_merged(&self, task_id: &str) -> PortResult<()> {
+    /// already verified as merged (merge, squash, or rebase) at `expected_head`.
+    /// Refuses dirty, locked, mid-operation, or HEAD-mismatched trees, without
+    /// requiring git ancestry.
+    fn cleanup_verified_merged(&self, task_id: &str, _expected_head: &str) -> PortResult<()> {
         self.cleanup(task_id)
     }
     /// Existing worktree and its `HEAD` oid (without creating a worktree).
