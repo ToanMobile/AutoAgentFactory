@@ -383,40 +383,38 @@ fn service_new_endpoints_create_task_diff_proof_and_supervisor() {
     let proof_val: Value = serde_json::from_str(&proof_body).unwrap();
     assert_eq!(proof_val["available"], json!(false));
 
+    let post_action = |body: Value| -> Value {
+        let s = body.to_string();
+        let (st, resp) = raw_http(
+            port,
+            &format!(
+                "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{s}",
+                s.len()
+            ),
+        );
+        assert_eq!(st, 200, "{resp}");
+        serde_json::from_str(&resp).unwrap()
+    };
+    let get_auth = |path: &str| -> Value {
+        let (st, resp) = raw_http(
+            port,
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+        );
+        assert_eq!(st, 200, "{resp}");
+        serde_json::from_str(&resp).unwrap()
+    };
+
     // 3. Supervisor toggle ON then OFF persists and reflects in /api/status
-    let sup_on = json!({ "action": "supervisor_toggle", "task_id": "", "note": "on" }).to_string();
-    let (st_on, on_body) = raw_http(
-        port,
-        &format!(
-            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_on}",
-            sup_on.len()
-        ),
-    );
-    assert_eq!(st_on, 200, "{on_body}");
-    let on_val: Value = serde_json::from_str(&on_body).unwrap();
+    let on_val = post_action(json!({ "action": "supervisor_toggle", "task_id": "", "note": "on" }));
     assert_eq!(on_val["enabled"], json!(true));
-
-    let (st_status, status_body) = raw_http(
-        port,
-        &format!(
-            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
-        ),
+    assert_eq!(
+        get_auth("/api/status")["supervisor"]["enabled"],
+        json!(true)
     );
-    assert_eq!(st_status, 200, "{status_body}");
-    let status_val: Value = serde_json::from_str(&status_body).unwrap();
-    assert_eq!(status_val["supervisor"]["enabled"], json!(true));
-
-    let sup_off =
-        json!({ "action": "supervisor_toggle", "task_id": "", "note": "off" }).to_string();
-    let (st_off, off_body) = raw_http(
-        port,
-        &format!(
-            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_off}",
-            sup_off.len()
-        ),
-    );
-    assert_eq!(st_off, 200, "{off_body}");
-    let off_val: Value = serde_json::from_str(&off_body).unwrap();
+    let off_val =
+        post_action(json!({ "action": "supervisor_toggle", "task_id": "", "note": "off" }));
     assert_eq!(off_val["enabled"], json!(false));
 
     // 3b. Supervisor allowed_repos selection persists and reflects in /api/status
@@ -424,69 +422,29 @@ fn service_new_endpoints_create_task_diff_proof_and_supervisor() {
         .unwrap_or_else(|_| sb.repo.clone())
         .to_string_lossy()
         .to_string();
-    let sup_pick = json!({
+    let pick_val = post_action(json!({
         "action": "supervisor_repos",
         "task_id": "",
         "note": json!({ "repos": [sb.repo.to_string_lossy()] }).to_string(),
-    })
-    .to_string();
-    let (st_pick, pick_body) = raw_http(
-        port,
-        &format!(
-            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_pick}",
-            sup_pick.len()
-        ),
-    );
-    assert_eq!(st_pick, 200, "{pick_body}");
-    let pick_val: Value = serde_json::from_str(&pick_body).unwrap();
+    }));
     assert_eq!(pick_val["allowed_repos"], json!([repo_canon]));
-
-    let (st_status2, status_body2) = raw_http(
-        port,
-        &format!(
-            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
-        ),
-    );
-    assert_eq!(st_status2, 200, "{status_body2}");
-    let status_val2: Value = serde_json::from_str(&status_body2).unwrap();
+    let status_val2 = get_auth("/api/status");
     assert_eq!(
         status_val2["supervisor"]["allowed_repos"],
         json!([repo_canon])
     );
     assert!(status_val2["supervisor"]["known_repos"].is_array());
-
-    let sup_none = json!({
+    let none_val = post_action(json!({
         "action": "supervisor_repos",
         "task_id": "",
         "note": json!({ "repos": [] }).to_string(),
-    })
-    .to_string();
-    let (st_none, none_body) = raw_http(
-        port,
-        &format!(
-            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_none}",
-            sup_none.len()
-        ),
-    );
-    assert_eq!(st_none, 200, "{none_body}");
-    let none_val: Value = serde_json::from_str(&none_body).unwrap();
+    }));
     assert_eq!(none_val["allowed_repos"], json!([]));
-
-    let sup_all = json!({
+    let all_val = post_action(json!({
         "action": "supervisor_repos",
         "task_id": "",
         "note": json!({ "all": true }).to_string(),
-    })
-    .to_string();
-    let (st_all, all_body) = raw_http(
-        port,
-        &format!(
-            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_all}",
-            sup_all.len()
-        ),
-    );
-    assert_eq!(st_all, 200, "{all_body}");
-    let all_val: Value = serde_json::from_str(&all_body).unwrap();
+    }));
     assert!(all_val["allowed_repos"].is_null());
 
     // 4. GET /api/accounts requires auth & returns native repo_assignments + aaf_accounts

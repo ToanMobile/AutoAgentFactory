@@ -10,6 +10,7 @@ mod proof_stop;
 mod service;
 mod studio;
 mod supervisor;
+mod supervisor_ops;
 mod tailscale;
 
 use std::io::{self, ErrorKind, Read};
@@ -524,55 +525,8 @@ impl UiBackend for CliUiBackend {
         if self.read_only {
             return Err("refused: server is running in read-only mode".into());
         }
-        if action == "supervisor_toggle" {
-            let enable = match note.trim().to_ascii_lowercase().as_str() {
-                "on" | "true" | "1" => true,
-                "off" | "false" | "0" => false,
-                _ => return Err("invalid supervisor_toggle: expected 'on' or 'off'".into()),
-            };
-            let res = self.supervisor.set_enabled(enable);
-            if res.is_ok() {
-                self.invalidate_status_cache();
-            }
-            return res;
-        }
-        if action == "supervisor_repos" {
-            let raw = note.trim();
-            let parsed_repos: Option<Vec<String>> = if raw.eq_ignore_ascii_case("all") || raw == "*"
-            {
-                None
-            } else if raw.is_empty() {
-                Some(Vec::new())
-            } else if raw.starts_with('{') || raw.starts_with('[') {
-                let v: Value = serde_json::from_str(raw)
-                    .map_err(|e| format!("invalid supervisor_repos JSON: {e}"))?;
-                if v.get("all").and_then(Value::as_bool) == Some(true) {
-                    None
-                } else if let Some(arr) = v
-                    .as_array()
-                    .or_else(|| v.get("repos").and_then(Value::as_array))
-                {
-                    Some(
-                        arr.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                            .filter(|s| !s.is_empty())
-                            .collect(),
-                    )
-                } else {
-                    return Err(
-                            "invalid supervisor_repos payload: expected {\"all\":true} or {\"repos\":[...]}"
-                                .into(),
-                        );
-                }
-            } else {
-                Some(
-                    raw.split([',', '\n'])
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect(),
-                )
-            };
-            let res = self.supervisor.set_allowed_repos(parsed_repos);
+        if matches!(action, "supervisor_toggle" | "supervisor_repos") {
+            let res = self.supervisor.handle_action(action, note);
             if res.is_ok() {
                 self.invalidate_status_cache();
             }
