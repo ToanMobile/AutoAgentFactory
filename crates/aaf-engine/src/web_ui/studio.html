@@ -37,6 +37,7 @@ header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px 14px
 .seg{display:inline-flex;border:1px solid var(--border);border-radius:9px;overflow:hidden}
 .seg button{border:0;border-radius:0;padding:7px 11px}
 .seg button.on{background:var(--ink);color:var(--bg)}
+a.needbtn,a.btnlink{display:inline-flex;align-items:center;text-decoration:none;border:1px solid var(--border);background:var(--surface);color:var(--ink);border-radius:9px;padding:7px 12px}
 .needbtn{display:inline-flex;align-items:center;gap:8px;font-weight:600}
 .needbtn.hot{background:var(--err-bg);border-color:transparent;color:var(--err)}
 .badge{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 7px;border-radius:999px;font-size:13px;font-weight:700;background:var(--surface2);color:var(--ink)}
@@ -133,7 +134,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 <header>
   <div class="brand"><h1>AAF Studio</h1><span class="scope" id="scope"></span><span class="pill" id="factory">…</span></div>
   <div class="controls">
-    <button id="needBtn" class="needbtn" title="Tasks that are blocked or waiting for your review">Needs you <span class="badge" id="needCount">0</span></button>
+    <a id="needBtn" class="needbtn" href="/?view=needyou" title="Open the Need You list in the Cockpit">Needs you <span class="badge" id="needCount">0</span></a>
     <div class="seg" id="period" aria-label="Period">
       <button data-h="24">24h</button><button data-h="168" class="on">7 days</button><button data-h="720">30 days</button><button data-h="">All</button>
     </div>
@@ -144,16 +145,8 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 </header>
 <main>
   <div class="card err" id="err"></div>
-  <div class="banner" id="banner"><span id="bannerText"></span><button id="bannerBtn">Show list</button></div>
+  <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/?view=needyou">Open in Cockpit →</a></div>
   <section class="grid" id="kpis"></section>
-  <section class="card">
-    <div class="head">
-      <div><h2>Tasks</h2><div class="sub">Click a task to see its criteria, runs and what to do next.</div></div>
-      <input class="search" id="search" type="search" placeholder="Search title or id…" aria-label="Search tasks">
-    </div>
-    <div class="chips" id="filters"></div>
-    <div class="tasks" id="tasks" style="margin-top:8px"></div>
-  </section>
   <section class="two">
     <div class="card"><h2>Time per stage</h2><div class="sub">How long tasks stay in each stage (p50 = typical, p90 = slow)</div><div id="stages"></div>
       <div class="legend"><span>p50</span><span class="p90">p90</span></div></div>
@@ -290,20 +283,6 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     }
   }
 
-  function openNeeds() {
-    const list = needs();
-    openDrawer("Needs you", list.length ? `${list.length} task${list.length > 1 ? "s" : ""} waiting on you` : "Nothing is waiting on you",
-      list.length ? list.map((t) => {
-        const step = nextSteps(t);
-        const reason = t.state === "blocked" ? `<b>${esc(reasonLabel(t.blocked_reason))}</b>${t.blocked_detail ? ": " + esc(t.blocked_detail) : ""}` : "";
-        return `<div class="need"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div class="t">${esc(t.title)}</div>${pill(t.state)}</div>` +
-          `<div class="meta muted" style="font-size:13.5px;margin-top:2px"><span class="mono">${esc(t.id)}</span> · ${esc(t.priority || "")} · ${esc(ago(t.updated_at))}</div>` +
-          (reason ? `<div class="r">${reason}</div>` : "") +
-          (step.text ? `<div class="r muted">${esc(step.text)}</div>` : "") + step.cmds.map(cmd).join("") +
-          `<div class="acts"><button data-task="${esc(t.id)}">Details</button><a href="/" style="align-self:center">Open in Cockpit →</a></div></div>`;
-      }).join("") : `<div class="empty">🎉 All clear. Nothing is blocked and nothing waits for review.</div>`);
-  }
-
   // ---------- Drawer ----------
   function openDrawer(title, sub, html) {
     $("drawerTitle").textContent = title; $("drawerSub").textContent = sub || "";
@@ -365,35 +344,13 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const c = r.counts || {}, a = r.autonomy || {}, lt = r.lead_time || {};
     const n = needs().length;
     $("kpis").innerHTML = [
-      kpi("Needs you", num(n), n ? "show the list" : "nothing waiting", { action: "needs", hot: n > 0 }),
+      kpi("Needs you", num(n), n ? "open in Cockpit" : "nothing waiting", { action: "needs", hot: n > 0 }),
       kpi("Tasks done", num(r.tasks_done), `${num(c.total)} tasks touched`),
       kpi("Autonomy", pct(a.autonomy_rate_pct), `${num(a.done_without_human)} of ${num(a.done_tasks)} done without you`),
       kpi("Gate first pass", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `gate takes ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : "share passing first try"),
       kpi("Lead time", lt.samples ? dur(lt.p50_secs) : "n/a", lt.samples ? `typical · slow ${dur(lt.p90_secs)}` : "created → done"),
       kpi("Cost", usd(r.estimated_cost_usd), `${compact(r.total_tokens_in)} in · ${compact(r.total_tokens_out)} out tokens`),
     ].join("");
-  }
-
-  function renderFilters() {
-    $("filters").innerHTML = FILTERS.map(([key, label, fn]) =>
-      `<button data-filter="${key}" class="${filter === key ? "on" : ""}">${esc(label)}<span class="c">${tasks.filter(fn).length}</span></button>`).join("");
-  }
-
-  function renderTasks() {
-    renderFilters();
-    const fn = (FILTERS.find((f) => f[0] === filter) || FILTERS[3])[2];
-    const q = query.trim().toLowerCase();
-    const rows = tasks.filter(fn).filter((t) => !q || String(t.title).toLowerCase().includes(q) || String(t.id).toLowerCase().includes(q))
-      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).slice(0, 80);
-    if (!tasks.length) { $("tasks").innerHTML = `<div class="empty">No task yet. Add one with <span class="mono">aaf board add</span> or from the Cockpit.</div>`; return; }
-    if (!rows.length) { $("tasks").innerHTML = `<div class="empty">${filter === "need" && !q ? "🎉 Nothing needs you right now." : "No task matches."}</div>`; return; }
-    $("tasks").innerHTML = rows.map((t) => {
-      const ac = t.acceptance || [];
-      const why = t.state === "blocked" ? `<div class="why"><b>${esc(reasonLabel(t.blocked_reason))}</b>${t.blocked_detail ? ": " + esc(t.blocked_detail) : ""}</div>` : "";
-      return `<div class="trow" data-task="${esc(t.id)}" tabindex="0" role="button">` +
-        `<div><div class="t">${esc(t.title)}</div><div class="meta"><span class="mono">${esc(t.id)}</span>${t.priority ? `<span>${esc(t.priority)}</span>` : ""}${ac.length ? `<span>${t.state === "done" ? "✓ " : ""}${ac.length} criteria</span>` : ""}</div></div>` +
-        `<div class="side">${pill(t.state)}<span>${esc(ago(t.updated_at))}</span></div>${why}</div>`;
-    }).join("");
   }
 
   function renderStages(stages) {
@@ -422,7 +379,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const max = Math.max(1, ...top.map((t) => t[1]));
     $("blocked").innerHTML = `<table>` + top.map(([kind, n]) =>
       `<tr><td>${esc(reasonLabel(kind))}</td><td style="width:45%"><div class="bar"><b style="width:${(100 * n / max).toFixed(1)}%"></b></div></td><td class="n">${num(n)}</td></tr>`).join("") +
-      `</table><div style="margin-top:10px"><button data-action="needs">See blocked tasks →</button></div>`;
+      `</table><div style="margin-top:10px"><a class="btnlink" href="/?view=needyou">See blocked tasks in Cockpit →</a></div>`;
   }
 
   function renderLive(st) {
@@ -479,7 +436,6 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       renderExecutors(r.executors, r.estimated_cost_usd);
       renderBlocked(r.top_blocked);
     }
-    renderTasks();
     renderLive(lastStatus);
     $("foot").textContent = "Updated " + new Date().toLocaleTimeString() + " · refreshes every 15 s";
   }
@@ -506,11 +462,8 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     });
     $("refresh").onclick = refresh;
     $("runDoctor").onclick = runDoctor;
-    $("needBtn").onclick = openNeeds;
-    $("bannerBtn").onclick = openNeeds;
     $("drawerClose").onclick = closeDrawer;
     $("scrim").onclick = closeDrawer;
-    $("search").oninput = (e) => { query = e.target.value; renderTasks(); };
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closeDrawer();
       if ((e.key === "Enter" || e.key === " ") && e.target.classList && e.target.classList.contains("trow")) { e.preventDefault(); openTask(e.target.dataset.task); }
@@ -519,8 +472,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       const el = e.target.closest("[data-copy],[data-filter],[data-action],[data-task]");
       if (!el) return;
       if (el.dataset.copy != null) return copy(el.dataset.copy);
-      if (el.dataset.filter) { filter = el.dataset.filter; return renderTasks(); }
-      if (el.dataset.action === "needs") return openNeeds();
+      if (el.dataset.action === "needs") { location.href = "/?view=needyou"; return; }
       if (el.dataset.task) { if ($("drawer").classList.contains("open")) closeDrawer(); return openTask(el.dataset.task); }
     });
     $("tokOk").onclick = () => {

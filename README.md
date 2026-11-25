@@ -89,32 +89,32 @@ Keep both `aaf` and `aaf-hook` on your `PATH`. Details: [Quickstart](docs/QUICKS
 > (for example `claude`) logged in. `gh` is optional, for pull requests.
 > On Linux, agents run without a sandbox for now (`aaf run --unsandboxed`).
 
-## 📊 Studio: all your numbers on one page
+## 🖥️ Cockpit and 📊 Studio
 
 ```sh
-aaf ui --open        # → http://127.0.0.1:4317/studio
+aaf ui --open        # opens the Cockpit; it also prints the Studio link
 ```
 
-![aaf Studio: KPIs and the task list](docs/images/studio.png)
+`aaf ui` serves two screens on `http://127.0.0.1:4317`:
 
-- **Needs you**: one click lists every blocked task and every task waiting for review, with the reason and the exact command to fix it
-- **Tasks**: filter (needs you · in progress · done · all), search, and click any task for its spec, criteria, agent runs and history
-- **KPIs**: tasks done, autonomy, gate first-pass rate, lead time, tokens and cost
-- **Time per stage** (p50 / p90), **cost per agent**, **live factory** and **health checks** (`aaf doctor`)
+| Screen | For | What is on it |
+|---|---|---|
+| **Cockpit** `/` | Working | Board, **Need You** list, approvals, live agent logs, machine and accounts |
+| **Studio** `/studio` | Watching | Statistics only: KPIs, time per stage, cost per agent, why tasks block, health checks |
+
+Each has a button to the other. Studio's **Needs you** counter opens the Cockpit's Need You list.
+
+![aaf Studio statistics screen](docs/images/studio.png)
 
 <details>
-<summary>More screenshots: the "Needs you" panel and dark mode</summary>
-
-![Needs you panel](docs/images/studio-needs.png)
+<summary>Studio in dark mode</summary>
 
 ![Studio in dark mode](docs/images/studio-dark.png)
 
 </details>
 
-<sub>Screenshots use demo data.</sub>
-
-It refreshes every 15 seconds and works on your phone. The same report is in
-the terminal with `aaf report --since 24`.
+<sub>Screenshots use demo data.</sub> Studio refreshes every 15 seconds and works on your
+phone. The same report is in the terminal with `aaf report --since 24`.
 
 ## 🧰 Everyday commands
 

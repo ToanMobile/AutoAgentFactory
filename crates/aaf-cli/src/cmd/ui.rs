@@ -116,11 +116,11 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
     let url = pairing_url(&pairing_host, bound.port(), &cfg.token);
     let card = render_pairing_card(&url, args.read_only, cfg.lan_mode, args.qr);
     let studio = studio::studio_url(&url);
-    eprintln!("{card}\nStudio (all metrics): {studio}");
+    eprintln!("{card}\nStudio (statistics only): {studio}");
     eprintln!("Listening on http://{bound} (press q + Enter or Ctrl-C to stop)");
     #[cfg(target_os = "macos")]
     if args.open && ctx.stdin_is_tty {
-        let _ = std::process::Command::new("open").arg(&studio).spawn();
+        let _ = std::process::Command::new("open").arg(&url).spawn();
     }
     let quit = Arc::new(AtomicBool::new(false));
     if ctx.stdin_is_tty {

@@ -127,6 +127,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       </div>
       <div class="top-actions">
         <span class="sse-pill"><span id="sseDot" class="dot"></span><span id="sseLabel">Idle</span></span>
+        <a href="/studio" class="btn-sm" style="text-decoration:none;color:inherit" title="Statistics screen: KPIs, time per stage, cost">Studio</a>
         <button id="refreshBtn" class="btn-sm" title="Refresh now">Refresh</button>
         <button id="themeBtn" class="btn-sm" title="Toggle light/dark">Theme</button>
         <button id="lockBtn" class="btn-sm" title="Clear session token">Lock</button>
@@ -798,6 +799,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     renderChips();
     document.querySelectorAll(".tab[data-tab]").forEach((b) => { b.onclick = () => { if (b.dataset.tab === "board" && stateFilter === "need_you") { stateFilter = "all"; renderChips(); renderBoard(); } switchTab(b.dataset.tab); }; });
     $("needYouTabBtn").onclick = () => { stateFilter = "need_you"; switchTab("board"); renderChips(); renderBoard(); };
+    if (new URLSearchParams(location.search).get("view") === "needyou") { stateFilter = "need_you"; renderChips(); }
     $("prioFilter").onchange = renderBoard;
     $("searchBox").oninput = renderBoard;
     $("refreshBtn").onclick = () => refreshAll().then(() => toast("Refreshed")).catch((e) => toast(e.message));
