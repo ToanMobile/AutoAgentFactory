@@ -17,6 +17,7 @@ use crate::db::Db;
 
 mod autonomy;
 mod cost;
+pub mod lessons;
 pub mod pipeline;
 mod report;
 pub mod score;
@@ -26,6 +27,7 @@ pub use autonomy::{
     compute_autonomy_metrics,
 };
 pub use cost::{CostBasis, CostPolicy, CostRates, cost_policy_for};
+pub use lessons::{LessonSuggestion, MIN_LESSON_OCCURRENCES, collect_lessons, compute_lessons};
 pub use pipeline::{
     PipelineEdge, PipelineNode, SopRunSummary, SopStageView, TaskPipeline, build_task_pipeline,
     list_sop_runs,

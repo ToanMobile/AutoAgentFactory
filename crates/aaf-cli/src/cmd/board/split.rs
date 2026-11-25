@@ -154,7 +154,7 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf board split") {
         return Ok(refused);
     }
-    let sandboxed = match sandbox_choice(args.unsandboxed, cfg!(target_os = "macos")) {
+    let sandboxed = match sandbox_choice(args.unsandboxed, crate::cmd::run::probe_run_sandbox()) {
         Ok(sandboxed) => sandboxed,
         Err(why) => return Ok(CmdOutput::policy("refused", why)),
     };

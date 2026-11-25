@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::shell::Cmd;
-use crate::{Ctx, Denial, git_alias, git_files, paths};
+use crate::{Ctx, Denial, base_ref, git_alias, git_files, paths};
 
 mod push;
 pub(crate) use push::current_branch;
@@ -245,9 +245,19 @@ fn mentions_hooks(text: &str) -> bool {
 /// Any non-ASCII name counts: APFS folds `maﬆer` and `MAſTER` onto the loose
 /// ref of `master`, and git resolves them through it.
 pub fn is_protected(branch: &str) -> bool {
+    is_protected_with(branch, None)
+}
+
+/// Like [`is_protected`], also treating a configured `[gate].base_ref` branch
+/// (case-insensitive) as protected.
+pub(crate) fn is_protected_with(branch: &str, extra_base: Option<&str>) -> bool {
     let lower = branch.to_ascii_lowercase();
     let branch = lower.strip_prefix("refs/heads/").unwrap_or(&lower);
-    !branch.is_ascii() || branch == "main" || branch == "master" || branch.starts_with("release/")
+    !branch.is_ascii()
+        || branch == "main"
+        || branch == "master"
+        || branch.starts_with("release/")
+        || extra_base.is_some_and(|extra| branch.eq_ignore_ascii_case(extra))
 }
 
 /// git accepts any unambiguous prefix of a long option.
@@ -361,8 +371,9 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     {
         return Some(denial);
     }
+    let base = || base_ref::for_dir(&call.resolve_dir(ctx), ctx);
     let verdict = match call.sub {
-        "push" => push::push(&call, ctx),
+        "push" => push::push(&call, ctx, base().as_deref()),
         "commit" => commit(call.rest),
         "reset" => options(call.rest)
             .any(|a| abbrev(a, "--hard", 3))
@@ -383,8 +394,8 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             })
             .flatten()
             .or_else(|| no_verify(call.rest)),
-        "branch" => branch_delete(call.rest).or_else(|| no_verify(call.rest)),
-        "update-ref" => update_ref(call.rest),
+        "branch" => branch_delete(call.rest, base().as_deref()).or_else(|| no_verify(call.rest)),
+        "update-ref" => update_ref(call.rest, base().as_deref()),
         "config" => config(call.rest),
         _ => no_verify(call.rest),
     };
@@ -504,7 +515,7 @@ fn commit(rest: &[String]) -> Verdict {
     None
 }
 
-fn branch_delete(rest: &[String]) -> Verdict {
+fn branch_delete(rest: &[String], extra_base: Option<&str>) -> Verdict {
     let mut delete = false;
     let mut names = Vec::new();
     let mut only_names = false;
@@ -521,7 +532,9 @@ fn branch_delete(rest: &[String]) -> Verdict {
             names.push(arg);
         }
     }
-    let branch = names.into_iter().find(|name| is_protected(name))?;
+    let branch = names
+        .into_iter()
+        .find(|name| is_protected_with(name, extra_base))?;
     delete.then(|| {
         (
             format!("this deletes the protected branch {branch}"),
@@ -530,13 +543,13 @@ fn branch_delete(rest: &[String]) -> Verdict {
     })
 }
 
-fn update_ref(rest: &[String]) -> Verdict {
+fn update_ref(rest: &[String], extra_base: Option<&str>) -> Verdict {
     let delete = options(rest).any(|a| a == "-d" || a == "--delete");
     // The ref may follow a literal `--`.
     let branch = rest
         .iter()
         .map(String::as_str)
-        .find(|a| !a.starts_with('-') && is_protected(a))?;
+        .find(|a| !a.starts_with('-') && is_protected_with(a, extra_base))?;
     delete.then(|| {
         (
             format!("update-ref -d removes the protected ref {branch}"),

@@ -78,6 +78,7 @@ pub const RUNNER_CONFIG_GLOBS: &[&str] = &[
 pub const CI_AND_MANIFEST_GLOBS: &[&str] = &[
     ".github/workflows/**",
     ".autofactory/config.toml",
+    ".autofactory/memory.md",
     "**/.adb-denylist",
     "**/.adb-allowlist",
     "**/Cargo.toml",

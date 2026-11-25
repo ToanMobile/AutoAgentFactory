@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{Value, json};
 
 pub mod adb_guard;
+pub(crate) mod base_ref;
 mod cwd;
 pub mod data_guard;
 pub mod delete_guard;

@@ -365,15 +365,18 @@ pub(crate) fn run_confined_with_tail(
             marks.as_ref().map(|marks| marks.mark.clone()),
         )?;
         if cfg!(target_os = "linux") {
-            match linux_sandbox::detect_host_linux_isolation() {
-                linux_sandbox::LinuxIsolation::Bubblewrap { bwrap_bin } => {
+            match linux_sandbox::probe_host_linux_isolation() {
+                Ok(linux_sandbox::LinuxIsolation::Bubblewrap { bwrap_bin }) => {
                     spec = linux_sandbox::wrap(&bwrap_bin, &extra, &spec)?;
                 }
-                linux_sandbox::LinuxIsolation::HardenedContainer { .. } => {}
-                linux_sandbox::LinuxIsolation::None => {
+                Ok(linux_sandbox::LinuxIsolation::HardenedContainer { .. }) => {}
+                Ok(linux_sandbox::LinuxIsolation::None) => {
                     return Err(PortError::Unsupported(
                         "no Linux sandbox found (install bubblewrap `bwrap`, run inside a hardened container, or pass --unsandboxed)".to_string(),
                     ));
+                }
+                Err(why) => {
+                    return Err(PortError::Unsupported(why));
                 }
             }
         } else {

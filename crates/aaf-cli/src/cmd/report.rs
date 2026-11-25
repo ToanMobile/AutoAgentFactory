@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use aaf_domain::ports::Clock;
 use aaf_engine::factory::adapters::SystemClock;
 use aaf_engine::telemetry::{
-    CostBasis, DurationStats, FactoryReport, ReportWindow, TaskCounts, collect_report,
-    compute_factory_score,
+    CostBasis, DurationStats, FactoryReport, LessonSuggestion, ReportWindow, TaskCounts,
+    collect_lessons, collect_report, compute_factory_score,
 };
 use serde_json::json;
 
@@ -23,6 +23,9 @@ pub struct ReportArgs {
     /// Report across every repository instead of the current one.
     #[arg(long)]
     pub all: bool,
+    /// Extract recurring failure patterns as candidate rules for `.autofactory/memory.md`.
+    #[arg(long)]
+    pub lessons: bool,
 }
 
 pub fn run(args: &ReportArgs, ctx: &Ctx) -> CmdResult {
@@ -38,23 +41,39 @@ pub fn run(args: &ReportArgs, ctx: &Ctx) -> CmdResult {
         since: args.since.map(|h| since_cutoff(now, h)),
         now,
     };
-    let report = match open_db_read_only(ctx)? {
-        Some(db) => collect_report(&db, repo.as_deref(), window, &ctx.cost_policy(&db))
-            .map_err(|e| err("report", e))?,
-        None => empty_report(window),
+    let (report, lessons) = match open_db_read_only(ctx)? {
+        Some(db) => {
+            let report = collect_report(&db, repo.as_deref(), window, &ctx.cost_policy(&db))
+                .map_err(|e| err("report", e))?;
+            let lessons = if args.lessons {
+                collect_lessons(&db, repo.as_deref(), window).map_err(|e| err("lessons", e))?
+            } else {
+                Vec::new()
+            };
+            (report, lessons)
+        }
+        None => (empty_report(window), Vec::new()),
     };
     let scope = repo.clone().unwrap_or_else(|| "all".to_string());
-    let text = render_text(&report, &scope, args.since);
+    let mut text = render_text(&report, &scope, args.since);
+    if args.lessons {
+        text.push_str(&render_lessons(&lessons));
+    }
     let score = compute_factory_score(&report);
     let mut value = serde_json::to_value(&report).map_err(|e| err("report", e))?;
     let score_val = serde_json::to_value(&score).map_err(|e| err("score", e))?;
     if let serde_json::Value::Object(ref mut map) = value {
         map.insert("score".into(), score_val.clone());
     }
-    Ok(CmdOutput::ok("ok", text)
+    let mut out = CmdOutput::ok("ok", text)
         .field("scope", json!(scope))
         .field("report", value)
-        .field("score", score_val))
+        .field("score", score_val);
+    if args.lessons {
+        let lessons_val = serde_json::to_value(&lessons).map_err(|e| err("lessons", e))?;
+        out = out.field("lessons", lessons_val);
+    }
+    Ok(out)
 }
 
 pub(crate) fn since_cutoff(now: i64, hours: u64) -> i64 {
@@ -193,6 +212,22 @@ pub(crate) fn render_text(report: &FactoryReport, scope: &str, since: Option<u64
     out.trim_end().to_string()
 }
 
+pub(crate) fn render_lessons(lessons: &[LessonSuggestion]) -> String {
+    let mut out = String::from("\n\nSuggested repo memory (.autofactory/memory.md):\n");
+    if lessons.is_empty() {
+        out.push_str("  (no recurring failures >= 2 occurrences in this period)");
+        return out;
+    }
+    for item in lessons {
+        let _ = writeln!(
+            out,
+            "  - [{}x {}:{}] {}",
+            item.occurrences, item.category, item.key, item.suggested_rule
+        );
+    }
+    out.trim_end().to_string()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -293,5 +328,19 @@ mod tests {
         assert!(text.contains("claude     2 runs (1 ok, 1 failed, 0 running)  6m  ~$1.25"));
         assert!(text.contains("Blocked by: infra (1)"));
         assert!(!text.contains("No task in this period"));
+    }
+
+    #[test]
+    fn render_lessons_formats_empty_and_recurring_items() {
+        let empty = render_lessons(&[]);
+        assert!(empty.contains("no recurring failures"));
+
+        let filled = render_lessons(&[LessonSuggestion {
+            category: "gate".into(),
+            key: "lint".into(),
+            occurrences: 3,
+            suggested_rule: "Run cargo clippy before commit.".into(),
+        }]);
+        assert!(filled.contains("[3x gate:lint] Run cargo clippy before commit."));
     }
 }

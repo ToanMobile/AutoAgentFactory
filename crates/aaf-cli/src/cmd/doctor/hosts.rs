@@ -287,17 +287,18 @@ pub(super) fn gate_confinement_check() -> Result<String, String> {
 
 /// Reports Linux bubblewrap / container isolation on Linux hosts.
 pub(super) fn linux_sandbox_check() -> Result<String, String> {
-    linux_sandbox_report(&linux_sandbox::detect_host_linux_isolation())
+    linux_sandbox_report(&linux_sandbox::probe_host_linux_isolation())
 }
 
-/// `aaf run` does not wrap agents in bwrap yet (`run::sandbox_choice`
-/// refuses off macOS without `--unsandboxed`), so what was detected is only
-/// informational and the check always warns.
-fn linux_sandbox_report(iso: &LinuxIsolation) -> Result<String, String> {
-    Err(format!(
-        "aaf run on Linux needs --unsandboxed (bwrap integration pending); detected: {}",
-        iso.summary()
-    ))
+fn linux_sandbox_report(result: &Result<LinuxIsolation, String>) -> Result<String, String> {
+    match result {
+        Ok(iso) if iso.is_isolated() => Ok(iso.summary()),
+        Ok(iso) => Err(format!(
+            "aaf run on Linux needs --unsandboxed without isolation; detected: {}",
+            iso.summary()
+        )),
+        Err(why) => Err(why.clone()),
+    }
 }
 
 /// Reports Tier-1 Telegram companion readiness without exposing the bot token.
@@ -457,12 +458,8 @@ mod tests {
 
     use super::*;
 
-    /// R10-L7-2: `aaf run` on Linux never wraps agents in bwrap yet
-    /// (`run::sandbox_choice` refuses without `--unsandboxed` off macOS), so
-    /// doctor must not report a detected bwrap or container as a working
-    /// sandbox.
     #[test]
-    fn linux_sandbox_report_says_run_needs_unsandboxed_even_with_bwrap() {
+    fn linux_sandbox_report_accepts_working_bwrap_or_container_and_warns_on_none_or_error() {
         for iso in [
             LinuxIsolation::Bubblewrap {
                 bwrap_bin: PathBuf::from("/usr/bin/bwrap"),
@@ -470,18 +467,21 @@ mod tests {
             LinuxIsolation::HardenedContainer {
                 indicator: "docker",
             },
-            LinuxIsolation::None,
         ] {
-            let Err(text) = linux_sandbox_report(&iso) else {
-                panic!("reported as a working sandbox: {iso:?}");
+            let Ok(text) = linux_sandbox_report(&Ok(iso.clone())) else {
+                panic!("expected working sandbox to report Ok: {iso:?}");
             };
-            assert!(
-                text.contains("aaf run on Linux needs --unsandboxed"),
-                "{text}"
-            );
-            assert!(text.contains("bwrap integration pending"), "{text}");
-            assert!(text.contains(&iso.summary()), "{text}");
+            assert_eq!(text, iso.summary());
         }
+        let Err(none_msg) = linux_sandbox_report(&Ok(LinuxIsolation::None)) else {
+            panic!("expected LinuxIsolation::None to fail");
+        };
+        assert!(none_msg.contains("needs --unsandboxed"), "{none_msg}");
+
+        let Err(probe_msg) = linux_sandbox_report(&Err("AppArmor denied userns".into())) else {
+            panic!("expected probe error to fail");
+        };
+        assert!(probe_msg.contains("AppArmor denied userns"), "{probe_msg}");
     }
 
     #[test]

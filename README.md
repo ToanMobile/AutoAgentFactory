@@ -105,7 +105,7 @@ Keep both `aaf` and `aaf-hook` on your `PATH`. Details: [Quickstart](docs/QUICKS
 
 > **Requirements:** macOS or Linux, git ≥ 2.34, and at least one agent CLI
 > (for example `claude`) logged in. `gh` is optional, for pull requests.
-> On Linux, agents run without a sandbox for now (`aaf run --unsandboxed`).
+> On Linux, `aaf run` sandboxes agents with Bubblewrap (`bwrap`) or an active hardened container; pass `--unsandboxed` only when no isolation layer is available.
 
 ## 🖥️ Desktop & 📱 Mobile PWA Dashboard
 
@@ -187,7 +187,7 @@ Scan the `--qr` code from your Mac, tap **Share → Add to Home Screen** on iPho
 | Pair iPhone PWA over Tailscale HTTPS | `aaf ui --install-service --allow-actions --tailscale --qr` |
 | Watch live in terminal | `aaf watch` · `aaf cockpit` |
 | Run the signed gate myself | `aaf gate` |
-| See metrics & Factory Score | `aaf report --since 168` · `aaf status` |
+| See metrics, Factory Score & lessons | `aaf report --since 168` · `aaf report --lessons` · `aaf status` |
 | Steer or rework a task | `aaf board steer <id> --note "…"` · `aaf board rework <id>` |
 | Unblock a task | `aaf board unblock <id>` |
 | Approve a head-locked change | `aaf approve --reviewer <name>` |

@@ -4,9 +4,9 @@ use std::fs;
 
 use crate::{Ctx, paths};
 
-use super::{FIX_FORCE, FIX_PROTECTED, GitCall, Verdict, abbrev, is_protected, no_verify};
+use super::{FIX_FORCE, FIX_PROTECTED, GitCall, Verdict, abbrev, is_protected_with, no_verify};
 
-pub(super) fn push(call: &GitCall, ctx: &Ctx) -> Verdict {
+pub(super) fn push(call: &GitCall, ctx: &Ctx, extra_base: Option<&str>) -> Verdict {
     let (mut force, mut lease, mut delete, mut dry_run) = (false, false, false, false);
     let (mut skip_hooks, mut all, mut repo_option) = (false, false, false);
     let mut positional: Vec<&str> = Vec::new();
@@ -99,7 +99,7 @@ pub(super) fn push(call: &GitCall, ctx: &Ctx) -> Verdict {
         .iter()
         .filter(|spec| delete || spec.starts_with(':'))
         .map(|spec| target(spec))
-        .find(|branch| is_protected(branch));
+        .find(|branch| is_protected_with(branch, extra_base));
     if let Some(branch) = deleted {
         return Some((
             format!("this deletes the protected branch {branch}"),
@@ -139,7 +139,7 @@ pub(super) fn push(call: &GitCall, ctx: &Ctx) -> Verdict {
                 "write the branch name literally",
             ));
         }
-        if is_protected(&branch) {
+        if is_protected_with(&branch, extra_base) {
             return Some((
                 format!("--force-with-lease would overwrite the protected branch {branch}"),
                 FIX_PROTECTED,

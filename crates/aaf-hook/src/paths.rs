@@ -317,6 +317,7 @@ const SUFFIXES: &[&str] = &[".keystore", ".jks", ".p12", ".mobileprovision"];
 const NAMES: &[&str] = &["google-services.json", "googleservice-info.plist"];
 const NESTED: &[(&str, &str)] = &[
     (".autofactory", "config.toml"),
+    (".autofactory", "memory.md"),
     (".claude", "settings.json"),
     (".claude", "settings.local.json"),
 ];

@@ -133,15 +133,34 @@ pub struct RunArgs {
     pub scope: Vec<String>,
 }
 
-/// Whether agent runs are sandboxed. Seatbelt exists on macOS only; anywhere
-/// else running unconfined has to be asked for by name (PLAN A.17).
-pub(crate) fn sandbox_choice(unsandboxed: bool, macos: bool) -> Result<bool, &'static str> {
-    match (unsandboxed, macos) {
-        (true, _) => Ok(false),
-        (false, true) => Ok(true),
-        (false, false) => {
-            Err("no agent sandbox on this platform: pass --unsandboxed to run agents unconfined")
-        }
+/// Whether agent runs are sandboxed. macOS uses Seatbelt; Linux uses
+/// Bubblewrap (`bwrap`) or an active hardened container; anywhere else running
+/// unconfined has to be asked for by name (PLAN A.17).
+pub(crate) fn sandbox_choice(
+    unsandboxed: bool,
+    host_sandbox: Result<bool, String>,
+) -> Result<bool, String> {
+    if unsandboxed {
+        return Ok(false);
+    }
+    match host_sandbox {
+        Ok(true) => Ok(true),
+        Ok(false) => Err(
+            "no agent sandbox on this platform: pass --unsandboxed to run agents unconfined"
+                .to_string(),
+        ),
+        Err(why) => Err(why),
+    }
+}
+
+pub(crate) fn probe_run_sandbox() -> Result<bool, String> {
+    if cfg!(target_os = "macos") {
+        Ok(true)
+    } else if cfg!(target_os = "linux") {
+        aaf_engine::executors::linux_sandbox::probe_host_linux_isolation()
+            .map(|iso| iso.is_isolated())
+    } else {
+        Ok(false)
     }
 }
 
@@ -259,10 +278,10 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     if args.stop {
         return stop::request_stop(ctx);
     }
-    let sandboxed = match sandbox_choice(args.unsandboxed, cfg!(target_os = "macos")) {
+    let sandboxed = match sandbox_choice(args.unsandboxed, probe_run_sandbox()) {
         Ok(sandboxed) => sandboxed,
         Err(why) => {
-            return Ok(CmdOutput::policy("refused", why)
+            return Ok(CmdOutput::policy("refused", why.clone())
                 .field("refused_kind", json!("config"))
                 .field("reason", json!(why)));
         }

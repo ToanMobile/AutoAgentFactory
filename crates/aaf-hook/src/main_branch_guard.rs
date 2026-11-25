@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::shell::Cmd;
-use crate::{Ctx, Denial, git_guard, paths};
+use crate::{Ctx, Denial, base_ref, git_guard, paths};
 
 pub const RULE: &str = "main_branch_guard";
 pub const FIX: &str = "create an isolated git worktree or use aaf run; set AAF_ALLOW_MAIN_EDIT=1 \
@@ -24,12 +24,11 @@ fn is_active(ctx: &Ctx) -> bool {
     !ctx.env.in_factory_run && !allow_main_edit()
 }
 
-/// Returns the protected primary branch name (`"main"`, `"master"`, or
-/// `"develop"`) when `root` is the primary checkout of an `aaf`-managed
-/// repository (`.autofactory/config.toml` exists, `.git` is a directory rather
-/// than a linked-worktree `.git` file, and `.git/HEAD` points to a protected
-/// branch). Uses only direct filesystem reads (no `git` subprocess).
-pub(crate) fn protected_primary_branch(root: &Path) -> Option<&'static str> {
+/// Returns the protected primary branch name (`"main"`, `"master"`, `"develop"`,
+/// or `[gate].base_ref` configured in `.autofactory/config.toml`) when `root`
+/// is the primary checkout of an `aaf`-managed repository. Uses only direct
+/// filesystem reads (no `git` subprocess).
+pub(crate) fn protected_primary_branch(root: &Path) -> Option<String> {
     if !root.join(".autofactory/config.toml").is_file() {
         return None;
     }
@@ -38,12 +37,16 @@ pub(crate) fn protected_primary_branch(root: &Path) -> Option<&'static str> {
         return None;
     }
     let head = fs::read_to_string(dot_git.join("HEAD")).ok()?;
-    match head.trim() {
-        "ref: refs/heads/main" => Some("main"),
-        "ref: refs/heads/master" => Some("master"),
-        "ref: refs/heads/develop" => Some("develop"),
-        _ => None,
+    let branch = head.trim().strip_prefix("ref: refs/heads/")?;
+    if matches!(branch, "main" | "master" | "develop") {
+        return Some(branch.to_string());
     }
+    if let Some(configured) = base_ref::configured_base_ref(root)
+        && branch.eq_ignore_ascii_case(&configured)
+    {
+        return Some(branch.to_string());
+    }
+    None
 }
 
 fn deny(branch: &str) -> Denial {
@@ -92,7 +95,7 @@ pub fn check_file(path: &Path, ctx: &Ctx) -> Option<Denial> {
     }
     let root = target_repo_root(path, ctx)?;
     let branch = protected_primary_branch(&root)?;
-    Some(deny(branch))
+    Some(deny(&branch))
 }
 
 /// Denies interactive `git commit` targeting a protected primary checkout.
@@ -111,11 +114,11 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             && git_dir.file_name().is_some_and(|name| name == ".git")
             && let Some(branch) = protected_primary_branch(parent)
         {
-            return Some(deny(branch));
+            return Some(deny(&branch));
         }
         return None;
     }
     let root = (ctx.env.repo_root)(&target_dir)?;
     let branch = protected_primary_branch(&root)?;
-    Some(deny(branch))
+    Some(deny(&branch))
 }

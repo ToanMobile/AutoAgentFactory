@@ -18,6 +18,30 @@ pub const DECLARERS: &[&str] = &["export", "declare", "typeset", "readonly", "lo
 /// Commands that give a value to the variable named as a bare argument.
 pub const NAME_SETTERS: &[&str] = &["read", "printf", "for", "select", "getopts"];
 
+/// Zsh associative tables that override how bare command names resolve.
+const ZSH_CMD_TABLES: &[&str] = &["functions", "aliases", "galiases", "saliases", "commands"];
+
+fn rebinds_zsh_table_word(word: &str) -> bool {
+    let Some((lhs, _)) = word.split_once('=') else {
+        return false;
+    };
+    let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
+    if ZSH_CMD_TABLES.contains(&lhs) {
+        return true;
+    }
+    let Some((table, rest)) = lhs.split_once('[') else {
+        return false;
+    };
+    let Some(key) = rest.strip_suffix(']') else {
+        return false;
+    };
+    if !ZSH_CMD_TABLES.contains(&table) {
+        return false;
+    }
+    let clean_key = key.trim_matches(['\'', '"']);
+    clean_key == "aaf" || key.contains(['$', '`', '*', '?', '['])
+}
+
 impl Cmd {
     /// The command gives `var` a value, whatever the value: as a prefix or
     /// through `env` (both in `assigns`), as an argument in assignment form
@@ -34,9 +58,18 @@ impl Cmd {
     }
 
     /// The command changes what a later bare `aaf` runs: an alias, a `hash`
-    /// entry, a function loaded by name (each may be named at run time), or
-    /// the search path.
+    /// entry, a function loaded by name (each may be named at run time), zsh
+    /// command-lookup tables (`functions[aaf]=…`, `aliases[aaf]=…`,
+    /// `commands[aaf]=…`), or the search path.
     fn rebinds_aaf(&self) -> bool {
+        let zsh_table = self
+            .assigns
+            .iter()
+            .any(|(k, _)| ZSH_CMD_TABLES.contains(&k.as_str()))
+            || self.words.iter().any(|w| rebinds_zsh_table_word(w));
+        if zsh_table {
+            return true;
+        }
         match self.name() {
             "alias" | "hash" | "autoload" => self
                 .args()

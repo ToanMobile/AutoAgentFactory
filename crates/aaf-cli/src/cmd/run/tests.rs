@@ -69,14 +69,20 @@ fn a_run_that_waits_for_the_repositorys_account_says_which_and_until_when() {
 
 #[test]
 fn macos_sandboxes_unless_told_not_to() {
-    assert_eq!(sandbox_choice(false, true), Ok(true));
-    assert_eq!(sandbox_choice(true, true), Ok(false));
+    assert_eq!(sandbox_choice(false, Ok(true)), Ok(true));
+    assert_eq!(sandbox_choice(true, Ok(true)), Ok(false));
 }
 
 #[test]
 fn without_seatbelt_running_unconfined_must_be_asked_for() {
-    assert!(sandbox_choice(false, false).is_err());
-    assert_eq!(sandbox_choice(true, false), Ok(false));
+    assert!(sandbox_choice(false, Ok(false)).is_err());
+    assert_eq!(sandbox_choice(true, Ok(false)), Ok(false));
+    let err = sandbox_choice(false, Err("bwrap smoke check failed".into())).unwrap_err();
+    assert!(err.contains("bwrap smoke check failed"), "{err}");
+    assert_eq!(
+        sandbox_choice(true, Err("bwrap smoke check failed".into())),
+        Ok(false)
+    );
 }
 
 #[test]

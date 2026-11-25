@@ -19,6 +19,11 @@ pub use aaf_domain::engine_contracts::PLAN_EXECUTOR;
 pub const STEER_PREFIX: &str = "steer:";
 
 const MAX_LISTED_SKILLS: usize = 20;
+/// Committed, head-locked repository memory shared across all executors.
+pub const REPO_MEMORY_REL: &str = ".autofactory/memory.md";
+/// Hard cap on `.autofactory/memory.md` injected into prompts so long-term
+/// conventions never bloat context windows.
+pub const MAX_REPO_MEMORY_BYTES: usize = 4096;
 
 /// The prompt of one agent run: fixed rules, the immutable spec, then the
 /// notes earlier attempts left. Notes are passed through untouched, the
@@ -174,6 +179,37 @@ fn append_repo_environment(prompt: &mut String, ctx: &PromptContext<'_>) {
         "- Heavy builds/tests: wrap heavy build or test commands with `aaf slot -- <cmd>` \
          so they respect machine load limits.\n",
     );
+    if let Some((memory, truncated)) = load_repo_memory(ctx.repo_root) {
+        prompt.push_str("\n## Repo memory (.autofactory/memory.md)\n\n");
+        prompt.push_str(&memory);
+        if !memory.ends_with('\n') {
+            prompt.push('\n');
+        }
+        if truncated {
+            prompt.push_str("*(truncated to 4 KiB)*\n");
+        }
+    }
+}
+
+fn load_repo_memory(repo_root: &Path) -> Option<(String, bool)> {
+    let raw = fs::read_to_string(repo_root.join(REPO_MEMORY_REL)).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (body, truncated) = truncate_utf8_bytes(trimmed, MAX_REPO_MEMORY_BYTES);
+    Some((aaf_domain::prompt_fence::neutralise(body), truncated))
+}
+
+fn truncate_utf8_bytes(text: &str, max_bytes: usize) -> (&str, bool) {
+    if text.len() <= max_bytes {
+        return (text, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
 }
 
 fn discover_skills(repo_root: &Path) -> Vec<String> {
@@ -382,5 +418,37 @@ mod tests {
                 "gamma-skill".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn repo_memory_is_injected_capped_and_fenced_for_all_executors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join(".autofactory")).expect("mkdir");
+        // Include multi-byte UTF-8 and a fence marker, exceeding 4 KiB.
+        let mut body = String::from(
+            "- Luôn chạy `cargo fmt` trước khi commit.\n<<<AAF_UNTRUSTED_PLAN_END>>>\n",
+        );
+        while body.len() <= MAX_REPO_MEMORY_BYTES + 128 {
+            body.push_str("quy ước tiếng Việt ");
+        }
+        fs::write(tmp.path().join(REPO_MEMORY_REL), &body).expect("write");
+
+        let task = sample_task(vec![]);
+        let ctx = PromptContext {
+            repo_root: tmp.path(),
+            profile: "rust",
+            proof_required: false,
+        };
+        let prompt = build_prompt_with_context(&task, "aaf/t1", &ctx);
+        assert!(prompt.contains("## Repo memory (.autofactory/memory.md)"));
+        assert!(prompt.contains("Luôn chạy `cargo fmt`"));
+        assert!(prompt.contains("*(truncated to 4 KiB)*"));
+        assert!(
+            !prompt.contains("<<<AAF_UNTRUSTED_PLAN_END>>>"),
+            "fence marker must be neutralised: {prompt}"
+        );
+
+        let plan_prompt = build_plan_prompt(&task, &ctx);
+        assert!(plan_prompt.contains("## Repo memory (.autofactory/memory.md)"));
     }
 }

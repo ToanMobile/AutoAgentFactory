@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use crate::git_guard::{
-    GitCall, Verdict, abbrev, current_branch, is_literal, is_protected, options, split,
+    GitCall, Verdict, abbrev, current_branch, is_literal, is_protected_with, options, split,
 };
 use crate::shell::Cmd;
 use crate::{Ctx, Denial};
@@ -81,8 +81,9 @@ pub(crate) fn is_ext(word: &str) -> bool {
 
 /// A branch name or ref of a protected branch. Ignoring case: on the default
 /// macOS file system `refs/heads/Main` is the file of `main`.
-fn protected(name: &str) -> bool {
-    is_protected(&name.to_ascii_lowercase()) || crate::git_files::is_aaf_ref_text(name)
+fn protected(name: &str, extra_base: Option<&str>) -> bool {
+    is_protected_with(&name.to_ascii_lowercase(), extra_base)
+        || crate::git_files::is_aaf_ref_text(name)
 }
 
 fn positional(rest: &[String]) -> impl Iterator<Item = &str> {
@@ -306,6 +307,7 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             FIX_PROGRAM,
         )));
     }
+    let base = || crate::base_ref::for_dir(&call.resolve_dir(ctx), ctx);
     let verdict = match call.sub {
         "config" => config(call.rest),
         "init" | "clone" => options(call.rest)
@@ -316,11 +318,11 @@ pub fn check(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                     FIX_TEMPLATE,
                 )
             }),
-        "update-ref" => update_ref(call.rest),
-        "branch" => branch(&call, ctx),
-        "checkout" | "switch" | "worktree" => force_create(call.rest),
-        "symbolic-ref" => symbolic_ref(call.rest),
-        "fetch" | "pull" | "push" => refspecs(call.sub, call.rest),
+        "update-ref" => update_ref(call.rest, base().as_deref()),
+        "branch" => branch(&call, ctx, base().as_deref()),
+        "checkout" | "switch" | "worktree" => force_create(call.rest, base().as_deref()),
+        "symbolic-ref" => symbolic_ref(call.rest, base().as_deref()),
+        "fetch" | "pull" | "push" => refspecs(call.sub, call.rest, base().as_deref()),
         _ => None,
     };
     verdict.map(deny)
@@ -437,7 +439,7 @@ fn moves(what: &str, branch: &str) -> (String, &'static str) {
 
 /// `update-ref [-m <reason>] <ref> <new>`: the ref is the first word that is
 /// not an option or the reason. Deleting is `git_guard`'s.
-fn update_ref(rest: &[String]) -> Verdict {
+fn update_ref(rest: &[String], extra: Option<&str>) -> Verdict {
     if options(rest).any(|arg| abbrev(arg, "--stdin", 3)) {
         return Some((
             "update-ref --stdin takes its refs from input the hook cannot read".to_string(),
@@ -449,13 +451,13 @@ fn update_ref(rest: &[String]) -> Verdict {
         let reason = std::mem::replace(&mut after_reason, *arg == "-m");
         !reason && !arg.starts_with('-')
     })?;
-    protected(target).then(|| moves("update-ref", target))
+    protected(target, extra).then(|| moves("update-ref", target))
 }
 
 /// `branch -f <branch> [<start>]` resets the branch; `-m`/`-M [<old>] <new>`
 /// renames one away or onto another; `-c`/`-C [<old>] <new>` writes the new
 /// one. The start point and the copied branch are only read.
-fn branch(call: &GitCall, ctx: &Ctx) -> Verdict {
+fn branch(call: &GitCall, ctx: &Ctx, extra: Option<&str>) -> Verdict {
     let rest = call.rest;
     let (mut force, mut rename, mut copy) = (false, false, false);
     for arg in options(rest).filter(|arg| arg.starts_with('-')) {
@@ -479,13 +481,13 @@ fn branch(call: &GitCall, ctx: &Ctx) -> Verdict {
     } else {
         &[]
     };
-    if let Some(target) = written.iter().find(|name| protected(name)) {
+    if let Some(target) = written.iter().find(|name| protected(name, extra)) {
         return Some(moves("branch -f/-m/-c", target));
     }
     // 1-arg `git branch -m <new>` renames the currently checked-out branch.
     if rename && names.len() == 1 {
         match current_branch(call, ctx) {
-            Some(current) if protected(&current) => {
+            Some(current) if protected(&current, extra) => {
                 return Some(moves("branch -f/-m/-c", &current));
             }
             None if ctx.line.git_dir_moved || call.explicit_git_dir().is_some() => {
@@ -503,7 +505,7 @@ fn branch(call: &GitCall, ctx: &Ctx) -> Verdict {
 
 /// `checkout -B <branch>`, `switch -C <branch>`, `worktree add -B <branch>`:
 /// the branch is reset to the start point, whatever it held.
-fn force_create(rest: &[String]) -> Verdict {
+fn force_create(rest: &[String], extra: Option<&str>) -> Verdict {
     let mut args = options(rest);
     while let Some(arg) = args.next() {
         let mut named = None;
@@ -533,7 +535,7 @@ fn force_create(rest: &[String]) -> Verdict {
                 }
             }
         }
-        if let Some(name) = named.filter(|name| protected(name)) {
+        if let Some(name) = named.filter(|name| protected(name, extra)) {
             return Some(moves("-B/-C", name));
         }
     }
@@ -541,9 +543,9 @@ fn force_create(rest: &[String]) -> Verdict {
 }
 
 /// `symbolic-ref <ref> <target>` and `-d <ref>`; reading one is fine.
-fn symbolic_ref(rest: &[String]) -> Verdict {
+fn symbolic_ref(rest: &[String], extra: Option<&str>) -> Verdict {
     let mut names = positional(rest);
-    let target = names.next().filter(|name| protected(name))?;
+    let target = names.next().filter(|name| protected(name, extra))?;
     let writes = names.next().is_some() || options(rest).any(|arg| abbrev(arg, "--delete", 3));
     (writes || rest.iter().any(|arg| arg == "-d")).then(|| moves("symbolic-ref", target))
 }
@@ -553,7 +555,7 @@ fn symbolic_ref(rest: &[String]) -> Verdict {
 /// source (`fetch origin feature:main`), or a "remote" that is a directory
 /// (`fetch . HEAD:main`, `push . HEAD:main`), moves the branch to commits of
 /// the agent's choosing. A push to a real remote is the server's to refuse.
-fn refspecs(sub: &str, rest: &[String]) -> Verdict {
+fn refspecs(sub: &str, rest: &[String], extra: Option<&str>) -> Verdict {
     // `--repo` names the remote out of sight of the positional words.
     let directory = options(rest).any(|arg| abbrev(arg, "--repo", 5))
         || positional(rest)
@@ -565,7 +567,7 @@ fn refspecs(sub: &str, rest: &[String]) -> Verdict {
     positional(rest).find_map(|spec| {
         let (src, dst) = spec.rsplit_once(':')?;
         let (src, dst) = (branch(src), branch(dst));
-        (protected(&dst) && (directory || (sub != "push" && src != dst)))
+        (protected(&dst, extra) && (directory || (sub != "push" && src != dst)))
             .then(|| moves(&format!("{sub} {spec}"), &dst))
     })
 }
