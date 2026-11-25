@@ -349,8 +349,34 @@ fn run_stop_drains_in_flight_task_and_leaves_second_task_ready() {
     );
     configure_executor(&fx, &script, "test -f work.txt");
 
-    let t1 = fx.add("first task");
-    let t2 = fx.add("second task");
+    let t1_out = fx.aaf(&[
+        "board",
+        "add",
+        "--title",
+        "first task",
+        "--spec",
+        "spec for first task",
+        "--accept",
+        "done",
+        "--priority",
+        "P0",
+    ]);
+    assert_eq!(t1_out.code, 0, "{}", t1_out.stderr);
+    let t1 = t1_out.json["task"]["id"].as_str().unwrap().to_string();
+    let t2_out = fx.aaf(&[
+        "board",
+        "add",
+        "--title",
+        "second task",
+        "--spec",
+        "spec for second task",
+        "--accept",
+        "done",
+        "--priority",
+        "P3",
+    ]);
+    assert_eq!(t2_out.code, 0, "{}", t2_out.stderr);
+    let t2 = t2_out.json["task"]["id"].as_str().unwrap().to_string();
 
     let child = fx
         .command(&fx.repo, &["run", "--auto", "--unsandboxed"])
