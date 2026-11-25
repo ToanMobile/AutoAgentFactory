@@ -382,6 +382,16 @@ fn c4_startup_sweep_under_run_lock_cleans_done_squash_task_without_deadlock() {
     fs::write(wt_dead_batch.path.join("dirty.tmp"), "junk\n").unwrap();
     let wt_live_batch = worktree::create(&sb.repo, &worktrees_dir, &live_batch_id, "main").unwrap();
 
+    // `aaf run` checks that the default executor's CLI is on PATH before it
+    // starts, even with nothing to do. CI runners have no `claude`, so put a
+    // stub first on PATH; with 0 Ready tasks it must never be executed.
+    let claude_stub = sb.bin.join("claude");
+    support::write(
+        &claude_stub,
+        "#!/bin/sh\necho 'claude stub must not run' >&2\nexit 97\n",
+    );
+    support::make_executable(&claude_stub);
+
     // Run `aaf run --unsandboxed --json` (holds `.run.lock`, 0 Ready tasks).
     let (code, body) = sb.json(&["run", "--unsandboxed"]);
     assert_eq!(code, 0, "{body}");
