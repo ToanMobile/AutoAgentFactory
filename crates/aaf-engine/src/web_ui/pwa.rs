@@ -64,13 +64,13 @@ pub const MANIFEST_JSON: &str = r##"{
   "theme_color": "#0F172A",
   "icons": [
     {
-      "src": "/apple-touch-icon.png",
+      "src": "/apple-touch-icon.png?v=4",
       "sizes": "180x180",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icon.svg",
+      "src": "/icon.svg?v=4",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
@@ -88,7 +88,7 @@ pub(super) fn write_pwa_asset(
     let header = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
          X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n\
-         Referrer-Policy: no-referrer\r\nCache-Control: private, max-age=3600\r\n\
+         Referrer-Policy: no-referrer\r\nCache-Control: no-cache\r\n\
          Connection: close\r\n\r\n",
         body.len()
     );

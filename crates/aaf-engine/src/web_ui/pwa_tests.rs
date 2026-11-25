@@ -201,7 +201,7 @@ fn pwa_manifest_and_icons_are_served_without_auth_and_valid_png_magic() {
         send_raw_bytes(addr, &format!("GET / HTTP/1.1\r\nHost: {addr}\r\n\r\n"));
     assert_eq!(st_idx, 200);
     let idx_html = String::from_utf8_lossy(&body_idx);
-    assert!(idx_html.contains("rel=\"icon\" type=\"image/svg+xml\" href=\"/icon.svg\""));
+    assert!(idx_html.contains("rel=\"icon\" type=\"image/svg+xml\" href=\"/icon.svg?v=4\""));
     assert!(!idx_html.contains("id=\"supReposBtn\""));
     assert!(idx_html.contains("supervisor_repos"));
     assert!(idx_html.contains("boardLoaded"));
@@ -215,7 +215,7 @@ fn pwa_manifest_and_icons_are_served_without_auth_and_valid_png_magic() {
     );
     assert_eq!(st_studio, 200);
     let studio_html = String::from_utf8_lossy(&body_studio);
-    assert!(studio_html.contains("rel=\"icon\" type=\"image/svg+xml\" href=\"/icon.svg\""));
+    assert!(studio_html.contains("rel=\"icon\" type=\"image/svg+xml\" href=\"/icon.svg?v=4\""));
     assert!(studio_html.contains("id=\"bannerBtn\" class=\"btnlink\" href=\"/\""));
 
     handle.join();
