@@ -11,10 +11,14 @@ use std::path::{Component, Path, PathBuf};
 
 use aaf_domain::config::RepoConfig;
 use aaf_domain::worktree_config::{WorktreeConfig, is_secret_file};
-mod stage;
+mod cleanup;
+pub mod device;
+pub mod seed;
+pub mod stage;
 
+pub use device::{MountEntry, same_cow_device};
 pub(crate) use stage::stage_for_gate_from_base;
-pub use stage::{GateSecretStage, stage_for_gate};
+pub use stage::{CloneSkip, GateSecretStage, remove_partial_dst, stage_for_gate};
 use stage::{cow_clone_dir, run_setup_cmd};
 
 use super::cmd::{self, git, git_raw};
@@ -95,7 +99,7 @@ pub fn assert_tracked_gitignore(repo_root: &Path, rel: &Path) -> Result<(), GitE
     assert_tracked_gitignore_inner(repo_root, rel, false)
 }
 
-fn assert_tracked_gitignore_inner(
+pub(super) fn assert_tracked_gitignore_inner(
     repo_root: &Path,
     rel: &Path,
     expect_dir: bool,
@@ -203,7 +207,7 @@ pub fn assert_no_escaping_symlink(root: &Path, rel: &Path) -> Result<PathBuf, Gi
     Ok(canon_src)
 }
 
-fn assert_no_escaping_wt_prefix(wt_root: &Path, rel: &Path) -> Result<(), GitError> {
+pub(super) fn assert_no_escaping_wt_prefix(wt_root: &Path, rel: &Path) -> Result<(), GitError> {
     let canon_wt = fs::canonicalize(wt_root)?;
     let mut cur = canon_wt.clone();
     for comp in rel.components() {
@@ -324,82 +328,99 @@ pub fn hydrate_for_agent(
     cfg: &WorktreeConfig,
 ) -> Result<HydratedPaths, GitError> {
     let data_dir = aaf_fp::data_dir().ok();
-    hydrate_for_agent_inner(repo_root, wt_root, cfg, None, data_dir.as_deref())
+    hydrate_for_agent_inner(
+        repo_root,
+        wt_root,
+        cfg,
+        None,
+        None,
+        data_dir.as_deref(),
+        false,
+        &seed::RealSeedBackend,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hydrate_for_agent_inner(
     repo_root: &Path,
     wt_root: &Path,
     cfg: &WorktreeConfig,
     snap_fallback: Option<(&Path, &str)>,
+    base_sha: Option<&str>,
     data_dir: Option<&Path>,
+    seed_enabled: bool,
+    seed_backend: &dyn seed::SeedBackend,
 ) -> Result<HydratedPaths, GitError> {
-    if cfg.is_empty() {
-        return Ok(HydratedPaths::default());
-    }
     let mut write_denied = Vec::new();
-    for entry in &cfg.clone_dirs {
-        let rel = validate_relative_entry(entry)?;
-        assert_tracked_gitignore_inner(repo_root, &rel, true)?;
-        assert_no_escaping_wt_prefix(wt_root, &rel)?;
-        let dst = wt_root.join(&rel);
-        let main_missing = matches!(
-            fs::symlink_metadata(repo_root.join(&rel)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound
-        );
-        if main_missing && let Some((snaps_dir, base_sha)) = snap_fallback {
-            if fs::symlink_metadata(&dst).is_err() {
-                let rel_s = path_str(&rel)?;
-                let restored = super::warm_slot::restore_clean_base_snapshot(
-                    wt_root,
-                    snaps_dir,
-                    base_sha,
-                    &[rel_s],
-                )?;
-                if restored == 0 {
-                    let _ = resolve_entry(repo_root, wt_root, entry, true, "clone_dirs")?;
+    if !cfg.is_empty() {
+        for entry in &cfg.clone_dirs {
+            let rel = validate_relative_entry(entry)?;
+            assert_tracked_gitignore_inner(repo_root, &rel, true)?;
+            assert_no_escaping_wt_prefix(wt_root, &rel)?;
+            let dst = wt_root.join(&rel);
+            let main_missing = matches!(
+                fs::symlink_metadata(repo_root.join(&rel)),
+                Err(err) if err.kind() == io::ErrorKind::NotFound
+            );
+            if main_missing && let Some((snaps_dir, snap_sha)) = snap_fallback {
+                if fs::symlink_metadata(&dst).is_err() {
+                    let rel_s = path_str(&rel)?;
+                    let restored = super::warm_slot::restore_clean_base_snapshot(
+                        wt_root,
+                        snaps_dir,
+                        snap_sha,
+                        &[rel_s],
+                    )?;
+                    if restored == 0 {
+                        let _ = resolve_entry(repo_root, wt_root, entry, true, "clone_dirs")?;
+                    }
                 }
+                write_denied.push(dst);
+                continue;
+            }
+            let (src, dst) = resolve_entry(repo_root, wt_root, entry, true, "clone_dirs")?;
+            if fs::symlink_metadata(&dst).is_err() {
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                cow_clone_dir(&src, &dst)?;
             }
             write_denied.push(dst);
-            continue;
         }
-        let (src, dst) = resolve_entry(repo_root, wt_root, entry, true, "clone_dirs")?;
-        if fs::symlink_metadata(&dst).is_err() {
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)?;
+        for entry in &cfg.copy_files {
+            let secret_err = || {
+                invalid(format!(
+                    "refusing to copy secret file {entry:?} into agent worktree; use [worktree].gate_copy_files"
+                ))
+            };
+            if is_secret_file(entry) {
+                return Err(secret_err());
             }
-            cow_clone_dir(&src, &dst)?;
-        }
-        write_denied.push(dst);
-    }
-    for entry in &cfg.copy_files {
-        let secret_err = || {
-            invalid(format!(
-                "refusing to copy secret file {entry:?} into agent worktree; use [worktree].gate_copy_files"
-            ))
-        };
-        if is_secret_file(entry) {
-            return Err(secret_err());
-        }
-        let rel = validate_relative_entry(entry)?;
-        if is_secret_file(path_str(&rel)?) {
-            return Err(secret_err());
-        }
-        let (src, dst) = resolve_entry(repo_root, wt_root, entry, false, "copy_files")?;
-        if fs::symlink_metadata(&dst).is_err() {
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)?;
+            let rel = validate_relative_entry(entry)?;
+            if is_secret_file(path_str(&rel)?) {
+                return Err(secret_err());
             }
-            fs::copy(&src, &dst)?;
+            let (src, dst) = resolve_entry(repo_root, wt_root, entry, false, "copy_files")?;
+            if fs::symlink_metadata(&dst).is_err() {
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&src, &dst)?;
+            }
+            write_denied.push(dst);
         }
-        write_denied.push(dst);
+        let setup_cmd = cfg.setup_cmd.trim();
+        if !setup_cmd.is_empty() {
+            if !git(wt_root, &["status", "--porcelain"])?.is_empty() {
+                return Err(GitError::Dirty(wt_root.to_path_buf()));
+            }
+            run_setup_cmd(wt_root, setup_cmd, data_dir)?;
+        }
     }
-    let setup_cmd = cfg.setup_cmd.trim();
-    if !setup_cmd.is_empty() {
-        if !git(wt_root, &["status", "--porcelain"])?.is_empty() {
-            return Err(GitError::Dirty(wt_root.to_path_buf()));
-        }
-        run_setup_cmd(wt_root, setup_cmd, data_dir)?;
+    if let Some(sha) = base_sha
+        && seed_enabled
+    {
+        seed::clone::run_seed_during_hydrate(repo_root, wt_root, cfg, sha, seed_backend)?;
     }
     Ok(HydratedPaths { write_denied })
 }
@@ -414,19 +435,43 @@ pub fn hydrate_fresh_worktree_with_snaps(
     data_dir: &Path,
     common_id: &str,
 ) -> Result<HydratedPaths, GitError> {
-    let snaps_dir = super::warm_slot::base_snapshots_dir(data_dir, common_id);
+    hydrate_fresh_worktree_with_seed_options(
+        repo_root,
+        worktree,
+        base_sha,
+        Some((data_dir, common_id)),
+        seed::seed_cache_enabled(),
+        &seed::RealSeedBackend,
+    )
+}
+
+/// Testable seam for hydrating a fresh worktree with explicit seed toggle and backend.
+#[doc(hidden)]
+pub fn hydrate_fresh_worktree_with_seed_options(
+    repo_root: &Path,
+    worktree: &TaskWorktree,
+    base_sha: &str,
+    snaps: Option<(&Path, &str)>,
+    seed_enabled: bool,
+    seed_backend: &dyn seed::SeedBackend,
+) -> Result<HydratedPaths, GitError> {
+    let default_data_dir = snaps.is_none().then(|| aaf_fp::data_dir().ok()).flatten();
     let result = load_base_worktree_config(repo_root, base_sha).and_then(|cfg| {
-        let resolved_sha = git(
-            repo_root,
-            &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
-        )
-        .unwrap_or_else(|_| base_sha.to_string());
+        let rev = format!("{base_sha}^{{commit}}");
+        let sha = git(repo_root, &["rev-parse", "--verify", &rev])
+            .unwrap_or_else(|_| base_sha.to_string());
+        let snaps_dir = snaps.map(|(d, id)| super::warm_slot::base_snapshots_dir(d, id));
+        let snap_ref = snaps_dir.as_deref().map(|d| (d, sha.as_str()));
+        let data_dir = snaps.map(|(d, _)| d).or(default_data_dir.as_deref());
         hydrate_for_agent_inner(
             repo_root,
             &worktree.path,
             &cfg,
-            Some((&snaps_dir, resolved_sha.as_str())),
-            Some(data_dir),
+            snap_ref,
+            Some(sha.as_str()),
+            data_dir,
+            seed_enabled,
+            seed_backend,
         )
     });
     if result.is_err() {
@@ -452,12 +497,14 @@ pub fn hydrate_fresh_worktree(
             &common_id,
         );
     }
-    let result = load_base_worktree_config(repo_root, base_sha)
-        .and_then(|cfg| hydrate_for_agent(repo_root, &worktree.path, &cfg));
-    if result.is_err() {
-        let _ = worktree::remove(repo_root, worktree, true, true);
-    }
-    result
+    hydrate_fresh_worktree_with_seed_options(
+        repo_root,
+        worktree,
+        base_sha,
+        None,
+        seed::seed_cache_enabled(),
+        &seed::RealSeedBackend,
+    )
 }
 
 /// Resolves all `clone_dirs` + `copy_files` destinations inside `worktree` from

@@ -127,7 +127,7 @@ Thứ tự: tầng 1 < tầng 2 < tầng 3 < env `AAF_*` < cờ CLI. Từ tầng
 - Khi `spike_factor > 0` (mặc định `4` nếu bật `daily_token_cap`; `0` = tắt), giới hạn theo giờ là `max(1, spike_factor × daily_token_cap / 24)` tính trên cửa sổ `max(now - 3600, factory_unfrozen_at)` theo `COALESCE(ended_at, started_at)` (bắt cả run chạy lâu mới kết thúc). Nếu vượt giới hạn này, factory **đóng băng cứng** (`factory_frozen` với `reason = "token_spike"`), cần người kiểm tra runaway agent rồi chạy `aaf board unfreeze` (ghi `factory_unfrozen_at = now` để không đóng băng lại ngay vì lượng đột biến cũ trong cùng giờ).
 - Giới hạn kế toán đã biết: executor `custom` luôn báo `0` token nên không bị đếm; token chỉ được cộng khi run kết thúc, vì vậy tổng thực tế có thể vượt trần một khoảng bằng các run đang chạy song song.
 
-Biến môi trường: `AAF_DATA_DIR` (mặc định `~/.local/share/autofactory`), `AAF_CONFIG_DIR`, `AAF_WORKTREE_DIR` (mặc định `~/.cache/autofactory/worktrees`), `AAF_STORE_COMPLIANCE`, `AAF_MIN_ANDROID_TARGET_SDK`, `AAF_MAX_PARALLEL`, `AAF_AUTO_MERGE` (chỉ tắt được). `AAF_RUN_ID` và `AAF_HEAVY_SLOT` do `aaf` tự đặt, không gán tay.
+Biến môi trường: `AAF_DATA_DIR` (mặc định `~/.local/share/autofactory`), `AAF_CONFIG_DIR`, `AAF_WORKTREE_DIR` (mặc định `~/.cache/autofactory/worktrees`; đặt trên cùng volume APFS/reflink với repo để tự động seed cache bằng clone CoW thật — kiểm tra bằng `aaf doctor`), `AAF_SEED_CACHE` (đặt `=0` để tắt tự động seed cache CoW gồm Unity `Library`, npm `node_modules`, CocoaPods `Pods` khi tạo task worktree mới), `AAF_STORE_COMPLIANCE`, `AAF_MIN_ANDROID_TARGET_SDK`, `AAF_MAX_PARALLEL`, `AAF_AUTO_MERGE` (chỉ tắt được). `AAF_RUN_ID` và `AAF_HEAVY_SLOT` do `aaf` tự đặt, không gán tay.
 
 ## Chống quá tải máy
 

@@ -260,6 +260,27 @@ fn tick(sup: &UiSupervisor) {
     sync_caffeinate(&mut guard);
 }
 
+pub(super) fn runner_env(ctx: &Ctx) -> Vec<(&'static str, std::ffi::OsString)> {
+    let mut env = vec![
+        ("PATH", ctx.path_var.clone()),
+        ("HOME", ctx.home.as_os_str().to_os_string()),
+        ("AAF_DATA_DIR", ctx.data_dir.as_os_str().to_os_string()),
+        ("AAF_CONFIG_DIR", ctx.config_dir.as_os_str().to_os_string()),
+        (
+            "AAF_WORKTREE_DIR",
+            ctx.worktrees_dir.as_os_str().to_os_string(),
+        ),
+    ];
+    if let Some((_, val)) = ctx
+        .aaf_env
+        .iter()
+        .find(|(k, v)| k == "AAF_SEED_CACHE" && !v.is_empty())
+    {
+        env.push(("AAF_SEED_CACHE", std::ffi::OsString::from(val)));
+    }
+    env
+}
+
 fn spawn_repo_runner(exe: &Path, ctx: &Ctx, repo_root: &str) -> Result<WorkerSlot, String> {
     let repo_name = Path::new(repo_root)
         .file_name()
@@ -297,12 +318,10 @@ fn spawn_repo_runner(exe: &Path, ctx: &Ctx, repo_root: &str) -> Result<WorkerSlo
     let mut cmd = Command::new(exe);
     cmd.args(["run"])
         .current_dir(repo_root)
-        .stdin(Stdio::null())
-        .env("PATH", &ctx.path_var)
-        .env("HOME", &ctx.home)
-        .env("AAF_DATA_DIR", &ctx.data_dir)
-        .env("AAF_CONFIG_DIR", &ctx.config_dir)
-        .env("AAF_WORKTREE_DIR", &ctx.worktrees_dir);
+        .stdin(Stdio::null());
+    for (k, v) in runner_env(ctx) {
+        cmd.env(k, v);
+    }
     if let Ok(f) = log_file {
         if let Ok(f2) = f.try_clone() {
             cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));

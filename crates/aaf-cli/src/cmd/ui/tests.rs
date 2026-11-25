@@ -174,3 +174,59 @@ fn service_token_migrates_legacy_config_dir_into_data_dir_and_deletes_old() {
         assert_eq!(mode & 0o777, 0o600);
     }
 }
+
+#[test]
+fn seed_service_and_supervisor_forward_worktree_dir_and_seed_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let default_wt = home.join(aaf_engine::executors::DEFAULT_WORKTREES_REL);
+    let custom_wt = tmp.path().join("custom-worktrees");
+
+    // 1. Default worktrees_dir and no AAF_SEED_CACHE -> neither appears in non_default_service_env.
+    let ctx_default = Ctx {
+        cwd: tmp.path().to_path_buf(),
+        home: home.clone(),
+        data_dir: home.join(".local/share/autofactory"),
+        config_dir: home.join(".config/autofactory"),
+        worktrees_dir: default_wt,
+        path_var: std::ffi::OsString::from("/usr/bin"),
+        run_id: None,
+        stdin_is_tty: false,
+        aaf_env: Vec::new(),
+    };
+    let env_def = service::non_default_service_env(&ctx_default);
+    assert!(
+        env_def.is_empty(),
+        "expected empty default env, got {env_def:?}"
+    );
+
+    // 2. Custom worktrees_dir + AAF_SEED_CACHE=0 -> both forwarded by service and supervisor.
+    let ctx_custom = Ctx {
+        worktrees_dir: custom_wt.clone(),
+        aaf_env: vec![("AAF_SEED_CACHE".to_string(), "0".to_string())],
+        ..ctx_default
+    };
+    let svc_env = service::non_default_service_env(&ctx_custom);
+    assert!(
+        svc_env.contains(&("AAF_WORKTREE_DIR", custom_wt.display().to_string())),
+        "service must forward non-default AAF_WORKTREE_DIR: {svc_env:?}"
+    );
+    assert!(
+        svc_env.contains(&("AAF_SEED_CACHE", "0".to_string())),
+        "service must forward AAF_SEED_CACHE: {svc_env:?}"
+    );
+
+    let sup_env = supervisor::runner_env(&ctx_custom);
+    assert!(
+        sup_env
+            .iter()
+            .any(|(k, v)| *k == "AAF_WORKTREE_DIR" && v == custom_wt.as_os_str()),
+        "supervisor must forward AAF_WORKTREE_DIR: {sup_env:?}"
+    );
+    assert!(
+        sup_env
+            .iter()
+            .any(|(k, v)| *k == "AAF_SEED_CACHE" && v == "0"),
+        "supervisor must forward AAF_SEED_CACHE: {sup_env:?}"
+    );
+}

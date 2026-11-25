@@ -26,7 +26,7 @@ English · [Tiếng Việt](docs/README.vi.md) · [Quickstart](docs/QUICKSTART.m
 ### ⚡ How the 100% Autonomous Loop Works
 
 1. **Task Board & DAG (`aaf board`):** Queue tasks with dependencies, priorities, and acceptance criteria; run `aaf run --auto --auto-merge --auto-split` for hands-off 24/7 execution.
-2. **Isolated Git Worktree:** Every task runs in its own clean worktree (`aaf/<task-id>`) with zero cross-task pollution and automatic post-merge cleanup (`aaf gc`).
+2. **Isolated Git Worktree + CoW Cache Seeding:** Every task runs in its own clean worktree (`aaf/<task-id>`) with automatic copy-on-write dependency seeding (Unity `Library`, npm `node_modules`, CocoaPods `Pods`) when `AAF_WORKTREE_DIR` is on the same APFS/reflink volume as your repo (disable with `AAF_SEED_CACHE=0`; verify with `aaf doctor`), zero cross-task pollution, and automatic post-merge cleanup (`aaf gc`).
 3. **Sandboxed Multi-Agent Workers (`Claude · Codex · Gemini · Antigravity · OpenCode`):** Agents run inside OS confinement (macOS Seatbelt) guarded by `aaf-hook`, with multi-account cooldown scheduling and a machine-wide heavy-build throttle (`aaf slot`).
 4. **Signed Gate + Proof + Dual Cross-Audit:** `aaf gate` runs outside the sandbox over head-locked tests/CI and writes an HMAC-signed `CLEAR` receipt using a key agents cannot read.
 5. **Self-Healing Unblocker & Auto-Merge:** When a gate fails, the Unblocker automatically retries, splits oversized tasks, or escalates executors before ever bothering a human — then auto-merges or opens a clean PR and exports an acceptance handover report.

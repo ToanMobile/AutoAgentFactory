@@ -12,6 +12,7 @@ mod dual;
 mod head_lock;
 mod heavy;
 mod hosts;
+mod seed;
 
 use std::fs;
 use std::io;
@@ -545,6 +546,12 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         ),
     ];
     checks.extend(hosts::repo_hook_checks(ctx, root_opt, &effective.repo));
+    checks.push(seed::worktree_cow_volume_check(ctx, root_opt));
+    checks.push(seed::seed_cache_dry_run_check(
+        ctx,
+        root_opt,
+        &effective.repo.worktree,
+    ));
     #[cfg(target_os = "macos")]
     checks.push(keychain_sandbox_exposure_check(
         effective.global.safety.deny_macos_keychain,

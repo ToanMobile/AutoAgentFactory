@@ -280,22 +280,25 @@ pub(crate) fn plist_xml(
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn non_default_service_env(ctx: &Ctx) -> Vec<(&'static str, String)> {
-    let abs = |p: &Path| {
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            ctx.cwd.join(p)
-        }
-    };
+pub(super) fn non_default_service_env(ctx: &Ctx) -> Vec<(&'static str, String)> {
+    let wt_rel = aaf_engine::executors::DEFAULT_WORKTREES_REL;
+    let abs = |p: &Path| ctx.cwd.join(p);
     let mut extra = Vec::new();
-    let cfg = abs(&ctx.config_dir);
-    if cfg != abs(&ctx.home.join(".config/autofactory")) {
-        extra.push(("AAF_CONFIG_DIR", cfg.display().to_string()));
+    for (k, p, rel) in [
+        ("AAF_CONFIG_DIR", &ctx.config_dir, ".config/autofactory"),
+        ("AAF_DATA_DIR", &ctx.data_dir, ".local/share/autofactory"),
+        ("AAF_WORKTREE_DIR", &ctx.worktrees_dir, wt_rel),
+    ] {
+        let v = abs(p);
+        if v != abs(&ctx.home.join(rel)) {
+            extra.push((k, v.display().to_string()));
+        }
     }
-    let data = abs(&ctx.data_dir);
-    if data != abs(&ctx.home.join(".local/share/autofactory")) {
-        extra.push(("AAF_DATA_DIR", data.display().to_string()));
+    for (k, v) in &ctx.aaf_env {
+        if k == "AAF_SEED_CACHE" && !v.is_empty() {
+            extra.push(("AAF_SEED_CACHE", v.clone()));
+            break;
+        }
     }
     extra
 }
