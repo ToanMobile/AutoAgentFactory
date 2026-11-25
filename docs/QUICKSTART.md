@@ -1,6 +1,6 @@
 # AutoAgentFactory (`aaf`) — 3-Minute Quickstart
 
-Get from zero to a receipt-verified autonomous agent workflow on macOS, Linux, or Windows in under three minutes.
+Get from zero to a receipt-verified autonomous agent workflow on macOS or Linux in under three minutes.
 
 ---
 
@@ -28,7 +28,10 @@ curl -fsSL https://raw.githubusercontent.com/ToanMobile/AutoAgentFactory/main/sc
 brew install --formula packaging/homebrew/aaf.rb
 ```
 
-### Windows (PowerShell)
+### Windows (PowerShell, not available yet)
+
+> Windows builds are not published: the engine still uses Unix-only APIs.
+> The installer below works once a release ships a Windows archive.
 
 ```powershell
 irm https://raw.githubusercontent.com/ToanMobile/AutoAgentFactory/main/scripts/install.ps1 | iex

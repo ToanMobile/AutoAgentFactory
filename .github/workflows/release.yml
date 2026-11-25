@@ -61,15 +61,15 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-latest
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+          # No Windows target: the engine uses Unix-only APIs (sockets,
+          # file modes, process groups) and does not compile there yet.
 
     steps:
       - name: Checkout repository
@@ -168,7 +168,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          LC_ALL=C sha256sum aaf-*.tar.gz aaf-*.zip | sort -k2 > SHA256SUMS.txt
+          LC_ALL=C sha256sum aaf-*.tar.gz | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Sign SHA256SUMS.txt with minisign
@@ -205,6 +205,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/aaf-*.tar.gz
-            dist/aaf-*.zip
             dist/SHA256SUMS.txt
             dist/SHA256SUMS.txt.minisig

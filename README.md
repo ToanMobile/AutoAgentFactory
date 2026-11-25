@@ -66,16 +66,12 @@ curl -fsSL https://raw.githubusercontent.com/ToanMobile/AutoAgentFactory/main/sc
 ```
 
 <details>
-<summary>Other ways: Homebrew, Windows, from source</summary>
+<summary>Other ways: Homebrew, from source</summary>
 
 ```sh
 brew install --formula packaging/homebrew/aaf.rb          # Homebrew
 cargo install --path crates/aaf-cli  --locked             # from source: aaf
 cargo install --path crates/aaf-hook --locked             # from source: aaf-hook
-```
-
-```powershell
-irm https://raw.githubusercontent.com/ToanMobile/AutoAgentFactory/main/scripts/install.ps1 | iex
 ```
 
 Keep both `aaf` and `aaf-hook` on your `PATH`. Details are in the
