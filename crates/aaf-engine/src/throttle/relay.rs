@@ -60,6 +60,14 @@ const DONE: &[u8] = b"done\n";
 /// started skips the wait. When armed, a watcher ends the reader (not done)
 /// once `$4` is gone, and the relay ends the watcher when it exits.
 ///
+/// The relay ends its own helpers (reader, watcher) with SIGKILL, not
+/// SIGTERM: a signal that reaches the relay while it is still starting them
+/// is answered at once, and a helper forked a moment earlier still runs the
+/// relay's `sig=TERM` trap until its own `trap` (or `exec`) replaces it, so
+/// a SIGTERM was swallowed and the relay waited on it forever (seen on
+/// Linux/dash). The helpers own nothing that needs a clean exit. Subshells
+/// clear the inherited `EXIT` trap so only the relay itself runs it.
+///
 /// The pre-`SIGTERM` closed-pipe check uses `kill -0 -"$1"` directly (avoiding
 /// a full `ps -A` scan before signalling; `SIGTERM` to a zombie-only group is
 /// a POSIX no-op). `bounded_ps` caps `/bin/ps -A` with a portable timer that
@@ -87,9 +95,10 @@ exec 3<&0
 /bin/sh -c 'IFS= read -r said && [ "$said" = done ]' aaf-relay-reader <&3 >/dev/null 2>&1 &
 reader=$!
 watcher=
-trap '[ -n "$watcher" ] && kill "$watcher" 2>/dev/null; [ -n "$reader" ] && kill "$reader" 2>/dev/null; wait 2>/dev/null' EXIT
+trap '[ -n "$watcher" ] && kill -KILL "$watcher" 2>/dev/null; [ -n "$reader" ] && kill -KILL "$reader" 2>/dev/null; wait 2>/dev/null' EXIT
 if [ -n "$armed" ]; then
   (
+    trap - EXIT
     sp=
     last_sp=$reader
     trap '[ -n "$sp" ] && kill "$sp" 2>/dev/null; [ -n "$!" ] && [ "$!" != "$last_sp" ] && kill "$!" 2>/dev/null; exit 0' TERM INT HUP
@@ -106,12 +115,14 @@ if [ -n "$armed" ]; then
 fi
 bounded_ps() {
   (
+    trap - EXIT
     ps_pid=
     t_pid=
     trap '[ -n "$t_pid" ] && kill "$t_pid" 2>/dev/null; [ -n "$ps_pid" ] && kill -KILL "$ps_pid" 2>/dev/null; exit 1' TERM INT HUP
     /bin/ps -A -o pgid=,stat= </dev/null 2>/dev/null 3<&- &
     ps_pid=$!
     (
+      trap - EXIT
       sp=
       trap '[ -n "$sp" ] && kill "$sp" 2>/dev/null; [ -n "$!" ] && [ "$!" != "$ps_pid" ] && kill "$!" 2>/dev/null; exit 0' TERM INT HUP
       kill -0 "$ps_pid" 2>/dev/null || exit 0
@@ -142,12 +153,12 @@ group_live() {
 [ -n "$sig" ] || wait "$reader"
 said=$?
 if [ -n "$watcher" ]; then
-  kill "$watcher" 2>/dev/null
+  kill -KILL "$watcher" 2>/dev/null
   wait "$watcher" 2>/dev/null
   watcher=
 fi
 if [ -n "$sig" ]; then
-  kill "$reader" 2>/dev/null
+  kill -KILL "$reader" 2>/dev/null
   wait "$reader" 2>/dev/null
 fi
 reader=
