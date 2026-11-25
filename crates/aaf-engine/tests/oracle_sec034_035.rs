@@ -101,6 +101,20 @@ fn sec034_tag_named_like_remote_tracking_base_does_not_move_gate_base() {
 }
 
 #[test]
+fn sec034_local_branch_named_like_remote_tracking_base_is_refused_not_used() {
+    let (tmp, base, head) = feature_repo();
+    let repo = tmp.path();
+    git(repo, &["update-ref", "refs/remotes/origin/main", &base]);
+    // A local branch `origin/main` would win over `refs/remotes/origin/main`.
+    git(repo, &["branch", "origin/main", &head]);
+    let err = gate_base::resolve(repo, "origin/main", Duration::from_secs(15)).unwrap_err();
+    assert!(err.to_string().contains("ambiguous"), "{err}");
+    let full =
+        gate_base::resolve(repo, "refs/remotes/origin/main", Duration::from_secs(15)).unwrap();
+    assert_eq!(full.sha.as_deref(), Some(base.as_str()));
+}
+
+#[test]
 fn sec034_name_that_only_exists_as_tag_is_rejected_unless_spelled_in_full() {
     let (tmp, base, _head) = feature_repo();
     let repo = tmp.path();

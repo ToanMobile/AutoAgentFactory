@@ -186,13 +186,25 @@ fn explicit_base_commit(
     if wanted.starts_with("refs/") {
         return commit_of(repo_root, wanted, timeout)?.ok_or_else(unresolved);
     }
+    let mut found: Option<(String, String)> = None;
     for full in [
         format!("refs/heads/{wanted}"),
         format!("refs/remotes/{wanted}"),
     ] {
         if let Some(sha) = commit_of(repo_root, &full, timeout)? {
-            return Ok(sha);
+            // A local branch named like a remote-tracking ref (or the other
+            // way round) is refused rather than guessed at.
+            if let Some((other, _)) = &found {
+                return Err(GateError::Config(format!(
+                    "gate.base_ref {wanted:?} is ambiguous ({other} and {full}); \
+                     write the full ref name"
+                )));
+            }
+            found = Some((full, sha));
         }
+    }
+    if let Some((_, sha)) = found {
+        return Ok(sha);
     }
     let tag = format!("refs/tags/{wanted}");
     if aaf_fp::git_or_none(
