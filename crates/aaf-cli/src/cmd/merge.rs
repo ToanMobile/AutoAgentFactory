@@ -22,6 +22,7 @@ use clap::ValueEnum;
 use serde_json::{Value, json};
 
 use super::board::store::{open_db, refuse_inside_agent_run};
+use super::run::report::attach_single_handover_report;
 use crate::cmd::gate::progress_line;
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult, notice};
@@ -320,6 +321,14 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
             {
                 marked_done = mark_task_done(ctx, task_id, prev_state, pr_number, &head_sha)?;
             }
+            let report_task_id = (!args.dry_run)
+                .then(|| {
+                    task_ctx
+                        .as_ref()
+                        .map(|(id, _)| id.clone())
+                        .or_else(|| cleanup.as_ref().and_then(|c| c.task_id.clone()))
+                })
+                .flatten();
             let text = format!(
                 "MERGED PR #{pr_number}\n  head: {head_sha}\n  base: {base_sha}\n  tree: {}\n  local: {local_sync_note}",
                 receipt.tree_fp
@@ -338,7 +347,12 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
                     .field("task_id", json!(task_id))
                     .field("task_marked_done", json!(marked_done));
             }
-            Ok(out)
+            Ok(attach_single_handover_report(
+                out,
+                ctx,
+                report_task_id.as_deref(),
+                &cfg.repo,
+            ))
         }
         PrMergeOutcome::DryRunClear {
             pr_number,
@@ -358,6 +372,14 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
                 .field("receipt", json!(receipt)))
         }
         PrMergeOutcome::AlreadyMerged { pr_number, url } => {
+            let report_task_id = (!args.dry_run && cleanup.is_some())
+                .then(|| {
+                    cleanup
+                        .as_ref()
+                        .and_then(|c| c.task_id.clone())
+                        .or_else(|| task_ctx.as_ref().map(|(id, _)| id.clone()))
+                })
+                .flatten();
             let mut text = format!("ALREADY_MERGED PR #{pr_number} ({url})");
             if let Some(summary) = cleanup.as_ref().and_then(|c| c.summary_note()) {
                 text.push_str(&format!("\n  cleanup: {summary}"));
@@ -368,7 +390,12 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
             if let Some(report) = cleanup {
                 out = out.field("cleanup", json!(report));
             }
-            Ok(out)
+            Ok(attach_single_handover_report(
+                out,
+                ctx,
+                report_task_id.as_deref(),
+                &cfg.repo,
+            ))
         }
         PrMergeOutcome::Blocked {
             code,

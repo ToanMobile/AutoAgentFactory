@@ -2,18 +2,30 @@
 
 use aaf_domain::config::ProofConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
-use aaf_domain::gate::{GateStatus, GoldenScore, PostGateAuditRecord, Receipt, Severity};
+use aaf_domain::gate::{GateStatus, GoldenScore, PostGateAuditRecord, Receipt};
 use aaf_domain::pipeline::ReviewerVerdictRecord;
 use aaf_domain::proof::ProofRecord;
 use aaf_domain::task::{Task, TaskState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cross_audit::scoring::{GOLDEN_STANDARDS, compute_mechanical_score};
+use crate::cross_audit::scoring::GOLDEN_STANDARDS;
 
+mod load;
+mod sections;
+
+pub use crate::handover_export::{AutoHandoverPaths, HandoverError, write_auto_handover_reports};
 pub use crate::handover_html::{
     CSP_META, HandoverProof, MAX_HTML_PROOF_BYTES, MAX_PR_BODY_BYTES, compose_pr_body,
     encode_base64, escape_html, render_html, render_json, render_markdown,
+    sanitize_external_markdown,
+};
+pub use load::load_handover;
+
+use sections::{
+    BuildCtx, ScoreBundle, build_code_safety, build_gate_proof_next_line, build_new_bug_risk,
+    build_next_step, build_prevent_old_bug, build_unverified, build_user_outcome,
+    extract_root_cause, map_gate_commands, resolve_scores, verdict_label_for,
 };
 
 /// Solo-dev badge surfaced whenever audit ran on the same account without a
@@ -21,6 +33,16 @@ pub use crate::handover_html::{
 pub const SOLO_DEV_BADGE: &str = "same_account — chưa có auditor độc lập";
 
 const MAX_EVENTS_LOAD: u32 = 200;
+
+/// Single gate command execution entry surfaced in handover QA tables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverGateCommand {
+    pub name: String,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub duration_ms: u64,
+}
 
 /// Structured acceptance handover report for a single task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +54,20 @@ pub struct HandoverData {
     pub tree_fp: Option<String>,
     /// `"XONG"` only when all required evidence is present and passing; otherwise `"CHƯA XONG"`.
     pub status: String,
+    #[serde(default)]
+    pub verdict_label: String,
+    #[serde(default)]
+    pub generated_at: i64,
+    #[serde(default)]
+    pub root_cause: String,
+    #[serde(default)]
+    pub user_outcome: String,
+    #[serde(default)]
+    pub gate_proof_next_line: String,
+    #[serde(default)]
+    pub next_step: String,
+    #[serde(default)]
+    pub gate_commands: Vec<HandoverGateCommand>,
     pub missing: Vec<String>,
     pub what_done: String,
     pub prevent_old_bug: String,
@@ -57,46 +93,46 @@ pub struct HandoverData {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
-struct CompactGate {
-    status: Option<String>,
-    tree_fp: Option<String>,
-    gated_tree: Option<String>,
-    config_hash: Option<String>,
-    reasons: Vec<String>,
+pub(super) struct CompactGate {
+    pub(super) status: Option<String>,
+    pub(super) tree_fp: Option<String>,
+    pub(super) gated_tree: Option<String>,
+    pub(super) config_hash: Option<String>,
+    pub(super) reasons: Vec<String>,
     #[serde(alias = "commands_ok")]
-    commands_passed: Option<u64>,
+    pub(super) commands_passed: Option<u64>,
     #[serde(alias = "commands_run")]
-    commands_total: Option<u64>,
-    static_critical: Option<u64>,
+    pub(super) commands_total: Option<u64>,
+    pub(super) static_critical: Option<u64>,
     #[serde(alias = "static_warnings")]
-    static_warn: Option<u64>,
-    suppressions: Option<u64>,
-    store_status: Option<String>,
-    store_critical: Option<u64>,
-    store_warnings: Option<u64>,
-    store_unresolved: Value,
-    head_lock_status: Option<String>,
-    mechanical_score: Option<u8>,
+    pub(super) static_warn: Option<u64>,
+    pub(super) suppressions: Option<u64>,
+    pub(super) store_status: Option<String>,
+    pub(super) store_critical: Option<u64>,
+    pub(super) store_warnings: Option<u64>,
+    pub(super) store_unresolved: Value,
+    pub(super) head_lock_status: Option<String>,
+    pub(super) mechanical_score: Option<u8>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
-struct CompactAudit {
-    verdict: Option<String>,
-    reviewer: Option<String>,
-    same_account: Option<bool>,
-    mechanical_score: Option<u8>,
-    llm_average: Option<u8>,
-    effective_score: Option<u8>,
-    scores: Vec<GoldenScore>,
-    tree_fp: Option<String>,
-    config_hash: Option<String>,
+pub(super) struct CompactAudit {
+    pub(super) verdict: Option<String>,
+    pub(super) reviewer: Option<String>,
+    pub(super) same_account: Option<bool>,
+    pub(super) mechanical_score: Option<u8>,
+    pub(super) llm_average: Option<u8>,
+    pub(super) effective_score: Option<u8>,
+    pub(super) scores: Vec<GoldenScore>,
+    pub(super) tree_fp: Option<String>,
+    pub(super) config_hash: Option<String>,
     #[serde(default)]
-    dual_consensus: bool,
+    pub(super) dual_consensus: bool,
     #[serde(default)]
-    adjudicated: bool,
+    pub(super) adjudicated: bool,
     #[serde(default)]
-    reviewers: Vec<ReviewerVerdictRecord>,
+    pub(super) reviewers: Vec<ReviewerVerdictRecord>,
 }
 
 impl CompactAudit {
@@ -120,105 +156,29 @@ impl CompactAudit {
     }
 }
 
-struct ScoreBundle {
-    mechanical: Option<u8>,
-    llm_average: Option<u8>,
-    effective: Option<u8>,
-    scores: Vec<GoldenScore>,
-    same_account_warning: bool,
-}
-
-struct BuildCtx<'a> {
-    task: &'a Task,
-    receipt: Option<&'a Receipt>,
-    cg: Option<&'a CompactGate>,
-    audit: Option<&'a PostGateAuditRecord>,
-    ca: Option<&'a CompactAudit>,
-    proof: Option<&'a ProofRecord>,
-    proof_required: bool,
-    audit_verdict: Option<&'a str>,
-    audit_reviewer: Option<&'a str>,
-    bundle: ScoreBundle,
-}
-
-fn latest_event(events: &[FactoryEvent], kind: EventKind) -> Option<&FactoryEvent> {
+pub(super) fn latest_event(events: &[FactoryEvent], kind: EventKind) -> Option<&FactoryEvent> {
     events
         .iter()
         .filter(|e| e.kind == kind)
         .max_by_key(|e| (e.created_at, e.id.unwrap_or(0)))
 }
 
-fn parse_event<T: for<'de> Deserialize<'de>>(
+pub(super) fn parse_event<T: for<'de> Deserialize<'de>>(
     events: &[FactoryEvent],
     kind: EventKind,
 ) -> Option<T> {
     serde_json::from_str(&latest_event(events, kind)?.payload_json).ok()
 }
 
-fn non_empty(opt: &Option<String>) -> Option<&str> {
+pub(super) fn non_empty(opt: &Option<String>) -> Option<&str> {
     opt.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
-fn enum_label<T: Serialize>(value: &T) -> String {
+pub(super) fn enum_label<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn resolve_scores(
-    receipt: Option<&Receipt>,
-    audit: Option<&PostGateAuditRecord>,
-    cg: Option<&CompactGate>,
-    ca: Option<&CompactAudit>,
-    proof_ok: bool,
-    require_diff: bool,
-    same_account: bool,
-) -> ScoreBundle {
-    let solo_warn = same_account && !require_diff;
-    if let Some(a) = audit {
-        return ScoreBundle {
-            mechanical: Some(a.mechanical_score),
-            llm_average: a.llm_average,
-            effective: Some(a.effective_score),
-            scores: a.scores.clone(),
-            same_account_warning: a.same_account && !require_diff,
-        };
-    }
-    if let Some(ca) = ca.filter(|a| a.effective_score.is_some() || a.mechanical_score.is_some()) {
-        let mech = ca.mechanical_score.or_else(|| {
-            receipt.map(|r| compute_mechanical_score(r, proof_ok, require_diff, same_account).score)
-        });
-        let eff = ca.effective_score.or_else(|| match (mech, ca.llm_average) {
-            (Some(m), Some(l)) => Some(m.min(l)),
-            (m, l) => m.or(l),
-        });
-        return ScoreBundle {
-            mechanical: mech,
-            llm_average: ca.llm_average,
-            effective: eff,
-            scores: ca.scores.clone(),
-            same_account_warning: solo_warn,
-        };
-    }
-    if let Some(r) = receipt {
-        let mech = compute_mechanical_score(r, proof_ok, require_diff, same_account);
-        return ScoreBundle {
-            mechanical: Some(mech.score),
-            llm_average: None,
-            effective: Some(mech.score),
-            scores: Vec::new(),
-            same_account_warning: mech.same_account_warning || solo_warn,
-        };
-    }
-    let mech = cg.and_then(|g| g.mechanical_score);
-    ScoreBundle {
-        mechanical: mech,
-        llm_average: None,
-        effective: mech,
-        scores: Vec::new(),
-        same_account_warning: solo_warn,
-    }
 }
 
 /// Assembles a [`HandoverData`] report from explicit task, event, receipt,
@@ -342,6 +302,21 @@ pub fn build_handover_from_parts_with_dual(
         (None, None) => (false, false, Vec::new()),
     };
 
+    let what_done = crate::handover_dual::build_clean_what_done(task, events).join(" · ");
+    let handover_proof = proof.map(HandoverProof::from_record);
+    let verdict_label = verdict_label_for(&status);
+    let generated_at = receipt.map(|r| r.created_at).unwrap_or(task.updated_at);
+    let root_cause = extract_root_cause(task, events, &what_done);
+    let user_outcome = build_user_outcome(task, &what_done);
+    let next_step = build_next_step(task, &status, &missing);
+    let gate_proof_next_line = build_gate_proof_next_line(
+        &ctx,
+        tree_fp.as_deref(),
+        handover_proof.as_ref(),
+        &next_step,
+    );
+    let gate_commands = map_gate_commands(receipt);
+
     HandoverData {
         task_id: task.id.clone(),
         title: task.title.clone(),
@@ -349,7 +324,14 @@ pub fn build_handover_from_parts_with_dual(
         repo_root: task.repo_root.clone(),
         tree_fp,
         status,
-        what_done: crate::handover_dual::build_clean_what_done(task, events).join(" · "),
+        verdict_label,
+        generated_at,
+        root_cause,
+        user_outcome,
+        gate_proof_next_line,
+        next_step,
+        gate_commands,
+        what_done,
         prevent_old_bug: build_prevent_old_bug(&ctx),
         new_bug_risk: build_new_bug_risk(&ctx),
         code_safety: build_code_safety(&ctx),
@@ -364,7 +346,7 @@ pub fn build_handover_from_parts_with_dual(
         reviewers,
         same_account_warning: ctx.bundle.same_account_warning,
         proof_required,
-        proof: proof.map(HandoverProof::from_record),
+        proof: handover_proof,
         proof_config: ProofConfig::default(),
     }
 }
@@ -446,145 +428,3 @@ fn collect_missing(
     ));
     missing
 }
-
-fn build_prevent_old_bug(ctx: &BuildCtx<'_>) -> String {
-    if let Some(r) = ctx.receipt {
-        if r.commands.is_empty() {
-            return "no gate commands recorded [tự chạy]".to_string();
-        }
-        let passed = r.commands.iter().filter(|c| c.passed()).count();
-        let summary: Vec<String> = r
-            .commands
-            .iter()
-            .map(|c| {
-                let st = match (c.passed(), c.timed_out) {
-                    (true, _) => "PASS",
-                    (false, true) => "TIMEOUT",
-                    (false, false) => "FAIL",
-                };
-                format!("{}: {st} ({}ms)", c.name, c.duration_ms)
-            })
-            .collect();
-        return format!(
-            "{passed}/{} commands passed ({}) [tự chạy]",
-            r.commands.len(),
-            summary.join(", ")
-        );
-    }
-    if let Some(g) = ctx.cg {
-        let st = non_empty(&g.status).unwrap_or("UNKNOWN");
-        return match (g.commands_passed, g.commands_total) {
-            (Some(p), Some(t)) => {
-                format!("compact GateResult: {st}, {p}/{t} commands passed [tự chạy]")
-            }
-            _ => format!("compact GateResult: {st} (worktree cleaned) [tự chạy]"),
-        };
-    }
-    "chưa có biên nhận gate / chưa chạy test [tự chạy]".to_string()
-}
-
-fn build_new_bug_risk(ctx: &BuildCtx<'_>) -> String {
-    if let Some(r) = ctx.receipt {
-        let cnt = |sev: Severity| {
-            r.static_findings
-                .iter()
-                .filter(|f| f.severity == sev)
-                .count()
-        };
-        return format!(
-            "static: {} critical, {} warn, {} info ({} suppressed); store compliance: {} ({} critical, {} warn, {} unresolved) [tự chạy]",
-            cnt(Severity::Critical),
-            cnt(Severity::Warn),
-            cnt(Severity::Info),
-            r.suppressions,
-            enum_label(&r.store_compliance.status),
-            r.store_compliance.critical,
-            r.store_compliance.warnings,
-            r.store_compliance.unresolved.len()
-        );
-    }
-    if let Some(g) = ctx.cg {
-        let unresolved = g
-            .store_unresolved
-            .as_u64()
-            .or_else(|| {
-                g.store_unresolved
-                    .as_array()
-                    .map(|a| u64::try_from(a.len()).unwrap_or(u64::MAX))
-            })
-            .unwrap_or(0);
-        let st = non_empty(&g.store_status).unwrap_or("n/a");
-        return format!(
-            "compact static: {} critical, {} warn ({} suppressed); store: {st} ({} critical, {} warn, {unresolved} unresolved) [tự chạy]",
-            g.static_critical.unwrap_or(0),
-            g.static_warn.unwrap_or(0),
-            g.suppressions.unwrap_or(0),
-            g.store_critical.unwrap_or(0),
-            g.store_warnings.unwrap_or(0)
-        );
-    }
-    "chưa có dữ liệu so sánh static/store [tự chạy]".to_string()
-}
-
-fn build_code_safety(ctx: &BuildCtx<'_>) -> String {
-    let mut parts = Vec::new();
-    if let Some(r) = ctx.receipt {
-        parts.push(format!(
-            "head-lock: {} ({} locked change(s)) [tự chạy]",
-            enum_label(&r.head_lock.status),
-            r.head_lock.locked_changes.len()
-        ));
-    } else if let Some(lock) = ctx.cg.and_then(|g| non_empty(&g.head_lock_status)) {
-        parts.push(format!("head-lock: {lock} [tự chạy]"));
-    }
-    parts.push(match (ctx.audit_verdict, ctx.audit_reviewer) {
-        (Some(v), Some(rev)) => format!("cross-audit: {v} by {rev}"),
-        (Some(v), None) => format!("cross-audit: {v}"),
-        (None, Some(rev)) => format!("reviewer: {rev}"),
-        (None, None) => "cross-audit: none".to_string(),
-    });
-    if ctx.bundle.same_account_warning {
-        parts.push(SOLO_DEV_BADGE.to_string());
-    }
-    parts.push(if let Some(p) = ctx.proof {
-        let short_sha: String = p.image_sha256.chars().take(12).collect();
-        format!(
-            "proof: verified ({}, {}x{}, sha256={short_sha}) [tự chạy]",
-            p.device_serial, p.width, p.height
-        )
-    } else if ctx.proof_required {
-        "proof: MISSING (required) [tự chạy]".to_string()
-    } else {
-        "proof: không yêu cầu".to_string()
-    });
-    parts.join("; ")
-}
-
-fn build_unverified(ctx: &BuildCtx<'_>, missing: &[String]) -> String {
-    let mut gaps: Vec<String> = missing.to_vec();
-    if let Some(r) = ctx.receipt {
-        gaps.extend(
-            r.store_compliance
-                .unresolved
-                .iter()
-                .map(|i| format!("store unresolved: {i}")),
-        );
-        if r.status != GateStatus::Clear {
-            gaps.extend(r.reasons.iter().map(|reason| format!("gate: {reason}")));
-        }
-    } else if let Some(g) = ctx.cg {
-        gaps.extend(g.reasons.iter().map(|reason| format!("gate: {reason}")));
-    }
-    if ctx.bundle.same_account_warning {
-        gaps.push(SOLO_DEV_BADGE.to_string());
-    }
-    if gaps.is_empty() {
-        "không có".to_string()
-    } else {
-        gaps.join("; ")
-    }
-}
-
-/// Loads task, events, and verified signed receipt/audit/proof artifacts from
-mod load;
-pub use load::load_handover;

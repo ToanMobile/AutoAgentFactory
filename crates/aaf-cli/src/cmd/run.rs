@@ -6,6 +6,7 @@ mod deps;
 pub(crate) mod detach;
 mod goal;
 mod progress;
+pub(crate) mod report;
 mod stage_wiring;
 mod stop;
 #[cfg(test)]
@@ -28,13 +29,14 @@ use aaf_engine::factory::{
     self, BindingView, Deps, Hooks, Mode, RunSummary, any_stage_uses_claude,
     configured_audit_provider, resolve_auto_audit_executor, resolve_base, same_audit_provider,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::board::store::{err, open_db, refuse_inside_agent_run, repo_root};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
 use deps::build_deps;
 pub(crate) use deps::run_executor_is_claude;
+use report::{attach_auto_handover_reports, report};
 
 /// How often `--auto` looks for new Ready tasks and ended cooldowns.
 const AUTO_POLL: Duration = Duration::from_secs(5);
@@ -216,76 +218,6 @@ pub(crate) fn drain_stop_reason(summary: &RunSummary) -> &'static str {
     } else {
         "drained"
     }
-}
-
-fn report(
-    summary: &RunSummary,
-    warnings: &[String],
-    binding: &BindingView,
-) -> Result<CmdOutput, CmdError> {
-    let mut text = format!(
-        "{} agent run(s), {} gate run(s): {} done, {} in review, {} blocked, {} back to ready, \
-         {} waiting for an account{}",
-        summary.agent_runs,
-        summary.gate_runs,
-        summary.done.len(),
-        summary.review.len(),
-        summary.blocked.len(),
-        summary.requeued.len(),
-        summary.waiting_for_account,
-        if summary.frozen {
-            "; factory is FROZEN: aaf board unfreeze"
-        } else {
-            ""
-        }
-    );
-    if summary.waiting_for_review_cap > 0 {
-        text.push_str(&format!(
-            "\nwaiting for review cap: {} (run.max_open_review reached)",
-            summary.waiting_for_review_cap
-        ));
-    }
-    if !summary.blocked_upstream.is_empty() {
-        let pairs: Vec<String> = summary
-            .blocked_upstream
-            .iter()
-            .map(|(task, blocker)| format!("{task} <- {blocker}"))
-            .collect();
-        text.push_str(&format!("\nblocked upstream: {}", pairs.join(", ")));
-    }
-    if let Some(line) = waiting_line(summary.waiting_for_account, binding) {
-        text.push('\n');
-        text.push_str(&line);
-    }
-    // PLAN C.10: 2 = Blocked. A task that ended Blocked needs a human, and
-    // every blocking error blocks its task; what is left in `errors` beside
-    // that (a pull request that could not be opened, a leftover worktree)
-    // stopped nothing and keeps exit 0.
-    // A halted run needs a person too (a login, the network), and its task
-    // is in Ready, not Blocked: said apart so it is not taken for an idle
-    // board.
-    let mut out = if summary.frozen {
-        CmdOutput::policy("frozen", text)
-    } else if let Some(why) = &summary.halted {
-        CmdOutput::policy("halted", format!("{text}\nstopped: {why}"))
-    } else if !summary.blocked.is_empty() {
-        let ids = summary.blocked.join(", ");
-        CmdOutput::policy(
-            "blocked",
-            format!("{text}\nblocked: {ids} (aaf board show <id> says why)"),
-        )
-    } else {
-        CmdOutput::ok("ok", text)
-    };
-    let Value::Object(fields) = serde_json::to_value(summary).map_err(|e| err("summary", e))?
-    else {
-        return Err(CmdError::new("summary is not an object"));
-    };
-    out.fields.extend(fields);
-    Ok(out
-        .field("drain_stop_reason", json!(drain_stop_reason(summary)))
-        .field("warnings", json!(warnings))
-        .field("account_binding", json!(binding)))
 }
 
 /// True when this repository has a task an agent could be started for.
@@ -518,8 +450,19 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         None
     });
     let gh = super::board::github::gh_runner();
+    let exported_reports = std::sync::Mutex::new(std::collections::HashMap::<String, i64>::new());
+    let repo_root_str = deps.settings.repo_root.clone();
     let hooks = Hooks {
         idle: &|| {
+            if let Ok(mut seen) = exported_reports.lock() {
+                report::flush_completed_reports_for_repo(
+                    ctx,
+                    &db,
+                    &repo_root_str,
+                    &cfg.repo,
+                    &mut seen,
+                );
+            }
             if should_stop() {
                 return false;
             }
@@ -572,6 +515,7 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     let mut out = report(&summary, &cfg.warnings, &binding)?
         .field("max_parallel", json!(deps.settings.max_parallel))
         .field("auto_split_count", json!(auto_split_count));
+    out = attach_auto_handover_reports(out, &summary, ctx, &db, &cfg.repo);
     out = stop::apply_stopped_report(out, stop_guard.was_stopped(), &summary);
     if summary.halted.is_some() {
         out = out.field("halt_recorded", json!(true));

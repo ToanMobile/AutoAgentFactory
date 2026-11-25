@@ -324,7 +324,9 @@ impl CommandHandler for CliTelegramHandler<'_> {
         let task = db.get_task(task_id).map_err(s_err)?;
         let repo_cfg = load_repo_config(self.ctx, Path::new(&task.repo_root));
         let data = load_handover(&db, &self.ctx.data_dir, task_id, &repo_cfg).map_err(s_err)?;
-        Ok(render_markdown(&data))
+        Ok(aaf_engine::handover::sanitize_external_markdown(
+            &render_markdown(&data),
+        ))
     }
 
     fn preview_approve(&self, task_id: &str) -> Result<ApprovePreview, String> {

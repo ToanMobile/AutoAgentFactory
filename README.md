@@ -144,7 +144,7 @@ Add `--json` to any command for machine-readable output
 | 📸 | Signed device-screenshot proofs | `aaf proof` |
 | 🧭 | Declarative SOP workflows | `aaf sop` |
 | 🔌 | 10 agent CLIs with fallback routing | `aaf executors` |
-| 📝 | Acceptance handover report (Markdown / HTML / JSON) | `aaf handover` |
+| 📝 | DevKit acceptance handover report (auto-exported to `reports/` on task completion) | `aaf handover` |
 | 🖥️ | Interactive terminal cockpit | `aaf cockpit` |
 | 📱 | Telegram companion and "needs you" pushes | `aaf telegram` · `aaf notify` |
 | 🧹 | Clean up old worktrees and logs | `aaf gc` |
