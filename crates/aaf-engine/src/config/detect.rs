@@ -6,8 +6,8 @@ use std::path::Path;
 
 use aaf_domain::config::{CommandsConfig, RepoConfig};
 use detect_scripts::{
-    android_gradle_commands, depends_on, package_json_commands, product_flavors_file,
-    pyproject_commands,
+    android_gradle_commands, depends_on, ios_xcode_commands, package_json_commands,
+    product_flavors_file, pyproject_commands, requirements_python_commands,
 };
 
 use super::detect_unity;
@@ -217,8 +217,12 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
                 .find(|name| name.ends_with(".xcodeproj") && repo_root.join(name).is_dir())
         })
     {
-        // Scheme and destination are project-specific, so no xcodebuild line is certain.
-        return found("ios", none(), vec![project.clone()]);
+        let (cmds, extra_evidence) = ios_xcode_commands(repo_root, project);
+        let mut evidence = vec![project.clone()];
+        if let Some(note) = extra_evidence {
+            evidence.push(note);
+        }
+        return found("ios", cmds, evidence);
     }
     if is_file("Package.swift") {
         return found(
@@ -243,22 +247,27 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
     }
 
     if is_file("go.mod") {
-        return found(
-            "backend",
-            commands(
-                "go build ./...",
-                "go test ./...",
-                "go test ./...",
-                "go vet ./...",
-            ),
-            vec!["go.mod".to_string()],
+        let mut cmds = commands(
+            "go build ./...",
+            "go test ./...",
+            "go test ./...",
+            "go vet ./...",
         );
+        cmds.lint_full = "test -z \"$(gofmt -l .)\"".to_string();
+        return found("backend", cmds, vec!["go.mod".to_string()]);
     }
     if is_file("pyproject.toml") {
         return found(
             "backend",
             pyproject_commands(repo_root),
             vec!["pyproject.toml".to_string()],
+        );
+    }
+    if is_file("requirements.txt") {
+        return found(
+            "backend",
+            requirements_python_commands(repo_root),
+            vec!["requirements.txt".to_string()],
         );
     }
 

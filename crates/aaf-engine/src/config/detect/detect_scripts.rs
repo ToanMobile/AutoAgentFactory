@@ -340,6 +340,99 @@ pub(super) fn pyproject_commands(repo_root: &Path) -> CommandsConfig {
     cmds
 }
 
+pub(super) fn requirements_python_commands(repo_root: &Path) -> CommandsConfig {
+    let has_pytest_dep = [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements-test.txt",
+    ]
+    .into_iter()
+    .filter_map(|rel| read_marker(&repo_root.join(rel)))
+    .any(|text| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .any(dep_spec_is_pytest)
+    });
+    let has_pytest = repo_root.join("tests").is_dir()
+        || repo_root.join("pytest.ini").is_file()
+        || repo_root.join("conftest.py").is_file()
+        || has_pytest_dep;
+    let has_ruff = repo_root.join("ruff.toml").is_file() || repo_root.join(".ruff.toml").is_file();
+    let has_mypy = repo_root.join("mypy.ini").is_file();
+    let test = if has_pytest { "python3 -m pytest" } else { "" };
+    let lint = if has_ruff { "ruff check ." } else { "" };
+    let mut cmds = commands("", test, test, lint);
+    if has_mypy {
+        cmds.lint_full = "mypy .".to_string();
+    }
+    cmds
+}
+
+fn is_plain_scheme_or_project(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn shared_schemes_in(dir: &Path) -> Vec<String> {
+    let schemes_dir = dir.join("xcshareddata/xcschemes");
+    let Ok(entries) = std::fs::read_dir(schemes_dir) else {
+        return Vec::new();
+    };
+    let mut schemes: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_file() {
+                return None;
+            }
+            let name = entry.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".xcscheme")?;
+            (!stem.is_empty()).then(|| stem.to_string())
+        })
+        .collect();
+    schemes.sort();
+    schemes
+}
+
+/// Derives an iOS simulator build command ONLY when there is a single shared
+/// `.xcscheme` and both container and scheme names are safe shell words.
+pub(super) fn ios_xcode_commands(
+    repo_root: &Path,
+    project: &str,
+) -> (CommandsConfig, Option<String>) {
+    let mut schemes = shared_schemes_in(&repo_root.join(project));
+    if schemes.is_empty()
+        && let Some(stem) = project.strip_suffix(".xcworkspace")
+    {
+        let sibling_proj = format!("{stem}.xcodeproj");
+        if repo_root.join(&sibling_proj).is_dir() {
+            schemes = shared_schemes_in(&repo_root.join(sibling_proj));
+        }
+    }
+    if schemes.len() != 1 {
+        return (CommandsConfig::default(), None);
+    }
+    let scheme = &schemes[0];
+    if !is_plain_scheme_or_project(project) || !is_plain_scheme_or_project(scheme) {
+        return (CommandsConfig::default(), None);
+    }
+    let flag = if project.ends_with(".xcworkspace") {
+        "-workspace"
+    } else {
+        "-project"
+    };
+    let build = format!(
+        "xcodebuild {flag} {project} -scheme {scheme} -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build"
+    );
+    (
+        commands(&build, "", "", ""),
+        Some(format!("{scheme}.xcscheme")),
+    )
+}
+
 pub(super) fn depends_on(package: &serde_json::Value, dependency: &str) -> bool {
     ["dependencies", "devDependencies", "peerDependencies"]
         .iter()

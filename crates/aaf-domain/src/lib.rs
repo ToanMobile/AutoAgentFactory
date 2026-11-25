@@ -11,6 +11,7 @@ pub mod dag;
 pub mod event;
 pub mod gate;
 pub mod head_lock_globs;
+pub mod heavy;
 pub mod keychain;
 pub mod land_mode;
 pub mod oracle_config;

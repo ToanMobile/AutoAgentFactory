@@ -17,6 +17,7 @@ pub enum HeavyTool {
     Gradle,
     Xcodebuild,
     Unity,
+    Mobile,
 }
 
 impl HeavyTool {
@@ -25,6 +26,7 @@ impl HeavyTool {
             HeavyTool::Gradle => "gradle",
             HeavyTool::Xcodebuild => "xcodebuild",
             HeavyTool::Unity => "unity",
+            HeavyTool::Mobile => "mobile",
         }
     }
 }
@@ -404,6 +406,7 @@ struct Scanner {
     value_next: bool,
     after_aaf: bool,
     queued: bool,
+    mobile: subcommand::MobileScan,
 }
 
 impl Scanner {
@@ -419,6 +422,7 @@ impl Scanner {
             value_next: false,
             after_aaf: false,
             queued: false,
+            mobile: subcommand::MobileScan::default(),
         }
     }
 
@@ -459,9 +463,16 @@ impl Scanner {
             self.skip_file = false;
             self.valued = NO_VALUED;
             self.value_next = false;
+            self.mobile.reset();
             return Step::Next;
         }
-        if !self.at_command || std::mem::take(&mut self.value_next) || is_assignment(word) {
+        if !self.at_command {
+            if self.mobile.on_arg(word) {
+                return Step::Heavy(HeavyTool::Mobile);
+            }
+            return Step::Next;
+        }
+        if std::mem::take(&mut self.value_next) || is_assignment(word) {
             return Step::Next;
         }
         let base = basename(word);
@@ -501,6 +512,7 @@ impl Scanner {
         if let Some(tool) = lookup(HEAVY_PROGRAMS, base) {
             return Step::Heavy(tool);
         }
+        self.mobile.on_command(base);
         if let Some(family) = lookup_family(base) {
             return Step::Family(family);
         }
@@ -578,4 +590,5 @@ pub fn heavy_tool_argv<S: AsRef<OsStr>>(argv: &[S]) -> Option<HeavyTool> {
 }
 
 mod family;
+mod subcommand;
 pub use family::{stats_command_family, stats_command_family_argv};

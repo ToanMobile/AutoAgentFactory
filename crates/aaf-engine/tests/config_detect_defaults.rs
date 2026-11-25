@@ -116,3 +116,87 @@ fn python_tools_run_through_the_lock_files_environment_manager() {
     ]);
     assert_eq!(dotted.commands.lint, "ruff check .");
 }
+
+#[test]
+fn go_projects_include_gofmt_in_full_lint() {
+    let d = detect(&[("go.mod", "module example.com/demo\n")]);
+    assert_eq!(d.profile, "backend");
+    assert_eq!(d.commands.build, "go build ./...");
+    assert_eq!(d.commands.test_scoped, "go test ./...");
+    assert_eq!(d.commands.lint, "go vet ./...");
+    assert_eq!(d.commands.lint_full, "test -z \"$(gofmt -l .)\"");
+}
+
+#[test]
+fn ios_xcodeproj_only_gets_xcodebuild_when_exactly_one_shared_scheme_exists() {
+    let single = detect(&[
+        ("Demo.xcodeproj/project.pbxproj", ""),
+        (
+            "Demo.xcodeproj/xcshareddata/xcschemes/DemoApp.xcscheme",
+            "<Scheme/>",
+        ),
+    ]);
+    assert_eq!(single.profile, "ios");
+    assert_eq!(
+        single.commands.build,
+        "xcodebuild -project Demo.xcodeproj -scheme DemoApp -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build"
+    );
+    assert!(single.evidence.contains(&"DemoApp.xcscheme".to_string()));
+
+    // Two shared schemes: ambiguous, leave commands empty.
+    let multi = detect(&[
+        ("Demo.xcodeproj/project.pbxproj", ""),
+        (
+            "Demo.xcodeproj/xcshareddata/xcschemes/DemoApp.xcscheme",
+            "<Scheme/>",
+        ),
+        (
+            "Demo.xcodeproj/xcshareddata/xcschemes/DemoAdmin.xcscheme",
+            "<Scheme/>",
+        ),
+    ]);
+    assert_eq!(multi.profile, "ios");
+    assert_eq!(multi.commands.build, "");
+
+    // Workspace falls back to sibling `.xcodeproj` shared scheme when unique.
+    let ws = detect(&[
+        ("Demo.xcworkspace/contents.xcworkspacedata", ""),
+        ("Demo.xcodeproj/project.pbxproj", ""),
+        (
+            "Demo.xcodeproj/xcshareddata/xcschemes/DemoApp.xcscheme",
+            "<Scheme/>",
+        ),
+    ]);
+    assert_eq!(ws.profile, "ios");
+    assert_eq!(
+        ws.commands.build,
+        "xcodebuild -workspace Demo.xcworkspace -scheme DemoApp -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build"
+    );
+}
+
+#[test]
+fn python_requirements_txt_without_pyproject_detects_pytest() {
+    let with_tests = detect(&[
+        ("requirements.txt", "flask==3.0.0\n"),
+        ("tests/test_app.py", "def test_ok(): pass\n"),
+        ("ruff.toml", "line-length = 100\n"),
+        ("mypy.ini", "[mypy]\n"),
+    ]);
+    assert_eq!(with_tests.profile, "backend");
+    assert_eq!(with_tests.evidence, vec!["requirements.txt"]);
+    assert_eq!(with_tests.commands.test_scoped, "python3 -m pytest");
+    assert_eq!(with_tests.commands.test_full, "python3 -m pytest");
+    assert_eq!(with_tests.commands.lint, "ruff check .");
+    assert_eq!(with_tests.commands.lint_full, "mypy .");
+
+    let by_dev_dep = detect(&[
+        ("requirements.txt", "requests>=2.31\n"),
+        ("requirements-dev.txt", "pytest>=8.0\n"),
+    ]);
+    assert_eq!(by_dev_dep.profile, "backend");
+    assert_eq!(by_dev_dep.commands.test_scoped, "python3 -m pytest");
+
+    let bare = detect(&[("requirements.txt", "requests>=2.31\n")]);
+    assert_eq!(bare.profile, "backend");
+    assert_eq!(bare.commands.test_scoped, "");
+}

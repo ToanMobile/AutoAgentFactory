@@ -5,6 +5,10 @@
 
 use crate::shell::{Cmd, DECLARERS, SHELLS, basename};
 use crate::{Ctx, Denial};
+use aaf_domain::heavy::{
+    GRADLE_PROGRAMS, UNITY_HEAVY_FLAGS, UNITY_PROGRAMS, XCODEBUILD_PROGRAMS,
+    is_mobile_heavy_command,
+};
 
 const RULE: &str = "heavy_cmd_guard";
 const REASON: &str = "heavy builds must share the machine queue";
@@ -14,7 +18,6 @@ const REASON: &str = "heavy builds must share the machine queue";
 const FIX: &str = "aaf slot -- <command> (aaf gate is run by the factory or the operator, not by \
                    an agent)";
 
-const GRADLE: &[&str] = &["gradlew", "gradle"];
 /// A Gradle call is light only when every argument is one of these. `help`,
 /// `tasks`, `projects` and `properties` are not: they configure the project
 /// and leave a daemon behind like any other task.
@@ -27,7 +30,6 @@ const GRADLE_LIGHT: &[&str] = &[
     "-h",
     "-?",
 ];
-const XCODEBUILD: &str = "xcodebuild";
 /// Options that make xcodebuild print and exit.
 const XCODEBUILD_LIGHT: &[&str] = &[
     "-version",
@@ -51,10 +53,6 @@ const XCODEBUILD_SELECTORS: &[&str] = &[
     "-destination",
 ];
 const XCODEBUILD_PLAIN: &[&str] = &["-json", "-quiet", "-verbose"];
-const UNITY: &[&str] = &["unity", "unity-editor"];
-/// Unity without one of these opens the editor window, which is not a
-/// queued build. Unity reads its options without regard to case.
-const UNITY_HEAVY: &[&str] = &["-batchmode", "-runtests", "-executemethod"];
 
 fn named(program: &str, names: &[&str]) -> bool {
     // The default macOS file system finds `./Gradlew` too.
@@ -152,18 +150,19 @@ fn invoked(cmd: &Cmd) -> (&str, &[String]) {
 /// `xargs`: further arguments come from its input and could be anything.
 fn is_heavy(program: &str, args: &[String], xargs: bool) -> bool {
     let is = |arg: &String, set: &[&str]| set.contains(&arg.as_str());
-    if named(program, GRADLE) {
+    if named(program, GRADLE_PROGRAMS) {
         xargs || args.is_empty() || !args.iter().all(|arg| is(arg, GRADLE_LIGHT))
-    } else if named(program, &[XCODEBUILD]) {
+    } else if named(program, XCODEBUILD_PROGRAMS) {
         xargs || !xcodebuild_prints_only(args)
-    } else if named(program, UNITY) {
+    } else if named(program, UNITY_PROGRAMS) {
         // An argument filled in at run time could be one of the batch ones.
         xargs
             || args
                 .iter()
-                .any(|arg| arg.is_empty() || arg.contains('$') || named(arg, UNITY_HEAVY))
+                .any(|arg| arg.is_empty() || arg.contains('$') || named(arg, UNITY_HEAVY_FLAGS))
     } else {
-        false
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        is_mobile_heavy_command(program, &arg_refs)
     }
 }
 
@@ -197,6 +196,8 @@ fn xcodebuild_prints_only(args: &[String]) -> bool {
 pub fn mentions<S: AsRef<str>>(tokens: &[S]) -> bool {
     tokens.iter().any(|token| {
         let program = basename(token.as_ref());
-        named(program, GRADLE) || named(program, &[XCODEBUILD]) || named(program, UNITY)
+        named(program, GRADLE_PROGRAMS)
+            || named(program, XCODEBUILD_PROGRAMS)
+            || named(program, UNITY_PROGRAMS)
     })
 }
