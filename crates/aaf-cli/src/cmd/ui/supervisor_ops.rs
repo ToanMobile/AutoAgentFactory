@@ -1,7 +1,7 @@
 //! Process spawning, persistence, and repo-allowlist helpers for `UiSupervisor`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -29,6 +29,7 @@ pub(super) struct PersistedState {
 pub(super) struct WorkerSlot {
     pub(super) child: Child,
     pub(super) repo_name: String,
+    pub(super) spawned_at: Instant,
 }
 
 pub(super) fn normalize_repo_key(raw: &str) -> String {
@@ -123,6 +124,26 @@ pub(super) fn runner_env(ctx: &Ctx) -> Vec<(&'static str, std::ffi::OsString)> {
     env
 }
 
+/// Returns `true` iff an external `aaf run` process currently holds the OS flock
+/// for `repo_root`. A stale, missing, or non-regular lock file returns `false`.
+pub(super) fn is_repo_lock_held(data_dir: &Path, repo_root: &str) -> bool {
+    let lock_path = crate::cmd::run::detach::run_lock_path(data_dir, Path::new(repo_root));
+    let Ok(meta) = fs::symlink_metadata(&lock_path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(file) = File::open(&lock_path) else {
+        return false;
+    };
+    match file.try_lock_shared() {
+        Ok(()) => false,
+        Err(TryLockError::WouldBlock) => true,
+        Err(TryLockError::Error(_)) => false,
+    }
+}
+
 pub(super) fn spawn_repo_runner(
     exe: &Path,
     ctx: &Ctx,
@@ -178,7 +199,11 @@ pub(super) fn spawn_repo_runner(
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
     let child = cmd.spawn().map_err(|e| e.to_string())?;
-    Ok(WorkerSlot { child, repo_name })
+    Ok(WorkerSlot {
+        child,
+        repo_name,
+        spawned_at: Instant::now(),
+    })
 }
 
 pub(super) fn stop_children_unlocked(
@@ -204,6 +229,36 @@ pub(super) fn stop_children_unlocked(
     if let Some(mut c) = caffeinate {
         let _ = c.kill();
         let _ = c.wait();
+    }
+}
+
+pub(super) fn sync_caffeinate_child(caffeinate: &mut Option<Child>, need: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(ref mut c) = *caffeinate
+            && c.try_wait().ok().flatten().is_some()
+        {
+            *caffeinate = None;
+        }
+        if need && caffeinate.is_none() {
+            let pid = std::process::id().to_string();
+            if let Ok(child) = Command::new("/usr/bin/caffeinate")
+                .args(["-s", "-w", &pid])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                *caffeinate = Some(child);
+            }
+        } else if !need && let Some(mut c) = caffeinate.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (caffeinate, need);
     }
 }
 
@@ -242,6 +297,7 @@ pub(super) fn write_persisted(path: &Path, state: &PersistedState) -> Result<(),
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -262,5 +318,36 @@ mod tests {
             &scoped,
             "/Volumes/Data/Toan/Idle-Plaza-3D"
         ));
+    }
+
+    #[test]
+    fn is_repo_lock_held_distinguishes_stale_file_from_active_flock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let repo_dir = tmp.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        let repo_str = repo_dir.to_string_lossy().into_owned();
+
+        // 1. Non-existent lock file -> false.
+        assert!(!is_repo_lock_held(&data_dir, &repo_str));
+
+        // 2. Existing unlocked (stale) lock file -> false.
+        let lock_path = crate::cmd::run::detach::run_lock_path(&data_dir, &repo_dir);
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::write(&lock_path, b"").unwrap();
+        assert!(!is_repo_lock_held(&data_dir, &repo_str));
+
+        // 3. Lock file currently held by an exclusive flock -> true.
+        let holder = File::options()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock().unwrap();
+        assert!(is_repo_lock_held(&data_dir, &repo_str));
+
+        // 4. After dropping the holder, lock is released -> false again.
+        drop(holder);
+        assert!(!is_repo_lock_held(&data_dir, &repo_str));
     }
 }

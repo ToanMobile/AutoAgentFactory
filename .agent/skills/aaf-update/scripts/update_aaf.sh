@@ -297,12 +297,22 @@ if [[ "$(uname -s)" == "Darwin" && -z "${AAF_RUN_ID:-}" && "${AAF_SKIP_UI_SERVIC
   ui_help="$("$AAF_BIN" ui --help 2>&1 || true)"
   if [[ "$ui_help" == *"--install-service"* ]]; then
     install_flags=()
+    service_env=()
     plist_file="$HOME/Library/LaunchAgents/com.autoagentfactory.ui.plist"
     if [[ "${AAF_UI_ALLOW_ACTIONS:-0}" == "1" ]] || { [[ -f "$plist_file" ]] && grep -q -- '--allow-actions' "$plist_file" 2>/dev/null; }; then
       install_flags+=(--allow-actions)
     fi
+    if [[ -f "$plist_file" ]]; then
+      for env_key in AAF_WORKTREE_DIR AAF_DATA_DIR AAF_CONFIG_DIR AAF_SEED_CACHE; do
+        if [[ -z "${!env_key:-}" ]]; then
+          if saved_val="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:${env_key}" "$plist_file" 2>/dev/null)" && [[ -n "$saved_val" ]]; then
+            service_env+=("${env_key}=${saved_val}")
+          fi
+        fi
+      done
+    fi
     echo "==> Restarting AAF Cockpit service (com.autoagentfactory.ui ${install_flags[*]:-read-only})..."
-    if ! "$AAF_BIN" ui --install-service "${install_flags[@]}" >/dev/null; then
+    if ! env ${service_env[@]+"${service_env[@]}"} "$AAF_BIN" ui --install-service ${install_flags[@]+"${install_flags[@]}"} >/dev/null; then
       echo "    [WARN] aaf ui --install-service failed (e.g. non-GUI session); skipping UI service restart." >&2
     else
       ui_ok=0

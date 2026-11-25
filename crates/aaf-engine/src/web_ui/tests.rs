@@ -229,7 +229,12 @@ fn index_returns_html_with_strict_csp_and_security_headers() {
     assert_eq!(resp.status, 200);
     assert!(resp.body.contains("<!DOCTYPE html>"));
     assert!(resp.body.contains("AutoAgentFactory Dashboard"));
-    assert!(resp.body.contains("subscription accounts: tokens only"));
+    assert!(resp.body.contains("machine.subTokensOnly"));
+    assert!(
+        super::pwa::I18N_UI_JS
+            .to_ascii_lowercase()
+            .contains("subscription accounts: tokens only")
+    );
     assert_eq!(
         resp.headers
             .get("content-security-policy")

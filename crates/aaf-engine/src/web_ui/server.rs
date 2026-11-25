@@ -353,14 +353,7 @@ fn dispatch_request(
         query_token: req.query.get("token").map(String::as_str),
         require_auth: !matches!(
             route,
-            Route::Index
-                | Route::Studio
-                | Route::Manifest
-                | Route::AppleTouchIcon
-                | Route::IconSvg
-                | Route::DiffJs
-                | Route::PipelineJs
-                | Route::Health
+            Route::Index | Route::Studio | Route::Static(_) | Route::Health
         ),
         allow_query_token: matches!(route, Route::Events),
         is_mutating: matches!(
@@ -380,11 +373,7 @@ fn dispatch_request(
     match route {
         Route::Index => write_html(stream, INDEX_HTML),
         Route::Studio => write_html(stream, STUDIO_HTML),
-        Route::Manifest => super::pwa::serve_static(stream, 0),
-        Route::AppleTouchIcon => super::pwa::serve_static(stream, 1),
-        Route::IconSvg => super::pwa::serve_static(stream, 2),
-        Route::DiffJs => super::pwa::serve_static(stream, 3),
-        Route::PipelineJs => super::pwa::serve_static(stream, 4),
+        Route::Static(asset) => super::pwa::serve_static(stream, asset),
         Route::Report => {
             let since = req.query.get("since").and_then(|s| s.parse::<u64>().ok());
             write_backend_result(stream, backend.report_json(since));

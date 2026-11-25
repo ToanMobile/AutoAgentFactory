@@ -13,6 +13,9 @@ pub const DIFF_UI_JS: &str = include_str!("diff_ui.js");
 /// Embedded zero-CDN SVG pipeline DAG, SOP runs, and Studio score JS module.
 pub const PIPELINE_UI_JS: &str = include_str!("pipeline_ui.js");
 
+/// Embedded zero-CDN bilingual EN / VI i18n JS module.
+pub const I18N_UI_JS: &str = include_str!("i18n_ui.js");
+
 /// Tactile 3D ceramic Agent Bot Pod icon (white chassis + glossy black visor + cyan pill eyes) legible down to 16px.
 pub const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
   <defs>
@@ -97,25 +100,43 @@ pub(super) fn write_pwa_asset(
     stream.flush()
 }
 
-/// Dispatches static PWA & UI asset routes (`0`=manifest, `1`=png, `2`=svg, `3`=diff.js, `4`=pipeline.js).
-pub(super) fn serve_static(stream: &mut TcpStream, kind: u8) {
-    let _ = match kind {
-        0 => write_pwa_asset(
+/// Static PWA & embedded UI asset variants served without auth.
+#[derive(Clone, Copy)]
+pub(super) enum StaticAsset {
+    Manifest,
+    AppleTouchIcon,
+    IconSvg,
+    DiffJs,
+    PipelineJs,
+    I18nJs,
+}
+
+/// Dispatches static PWA & UI asset routes.
+pub(super) fn serve_static(stream: &mut TcpStream, asset: StaticAsset) {
+    let _ = match asset {
+        StaticAsset::Manifest => write_pwa_asset(
             stream,
             "application/manifest+json; charset=utf-8",
             MANIFEST_JSON.as_bytes(),
         ),
-        1 => write_pwa_asset(stream, "image/png", APPLE_TOUCH_ICON_PNG),
-        2 => write_pwa_asset(stream, "image/svg+xml; charset=utf-8", ICON_SVG.as_bytes()),
-        3 => write_pwa_asset(
+        StaticAsset::AppleTouchIcon => write_pwa_asset(stream, "image/png", APPLE_TOUCH_ICON_PNG),
+        StaticAsset::IconSvg => {
+            write_pwa_asset(stream, "image/svg+xml; charset=utf-8", ICON_SVG.as_bytes())
+        }
+        StaticAsset::DiffJs => write_pwa_asset(
             stream,
             "application/javascript; charset=utf-8",
             DIFF_UI_JS.as_bytes(),
         ),
-        _ => write_pwa_asset(
+        StaticAsset::PipelineJs => write_pwa_asset(
             stream,
             "application/javascript; charset=utf-8",
             PIPELINE_UI_JS.as_bytes(),
+        ),
+        StaticAsset::I18nJs => write_pwa_asset(
+            stream,
+            "application/javascript; charset=utf-8",
+            I18N_UI_JS.as_bytes(),
         ),
     };
 }

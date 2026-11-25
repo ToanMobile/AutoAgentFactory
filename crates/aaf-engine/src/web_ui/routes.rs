@@ -6,11 +6,7 @@ pub(super) enum Route {
     Index,
     /// The all-in-one metrics page.
     Studio,
-    Manifest,
-    AppleTouchIcon,
-    IconSvg,
-    DiffJs,
-    PipelineJs,
+    Static(super::pwa::StaticAsset),
     Report,
     Doctor,
     Health,
@@ -37,6 +33,7 @@ pub(super) enum Route {
 }
 
 pub(super) fn match_route(method: &str, path: &str) -> Route {
+    use super::pwa::StaticAsset;
     let exact = |want: &str, r: Route| {
         if method == want {
             r
@@ -47,11 +44,12 @@ pub(super) fn match_route(method: &str, path: &str) -> Route {
     match path {
         "/" => return exact("GET", Route::Index),
         "/studio" => return exact("GET", Route::Studio),
-        "/manifest.webmanifest" => return exact("GET", Route::Manifest),
-        "/apple-touch-icon.png" => return exact("GET", Route::AppleTouchIcon),
-        "/icon.svg" => return exact("GET", Route::IconSvg),
-        "/assets/diff.js" => return exact("GET", Route::DiffJs),
-        "/assets/pipeline.js" => return exact("GET", Route::PipelineJs),
+        "/manifest.webmanifest" => return exact("GET", Route::Static(StaticAsset::Manifest)),
+        "/apple-touch-icon.png" => return exact("GET", Route::Static(StaticAsset::AppleTouchIcon)),
+        "/icon.svg" => return exact("GET", Route::Static(StaticAsset::IconSvg)),
+        "/assets/diff.js" => return exact("GET", Route::Static(StaticAsset::DiffJs)),
+        "/assets/pipeline.js" => return exact("GET", Route::Static(StaticAsset::PipelineJs)),
+        "/assets/i18n.js" => return exact("GET", Route::Static(StaticAsset::I18nJs)),
         "/api/report" => return exact("GET", Route::Report),
         "/api/doctor" => return exact("GET", Route::Doctor),
         "/api/health" => return exact("GET", Route::Health),

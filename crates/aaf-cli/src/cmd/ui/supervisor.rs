@@ -1,14 +1,15 @@
 //! Multi-repo background Auto-Runner Supervisor controlled from the Web UI.
 //!
-//! When enabled, periodically scans `aaf.db` for repositories with `Ready` tasks
-//! (while the factory is not frozen), spawns `<exe> run` (drain-and-exit) per repo
-//! with exponential backoff on failure, and keeps macOS awake with
-//! `caffeinate -s -w <pid>` while at least one worker is active.
+//! When enabled, periodically scans `aaf.db` for repositories with `Ready`,
+//! `Running`, or `Gating` tasks (while the factory is not frozen), spawns
+//! `<exe> run` (drain-and-exit) per repo with exponential backoff on failure,
+//! and keeps macOS awake with `caffeinate -s -w <pid>` while at least one
+//! worker is active.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
@@ -22,8 +23,9 @@ use serde_json::{Value, json};
 #[cfg(test)]
 pub(super) use super::supervisor_ops::runner_env;
 use super::supervisor_ops::{
-    PersistedState, WorkerSlot, is_repo_allowed, normalize_repo_key, read_persisted,
-    spawn_repo_runner, stop_children_unlocked, write_persisted,
+    PersistedState, WorkerSlot, is_repo_allowed, is_repo_lock_held, normalize_repo_key,
+    read_persisted, spawn_repo_runner, stop_children_unlocked, sync_caffeinate_child,
+    write_persisted,
 };
 use crate::cmd::board::store::SharedRoDb;
 use crate::ctx::Ctx;
@@ -32,6 +34,7 @@ const STATE_FILE: &str = "ui-supervisor.json";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const BASE_BACKOFF_SECS: u64 = 15;
 const MAX_BACKOFF_SECS: u64 = 300;
+const RAPID_EXIT_SECS: u64 = 10;
 
 struct Inner {
     enabled: bool,
@@ -99,8 +102,9 @@ impl UiSupervisor {
 
     pub(super) fn status_json(&self) -> Value {
         let known_repos = self.collect_known_repos();
+        self.reap_workers();
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        reap_finished(&mut guard);
+        sync_caffeinate(&mut guard);
         let active: Vec<String> = guard
             .workers
             .values()
@@ -112,20 +116,24 @@ impl UiSupervisor {
             .as_ref()
             .map(|s| s.iter().cloned().collect());
         let now = Instant::now();
-        let backoff: BTreeMap<String, u64> = guard
-            .backoff_until
-            .iter()
-            .filter_map(|(repo, until)| {
-                until.checked_duration_since(now).map(|d| {
-                    let name = Path::new(repo)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(repo)
-                        .to_string();
-                    (name, d.as_secs())
+        let backoff: BTreeMap<String, u64> = if guard.enabled {
+            guard
+                .backoff_until
+                .iter()
+                .filter_map(|(repo, until)| {
+                    until.checked_duration_since(now).map(|d| {
+                        let name = Path::new(repo)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(repo)
+                            .to_string();
+                        (name, d.as_secs().max(1))
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         json!({
             "enabled": guard.enabled,
             "active_repos": active,
@@ -135,6 +143,25 @@ impl UiSupervisor {
             "backoff": backoff,
             "caffeinate": guard.caffeinate.is_some(),
         })
+    }
+
+    fn reap_workers(&self) {
+        let rapid_ok = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            reap_finished_raw(&mut guard)
+        };
+        if rapid_ok.is_empty() {
+            return;
+        }
+        let outcomes: Vec<(String, bool)> = rapid_ok
+            .into_iter()
+            .map(|repo| {
+                let pending = repo_has_pending_tasks(&self.ro_db, &repo);
+                (repo, pending)
+            })
+            .collect();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        apply_rapid_exit_outcomes(&mut guard, outcomes);
     }
 
     fn collect_known_repos(&self) -> Vec<Value> {
@@ -226,6 +253,8 @@ impl UiSupervisor {
         let to_stop = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.enabled = enabled;
+            guard.failures.clear();
+            guard.backoff_until.clear();
             if !enabled {
                 Some(take_all_children(&mut guard))
             } else {
@@ -269,6 +298,8 @@ impl UiSupervisor {
         let removed_workers = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.allowed_repos = normalized_set;
+            guard.failures.clear();
+            guard.backoff_until.clear();
             let disallowed_keys: Vec<String> = guard
                 .workers
                 .keys()
@@ -344,14 +375,15 @@ fn loop_forever(weak: Weak<UiSupervisor>) {
 }
 
 fn tick(sup: &UiSupervisor) {
-    {
+    sup.reap_workers();
+    let active_before_scan: BTreeSet<String> = {
         let mut guard = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
-        reap_finished(&mut guard);
         if !guard.enabled {
             sync_caffeinate(&mut guard);
             return;
         }
-    }
+        guard.workers.keys().cloned().collect()
+    };
 
     let Ok(Some(db)) = sup.ro_db.get() else {
         return;
@@ -361,41 +393,39 @@ fn tick(sup: &UiSupervisor) {
         sync_caffeinate(&mut guard);
         return;
     }
-    let ready_tasks = db
-        .list_tasks(sup.scoped_repo.as_deref(), Some(TaskState::Ready))
-        .unwrap_or_default();
-    let running_repos: BTreeSet<String> = db
-        .running_runs(None)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|r| db.get_task(&r.task_id).ok().map(|t| t.repo_root))
-        .collect();
-
-    let mut ready_repos = BTreeSet::new();
-    for t in ready_tasks {
-        if Path::new(&t.repo_root).is_dir() {
-            ready_repos.insert(t.repo_root);
+    let mut candidate_repos = BTreeSet::new();
+    for state in [TaskState::Ready, TaskState::Running, TaskState::Gating] {
+        for t in db
+            .list_tasks(sup.scoped_repo.as_deref(), Some(state))
+            .unwrap_or_default()
+        {
+            if Path::new(&t.repo_root).is_dir() {
+                candidate_repos.insert(t.repo_root);
+            }
         }
     }
 
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
+    sup.reap_workers();
     let now = Instant::now();
     let mut guard = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
-    reap_finished(&mut guard);
     if !guard.enabled {
         sync_caffeinate(&mut guard);
         return;
     }
-    for repo in ready_repos {
+    for repo in candidate_repos {
         if !is_repo_allowed(&guard.allowed_repos, &repo) {
             continue;
         }
-        if guard.workers.contains_key(&repo) || running_repos.contains(&repo) {
+        if active_before_scan.contains(&repo) || guard.workers.contains_key(&repo) {
             continue;
         }
         if guard.backoff_until.get(&repo).is_some_and(|u| *u > now) {
+            continue;
+        }
+        if is_repo_lock_held(&sup.ctx.data_dir, &repo) {
             continue;
         }
         match spawn_repo_runner(&exe, &sup.ctx, &repo) {
@@ -406,6 +436,18 @@ fn tick(sup: &UiSupervisor) {
         }
     }
     sync_caffeinate(&mut guard);
+}
+
+fn repo_has_pending_tasks(ro_db: &SharedRoDb, repo_root: &str) -> bool {
+    let Ok(Some(db)) = ro_db.get() else {
+        return false;
+    };
+    [TaskState::Ready, TaskState::Running, TaskState::Gating]
+        .into_iter()
+        .any(|state| {
+            db.list_tasks(Some(repo_root), Some(state))
+                .is_ok_and(|tasks| !tasks.is_empty())
+        })
 }
 
 fn compute_backoff_secs(failures: u32) -> u64 {
@@ -422,55 +464,135 @@ fn record_failure(inner: &mut Inner, repo: String) {
         .insert(repo, Instant::now() + Duration::from_secs(secs));
 }
 
-fn reap_finished(inner: &mut Inner) {
+/// Reaps exited workers. Returns repos that exited `0` faster than `RAPID_EXIT_SECS`
+/// so the caller can check outside the mutex whether work still remains.
+fn reap_finished_raw(inner: &mut Inner) -> Vec<String> {
     let mut done = Vec::new();
     for (repo, slot) in &mut inner.workers {
         if let Ok(Some(status)) = slot.child.try_wait() {
-            done.push((repo.clone(), status.success()));
+            let rapid = slot.spawned_at.elapsed() < Duration::from_secs(RAPID_EXIT_SECS);
+            done.push((repo.clone(), status.success(), rapid));
         }
     }
-    for (repo, ok) in done {
+    let mut rapid_ok = Vec::new();
+    for (repo, ok, rapid) in done {
         inner.workers.remove(&repo);
-        if ok {
+        if ok && !rapid {
             inner.failures.remove(&repo);
             inner.backoff_until.remove(&repo);
+        } else if ok {
+            rapid_ok.push(repo);
         } else {
             record_failure(inner, repo);
+        }
+    }
+    rapid_ok
+}
+
+fn apply_rapid_exit_outcomes(inner: &mut Inner, outcomes: Vec<(String, bool)>) {
+    for (repo, still_pending) in outcomes {
+        if still_pending {
+            record_failure(inner, repo);
+        } else {
+            inner.failures.remove(&repo);
+            inner.backoff_until.remove(&repo);
         }
     }
 }
 
 fn sync_caffeinate(inner: &mut Inner) {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(ref mut c) = inner.caffeinate
-            && c.try_wait().ok().flatten().is_some()
-        {
-            inner.caffeinate = None;
-        }
-        let need = inner.enabled && !inner.workers.is_empty();
-        if need && inner.caffeinate.is_none() {
-            let pid = std::process::id().to_string();
-            if let Ok(child) = Command::new("/usr/bin/caffeinate")
-                .args(["-s", "-w", &pid])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                inner.caffeinate = Some(child);
-            }
-        } else if !need && let Some(mut c) = inner.caffeinate.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = inner;
-    }
+    let need = inner.enabled && !inner.workers.is_empty();
+    sync_caffeinate_child(&mut inner.caffeinate, need);
 }
 
 fn take_all_children(inner: &mut Inner) -> (BTreeMap<String, WorkerSlot>, Option<Child>) {
     (std::mem::take(&mut inner.workers), inner.caffeinate.take())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    fn empty_inner() -> Inner {
+        Inner {
+            enabled: true,
+            allowed_repos: None,
+            workers: BTreeMap::new(),
+            failures: BTreeMap::new(),
+            backoff_until: BTreeMap::new(),
+            caffeinate: None,
+            thread_started: false,
+        }
+    }
+
+    fn spawn_exit_zero() -> Child {
+        let mut child = Command::new("/usr/bin/true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        // Wait briefly so try_wait() observes exit status immediately in reap_finished.
+        for _ in 0..50 {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        child
+    }
+
+    #[test]
+    fn rapid_exit_zero_only_backs_off_when_pending_work_remains() {
+        let mut inner = empty_inner();
+        let repo = "/tmp/demo-repo".to_string();
+
+        // 1. Rapid exit 0 while tasks still remain -> triggers backoff to stop 5s busy-loop.
+        inner.workers.insert(
+            repo.clone(),
+            WorkerSlot {
+                child: spawn_exit_zero(),
+                repo_name: "demo-repo".into(),
+                spawned_at: Instant::now(),
+            },
+        );
+        let rapid = reap_finished_raw(&mut inner);
+        assert_eq!(rapid, vec![repo.clone()]);
+        apply_rapid_exit_outcomes(&mut inner, vec![(repo.clone(), true)]);
+        assert_eq!(inner.failures.get(&repo), Some(&1));
+        assert!(inner.backoff_until.contains_key(&repo));
+
+        // 2. Rapid exit 0 when repo drained cleanly (no pending tasks) -> clears backoff.
+        inner.workers.insert(
+            repo.clone(),
+            WorkerSlot {
+                child: spawn_exit_zero(),
+                repo_name: "demo-repo".into(),
+                spawned_at: Instant::now(),
+            },
+        );
+        let rapid = reap_finished_raw(&mut inner);
+        assert_eq!(rapid, vec![repo.clone()]);
+        apply_rapid_exit_outcomes(&mut inner, vec![(repo.clone(), false)]);
+        assert!(!inner.failures.contains_key(&repo));
+        assert!(!inner.backoff_until.contains_key(&repo));
+
+        // 3. Sustained run exiting 0 (>= RAPID_EXIT_SECS) -> immediately clears backoff.
+        record_failure(&mut inner, repo.clone());
+        inner.workers.insert(
+            repo.clone(),
+            WorkerSlot {
+                child: spawn_exit_zero(),
+                repo_name: "demo-repo".into(),
+                spawned_at: Instant::now() - Duration::from_secs(RAPID_EXIT_SECS + 1),
+            },
+        );
+        let rapid = reap_finished_raw(&mut inner);
+        assert!(rapid.is_empty());
+        assert!(!inner.failures.contains_key(&repo));
+        assert!(!inner.backoff_until.contains_key(&repo));
+    }
 }

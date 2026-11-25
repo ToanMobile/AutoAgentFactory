@@ -152,7 +152,21 @@ fn trusted_origin_allows_https_proxy_but_keeps_bearer_auth_and_blocks_foreign() 
     );
     assert_eq!(st_csrf, 403);
 
-    // 5. Local loopback access still works alongside trusted_origin
+    // 5. Static i18n asset allowed via trusted_origin Host, blocked on foreign Host
+    let (st_i18n_ok, head_i18n_ok, _) = send_raw_bytes(
+        addr,
+        "GET /assets/i18n.js HTTP/1.1\r\nHost: mac.tail1234.ts.net\r\n\r\n",
+    );
+    assert_eq!(st_i18n_ok, 200);
+    assert!(head_i18n_ok.contains("Content-Type: application/javascript; charset=utf-8"));
+
+    let (st_i18n_foreign, _, _) = send_raw_bytes(
+        addr,
+        "GET /assets/i18n.js HTTP/1.1\r\nHost: evil.example.com\r\n\r\n",
+    );
+    assert_eq!(st_i18n_foreign, 403);
+
+    // 6. Local loopback access still works alongside trusted_origin
     let (st_local, _, _) = send_raw_bytes(
         addr,
         &format!(
@@ -197,17 +211,65 @@ fn pwa_manifest_and_icons_are_served_without_auth_and_valid_png_magic() {
     assert!(head_svg.contains("image/svg+xml"));
     assert!(String::from_utf8_lossy(&body_svg).contains("<svg"));
 
+    let (st_i18n, head_i18n, body_i18n) = send_raw_bytes(
+        addr,
+        &format!("GET /assets/i18n.js HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    );
+    assert_eq!(st_i18n, 200);
+    assert!(head_i18n.contains("Content-Type: application/javascript; charset=utf-8"));
+    assert!(head_i18n.contains("X-Content-Type-Options: nosniff"));
+    assert!(head_i18n.contains("X-Frame-Options: DENY"));
+    assert!(head_i18n.contains("Referrer-Policy: no-referrer"));
+    assert!(head_i18n.contains("Cache-Control: no-cache"));
+    let i18n_js = String::from_utf8_lossy(&body_i18n);
+    assert!(i18n_js.contains("window.AafI18n"));
+    assert!(i18n_js.contains("aaf_ui_lang"));
+    assert!(!i18n_js.contains(TEST_TOKEN));
+
+    // Cache-busting query strings work; non-GET & traversal variants are rejected.
+    let (st_i18n_q, _, _) = send_raw_bytes(
+        addr,
+        &format!("GET /assets/i18n.js?v=1 HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    );
+    assert_eq!(st_i18n_q, 200);
+    let (st_i18n_post_noauth, _, _) = send_raw_bytes(
+        addr,
+        &format!("POST /assets/i18n.js HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\n\r\n"),
+    );
+    assert_eq!(st_i18n_post_noauth, 401);
+    let (st_i18n_post_auth, _, _) = send_raw_bytes(
+        addr,
+        &format!(
+            "POST /assets/i18n.js HTTP/1.1\r\nHost: {addr}\r\n\
+             Authorization: Bearer {TEST_TOKEN}\r\nContent-Length: 0\r\n\r\n"
+        ),
+    );
+    assert_eq!(st_i18n_post_auth, 405);
+    let (st_i18n_trav, _, _) = send_raw_bytes(
+        addr,
+        &format!(
+            "GET /assets/i18n.js/.. HTTP/1.1\r\nHost: {addr}\r\n\
+             Authorization: Bearer {TEST_TOKEN}\r\n\r\n"
+        ),
+    );
+    assert_eq!(st_i18n_trav, 404);
+
     let (st_idx, _, body_idx) =
         send_raw_bytes(addr, &format!("GET / HTTP/1.1\r\nHost: {addr}\r\n\r\n"));
     assert_eq!(st_idx, 200);
     let idx_html = String::from_utf8_lossy(&body_idx);
     assert!(idx_html.contains("rel=\"icon\" type=\"image/svg+xml\" href=\"/icon.svg?v=4\""));
+    assert!(idx_html.contains("id=\"langBtn\""));
+    assert!(idx_html.contains("/assets/i18n.js"));
     assert!(!idx_html.contains("id=\"supReposBtn\""));
     assert!(idx_html.contains("supervisor_repos"));
     assert!(idx_html.contains("boardLoaded"));
     assert!(idx_html.contains("renderLiveRunBox"));
     assert!(idx_html.contains("tickLiveClocks"));
     assert!(idx_html.contains("clearViewParamFromUrl"));
+    assert!(!idx_html.contains("boardView === \"kanban\" && stateFilter === \"all\""));
+    assert!(idx_html.contains("matchesStateFilter"));
+    assert!(idx_html.contains("renderChips(scopedTasks)"));
 
     let (st_studio, _, body_studio) = send_raw_bytes(
         addr,
