@@ -6,121 +6,187 @@
 <title>AAF Studio</title>
 <style>
 :root{
-  --bg:#FAF8F5;--surface:#FFFFFF;--surface2:#F3EFE8;--ink:#1F1D1A;--muted:#6E685F;
-  --border:#E6E1D9;--accent:#B45309;--ok:#0F766E;--ok-bg:#ECFDF5;
-  --warn:#B45309;--warn-bg:#FEF3C7;--err:#B91C1C;--err-bg:#FEE2E2;--info:#3730A3;--info-bg:#EEF2FF;
-  --bar:#B45309;--bar2:#E7C9A0;
-  --shadow:0 1px 2px rgba(31,29,26,.06),0 8px 24px rgba(31,29,26,.06);
+  --bg:#F7F5F1;--surface:#FFFFFF;--surface2:#F0ECE5;--ink:#1A1916;--ink2:#3A3631;--muted:#5C564D;
+  --border:#E2DCD2;--accent:#A84A06;
+  --ok:#0B6B5E;--ok-bg:#E3F6F0;--warn:#8A4B00;--warn-bg:#FDEFC8;--err:#A61B1B;--err-bg:#FDE3E3;--info:#2F3A9E;--info-bg:#E8ECFE;
+  --bar:#B45309;--bar2:#EBCFA8;
+  --shadow:0 1px 2px rgba(26,25,22,.05),0 6px 18px rgba(26,25,22,.05);
   --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
 }
 [data-theme="dark"]{
-  --bg:#151412;--surface:#1F1D1A;--surface2:#292622;--ink:#F4F1EA;--muted:#A49D92;
-  --border:#35312B;--accent:#F59E0B;--ok:#2DD4BF;--ok-bg:#102D2A;
-  --warn:#FBBF24;--warn-bg:#382811;--err:#F87171;--err-bg:#3A1818;--info:#A5B4FC;--info-bg:#1E2042;
-  --bar:#F59E0B;--bar2:#5A4423;
-  --shadow:0 1px 2px rgba(0,0,0,.35),0 10px 28px rgba(0,0,0,.45);
+  --bg:#121110;--surface:#1C1A18;--surface2:#27241F;--ink:#F5F2EC;--ink2:#DDD7CC;--muted:#B5AC9F;
+  --border:#38332C;--accent:#F5A524;
+  --ok:#4ADEC4;--ok-bg:#0F2D28;--warn:#FCC34D;--warn-bg:#3A2A0E;--err:#FF8A8A;--err-bg:#3D1717;--info:#AAB6FF;--info-bg:#1D2147;
+  --bar:#F59E0B;--bar2:#5E4824;
+  --shadow:0 1px 2px rgba(0,0,0,.35),0 8px 24px rgba(0,0,0,.4);
 }
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
 button,input,select{font:inherit;color:inherit}
-button,select{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:6px 11px}
+button{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:7px 12px;font-weight:500}
 button:hover{background:var(--surface2)}
+button:disabled{opacity:.55;cursor:default}
+button.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 a{color:var(--accent)}
 header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border)}
-.brand{font-weight:700;font-size:16px}.brand small{font-weight:400;color:var(--muted);margin-left:8px}
+.brand{font-weight:700;font-size:17px}.brand small{font-weight:500;color:var(--muted);margin-left:8px;font-size:14px}
 .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.seg button{border:0;border-radius:0;padding:6px 10px}
+.seg button{border:0;border-radius:0;padding:7px 11px}
 .seg button.on{background:var(--ink);color:var(--bg)}
-main{max-width:1240px;margin:0 auto;padding:18px 20px 60px;display:grid;gap:16px}
-.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
-.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr))}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
-.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 10px;font-weight:600}
-.kpi .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
-.kpi .l{color:var(--muted);font-size:12px}.kpi .s{color:var(--muted);font-size:12px;margin-top:2px}
+main{max-width:1240px;margin:0 auto;padding:18px 20px 60px;display:grid;gap:18px}
+h1.sec{font-size:15px;margin:4px 0 -6px;color:var(--ink2);font-weight:700}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(min(160px,100%),1fr))}
+.two{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(min(420px,100%),1fr))}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
+.card h2{font-size:14px;color:var(--ink2);margin:0 0 12px;font-weight:700;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.hint{font-weight:400;color:var(--muted);font-size:13px}
+/* Needs-you tiles */
+.tile{display:block;width:100%;text-align:left;padding:14px 16px;border-radius:12px;border:1px solid var(--border);background:var(--surface);box-shadow:var(--shadow)}
+.tile .n{font-size:30px;font-weight:750;line-height:1.1;font-variant-numeric:tabular-nums}
+.tile .t{font-weight:650;margin-top:2px}
+.tile .s{color:var(--muted);font-size:13px}
+.tile.err{background:var(--err-bg);border-color:transparent}.tile.err .n{color:var(--err)}
+.tile.warn{background:var(--warn-bg);border-color:transparent}.tile.warn .n{color:var(--warn)}
+.tile.info .n{color:var(--info)}.tile.ok .n{color:var(--ok)}
+.tile.sel{outline:2px solid var(--ink);outline-offset:1px}
+.tile:hover{filter:brightness(.98)}
+/* KPIs */
+.kpi .l{color:var(--muted);font-size:13px;font-weight:600}
+.kpi .v{font-size:26px;font-weight:750;font-variant-numeric:tabular-nums;margin:2px 0}
+.kpi .s{color:var(--muted);font-size:13px}
+/* tables */
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--border);vertical-align:top}
-th{font-size:12px;color:var(--muted);font-weight:600}
-td.n,th.n{text-align:right}
-.tablewrap{overflow-x:auto}
-.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--surface2)}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border);vertical-align:middle}
+th{font-size:13px;color:var(--muted);font-weight:600}
+td.n,th.n{text-align:right;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.sub{display:block;color:var(--muted);font-size:13px}
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:13px;font-weight:600;background:var(--surface2);color:var(--ink2);white-space:nowrap}
 .ok{background:var(--ok-bg);color:var(--ok)}.warn{background:var(--warn-bg);color:var(--warn)}
 .err{background:var(--err-bg);color:var(--err)}.info{background:var(--info-bg);color:var(--info)}
-.muted{color:var(--muted)}.mono{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
-.card{overflow-x:auto}
-@media (max-width:600px){header,main{padding-left:16px;padding-right:16px}}
-.bar{position:relative;height:16px;background:var(--surface2);border-radius:4px;overflow:hidden;min-width:80px}
+.muted{color:var(--muted)}.mono{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+.bar{position:relative;height:12px;background:var(--surface2);border-radius:6px;overflow:hidden;min-width:60px}
 .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--bar2)}
-.bar b{position:absolute;left:0;top:0;bottom:0;background:var(--bar)}
-.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:8px}
-.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:var(--bar)}
+.bar b{position:absolute;left:0;top:0;bottom:0;background:var(--bar);border-radius:6px}
+.legend{display:flex;gap:14px;font-size:13px;color:var(--muted);margin-top:10px}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px;background:var(--bar)}
 .legend span.p90::before{background:var(--bar2)}
-details summary{cursor:pointer}
-ul.ac{margin:6px 0 0;padding-left:18px}
-.empty{color:var(--muted);padding:10px 0}
+.empty{color:var(--muted);padding:8px 0}
+/* task list */
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.chips button{border-radius:999px;padding:5px 12px;font-size:14px}
+.chips button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}.chips button.on .muted{color:inherit;opacity:.75}
+.task{border:1px solid var(--border);border-radius:10px;margin-bottom:10px;background:var(--surface)}
+.task>summary{list-style:none;cursor:pointer;padding:12px 14px;display:grid;grid-template-columns:1fr auto;gap:4px 12px;align-items:start}
+.task>summary::-webkit-details-marker{display:none}
+.task .title{font-weight:650;overflow-wrap:anywhere}
+.task .meta{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;color:var(--muted);font-size:13px}
+.task .body{padding:0 14px 14px;display:grid;gap:10px}
+.task[open]>summary .chev{transform:rotate(90deg)}
+.chev{display:inline-block;transition:transform .15s;color:var(--muted)}
+.callout{border-radius:8px;padding:10px 12px;font-size:14px}
+.callout b{display:block;margin-bottom:2px}
+.callout.err{background:var(--err-bg);color:var(--ink)}.callout.err b{color:var(--err)}
+.callout.warn{background:var(--warn-bg);color:var(--ink)}.callout.warn b{color:var(--warn)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+code{font-family:var(--mono);font-size:13px;background:var(--surface2);padding:2px 6px;border-radius:5px;overflow-wrap:anywhere}
+ul.ac{margin:4px 0 0;padding-left:20px}ul.ac li{margin:2px 0}
+.lbl{font-size:13px;color:var(--muted);font-weight:600}
 #auth{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
 #auth .card{max-width:440px;width:100%}
-#auth input{width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);margin:8px 0}
+#auth input{width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;background:var(--bg);margin:8px 0}
 #err{display:none}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;display:none;z-index:30;max-width:calc(100% - 32px)}
+@media (max-width:600px){header,main{padding-left:16px;padding-right:16px}.card{padding:14px}.hide-sm{display:none}}
 </style>
 </head>
 <body>
 <header>
   <div class="brand">AAF Studio<small id="scope"></small></div>
   <div class="controls">
-    <div class="seg" id="period">
+    <div class="seg" id="period" title="Period for the numbers below">
       <button data-h="24">24h</button><button data-h="168" class="on">7 days</button><button data-h="720">30 days</button><button data-h="">All</button>
     </div>
-    <button id="refresh" title="Refresh now">Refresh</button>
-    <button id="theme" title="Toggle theme">Theme</button>
+    <button id="refresh" title="Refresh now">↻ Refresh</button>
+    <button id="theme" title="Light or dark">Theme</button>
     <a href="/" title="Board, approvals and live logs">Cockpit →</a>
   </div>
 </header>
 <main>
   <div class="card err" id="err"></div>
+  <h1 class="sec">Right now</h1>
+  <section class="grid" id="needs"></section>
+  <section class="card" id="tasksCard"><h2>Tasks <span class="hint" id="taskHint"></span></h2>
+    <div class="chips" id="chips"></div><div id="tasks"></div></section>
+  <h1 class="sec">How the factory is doing <span class="hint" id="periodLabel"></span></h1>
   <section class="grid" id="kpis"></section>
   <section class="two">
-    <div class="card"><h2>Time per stage</h2><div id="stages"></div>
-      <div class="legend"><span>p50</span><span class="p90">p90</span></div></div>
-    <div class="card"><h2>Executors and cost</h2><div class="tablewrap" id="executors"></div></div>
+    <div class="card"><h2>Time per stage <span class="hint">how long tasks wait in each step</span></h2><div id="stages"></div>
+      <div class="legend"><span>typical (p50)</span><span class="p90">slow (p90)</span></div></div>
+    <div class="card"><h2>Agents and cost</h2><div id="executors"></div></div>
   </section>
   <section class="two">
-    <div class="card"><h2>Why tasks are blocked</h2><div id="blocked"></div></div>
+    <div class="card"><h2>Why tasks got blocked</h2><div id="blocked"></div></div>
     <div class="card"><h2>Live factory</h2><div id="live"></div></div>
   </section>
-  <section class="card"><h2>Tasks and acceptance criteria</h2><div class="tablewrap" id="tasks"></div></section>
-  <section class="card"><h2>Machine and repo health <button id="runDoctor" style="float:right">Run checks</button></h2><div id="doctor" class="empty">Press “Run checks” to run aaf doctor here.</div></section>
+  <section class="card"><h2>Machine and repo health <button id="runDoctor">Run checks</button></h2><div id="doctor" class="empty">Press “Run checks” to run aaf doctor here.</div></section>
   <p class="muted" id="foot"></p>
 </main>
 <div id="auth"><div class="card">
   <h2>Session token</h2>
   <p class="muted">Open the Studio link that <span class="mono">aaf ui</span> prints, or paste its token.</p>
   <input id="tok" type="password" placeholder="Bearer token…">
-  <button id="tokOk">Unlock</button>
+  <button id="tokOk" class="primary">Unlock</button>
 </div></div>
+<div id="toast"></div>
 <script>
 (() => {
-  const TOKEN_KEY = "aaf_ui_token", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period";
-  const STATE_CLASS = { done:"ok", running:"info", gating:"info", review:"warn", blocked:"err", ready:"", backlog:"", cancelled:"" };
+  const TOKEN_KEY = "aaf_ui_token", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period", FILTER_KEY = "aaf_studio_filter";
+  const STATE = {
+    ready: ["Ready", ""], backlog: ["Backlog", ""], running: ["Agent working", "info"], gating: ["Checking", "info"],
+    review: ["Waiting for review", "warn"], blocked: ["Blocked", "err"], done: ["Done", "ok"], cancelled: ["Cancelled", ""],
+  };
+  const STAGE = { queued: "Waiting to start", ready: "Waiting to start", running: "Agent working", gating: "Checks (gate)", review: "Waiting for review", blocked: "Blocked", backlog: "Backlog" };
+  const REASON = {
+    gate_failed: "Checks failed", needs_human: "Needs your decision", quota: "Account quota used up", dependency: "Waiting on another task",
+    merge_conflict: "Merge conflict", flaky_test: "Flaky test", stuck: "Agent got stuck", budget_exceeded: "Budget used up", infra: "Machine or network problem",
+  };
+  const FILTERS = [
+    ["needs", "Needs you", (t) => t.state === "blocked" || t.state === "review"],
+    ["working", "Working", (t) => ["ready", "running", "gating"].includes(t.state)],
+    ["review", "Review", (t) => t.state === "review"],
+    ["blocked", "Blocked", (t) => t.state === "blocked"],
+    ["done", "Done", (t) => t.state === "done"],
+    ["all", "All", () => true],
+  ];
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-  let token = "", hours = "168", timer = null;
+  let token = "", hours = "168", timer = null, filter = null, tasks = [], meta = {}, status = null;
+  const openIds = new Set();
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
 
   function dur(s) {
-    s = Number(s) || 0;
+    s = Math.max(0, Math.round(Number(s) || 0));
     if (s < 60) return s + "s";
     if (s < 3600) return Math.floor(s / 60) + "m";
-    if (s < 86400) return Math.floor(s / 3600) + "h" + String(Math.floor((s % 3600) / 60)).padStart(2, "0");
-    return Math.floor(s / 86400) + "d" + String(Math.floor((s % 86400) / 3600)).padStart(2, "0") + "h";
+    if (s < 86400) return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+    return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
   }
-  const pct = (v) => v == null ? "n/a" : Number(v).toFixed(1) + "%";
+  const ago = (ts) => ts ? dur(Date.now() / 1000 - ts) + " ago" : "";
+  const pct = (v) => v == null ? "n/a" : Math.round(Number(v)) + "%";
   const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
   const num = (v) => (Number(v) || 0).toLocaleString();
+  const short = (v) => { v = Number(v) || 0; return v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v >= 1e3 ? Math.round(v / 1e3) + "k" : String(v); };
+  const reason = (k) => REASON[k] || String(k || "").replace(/_/g, " ");
+
+  function toast(msg) {
+    const t = $("toast"); t.textContent = msg; t.style.display = "block";
+    clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.display = "none"; }, 3500);
+  }
 
   function hashToken() {
     const m = (location.hash || "").match(/(?:^#|&)token=([^&]+)/);
@@ -131,8 +197,11 @@ ul.ac{margin:6px 0 0;padding-left:18px}
     return load(sessionStorage, TOKEN_KEY) || "";
   }
 
-  async function api(path) {
-    const res = await fetch(path, { headers: { "Authorization": "Bearer " + token } });
+  async function api(path, opts) {
+    opts = opts || {};
+    const headers = { "Authorization": "Bearer " + token };
+    if (opts.body) headers["Content-Type"] = "application/json";
+    const res = await fetch(path, Object.assign({}, opts, { headers }));
     let data = {};
     try { data = await res.json(); } catch (_) {}
     if (res.status === 401) { $("auth").style.display = "flex"; throw new Error("token rejected"); }
@@ -140,81 +209,167 @@ ul.ac{margin:6px 0 0;padding-left:18px}
     return data;
   }
 
-  function kpi(label, value, sub, cls) {
-    return `<div class="card kpi"><div class="l">${esc(label)}</div><div class="v ${cls || ""}">${esc(value)}</div><div class="s">${esc(sub || "")}</div></div>`;
+  /* ---------- Right now ---------- */
+  function tile(key, n, title, sub, cls) {
+    return `<button class="tile ${cls}${filter === key ? " sel" : ""}" data-f="${key}"><div class="n">${esc(n)}</div><div class="t">${esc(title)}</div><div class="s">${esc(sub)}</div></button>`;
   }
 
-  function renderKpis(r, st) {
-    const c = r.counts || {}, a = r.autonomy || {}, lt = r.lead_time || {};
-    const active = (c.ready || 0) + (c.running || 0) + (c.gating || 0) + (c.review || 0);
+  function renderNeeds() {
+    const c = (s) => tasks.filter((t) => t.state === s).length;
+    const blocked = c("blocked"), review = c("review"), working = c("running") + c("gating"), ready = c("ready");
+    const frozen = status && status.frozen;
+    const html = [];
+    if (frozen) html.push(tile("blocked", "❄", "Factory frozen", "too many failures in a row; unfreeze to resume", "err"));
+    html.push(tile("blocked", blocked, "Blocked", blocked ? "need your decision · click to see" : "nothing is stuck", blocked ? "err" : "ok"));
+    html.push(tile("review", review, "Waiting for review", review ? "PRs to review and merge" : "no PR waiting", review ? "warn" : "ok"));
+    html.push(tile("working", working, "Agents working", ready ? `${ready} more ready to start` : "running or being checked", "info"));
+    html.push(tile("done", c("done"), "Done", "finished tasks on the board", "ok"));
+    $("needs").innerHTML = html.join("");
+    $("needs").querySelectorAll(".tile").forEach((b) => {
+      b.onclick = () => { setFilter(b.dataset.f); $("tasksCard").scrollIntoView({ behavior: "smooth", block: "start" }); };
+    });
+    if (frozen && !meta.read_only) {
+      const b = document.createElement("div");
+      b.className = "card callout err";
+      b.innerHTML = `<b>The factory is frozen</b>No new task starts until you unfreeze it. <div class="actions" style="margin-top:8px"><button class="primary" id="unfreeze">Unfreeze</button><code>aaf board unfreeze</code></div>`;
+      $("needs").appendChild(b);
+      $("unfreeze").onclick = () => act("unfreeze", "", "Factory unfrozen");
+    }
+  }
+
+  /* ---------- Tasks ---------- */
+  function setFilter(key) {
+    filter = key; store(localStorage, FILTER_KEY, key);
+    renderNeeds(); renderTasks();
+  }
+
+  function advice(t) {
+    if (t.state === "blocked") {
+      const kind = t.blocked_reason;
+      const why = t.blocked_detail ? `<div>${esc(t.blocked_detail)}</div>` : "";
+      const todo = kind === "needs_human" ? "Look at the change, then approve it or send it back."
+        : kind === "gate_failed" ? "Fix the failing check or give the agent more context, then unblock to retry."
+        : kind === "dependency" ? "It starts by itself when the other task is done."
+        : kind === "quota" ? "It retries by itself when the account quota resets."
+        : "Fix the cause, then unblock to retry.";
+      const btn = meta.read_only ? "" : `<button class="primary" data-act="unblock" data-id="${esc(t.id)}">Unblock and retry</button>`;
+      return `<div class="callout err"><b>${esc(reason(kind))}</b>${why}<div class="muted" style="margin-top:4px">${esc(todo)}</div></div>` +
+        `<div class="actions">${btn}<code>aaf board unblock ${esc(t.id)}</code><a href="/">Open in Cockpit</a></div>`;
+    }
+    if (t.state === "review") {
+      return `<div class="callout warn"><b>Ready for your review</b>The checks passed and a pull request is open. Merge it and the task becomes done.</div>` +
+        `<div class="actions"><code>aaf handover ${esc(t.id)} --open</code><a href="/">Open in Cockpit</a></div>`;
+    }
+    return "";
+  }
+
+  function renderTasks() {
+    const counts = Object.fromEntries(FILTERS.map(([k, , f]) => [k, tasks.filter(f).length]));
+    if (!filter) filter = counts.needs ? "needs" : "all";
+    $("chips").innerHTML = FILTERS.map(([k, label]) => `<button data-f="${k}" class="${filter === k ? "on" : ""}">${label} <span class="muted">${counts[k]}</span></button>`).join("");
+    $("chips").querySelectorAll("button").forEach((b) => { b.onclick = () => setFilter(b.dataset.f); });
+    const f = (FILTERS.find(([k]) => k === filter) || FILTERS[5])[2];
+    const rows = tasks.filter(f).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).slice(0, 80);
+    $("taskHint").textContent = "click a task for details";
+    if (!tasks.length) { $("tasks").innerHTML = `<div class="empty">No task yet. Add one with <code>aaf board add</code> or from the Cockpit.</div>`; return; }
+    if (!rows.length) { $("tasks").innerHTML = `<div class="empty">Nothing here. ${filter === "needs" ? "Nothing needs you right now 🎉" : ""}</div>`; return; }
+    $("tasks").innerHTML = rows.map((t) => {
+      const [label, cls] = STATE[t.state] || [t.state, ""];
+      const ac = t.acceptance || [];
+      const done = t.state === "done";
+      const why = t.state === "blocked" ? `<span class="pill err">${esc(reason(t.blocked_reason))}</span>` : "";
+      return `<details class="task" data-id="${esc(t.id)}"${openIds.has(t.id) ? " open" : ""}><summary>` +
+        `<span class="title"><span class="chev">›</span> ${esc(t.title)}</span><span class="pill ${cls}">${esc(label)}</span>` +
+        `<span class="meta">${why}<span>${esc(t.priority || "")}</span><span class="mono">${esc(t.id)}</span><span>${ac.length} criteria</span><span>updated ${esc(ago(t.updated_at))}</span></span>` +
+        `</summary><div class="body">${advice(t)}` +
+        (t.spec_description ? `<div><div class="lbl">What to do</div>${esc(t.spec_description)}</div>` : "") +
+        (ac.length ? `<div><div class="lbl">Acceptance criteria</div><ul class="ac">${ac.map((c) => `<li>${done ? "✅ " : ""}${esc(c)}</li>`).join("")}</ul></div>` : "") +
+        `</div></details>`;
+    }).join("");
+    $("tasks").querySelectorAll("details.task").forEach((d) => {
+      d.ontoggle = () => { d.open ? openIds.add(d.dataset.id) : openIds.delete(d.dataset.id); };
+    });
+    $("tasks").querySelectorAll("button[data-act]").forEach((b) => {
+      b.onclick = (e) => { e.preventDefault(); act(b.dataset.act, b.dataset.id, "Task moved back to Ready", b); };
+    });
+  }
+
+  async function act(action, taskId, okMsg, btn) {
+    if (btn && !btn.dataset.armed) { btn.dataset.armed = "1"; btn.textContent = "Click again to confirm"; return; }
+    if (btn) btn.disabled = true;
+    try {
+      await api("/api/action", { method: "POST", body: JSON.stringify({ action, task_id: taskId || "", note: "from Studio" }) });
+      toast(okMsg); refresh();
+    } catch (e) { toast("Could not do that: " + e.message); if (btn) btn.disabled = false; }
+  }
+
+  /* ---------- Period numbers ---------- */
+  function kpi(label, value, sub) {
+    return `<div class="card kpi"><div class="l">${esc(label)}</div><div class="v">${esc(value)}</div><div class="s">${esc(sub || "")}</div></div>`;
+  }
+
+  function renderKpis(r) {
+    const a = r.autonomy || {}, lt = r.lead_time || {}, c = r.counts || {};
     $("kpis").innerHTML = [
-      kpi("Tasks done", num(r.tasks_done), `${num(c.total)} touched in period`),
-      kpi("Autonomy", pct(a.autonomy_rate_pct), `${num(a.done_without_human)} of ${num(a.done_tasks)} done without you`),
-      kpi("Gate first pass", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `avg gate ${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : ""),
-      kpi("Estimated cost", usd(r.estimated_cost_usd), `${num(r.total_tokens_in)} in / ${num(r.total_tokens_out)} out tokens`),
-      kpi("Lead time p50", lt.samples ? dur(lt.p50_secs) : "n/a", lt.samples ? `p90 ${dur(lt.p90_secs)} · max ${dur(lt.max_secs)}` : "created → done"),
-      kpi("In progress", num(active), `${num(c.blocked)} blocked`),
-      kpi("Factory", st && st.frozen ? "Frozen" : "Running", st && st.frozen ? "run aaf board unfreeze or use Cockpit" : "accepting work"),
+      kpi("Tasks finished", num(r.tasks_done), `${num(c.total)} tasks moved in this period`),
+      kpi("Time to finish (typical)", lt.samples ? dur(lt.p50_secs) : "n/a", lt.samples ? `slow ones: ${dur(lt.p90_secs)}` : "from created to done"),
+      kpi("Done without you", pct(a.autonomy_rate_pct), `${num(a.done_without_human)} of ${num(a.done_tasks)} finished tasks`),
+      kpi("Checks pass first time", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `a check takes ${dur(a.gate_avg_duration_ms / 1000)}` : "no gate run yet"),
+      kpi("Estimated cost", usd(r.estimated_cost_usd), `${short(r.total_tokens_in)} tokens in · ${short(r.total_tokens_out)} out`),
     ].join("");
   }
 
   function renderStages(stages) {
     if (!stages || !stages.length) { $("stages").innerHTML = `<div class="empty">No stage data in this period yet.</div>`; return; }
     const max = Math.max(1, ...stages.map((s) => s.durations.p90_secs || 0));
-    $("stages").innerHTML = `<table><tr><th>Stage</th><th>Distribution</th><th class="n">p50</th><th class="n">p90</th><th class="n">Stays</th><th class="n">Now</th></tr>` +
+    $("stages").innerHTML = `<table><tr><th>Step</th><th class="hide-sm"></th><th class="n">Typical</th><th class="n">Slow</th><th class="n">Now</th></tr>` +
       stages.map((s) => {
         const d = s.durations;
         const w50 = (100 * (d.p50_secs || 0) / max).toFixed(1), w90 = (100 * (d.p90_secs || 0) / max).toFixed(1);
-        return `<tr><td>${esc(s.stage)}</td><td><div class="bar" title="p50 ${dur(d.p50_secs)}, p90 ${dur(d.p90_secs)}, max ${dur(d.max_secs)}"><i style="width:${w90}%"></i><b style="width:${w50}%"></b></div></td>` +
-          `<td class="n">${d.samples ? dur(d.p50_secs) : "—"}</td><td class="n">${d.samples ? dur(d.p90_secs) : "—"}</td><td class="n">${num(d.samples)}</td><td class="n">${num(s.open_now)}</td></tr>`;
+        return `<tr title="${num(d.samples)} finished stays · max ${dur(d.max_secs)}"><td>${esc(STAGE[s.stage] || s.stage)}</td>` +
+          `<td class="hide-sm" style="width:35%"><div class="bar"><i style="width:${w90}%"></i><b style="width:${w50}%"></b></div></td>` +
+          `<td class="n">${d.samples ? dur(d.p50_secs) : "—"}</td><td class="n">${d.samples ? dur(d.p90_secs) : "—"}</td><td class="n">${num(s.open_now)}</td></tr>`;
       }).join("") + `</table>`;
   }
 
   function renderExecutors(list, total) {
     if (!list || !list.length) { $("executors").innerHTML = `<div class="empty">No agent run in this period yet.</div>`; return; }
-    $("executors").innerHTML = `<table><tr><th>Executor</th><th class="n">Runs</th><th class="n">OK</th><th class="n">Failed</th><th class="n">Time</th><th class="n">Tokens in/out</th><th class="n">Cost</th></tr>` +
-      list.map((e) => `<tr><td>${esc(e.executor)}</td><td class="n">${num(e.runs)}</td><td class="n">${num(e.succeeded)}</td><td class="n">${num(e.failed)}${e.running ? ` <span class="pill info">${num(e.running)} live</span>` : ""}</td>` +
-        `<td class="n">${dur(e.wall_secs)}</td><td class="n">${num(e.tokens_in)} / ${num(e.tokens_out)}</td><td class="n">${usd(e.estimated_cost_usd)}</td></tr>`).join("") +
-      `<tr><th>Total</th><td></td><td></td><td></td><td></td><td></td><th class="n">${usd(total)}</th></tr></table>`;
+    $("executors").innerHTML = `<table><tr><th>Agent</th><th class="n">Runs</th><th class="n">Time</th><th class="n">Cost</th></tr>` +
+      list.map((e) => {
+        const live = e.running ? ` <span class="pill info">${num(e.running)} live</span>` : "";
+        const fail = e.failed ? `, <span style="color:var(--err)">${num(e.failed)} failed</span>` : "";
+        return `<tr><td><b>${esc(e.executor)}</b>${live}<span class="sub">${short(e.tokens_in)} in · ${short(e.tokens_out)} out tokens</span></td>` +
+          `<td class="n">${num(e.runs)}<span class="sub">${num(e.succeeded)} ok${fail}</span></td><td class="n">${dur(e.wall_secs)}</td><td class="n">${usd(e.estimated_cost_usd)}</td></tr>`;
+      }).join("") + `<tr><td><b>Total</b></td><td></td><td></td><td class="n"><b>${usd(total)}</b></td></tr></table>`;
   }
 
   function renderBlocked(top) {
-    if (!top || !top.length) { $("blocked").innerHTML = `<div class="empty">Nothing is blocked.</div>`; return; }
+    if (!top || !top.length) { $("blocked").innerHTML = `<div class="empty">Nothing got blocked in this period. 🎉</div>`; return; }
     const max = Math.max(1, ...top.map((t) => t[1]));
     $("blocked").innerHTML = `<table>` + top.map(([kind, n]) =>
-      `<tr><td>${esc(kind)}</td><td style="width:55%"><div class="bar"><b style="width:${(100 * n / max).toFixed(1)}%"></b></div></td><td class="n">${num(n)}</td></tr>`).join("") + `</table>`;
+      `<tr><td>${esc(reason(kind))}</td><td style="width:45%"><div class="bar"><b style="width:${(100 * n / max).toFixed(1)}%"></b></div></td><td class="n">${num(n)}</td></tr>`).join("") + `</table>`;
   }
 
-  function renderLive(st) {
+  function renderLive() {
+    const st = status;
     if (!st) { $("live").innerHTML = `<div class="empty">No status yet.</div>`; return; }
+    const title = Object.fromEntries(tasks.map((t) => [t.id, t.title]));
     const runs = (st.recent_runs || []).slice(0, 6);
-    const accounts = st.accounts || [];
     const t = st.throttle || {};
-    let html = `<table><tr><th>Heavy slots in use</th><td class="n">${num(t.throttle_slots)}</td></tr>` +
-      `<tr><th>Drain lock</th><td class="n">${t.drain_lock_present ? `<span class="pill warn">held</span>` : "free"}</td></tr></table>`;
-    if (accounts.length) {
-      html += `<h2 style="margin-top:14px">Accounts</h2><table>` + accounts.map((a) =>
-        `<tr><td>${esc(a.name)}</td><td>${esc(a.provider)}</td><td><span class="pill ${a.status === "available" || a.status === "ready" ? "ok" : "warn"}">${esc(a.status)}</span></td></tr>`).join("") + `</table>`;
-    }
+    const RUN = { running: "info", succeeded: "ok", failed: "err", cancelled: "" };
+    let html = `<div class="actions" style="margin-bottom:10px"><span class="pill">${num(t.throttle_slots)} heavy builds running</span>` +
+      (t.drain_lock_present ? `<span class="pill warn">build queue draining</span>` : `<span class="pill ok">build queue free</span>`) + `</div>`;
     if (runs.length) {
-      html += `<h2 style="margin-top:14px">Recent runs</h2><table>` + runs.map((r) =>
-        `<tr><td class="mono">${esc(r.task_id || r.id || "")}</td><td>${esc(r.executor || "")}</td><td><span class="pill">${esc(r.status || "")}</span></td></tr>`).join("") + `</table>`;
+      html += `<table>` + runs.map((r) =>
+        `<tr><td>${esc(title[r.task_id] || r.task_id || "")}<span class="sub">${esc(r.executor || "")} · ${r.status === "running" ? "started " + esc(ago(r.started_at)) : esc(ago(r.ended_at || r.started_at))}</span></td>` +
+        `<td class="n"><span class="pill ${RUN[r.status] || ""}">${esc(r.status || "")}</span></td></tr>`).join("") + `</table>`;
+    } else html += `<div class="empty">No agent run yet.</div>`;
+    const accounts = st.accounts || [];
+    if (accounts.length) {
+      html += `<div class="lbl" style="margin-top:12px">Accounts</div><table>` + accounts.map((a) =>
+        `<tr><td>${esc(a.name)}<span class="sub">${esc(a.provider)}</span></td><td class="n"><span class="pill ${a.status === "available" || a.status === "ready" ? "ok" : "warn"}">${esc(a.status)}</span></td></tr>`).join("") + `</table>`;
     }
     $("live").innerHTML = html;
-  }
-
-  function renderTasks(tasks) {
-    if (!tasks || !tasks.length) { $("tasks").innerHTML = `<div class="empty">No task yet. Add one with aaf board add or from the Cockpit.</div>`; return; }
-    const rows = tasks.slice().sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).slice(0, 60);
-    $("tasks").innerHTML = `<table><tr><th>Task</th><th>State</th><th class="n">Criteria</th><th class="n">Updated</th></tr>` +
-      rows.map((t) => {
-        const ac = t.acceptance || [];
-        const list = ac.length ? `<details><summary>${esc(t.title)}</summary><ul class="ac">${ac.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></details>` : esc(t.title);
-        const when = t.updated_at ? new Date(t.updated_at * 1000).toLocaleString() : "";
-        const why = t.state === "blocked" && t.blocked_reason ? ` <span class="muted">(${esc(t.blocked_reason)})</span>` : "";
-        return `<tr><td>${list}<div class="mono muted">${esc(t.id)}</div></td><td><span class="pill ${STATE_CLASS[t.state] || ""}">${esc(t.state)}</span>${why}</td>` +
-          `<td class="n">${ac.length ? (t.state === "done" ? `✓ ${ac.length}/${ac.length}` : `${ac.length}`) : "—"}</td><td class="n muted">${esc(when)}</td></tr>`;
-      }).join("") + `</table>`;
   }
 
   async function runDoctor() {
@@ -226,28 +381,26 @@ ul.ac{margin:6px 0 0;padding-left:18px}
       $("doctor").className = "";
       $("doctor").innerHTML = `<p>${bad.length ? `<span class="pill err">${bad.length} problem(s)</span>` : `<span class="pill ok">All checks pass</span>`}</p><table>` +
         checks.sort((a, b) => Number(a.ok) - Number(b.ok)).map((c) =>
-          `<tr><td>${c.ok ? `<span class="pill ok">ok</span>` : `<span class="pill ${c.required ? "err" : "warn"}">${c.required ? "fail" : "advice"}</span>`}</td><td>${esc(c.name)}</td><td class="mono">${esc(c.detail)}</td></tr>`).join("") + `</table>`;
+          `<tr><td style="width:1%">${c.ok ? `<span class="pill ok">ok</span>` : `<span class="pill ${c.required ? "err" : "warn"}">${c.required ? "fail" : "advice"}</span>`}</td><td><b>${esc(c.name)}</b><span class="sub mono">${esc(c.detail)}</span></td></tr>`).join("") + `</table>`;
     } catch (e) { $("doctor").textContent = "Checks failed: " + e.message; }
   }
 
   async function refresh() {
     if (!token) { $("auth").style.display = "flex"; return; }
     const q = hours ? "?since=" + encodeURIComponent(hours) : "";
-    const [rep, st, meta, board] = await Promise.allSettled([api("/api/report" + q), api("/api/status"), api("/api/meta"), api("/api/board")]);
-    const errors = [rep, st, meta, board].filter((p) => p.status === "rejected").map((p) => p.reason.message);
+    const [rep, st, mt, board] = await Promise.allSettled([api("/api/report" + q), api("/api/status"), api("/api/meta"), api("/api/board")]);
+    const errors = [rep, st, mt, board].filter((p) => p.status === "rejected").map((p) => p.reason.message);
     $("err").style.display = errors.length ? "block" : "none";
     $("err").textContent = errors.length ? "Some data could not load: " + [...new Set(errors)].join("; ") : "";
-    const status = st.status === "fulfilled" ? st.value : null;
-    if (meta.status === "fulfilled") $("scope").textContent = `${meta.value.repo_name || meta.value.scope || ""} · v${meta.value.version || "?"}`;
+    status = st.status === "fulfilled" ? st.value : null;
+    if (mt.status === "fulfilled") { meta = mt.value; $("scope").textContent = `${meta.repo_name || meta.scope || ""} · v${meta.version || "?"}`; }
+    if (board.status === "fulfilled") tasks = board.value.tasks || [];
+    renderNeeds(); renderTasks(); renderLive();
     if (rep.status === "fulfilled") {
       const r = rep.value.report || {};
-      renderKpis(r, status);
-      renderStages(r.stages);
-      renderExecutors(r.executors, r.estimated_cost_usd);
-      renderBlocked(r.top_blocked);
+      renderKpis(r); renderStages(r.stages); renderExecutors(r.executors, r.estimated_cost_usd); renderBlocked(r.top_blocked);
     }
-    renderLive(status);
-    if (board.status === "fulfilled") renderTasks(board.value.tasks);
+    $("periodLabel").textContent = hours ? `· last ${hours === "24" ? "24 hours" : hours === "168" ? "7 days" : "30 days"}` : "· all time";
     $("foot").textContent = "Updated " + new Date().toLocaleTimeString() + " · refreshes every 15 s";
   }
 
@@ -263,6 +416,7 @@ ul.ac{margin:6px 0 0;padding-left:18px}
     };
     const saved = load(localStorage, PERIOD_KEY);
     if (saved !== null) hours = saved;
+    filter = load(localStorage, FILTER_KEY);
     document.querySelectorAll("#period button").forEach((b) => {
       b.classList.toggle("on", b.dataset.h === hours);
       b.onclick = () => {
