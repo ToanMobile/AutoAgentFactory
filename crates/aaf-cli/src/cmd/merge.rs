@@ -14,7 +14,8 @@ use aaf_domain::ports::{Clock, EventSink, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::gate::GIT_TIMEOUT;
 use aaf_engine::git::{
-    GhClient, MergeStrategy, PrMergeOutcome, PrMergeRequest, SystemGh, merge_pr, worktree,
+    GhClient, MergeStrategy, PrMergeOutcome, PrMergeRequest, SystemGh, main_work_tree,
+    merge_pr_with_cwd, worktree,
 };
 use aaf_engine::throttle::Progress;
 use clap::ValueEnum;
@@ -166,9 +167,9 @@ fn resolve_task_merge_target(
         .get_task(task_id)
         .map_err(|e| CmdError::new(format!("merge: task {task_id}: {e}")))?;
     let repo_root = if !task.repo_root.is_empty() && Path::new(&task.repo_root).is_dir() {
-        PathBuf::from(&task.repo_root)
+        main_work_tree(Path::new(&task.repo_root))
     } else {
-        ctx.repo_root()?
+        main_work_tree(&ctx.repo_root()?)
     };
     let events = db
         .events_for_task(&task.id, 100)
@@ -259,7 +260,7 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
             .expect_head
             .clone()
             .ok_or_else(|| CmdError::new("merge: --expect-head or --task is required"))?;
-        (ctx.repo_root()?, pr, head, None)
+        (main_work_tree(&ctx.repo_root()?), pr, head, None)
     };
     let cfg = ctx.load_config(&repo_root)?;
     let req = PrMergeRequest {
@@ -280,8 +281,14 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
         global_config: Some(cfg.global.clone()),
     };
     let progress = |event: &Progress<'_>| notice("merge", &progress_line(event));
-    let outcome = merge_pr(&req, &SystemGh, &SystemClock, &progress)
-        .map_err(|e| CmdError::new(format!("merge: {e}")))?;
+    let (outcome, cleanup) = merge_pr_with_cwd(
+        &req,
+        Some(ctx.cwd.as_path()),
+        &SystemGh,
+        &SystemClock,
+        &progress,
+    )
+    .map_err(|e| CmdError::new(format!("merge: {e}")))?;
 
     match outcome {
         PrMergeOutcome::Merged {
@@ -291,8 +298,10 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
             receipt,
             local_sync_note,
         } => {
-            let mut marked_done = false;
-            if let Some((ref task_id, prev_state)) = task_ctx {
+            let mut marked_done = cleanup.as_ref().is_some_and(|c| c.task_marked_done);
+            if let Some((ref task_id, prev_state)) = task_ctx
+                && !marked_done
+            {
                 marked_done = mark_task_done(ctx, task_id, prev_state, pr_number, &head_sha)?;
             }
             let text = format!(
@@ -305,6 +314,9 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
                 .field("base_sha", json!(base_sha))
                 .field("local_sync_note", json!(local_sync_note))
                 .field("receipt", json!(receipt));
+            if let Some(report) = cleanup {
+                out = out.field("cleanup", json!(report));
+            }
             if let Some((task_id, _)) = task_ctx {
                 out = out
                     .field("task_id", json!(task_id))
@@ -330,10 +342,17 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
                 .field("receipt", json!(receipt)))
         }
         PrMergeOutcome::AlreadyMerged { pr_number, url } => {
-            let text = format!("ALREADY_MERGED PR #{pr_number} ({url})");
-            Ok(CmdOutput::ok("ALREADY_MERGED", text)
+            let mut text = format!("ALREADY_MERGED PR #{pr_number} ({url})");
+            if let Some(summary) = cleanup.as_ref().and_then(|c| c.summary_note()) {
+                text.push_str(&format!("\n  cleanup: {summary}"));
+            }
+            let mut out = CmdOutput::ok("ALREADY_MERGED", text)
                 .field("pr_number", json!(pr_number))
-                .field("url", json!(url)))
+                .field("url", json!(url));
+            if let Some(report) = cleanup {
+                out = out.field("cleanup", json!(report));
+            }
+            Ok(out)
         }
         PrMergeOutcome::Blocked {
             code,

@@ -16,7 +16,7 @@ use super::warm_slot::{
     SlotKind, WarmSlot, base_snapshots_dir, promote_from_pure_base_slot,
     restore_clean_base_snapshot,
 };
-use super::{GitError, check_branch_name};
+use super::{GitError, check_branch_name, worktree};
 use crate::config::{self, REPO_CONFIG_REL};
 use crate::throttle::Progress;
 
@@ -328,7 +328,11 @@ pub(super) fn acquire_merge_lock(
     }
 }
 
-pub(super) fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str) -> String {
+pub(super) fn sync_checked_out_local_base(
+    repo_root: &Path,
+    remote: &str,
+    base_branch: &str,
+) -> String {
     let refspec = format!("+refs/heads/{base_branch}:refs/remotes/{remote}/{base_branch}");
     if git(repo_root, &["fetch", "--quiet", "--", remote, &refspec]).is_err() {
         return format!("warning: could not fetch {remote}/{base_branch} after merge");
@@ -356,6 +360,62 @@ pub(super) fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str)
         Ok(st) if st.success() => format!("fast-forwarded local `{base_branch}` to `{target}`"),
         _ => format!(
             "warning: local `{base_branch}` could not fast-forward to `{target}` (diverged)"
+        ),
+    }
+}
+
+/// Fetches `remote/base_branch` and fast-forwards local `refs/heads/<base_branch>`:
+/// - when `HEAD == base_branch`, delegates to clean checked-out `--ff-only` merge;
+/// - when `HEAD != base_branch` and `worktree::list` confirms no worktree has
+///   `base_branch` checked out, fast-forwards via `--is-ancestor` + CAS `update-ref`.
+pub(super) fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str) -> String {
+    let current = git(repo_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
+    if current == base_branch {
+        return sync_checked_out_local_base(repo_root, remote, base_branch);
+    }
+    let refspec = format!("+refs/heads/{base_branch}:refs/remotes/{remote}/{base_branch}");
+    if git(repo_root, &["fetch", "--quiet", "--", remote, &refspec]).is_err() {
+        return format!("warning: could not fetch {remote}/{base_branch} after merge");
+    }
+    let checked_out_elsewhere = worktree::list(repo_root)
+        .map(|entries| {
+            entries
+                .into_iter()
+                .any(|entry| entry.branch.as_deref() == Some(base_branch))
+        })
+        .unwrap_or(true);
+    if checked_out_elsewhere {
+        return format!(
+            "local branch `{base_branch}` is checked out in another worktree; skipped local fast-forward"
+        );
+    }
+    let remote_ref = format!("refs/remotes/{remote}/{base_branch}");
+    let local_ref = format!("refs/heads/{base_branch}");
+    let Ok(new_sha) = git(repo_root, &["rev-parse", "--verify", &remote_ref]) else {
+        return format!("warning: could not resolve `{remote_ref}` after fetch");
+    };
+    let Ok(old_sha) = git(repo_root, &["rev-parse", "--verify", &local_ref]) else {
+        return format!("local branch `{base_branch}` does not exist; skipped local fast-forward");
+    };
+    if old_sha == new_sha {
+        return format!("local `{base_branch}` already up to date with `{remote}/{base_branch}`");
+    }
+    let is_ancestor = git_raw(
+        repo_root,
+        &["merge-base", "--is-ancestor", &old_sha, &new_sha],
+    )
+    .is_ok_and(|out| out.code == Some(0));
+    if !is_ancestor {
+        return format!(
+            "warning: local `{base_branch}` could not fast-forward to `{remote}/{base_branch}` (diverged)"
+        );
+    }
+    match git_raw(repo_root, &["update-ref", &local_ref, &new_sha, &old_sha]) {
+        Ok(out) if out.success() => format!(
+            "fast-forwarded local `{base_branch}` to `{remote}/{base_branch}` via update-ref"
+        ),
+        _ => format!(
+            "warning: local `{base_branch}` moved concurrently; skipped update-ref to `{remote}/{base_branch}`"
         ),
     }
 }

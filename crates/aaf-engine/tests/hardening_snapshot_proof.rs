@@ -314,6 +314,7 @@ fn merge_oracle_and_hydration_seed_from_shared_base_snapshot() {
         is_draft: false,
         title: "PR #42".into(),
         url: "https://example.invalid/pr/42".into(),
+        ..Default::default()
     });
     let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
     let req = PrMergeRequest {
