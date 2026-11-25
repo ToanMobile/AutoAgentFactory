@@ -141,7 +141,7 @@ aaf run
 ## 6. Studio: every number on one page
 
 Start the local web UI and open the **Studio** link it prints
-(`http://127.0.0.1:4317/studio#token=…`; `aaf ui --open` opens it for you on macOS):
+(`http://127.0.0.1:4317/studio#token=…`; `aaf ui --open` opens the Cockpit on macOS; its Stats button leads here):
 
 ```sh
 aaf ui          # add --qr to pair a phone on the local network

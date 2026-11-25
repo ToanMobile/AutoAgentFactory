@@ -92,7 +92,7 @@ Keep both `aaf` and `aaf-hook` on your `PATH`. Details: [Quickstart](docs/QUICKS
 ## 📊 Studio: all your numbers on one page
 
 ```sh
-aaf ui --open        # → http://127.0.0.1:4317/studio
+aaf ui --open        # opens the Cockpit; statistics: http://127.0.0.1:4317/studio
 ```
 
 ![aaf Studio: KPIs and the task list](docs/images/studio.png)

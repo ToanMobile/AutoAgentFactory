@@ -120,7 +120,7 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
     eprintln!("Listening on http://{bound} (press q + Enter or Ctrl-C to stop)");
     #[cfg(target_os = "macos")]
     if args.open && ctx.stdin_is_tty {
-        let _ = std::process::Command::new("open").arg(&studio).spawn();
+        let _ = std::process::Command::new("open").arg(&url).spawn();
     }
     let quit = Arc::new(AtomicBool::new(false));
     if ctx.stdin_is_tty {
