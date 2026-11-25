@@ -188,6 +188,6 @@ aaf upgrade --version v0.1.0
 
 ## Next Steps
 
-- Full configuration & safety model: [REFERENCE.md](REFERENCE.md)
+- Full configuration & safety model: [GUIDE.md](GUIDE.md)
 - Security architecture & threat boundaries: [SECURITY.md](../SECURITY.md)
 - Machine-readable automation: append `--json` to any command (except `aaf slot`).

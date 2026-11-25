@@ -1,6 +1,6 @@
 [← Back to README](../README.md) · English | [Tiếng Việt](README.vi.md)
 
-# AutoAgentFactory (`aaf`) — Full reference
+# AutoAgentFactory: full guide
 
 **Run Claude Code agents on a task board while your machine stays usable. Agents work inside a sandbox, a signed gate checks what they hand back, and only one heavy build runs at a time.**
 
