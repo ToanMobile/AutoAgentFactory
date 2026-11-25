@@ -23,6 +23,9 @@ pub struct CancelArgs {
     /// Also cancel unfinished child/descendant tasks atomically.
     #[arg(long)]
     pub cascade: bool,
+    /// Allow cancelling an idle Gating task (e.g. imported from GitHub QA) when no run is active.
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub fn run(args: &CancelArgs, ctx: &Ctx) -> CmdResult {
@@ -38,7 +41,7 @@ pub fn run(args: &CancelArgs, ctx: &Ctx) -> CmdResult {
     let now = SystemClock.now();
 
     let outcome = match db
-        .cancel_task_atomic(&args.id, args.cascade, reason.as_deref(), now)
+        .cancel_task_atomic_with_options(&args.id, args.cascade, args.force, reason.as_deref(), now)
         .map_err(port)?
     {
         Ok(outcome) => outcome,
@@ -90,8 +93,13 @@ pub fn run(args: &CancelArgs, ctx: &Ctx) -> CmdResult {
 fn format_refusal(target_id: &str, refusal: CancelRefusal) -> CmdOutput {
     match refusal {
         CancelRefusal::ActiveState { task_id, state } => {
+            let hint = if state == TaskState::Gating {
+                "stop `aaf run` first, or pass --force if no run is active"
+            } else {
+                "stop `aaf run` first"
+            };
             let text = format!(
-                "{task_id} is {}; cannot cancel an active task (stop `aaf run` first)",
+                "{task_id} is {}; cannot cancel an active task ({hint})",
                 state.as_str()
             );
             CmdOutput::policy("refused", text)

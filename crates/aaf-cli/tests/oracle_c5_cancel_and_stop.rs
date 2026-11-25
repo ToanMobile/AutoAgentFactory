@@ -242,6 +242,70 @@ fn cancel_refuses_running_task_running_run_and_agent_env() {
         res_agent.json
     );
     assert_eq!(fx.state(&ready_id), "ready");
+
+    // Running state is refused even with --force.
+    let res_running_force = fx.aaf(&["board", "cancel", "--force", &running_id]);
+    assert_eq!(res_running_force.code, 2, "{}", res_running_force.stderr);
+    assert_eq!(fx.state(&running_id), "running");
+}
+
+#[test]
+fn cancel_idle_gating_requires_force_and_still_refuses_running_run() {
+    let fx = Fixture::new();
+    let idle_gating = fx.add("orphaned gating task from github import");
+    let busy_gating = fx.add("gating task with active run");
+
+    {
+        let db = fx.db();
+        db.set_state(&idle_gating, TaskState::Running, None, 1_700_000_009)
+            .unwrap();
+        db.set_state(&idle_gating, TaskState::Gating, None, 1_700_000_010)
+            .unwrap();
+        db.set_state(&busy_gating, TaskState::Running, None, 1_700_000_010)
+            .unwrap();
+        db.set_state(&busy_gating, TaskState::Gating, None, 1_700_000_011)
+            .unwrap();
+        db.insert_run(&RunRecord {
+            id: "run-gating-live".to_string(),
+            task_id: busy_gating.clone(),
+            account_id: None,
+            executor: "custom".to_string(),
+            worktree_path: "/tmp/wt-gating".to_string(),
+            branch: format!("aaf/{busy_gating}"),
+            status: RunStatus::Running,
+            exit_code: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            started_at: 1_700_000_011,
+            ended_at: None,
+        })
+        .unwrap();
+    }
+
+    // Without --force, idle Gating is refused.
+    let no_force = fx.aaf(&["board", "cancel", &idle_gating]);
+    assert_eq!(no_force.code, 2, "{}", no_force.stderr);
+    assert_eq!(no_force.json["status"], json!("refused"));
+    assert_eq!(fx.state(&idle_gating), "gating");
+
+    // Even with --force, Gating with a live running run is still refused.
+    let busy_force = fx.aaf(&["board", "cancel", "--force", &busy_gating]);
+    assert_eq!(busy_force.code, 2, "{}", busy_force.stderr);
+    assert_eq!(busy_force.json["status"], json!("refused"));
+    assert_eq!(fx.state(&busy_gating), "gating");
+
+    // With --force and no running run, idle Gating cancels cleanly.
+    let ok = fx.aaf(&[
+        "board",
+        "cancel",
+        "--force",
+        &idle_gating,
+        "--reason",
+        "obsolete imported gating task",
+    ]);
+    assert_eq!(ok.code, 0, "{}", ok.stderr);
+    assert_eq!(ok.json["status"], json!("cancelled"));
+    assert_eq!(fx.state(&idle_gating), "cancelled");
 }
 
 #[test]

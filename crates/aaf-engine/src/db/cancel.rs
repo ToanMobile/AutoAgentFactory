@@ -30,11 +30,15 @@ pub enum CancelRefusal {
     HasUnfinishedChildren { children: Vec<String> },
 }
 
-fn is_cancellable(state: TaskState) -> bool {
+fn is_cancellable(state: TaskState, allow_idle_gating: bool) -> bool {
     matches!(
         state,
         TaskState::Backlog | TaskState::Ready | TaskState::Blocked | TaskState::Review
-    )
+    ) || (allow_idle_gating && state == TaskState::Gating)
+}
+
+fn is_active_refusal(state: TaskState, allow_idle_gating: bool) -> bool {
+    state == TaskState::Running || (!allow_idle_gating && state == TaskState::Gating)
 }
 
 fn first_running_run(conn: &Connection, task_id: &str) -> PortResult<Option<String>> {
@@ -139,13 +143,27 @@ impl Db {
         reason: Option<&str>,
         now: i64,
     ) -> PortResult<Result<CancelOutcome, CancelRefusal>> {
+        self.cancel_task_atomic_with_options(id, cascade, false, reason, now)
+    }
+
+    /// Atomically validates and cancels `id`, optionally allowing idle `Gating`
+    /// tasks (tasks with no `running` run record) when `allow_idle_gating` is
+    /// `true`. `Running` tasks and any task with a `running` run are always refused.
+    pub fn cancel_task_atomic_with_options(
+        &self,
+        id: &str,
+        cascade: bool,
+        allow_idle_gating: bool,
+        reason: Option<&str>,
+        now: i64,
+    ) -> PortResult<Result<CancelOutcome, CancelRefusal>> {
         let root_id = id.to_string();
         let reason = reason.map(str::to_string);
         self.write(move |tx| {
             let Some((state, parent_id)) = task_state_row(tx, &root_id)? else {
                 return Err(PortError::NotFound(format!("task {root_id}")));
             };
-            if matches!(state, TaskState::Running | TaskState::Gating) {
+            if is_active_refusal(state, allow_idle_gating) {
                 return Ok(Err(CancelRefusal::ActiveState {
                     task_id: root_id,
                     state,
@@ -172,7 +190,7 @@ impl Db {
                     if !visited.insert(child_id.clone()) {
                         continue;
                     }
-                    if matches!(child_state, TaskState::Running | TaskState::Gating) {
+                    if is_active_refusal(child_state, allow_idle_gating) {
                         return Ok(Err(CancelRefusal::ActiveDescendant {
                             child_id,
                             state: child_state,
@@ -184,7 +202,7 @@ impl Db {
                             run_id,
                         }));
                     }
-                    if is_cancellable(child_state) {
+                    if is_cancellable(child_state, allow_idle_gating) {
                         unfinished_descendants.push((child_id.clone(), child_state));
                     }
                     queue.push_back(child_id);
