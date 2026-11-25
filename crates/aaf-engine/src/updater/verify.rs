@@ -33,7 +33,8 @@ pub const SHA256SUMS_SIG_FILENAME: &str = "SHA256SUMS.txt.minisig";
 ///
 /// When this slice is empty, verification fails closed and refuses all remote
 /// upgrades — never falling back to unsigned releases (even with `--repo`).
-pub const TRUSTED_RELEASE_PUBKEYS: &[&str] = &[];
+pub const TRUSTED_RELEASE_PUBKEYS: &[&str] =
+    &["RWR+/f01ZdzkeCw5RUcks85UjGh7Xe+gGjnhGPRe8DF9jO3z+P18mI9J"];
 
 /// Verify that `sig_text` is a valid, non-legacy (pre-hashed) minisign
 /// signature over `sums_bytes` produced by at least one key in

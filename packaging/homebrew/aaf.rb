@@ -1,30 +1,30 @@
 class Aaf < Formula
   desc "Receipt-verified autonomous agent factory CLI and PreToolUse hook guard"
   homepage "https://github.com/ToanMobile/AutoAgentFactory"
-  version "0.1.0"
+  version "0.3.0"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
       url "https://github.com/ToanMobile/AutoAgentFactory/releases/download/v#{version}/aaf-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_SHA256_AARCH64_APPLE_DARWIN"
+      sha256 "7957b524a7fdf3749e1c93d97090e4f441b7f11a05673fc3febaed8faeadbadf"
     end
 
     on_intel do
       url "https://github.com/ToanMobile/AutoAgentFactory/releases/download/v#{version}/aaf-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_SHA256_X86_64_APPLE_DARWIN"
+      sha256 "eabbf552051c7fea452a4e2656b28d09a834d49e957cda221287302f1a013df0"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/ToanMobile/AutoAgentFactory/releases/download/v#{version}/aaf-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "REPLACE_WITH_SHA256_AARCH64_UNKNOWN_LINUX_GNU"
+      sha256 "36030c6579d35aafaa2860d6412f69cd9006f9e9aa96721cc10573baf140de56"
     end
 
     on_intel do
       url "https://github.com/ToanMobile/AutoAgentFactory/releases/download/v#{version}/aaf-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "REPLACE_WITH_SHA256_X86_64_UNKNOWN_LINUX_GNU"
+      sha256 "d7fb95e10eb1679e8f6f23ad595da904ae2fec587e59c24d05cef9e95002e3dc"
     end
   end
 

@@ -411,7 +411,7 @@ fn download_and_verify_fails_closed_on_tampered_bytes_or_missing_checksum() {
         .with_text(plan.checksums_sig_url.clone(), SIG_GOOD)
         .with_blob(plan.archive_url.clone(), good_bytes.clone());
 
-    // Default production TRUSTED_RELEASE_PUBKEYS fails closed until populated.
+    // Default production TRUSTED_RELEASE_PUBKEYS rejects untrusted test-key signatures.
     assert!(matches!(
         download_and_verify(&ok_source, &plan),
         Err(UpdateError::VerificationFailed(_))

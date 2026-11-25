@@ -189,8 +189,14 @@ fn missing_minisig_asset_fails_closed() {
 /// (d) Wrong public key or empty trusted_pubkeys fails closed; key #2 in rotation slice succeeds.
 #[test]
 fn wrong_key_and_empty_keys_fail_closed_and_key_rotation_succeeds() {
-    // Empty trusted keys (including default production slice before key bootstrap).
-    assert!(TRUSTED_RELEASE_PUBKEYS.is_empty());
+    // Production trusted keys are bootstrapped with a valid Ed25519 minisign key,
+    // empty slice fails closed, and untrusted test-key signatures are rejected.
+    assert!(!TRUSTED_RELEASE_PUBKEYS.is_empty());
+    assert!(
+        TRUSTED_RELEASE_PUBKEYS
+            .iter()
+            .all(|k| k.starts_with("RW") && minisign_verify::PublicKey::from_base64(k).is_ok())
+    );
     assert!(matches!(
         verify_sums_signature(ORACLE_SUMS.as_bytes(), ORACLE_SIG_KEY1, &[]),
         Err(UpdateError::VerificationFailed(_))
