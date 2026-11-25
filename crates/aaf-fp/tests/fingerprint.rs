@@ -265,3 +265,46 @@ fn git_still_times_out_and_reports_failures() {
     .unwrap_err();
     assert!(err.to_string().contains("exit"), "{err}");
 }
+
+/// Git trusts an index entry's stat data unless the entry is "racily clean":
+/// its mtime is not older than the index file's own mtime. The fingerprint
+/// works on a copy of the real index, so the copy must keep the real index's
+/// mtime; a fresh mtime makes a racily clean entry look trustworthy and a
+/// same-size edit made in the same second as the last index write is missed.
+/// `checkStat = minimal` + `trustctime = false` stand in for a git that
+/// compares whole seconds only (Linux runners), so the race is deterministic.
+#[test]
+fn a_same_size_edit_in_the_index_write_second_changes_the_fingerprint() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "core.checkStat", "minimal"]);
+    git(repo, &["config", "core.trustctime", "false"]);
+    let file = repo.join("db.rs");
+    fs::write(&file, "pub fn ping() -> u8 { 1 }\n").unwrap();
+    let old = SystemTime::now() - Duration::from_secs(100);
+    let whole = old
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let second = SystemTime::UNIX_EPOCH + Duration::from_secs(whole);
+    let set_mtime = |path: &Path| {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(second)
+            .unwrap();
+    };
+    set_mtime(&file);
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "init"]);
+    let clean = fp(repo);
+
+    // Same size, same second as the entry and as the index write.
+    fs::write(&file, "pub fn ping() -> u8 { 2 }\n").unwrap();
+    set_mtime(&file);
+    set_mtime(&repo.join(".git/index"));
+    assert_ne!(clean, fp(repo), "a racily clean edit was missed");
+}
