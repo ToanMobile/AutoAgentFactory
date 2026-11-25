@@ -24,8 +24,17 @@ const GH_BOARD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Resolves `"gh"` through [`aaf_fp::program`] (startup `PATH`, outside the
 /// repository/worktree) before delegating execution to [`SystemRunner`].
-struct ResolvedGhRunner {
+pub(crate) struct ResolvedGhRunner {
     inner: SystemRunner,
+}
+
+/// The `gh` runner `import-issues` uses, for the unattended run's poller.
+pub(crate) fn gh_runner() -> ResolvedGhRunner {
+    ResolvedGhRunner {
+        inner: SystemRunner {
+            timeout: GH_BOARD_TIMEOUT,
+        },
+    }
 }
 
 impl CommandRunner for ResolvedGhRunner {

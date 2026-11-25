@@ -494,8 +494,26 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             return Ok(out);
         }
     }
+    // Owner issues become tasks without a person running import-issues;
+    // `None` unless `[github]` is on and the allowlist has a trusted login.
+    let issue_poller = std::sync::Mutex::new(if args.auto {
+        aaf_engine::github_poll::IssuePoller::new(
+            &repo,
+            &cfg.global.safety.owner_github_allowlist,
+            &cfg.repo.github,
+        )
+    } else {
+        None
+    });
+    let gh = super::board::github::gh_runner();
     let hooks = Hooks {
         idle: &|| {
+            if let Ok(mut guard) = issue_poller.lock()
+                && let Some(poller) = guard.as_mut()
+                && let Some(e) = poller.tick(&gh, &db, deps.clock.now())
+            {
+                eprintln!("aaf: issue import: {e}");
+            }
             std::thread::sleep(AUTO_POLL);
             true
         },

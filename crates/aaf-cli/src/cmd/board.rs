@@ -3,7 +3,7 @@
 
 mod approve_plan;
 mod dag;
-mod github;
+pub(crate) mod github;
 mod rework;
 pub(crate) mod split;
 pub(crate) mod store;

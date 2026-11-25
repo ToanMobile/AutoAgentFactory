@@ -13,6 +13,7 @@ pub mod gc;
 pub mod gc_audits;
 pub mod git;
 pub mod github_board;
+pub mod github_poll;
 pub mod handover;
 pub mod handover_dual;
 mod handover_html;

@@ -333,7 +333,11 @@ fn fallback_rejection_note_never_leaks_unverified_findings() {
     let notes = task.context_notes;
     // RFC-032: an unbacked "yes" leaves the audit without a verdict, which
     // parks the task as an infra block instead of sending a rework note.
-    assert_eq!(task.state, aaf_domain::task::TaskState::Blocked, "{notes:?}");
+    assert_eq!(
+        task.state,
+        aaf_domain::task::TaskState::Blocked,
+        "{notes:?}"
+    );
     assert!(notes.is_empty(), "{notes:?}");
     assert!(
         !notes.iter().any(|n| n.contains("hallucinated prose")),
