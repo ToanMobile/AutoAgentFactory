@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aaf-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aaf-domain",
  "aaf-engine",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "aaf-domain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "aaf-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aaf-domain",
  "aaf-fp",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "aaf-fp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aaf-domain",
  "hmac",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "aaf-hook"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aaf-domain",
  "aaf-fp",
