@@ -22,7 +22,7 @@ use helpers::{collect_mechanical_findings, primary_infra_next, reject_post_audit
 
 use super::audit_backend::{self, AuditBackend};
 use super::audit_turn::short_circuit_audit_reason;
-use super::ports::{AccountPool, Grant, Purpose};
+use super::ports::{AccountPool, Grant, IntegrationGuard, Purpose};
 use super::rework_filter;
 use super::stage_router::ProviderKey;
 use super::worker::{self, GateJob, Job, Next, Outcome, PreGateAudit};
@@ -229,23 +229,16 @@ fn execute_post_gate_audit(
                 }
                 return reject_post_audit(deps, task.id, job.worktree, &event_verdict);
             }
-            let clean = deps.git.integrate(&[])?;
-            let audited = audit_backend::run_auditor_turn(
+            let clean = IntegrationGuard::acquire(&*deps.git, &[])?;
+            let (mut report, mut infra, mut limit_hit) = audit_backend::run_auditor_turn(
                 deps,
                 audit_backend,
                 &task,
                 &input,
-                &clean.tree,
+                &clean.integration().tree,
                 grant,
                 cfg.score_gate,
-            );
-            let (mut report, mut infra, mut limit_hit) = match audited {
-                Ok(res) => res,
-                Err(err) => {
-                    let _ = deps.git.discard(&clean);
-                    return Err(err);
-                }
-            };
+            )?;
             let mut active_accounts: &dyn AccountPool =
                 audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);
             let mut fallback_grant_slot: Option<Grant> = None;
@@ -260,7 +253,6 @@ fn execute_post_gate_audit(
                 if let Ok((fb_provider, fb_reviewer, fb_same)) = fb_ctx {
                     if receipt.head_lock.has_hard_lock() && fb_same {
                         tier1_blocked_fallback = true;
-                        let _ = deps.git.discard(&clean);
                     } else {
                         let prev_provider = audit_provider.clone();
                         (audit_provider, reviewer, same_account) =
@@ -277,26 +269,21 @@ fn execute_post_gate_audit(
                                 "reviewer": reviewer, "same_account": same_account,
                             }),
                         )?;
-                        let fb_res = audit_backend::run_auditor_turn(
+                        (report, infra, limit_hit) = audit_backend::run_auditor_turn(
                             deps,
                             None,
                             &task,
                             &input,
-                            &clean.tree,
+                            &clean.integration().tree,
                             &fb_grant,
                             cfg.score_gate,
-                        );
-                        let _ = deps.git.discard(&clean);
-                        (report, infra, limit_hit) = fb_res?;
+                        )?;
                         active_accounts = &*deps.accounts;
                         fallback_grant_slot = Some(fb_grant);
                     }
-                } else {
-                    let _ = deps.git.discard(&clean);
                 }
-            } else {
-                let _ = deps.git.discard(&clean);
             }
+            drop(clean);
             let active_grant = fallback_grant_slot.as_ref().unwrap_or(grant);
             if let Some(hit) = limit_hit {
                 audit_backend::report_audit_limit(

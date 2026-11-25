@@ -139,7 +139,7 @@ pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String
 
 pub(crate) use super::audit_turn::run_auditor_turn;
 use super::audit_turn::short_circuit_audit_reason;
-use super::ports::{AccountPool, Grant};
+use super::ports::{AccountPool, Grant, IntegrationGuard};
 use super::rework_filter;
 use super::worker::{GateJob, Job, Next, PLAN_EXECUTOR, PreGateAudit};
 use super::{Deps, unblock};
@@ -376,17 +376,17 @@ pub(crate) fn execute_audit(
     }
 
     // Auditor runs in a clean base tree so it never loads the author's CLAUDE.md/hooks.
-    let clean = deps.git.integrate(&[])?;
+    let clean = IntegrationGuard::acquire(&*deps.git, &[])?;
     let audited = run_auditor_turn(
         deps,
         audit_backend,
         &task,
         &input,
-        &clean.tree,
+        &clean.integration().tree,
         grant,
         cfg.score_gate,
     );
-    let _ = deps.git.discard(&clean);
+    drop(clean);
     let (report, infra, limit_hit) = audited?;
     if let Some(hit) = limit_hit {
         let accounts: &dyn AccountPool = audit_backend.map_or(&*deps.accounts, |a| &*a.accounts);

@@ -14,7 +14,7 @@ use super::commit_lock::{self, CommitLock};
 use super::git_real_base::{
     NO_HOOKS, abort_rebase, git_no_hooks, merge_pr_real, refuse_nested_repositories,
 };
-use super::ports::{GitOps, Integration};
+use super::ports::{GitOps, Integration, IntegrationGuard};
 use crate::git::cmd::{failure, git, git_raw, git_timed};
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef, fetch_pr_feedback};
 use crate::git::pr_merge::PrMergeOutcome;
@@ -216,19 +216,29 @@ impl GitOps for RealGit {
     }
 
     fn integrate(&self, task_ids: &[String]) -> PortResult<Integration> {
-        // A task-shaped name, so the worktree layer creates and removes the
-        // integration tree like any other and it shows up in its listings.
-        let name = format!("batch-{}", &super::unblock::unique_id()[..12]);
+        // PID-tagged task-shaped name (`batch-<pid>-<8hex>`), so live batch
+        // trees (including `aaf board split`, which holds no `.run.lock`) are
+        // protected from concurrent sweeps while still showing up in worktree listings.
+        let name = format!(
+            "batch-{}-{}",
+            std::process::id(),
+            &super::unblock::unique_id()[..8]
+        );
         let tree = {
             let _admin = self.admin();
             worktree::create(&self.repo_root, &self.worktrees_dir, &name, &self.start())
                 .map_err(err)?
         };
-        let mut integration = Integration {
-            tree,
-            merged: Vec::new(),
-            conflicted: Vec::new(),
-        };
+        // Construct the guard ONLY AFTER `_admin` is released so a drop/unwind
+        // calling `self.discard()` (which acquires `self.admin()`) cannot deadlock.
+        let mut guard = IntegrationGuard::from_existing(
+            self,
+            Integration {
+                tree,
+                merged: Vec::new(),
+                conflicted: Vec::new(),
+            },
+        );
         for task_id in task_ids {
             worktree::validate_task_id(task_id).map_err(err)?;
             let branch = format!("{BRANCH_PREFIX}{task_id}");
@@ -236,8 +246,9 @@ impl GitOps for RealGit {
             // Full ref name, as in `is_merged`: a tag `aaf/<id>` must not
             // stand in for the task branch.
             let branch_ref = format!("refs/heads/{branch}");
+            let tree_path = guard.integration().tree.path.clone();
             let merge = git_no_hooks(
-                &integration.tree.path,
+                &tree_path,
                 &[
                     "-c",
                     "commit.gpgsign=false",
@@ -254,23 +265,23 @@ impl GitOps for RealGit {
             if !merge.success() {
                 // Fails when the merge never started (nothing to abort); the
                 // status check below is what guards the tree.
-                let _ = git_no_hooks(&integration.tree.path, &["merge", "--abort"]);
+                let _ = git_no_hooks(&tree_path, &["merge", "--abort"]);
             }
-            let dirty = git(&integration.tree.path, &["status", "--porcelain"]).map_err(err)?;
+            let dirty = git(&tree_path, &["status", "--porcelain"]).map_err(err)?;
             if !dirty.is_empty() {
-                let cleanup = self.discard(&integration);
+                let cleanup = guard.discard();
                 return Err(PortError::Io(format!(
                     "integration tree is dirty after the merge of {branch} \
                      (cleanup: {cleanup:?})"
                 )));
             }
             if merge.success() {
-                integration.merged.push(task_id.clone());
+                guard.integration_mut().merged.push(task_id.clone());
             } else {
-                integration.conflicted.push(task_id.clone());
+                guard.integration_mut().conflicted.push(task_id.clone());
             }
         }
-        Ok(integration)
+        Ok(guard.into_inner())
     }
 
     fn discard(&self, integration: &Integration) -> PortResult<()> {

@@ -12,7 +12,7 @@ use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
 use super::audit_backend;
-use super::ports::Grant;
+use super::ports::{Grant, IntegrationGuard};
 use super::prompt::{PLAN_EXECUTOR, PromptContext, STEER_PREFIX};
 use super::stage_router::{StageTarget, is_tier_s_skip_debate};
 use super::worker::{self, Next};
@@ -105,10 +105,16 @@ pub(crate) fn run_plan_turn(
     round: u32,
     grant: &Grant,
 ) -> PortResult<Next> {
-    let clean = deps.git.integrate(&[])?;
-    let res = run_plan_turn_in(deps, target, task_id, role, round, grant, &clean.tree);
-    let _ = deps.git.discard(&clean);
-    res
+    let clean = IntegrationGuard::acquire(&*deps.git, &[])?;
+    run_plan_turn_in(
+        deps,
+        target,
+        task_id,
+        role,
+        round,
+        grant,
+        &clean.integration().tree,
+    )
 }
 
 fn run_plan_turn_in(

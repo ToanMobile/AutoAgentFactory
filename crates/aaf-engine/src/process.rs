@@ -214,3 +214,23 @@ impl CommandRunner for SystemRunner {
         })
     }
 }
+
+/// Fail-closed check whether POSIX process `pid` is currently alive.
+///
+/// Returns `true` for `pid <= 1`, `pid == std::process::id()`, or any error /
+/// timeout / unexpected status from `/bin/ps`. Returns `false` **only** when
+/// `/bin/ps -p <pid> -o pid=` exits cleanly with status `1` and empty stdout.
+pub fn process_alive(pid: u32) -> bool {
+    if pid <= 1 || pid == std::process::id() {
+        return true;
+    }
+    let pid_arg = pid.to_string();
+    let mut cmd = Command::new("/bin/ps");
+    cmd.args(["-p", &pid_arg, "-o", "pid="]);
+    let Ok(finished) = run_with_timeout(cmd, Duration::from_secs(5), true) else {
+        return true;
+    };
+    let exited_missing = finished.status.and_then(|s| s.code()) == Some(1);
+    let empty_stdout = String::from_utf8_lossy(&finished.stdout).trim().is_empty();
+    !(exited_missing && empty_stdout)
+}
