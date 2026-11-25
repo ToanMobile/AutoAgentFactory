@@ -163,6 +163,7 @@ require_different_provider = false
             subject: None,
             body_file: None,
             ci_wait_secs: 0,
+            require_checks: false,
             lock_timeout: Duration::from_secs(10),
             dry_run,
             // The CPU-load wait is off: the host running the tests may be busy.
@@ -202,7 +203,6 @@ fn merge_blocks_head_mismatch_and_unapproved_or_same_account_tier1_edit() {
         .unwrap();
     });
     let noop = |_: &aaf_engine::throttle::Progress<'_>| {};
-
     // 1. Head mismatch is rejected before any gate or merge.
     let wrong_sha = "0".repeat(40);
     let gh = FakeGh {
