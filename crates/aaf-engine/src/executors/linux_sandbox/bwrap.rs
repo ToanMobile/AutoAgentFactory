@@ -125,6 +125,8 @@ pub fn build_bwrap_args(
             ro.bind_with_target(&dot_git)?;
         }
         for rel in [
+            ".autofactory/config.toml",
+            ".autofactory/memory.md",
             ".claude/settings.json",
             ".claude/settings.local.json",
             ".gemini/settings.json",

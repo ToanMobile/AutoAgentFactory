@@ -17,7 +17,8 @@ use crate::ctx::{Ctx, SystemClock};
 pub(crate) fn host_sandbox_available() -> bool {
     cfg!(target_os = "macos")
         || (cfg!(target_os = "linux")
-            && executors::linux_sandbox::detect_host_linux_isolation().is_isolated())
+            && executors::linux_sandbox::probe_host_linux_isolation()
+                .is_ok_and(|iso| iso.is_isolated()))
 }
 
 pub(crate) fn build_exec_env(ctx: &Ctx, cfg: &EffectiveConfig) -> ExecEnv {

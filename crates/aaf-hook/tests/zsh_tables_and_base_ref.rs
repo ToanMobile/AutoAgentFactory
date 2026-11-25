@@ -109,6 +109,7 @@ fn configured_gate_base_ref_is_protected_across_guards() {
         "git update-ref -d refs/heads/trunk",
         "git checkout -B trunk HEAD~1",
         "git branch -f trunk HEAD~1",
+        "echo deadbeef > .git/refs/heads/trunk",
     ] {
         let decision = bash_in(repo, cmd, true);
         assert!(

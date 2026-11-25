@@ -10,9 +10,9 @@
 
 use std::path::{Component, Path};
 
-use crate::git_guard::is_protected;
+use crate::git_guard::is_protected_with;
 use crate::shell::{Cmd, DECLARERS, SHELLS};
-use crate::{Ctx, Denial, paths, sed_script};
+use crate::{Ctx, Denial, base_ref, paths, sed_script};
 
 const RULE: &str = "git_guard";
 const FIX: &str = "leave git's hooks, control files, and protected refs untouched; read them with \
@@ -165,11 +165,21 @@ fn guarded(path: &Path) -> Option<&'static str> {
         [refs, aaf, ..] if is(refs, "refs") && is(aaf, "aaf") => Some(AAF_REF),
         [refs, heads, branch @ ..] if is(refs, "refs") && is(heads, "heads") => {
             let branch = branch.join("/").to_ascii_lowercase();
+            // Lazily resolve `[gate].base_ref` only when touching `.git/refs/heads/...`
+            // so the fast path never inspects the repo config.
+            let extra = path
+                .ancestors()
+                .find(|p| {
+                    p.file_name()
+                        .is_some_and(|n| is(&n.to_string_lossy(), ".git"))
+                })
+                .and_then(Path::parent)
+                .and_then(base_ref::configured_base_ref);
             // The directory of all branches or of `release/*`, a protected
             // branch, or a glob that could name one.
             (branch.is_empty()
                 || branch == "release"
-                || is_protected(&branch)
+                || is_protected_with(&branch, extra.as_deref())
                 || paths::has_glob(&branch))
             .then_some(REF)
         }

@@ -24,6 +24,8 @@ pub const REPO_MEMORY_REL: &str = ".autofactory/memory.md";
 /// Hard cap on `.autofactory/memory.md` injected into prompts so long-term
 /// conventions never bloat context windows.
 pub const MAX_REPO_MEMORY_BYTES: usize = 4096;
+/// Hard ceiling on file size read from disk so oversized files or FIFOs are rejected.
+const MAX_REPO_MEMORY_FILE_BYTES: u64 = 64 * 1024;
 
 /// The prompt of one agent run: fixed rules, the immutable spec, then the
 /// notes earlier attempts left. Notes are passed through untouched, the
@@ -192,7 +194,28 @@ fn append_repo_environment(prompt: &mut String, ctx: &PromptContext<'_>) {
 }
 
 fn load_repo_memory(repo_root: &Path) -> Option<(String, bool)> {
-    let raw = fs::read_to_string(repo_root.join(REPO_MEMORY_REL)).ok()?;
+    // Reject symlinks on both `.autofactory` and `.autofactory/memory.md` so a
+    // worktree cannot point host-side prompt assembly at out-of-repo secrets
+    // (for example `AAF_DATA_DIR/receipt.key` or `~/.ssh/*`).
+    let dir = repo_root.join(".autofactory");
+    let dir_meta = fs::symlink_metadata(&dir).ok()?;
+    if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
+        return None;
+    }
+    let path = repo_root.join(REPO_MEMORY_REL);
+    let file_meta = fs::symlink_metadata(&path).ok()?;
+    if file_meta.file_type().is_symlink()
+        || !file_meta.is_file()
+        || file_meta.len() > MAX_REPO_MEMORY_FILE_BYTES
+    {
+        return None;
+    }
+    let root_canon = fs::canonicalize(repo_root).ok()?;
+    let path_canon = fs::canonicalize(&path).ok()?;
+    if !path_canon.starts_with(&root_canon) {
+        return None;
+    }
+    let raw = fs::read_to_string(&path_canon).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -450,5 +473,31 @@ mod tests {
 
         let plan_prompt = build_plan_prompt(&task, &ctx);
         assert!(plan_prompt.contains("## Repo memory (.autofactory/memory.md)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_memory_refuses_symlinks_to_external_files() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempfile::tempdir().expect("repo");
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("receipt.key");
+        fs::write(&secret, "TOP_SECRET_KEY_MATERIAL").expect("write secret");
+        fs::create_dir_all(repo.path().join(".autofactory")).expect("mkdir");
+        symlink(&secret, repo.path().join(REPO_MEMORY_REL)).expect("symlink");
+
+        let task = sample_task(vec![]);
+        let ctx = PromptContext {
+            repo_root: repo.path(),
+            profile: "rust",
+            proof_required: false,
+        };
+        let prompt = build_prompt_with_context(&task, "aaf/t1", &ctx);
+        assert!(
+            !prompt.contains("TOP_SECRET_KEY_MATERIAL"),
+            "symlinked secret leaked into prompt: {prompt}"
+        );
+        assert!(!prompt.contains("## Repo memory"));
     }
 }
