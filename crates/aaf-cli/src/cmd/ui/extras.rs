@@ -24,7 +24,7 @@ use crate::cmd::task_ops::{PLAN_APPROVAL_PREFIX, PLAN_DEBATE_STALLED_PREFIX, lat
 use crate::ctx::{Ctx, SystemClock};
 
 const MAX_TITLE_CHARS: usize = 200;
-const MAX_DIFF_BYTES: usize = 200 * 1024;
+pub(super) const MAX_DIFF_BYTES: usize = 200 * 1024;
 const GIT_DIFF_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_COOLDOWN_MINS: i64 = 300;
 const INVALID_REPO_MSG: &str =
@@ -275,7 +275,7 @@ pub(super) fn canonical_under_allowed_roots(path: &Path, roots: &[PathBuf]) -> O
     ok.then_some(canon)
 }
 
-fn run_git_bounded(wt: &Path, args: &[&str], max_bytes: usize) -> (String, bool) {
+pub(super) fn run_git_bounded(wt: &Path, args: &[&str], max_bytes: usize) -> (String, bool, bool) {
     let Ok(mut child) = Command::new("git")
         .arg("-C")
         .arg(wt)
@@ -285,12 +285,12 @@ fn run_git_bounded(wt: &Path, args: &[&str], max_bytes: usize) -> (String, bool)
         .stderr(Stdio::null())
         .spawn()
     else {
-        return (String::new(), false);
+        return (String::new(), false, false);
     };
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        return (String::new(), false);
+        return (String::new(), false, false);
     };
     let reader = thread::spawn(move || {
         let mut buf = Vec::new();
@@ -312,58 +312,82 @@ fn run_git_bounded(wt: &Path, args: &[&str], max_bytes: usize) -> (String, bool)
     let _ = child.kill();
     let _ = child.wait();
     let mut bytes = reader.join().unwrap_or_default();
-    if !exited_ok && bytes.is_empty() {
-        return (String::new(), false);
-    }
     let truncated = bytes.len() > max_bytes;
+    if !exited_ok && !truncated {
+        return (String::new(), false, false);
+    }
     if truncated {
         bytes.truncate(max_bytes);
     }
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    (text, truncated)
+    (text, truncated, exited_ok)
 }
 
-/// Read git diff (bounded, no-textconv, timeout-protected) for a task's worktree.
+/// Read git diff (bounded, no-textconv, timeout-protected, secret-scrubbed, structured)
+/// for a task's worktree, falling back to `base..branch` in `repo_root` when cleaned.
 pub(super) fn read_task_diff(db: &Db, ctx: &Ctx, task_id: &str) -> Result<Value, String> {
     let task = db.get_task(task_id).map_err(|e| e.to_string())?;
-    let Some((wt, branch)) = resolve_task_worktree(db, ctx, &task) else {
-        return Ok(json!({
-            "available": false,
-            "branch": "",
-            "worktree_path": "",
-            "stat": "",
-            "diff": "",
-            "truncated": false,
-            "note": "No active worktree found for this task yet."
-        }));
-    };
-    let allowed = vec![ctx.worktrees_dir.clone(), PathBuf::from(&task.repo_root)];
-    let Some(canon_wt) = canonical_under_allowed_roots(&wt, &allowed) else {
-        return Err("refused: worktree path outside allowed roots".into());
-    };
-    let merge_base = ["origin/main", "main", "master"].iter().find_map(|r| {
-        let (out, _) = run_git_bounded(&canon_wt, &["merge-base", r, "HEAD"], 256);
-        let sha = out.trim().to_string();
-        (!sha.is_empty()).then_some(sha)
-    });
-    let base_ref = merge_base.as_deref().unwrap_or("HEAD");
-    let (diff, truncated) = run_git_bounded(
-        &canon_wt,
-        &["diff", "--no-ext-diff", "--no-textconv", base_ref],
-        MAX_DIFF_BYTES,
-    );
-    let (stat, _) = run_git_bounded(
-        &canon_wt,
-        &["diff", "--no-ext-diff", "--no-textconv", "--stat", base_ref],
-        32 * 1024,
-    );
+    let runs = db.runs_for_task(&task.id).unwrap_or_default();
+    let cfg = ctx.load_config(Path::new(&task.repo_root)).ok();
+    let globs = cfg
+        .as_ref()
+        .map(|c| c.repo.gate.head_lock_globs.clone())
+        .unwrap_or_else(aaf_domain::head_lock_globs::default_head_lock_globs);
+    let is_locked = aaf_engine::gate::head_lock_path_matcher(&globs);
+    let base_cfg = cfg.as_ref().map(|c| c.repo.gate.base_ref.as_str());
+    let (diff, stat, truncated, branch, wt_disp) =
+        if let Some((wt, branch)) = resolve_task_worktree(db, ctx, &task) {
+            let allowed = vec![ctx.worktrees_dir.clone(), PathBuf::from(&task.repo_root)];
+            let Some(canon_wt) = canonical_under_allowed_roots(&wt, &allowed) else {
+                return Err("refused: worktree path outside allowed roots".into());
+            };
+            let base_ref = super::diff_parse::resolve_diff_base(&canon_wt, base_cfg, "HEAD");
+            let (diff, truncated, _) = run_git_bounded(
+                &canon_wt,
+                &["diff", "--no-ext-diff", "--no-textconv", &base_ref, "--"],
+                MAX_DIFF_BYTES,
+            );
+            let (stat, _, _) = run_git_bounded(
+                &canon_wt,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--stat",
+                    &base_ref,
+                    "--",
+                ],
+                32 * 1024,
+            );
+            (
+                diff,
+                stat,
+                truncated,
+                branch,
+                canon_wt.display().to_string(),
+            )
+        } else if let Some((diff, stat, truncated, branch)) =
+            super::diff_parse::fallback_branch_diff(Path::new(&task.repo_root), &runs, base_cfg)
+        {
+            (diff, stat, truncated, branch, String::new())
+        } else {
+            return Ok(json!({
+                "available": false, "branch": "", "worktree_path": "",
+                "stat": "", "diff": "", "truncated": false,
+                "note": "No active worktree found for this task yet."
+            }));
+        };
+    let structured = super::diff_parse::parse_unified_diff(&diff, truncated, is_locked);
+    let scrubbed_diff = super::diff_parse::scrub_diff_text(&diff);
     Ok(json!({
         "available": true,
         "branch": branch,
-        "worktree_path": canon_wt.display().to_string(),
+        "worktree_path": wt_disp,
         "stat": stat.trim(),
-        "diff": diff,
+        "diff": scrubbed_diff,
         "truncated": truncated,
+        "summary": structured.summary,
+        "files": structured.files,
     }))
 }
 

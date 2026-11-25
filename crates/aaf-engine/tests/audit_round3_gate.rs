@@ -17,9 +17,8 @@ use aaf_engine::gate::changes::{AddedLines, Change};
 use aaf_engine::gate::{
     HiddenPolicy, changes, docs_fast, head_lock, run_gate_policy, static_checks,
 };
-use aaf_engine::git::{
-    GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
-};
+use aaf_engine::git::{GhClient, GitError, MergeStrategy, PrCheck, PrInfo};
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use aaf_engine::store_compliance;
 use tempfile::TempDir;
 

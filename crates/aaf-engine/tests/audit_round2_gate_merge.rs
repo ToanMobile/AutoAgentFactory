@@ -21,9 +21,8 @@ use aaf_engine::gate::changes::AddedLines;
 use aaf_engine::gate::{
     HiddenPolicy, config_hash, head_lock, run_gate_policy, static_checks, stats_repo_id,
 };
-use aaf_engine::git::{
-    GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
-};
+use aaf_engine::git::{GhClient, GitError, MergeStrategy, PrCheck, PrInfo};
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use aaf_engine::store_compliance;
 use rusqlite::Connection;
 use tempfile::TempDir;

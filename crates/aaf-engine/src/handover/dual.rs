@@ -10,8 +10,8 @@ use aaf_domain::pipeline::{ReviewerVerdictRecord, distinct_real_canonical_provid
 use aaf_domain::task::Task;
 use serde_json::Value;
 
+use super::html::escape_html;
 use crate::cross_audit::scoring::{MechanicalScoreReport, evaluate_score_gate};
-use crate::handover_html::escape_html;
 
 const INTERNAL_NOTE_PREFIXES: &[&str] = &[
     "unblocked:",

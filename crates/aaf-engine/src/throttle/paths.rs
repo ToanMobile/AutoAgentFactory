@@ -26,7 +26,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 const DIR: &str = "throttle";
 const GUEST: &str = "guest";

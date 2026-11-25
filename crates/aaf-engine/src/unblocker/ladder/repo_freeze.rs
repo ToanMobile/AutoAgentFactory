@@ -13,9 +13,7 @@ pub const MAX_REPO_PROBE_COUNT: u32 = 3;
 /// Default consecutive root failures before freezing a repository.
 pub const DEFAULT_REPO_FREEZE_THRESHOLD: u32 = 3;
 
-pub fn repo_frozen_key(repo_root: &str) -> String {
-    format!("repo_frozen:{}", aaf_fp::repo_id(Path::new(repo_root)))
-}
+pub use aaf_fp::fs_private::repo_frozen_key;
 
 pub fn repo_frozen_until_key(repo_root: &str) -> String {
     format!(

@@ -4,16 +4,14 @@
 use std::fmt::Write as _;
 
 use aaf_domain::pipeline::{MAX_PLAN_CONTRACT_BYTES, PlanContract, PlanCritique, ReviewIssue};
+pub use aaf_domain::prompt_fence::{
+    PLAN_BEGIN, PLAN_END, SPEC_BEGIN, SPEC_END, format_plan_for_implementer,
+};
+use aaf_domain::prompt_fence::{PromptContext, neutralise};
 use aaf_domain::task::Task;
 
-use super::schema::{plan_contract_json_schema, plan_critique_json_schema, strip_for_downstream};
-use crate::cross_audit::prompt::neutralise;
-use crate::factory::prompt::PromptContext;
+use super::schema::{plan_contract_json_schema, plan_critique_json_schema};
 
-pub const SPEC_BEGIN: &str = "<<<AAF_UNTRUSTED_SPEC_BEGIN>>>";
-pub const SPEC_END: &str = "<<<AAF_UNTRUSTED_SPEC_END>>>";
-pub const PLAN_BEGIN: &str = "<<<AAF_UNTRUSTED_PLAN_BEGIN>>>";
-pub const PLAN_END: &str = "<<<AAF_UNTRUSTED_PLAN_END>>>";
 pub const CRITIQUE_BEGIN: &str = "<<<AAF_UNTRUSTED_CRITIQUE_BEGIN>>>";
 pub const CRITIQUE_END: &str = "<<<AAF_UNTRUSTED_CRITIQUE_END>>>";
 pub const ISSUES_BEGIN: &str = "<<<AAF_UNTRUSTED_ISSUES_BEGIN>>>";
@@ -257,15 +255,4 @@ pub fn build_plan_format_repair_prompt(
          Expected schema:\n{expected_schema_hint}"
     );
     out
-}
-
-/// Formats an approved [`PlanContract`] for downstream Implementer / Reviewer
-/// prompts: strips `dispositions` & `open_questions`, serializes to JSON,
-/// neutralises delimiter tokens, and frames with `<<<AAF_UNTRUSTED_PLAN_*>>>`
-/// (R3-SEC-8).
-pub fn format_plan_for_implementer(plan: &PlanContract) -> String {
-    let stripped = strip_for_downstream(plan);
-    let json = serde_json::to_string_pretty(&stripped).unwrap_or_default();
-    let safe = neutralise(&json);
-    format!("{PLAN_BEGIN}\n{safe}\n{PLAN_END}")
 }

@@ -28,9 +28,10 @@ use aaf_engine::factory::{
     RunSummary, Settings, Store, resolve_base, run,
 };
 use aaf_engine::git::{
-    GhClient, GitError, MergeCommitRef, MergeOutcome, MergeStrategy, PrCheck, PrInfo,
-    PrMergeOutcome, PrMergeRequest, PrOutcome, TaskWorktree, merge_pr,
+    GhClient, GitError, MergeCommitRef, MergeOutcome, MergeStrategy, PrCheck, PrInfo, PrOutcome,
+    TaskWorktree,
 };
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use aaf_engine::webhook::WebhookEvent;
 use serde_json::json;
 use support::{Fixture, commit_file, git};

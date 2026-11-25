@@ -22,8 +22,8 @@ use aaf_engine::db::Db;
 use aaf_engine::factory::{
     AccountPool, Deps, GateRunner, GitOps, Grant, Hooks, Integration, Mode, Notifier, Settings, run,
 };
-use aaf_engine::git::pr_merge::PrMergeOutcome;
 use aaf_engine::git::{MergeOutcome, PrOutcome, TaskWorktree};
+use aaf_engine::pr_ops::PrMergeOutcome;
 use aaf_engine::webhook::WebhookEvent;
 use tempfile::TempDir;
 

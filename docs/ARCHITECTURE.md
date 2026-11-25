@@ -28,10 +28,10 @@ exceptions listed in section 5.
 
 | Layer | Modules | Role |
 |---|---|---|
-| Orchestration | `factory`, `plan_debate`, `split`, `github_board`, `github_poll`, `watch` | Pick a task, run an agent in a worktree, gate it, audit it, open the PR, move the task |
-| Review and reporting | `cross_audit`, `handover*`, `proof`, `telemetry`, `web_ui`, `telegram`, `webhook` | Second opinions, acceptance reports, metrics, the local web UI and notifications |
+| Orchestration | `factory`, `plan_debate`, `pr_ops`, `split`, `github_board`, `github_poll`, `watch` | Pick a task, run an agent in a worktree, gate it, audit it, open and merge the PR, move the task |
+| Review and reporting | `cross_audit`, `handover`, `proof`, `telemetry`, `web_ui`, `telegram`, `webhook` | Second opinions, acceptance reports, metrics, the local web UI and notifications |
 | Execution | `executors`, `roles`, `accounts`, `throttle`, `unblocker`, `gate`, `store_compliance`, `detector` | Agent CLIs, quota, the heavy-command queue, the quality gate |
-| Infrastructure | `db`, `git`, `config`, `hook_settings`, `skills`, `gc*`, `process`, `clock` | SQLite store, git and worktrees, configuration, clean-up, processes, time |
+| Infrastructure | `db`, `git`, `config`, `confine_core`, `hook_settings`, `skills`, `gc*`, `process`, `clock` | SQLite store, git and worktrees, configuration, host confinement/process plumbing, clean-up, processes, time |
 
 `aaf-cli` holds one module per subcommand under `src/cmd/`. A command parses
 its flags, calls the engine, and renders one `CmdOutput` (text, or one JSON
@@ -84,23 +84,28 @@ top-level engine modules. The test fails when:
 - a listed dependency disappeared: delete it from the list, so it cannot
   creep back.
 
-It also keeps `clock`, `process`, `detector`, `webhook` and `telemetry`
-free of any dependency on the orchestration layer.
+It also keeps `clock`, `config`, `confine_core`, `process`, `detector`,
+`webhook`, and `telemetry` free of any dependency on the orchestration layer
+(`factory`, `plan_debate`, `pr_ops`, `split`, `github_board`, `github_poll`,
+`watch`, `web_ui`), and enforces a permanent Tarjan SCC ratchet
+(`no_cycles_in_engine_module_graph`) requiring **zero dependency cycles** across
+all top-level `aaf-engine` modules.
 
-**Known debt.** Twelve modules form one dependency cycle today: `accounts`,
-`config`, `cross_audit`, `db`, `executors`, `gate`, `git`, `plan_debate`,
-`proof`, `telemetry`, `throttle`, `unblocker`. The edges that close it point
-upwards from infrastructure, for example `db → factory` (two constants),
-`db → cross_audit`/`unblocker` (executor names), `git → gate`, and
-`throttle → telemetry`, and `git → proof` (`aaf merge` refuses a tree whose
-verified proof has a `needs_human` flow, see `SECURITY.md` §19). Breaking one is usually a matter of moving a constant
-or a small type into `aaf-domain` or into the lower module. Do one per change
-and shrink the list in the same commit.
+**Resolved debt (0 cycles).** The legacy 12-module cycle and `handover*`
+cross-module knot have been eliminated: shared contracts live in
+`aaf_domain::engine_contracts`, low-level host confinement / supervised process
+capture / hidden-file inspection / git-ref helpers live in `confine_core`,
+locked PR merge + post-merge cleanup orchestration lives in `pr_ops`, and the
+`handover` feature is consolidated under `handover/`. Any future PR that
+re-introduces a module cycle fails `module_layers::no_cycles_in_engine_module_graph`.
 
-The `handover*` modules (`handover`, `handover_devkit`, `handover_dual`,
-`handover_export`, `handover_html`) are one feature split across top-level
-files and call each other in both directions. Folding them into submodules of
-`handover/` would remove those edges from the list.
+**Remaining acyclic cross-layer edges (ratcheted in `ALLOWED`):**
+
+- `gate -> proof, store_compliance` (quality gate verifies proof receipts and runs store-compliance checks)
+- `gc -> gate, telemetry` (garbage collection checks gate receipts/locks and reads telemetry snapshots)
+- `hook_settings -> gate` (hook configuration references gate policies)
+- `executors -> process` (agent runners manage subprocesses and process groups)
+- `telegram -> watch` (Telegram bot queries live watch status)
 
 ## 6. House rules
 

@@ -66,7 +66,6 @@ pub use audit_backend::{
     same_audit_provider,
 };
 pub use git_real::RealGit;
-pub(crate) use infra_retry::INFRA_RETRY_MAX;
 pub use ports::{
     AccountPool, GateRunner, GitOps, Grant, Integration, IntegrationGuard, Notifier, Purpose,
 };

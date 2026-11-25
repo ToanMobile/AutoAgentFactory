@@ -1,6 +1,7 @@
 //! Tree fingerprint, data-directory layout and HMAC-signed receipts and
 //! approvals. Synchronous on purpose: both the gate and the hook use it.
 
+pub mod fs_private;
 mod hidden;
 pub mod output;
 mod proc;

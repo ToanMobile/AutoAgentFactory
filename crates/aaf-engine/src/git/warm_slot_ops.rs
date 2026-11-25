@@ -15,7 +15,7 @@ use super::GitError;
 use super::cmd::run;
 use super::cmd::{git, git_raw};
 use super::warm_slot::{SlotKind, warm_slots_root};
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 pub(super) const MAX_WALK_DEPTH: usize = 64;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

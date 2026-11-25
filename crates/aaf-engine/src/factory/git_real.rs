@@ -17,9 +17,9 @@ use super::ports::{GitOps, Integration, IntegrationGuard};
 use crate::git::base_ref::{BaseRef, DEFAULT_REMOTE};
 use crate::git::cmd::{failure, git, git_raw, git_timed};
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef, fetch_pr_feedback};
-use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree};
+use crate::pr_ops::PrMergeOutcome;
 use crate::process::SystemRunner;
 
 mod cleanup;
@@ -419,8 +419,7 @@ impl GitOps for RealGit {
         let Some(remote) = self.base.remote.as_deref() else {
             return Ok(None);
         };
-        let note =
-            crate::git::pr_merge::sync_local_base(&self.repo_root, remote, &self.base.branch);
+        let note = crate::pr_ops::sync_local_base(&self.repo_root, remote, &self.base.branch);
         Ok(Some(note))
     }
 

@@ -12,9 +12,8 @@ use super::{GcError, GcReport, PRUNE_EXPIRE};
 use crate::config::{self, ConfigInputs, ConfigOverlay};
 use crate::git::base_ref::{BaseRef, resolve_base};
 use crate::git::cmd::{git, git_raw};
-use crate::git::path_str;
-use crate::git::pr_cleanup::main_work_tree;
 use crate::git::worktree::{self, BRANCH_PREFIX, WorktreeEntry};
+use crate::git::{main_work_tree, path_str};
 
 pub(super) struct ResolvedBase {
     pub(super) base: BaseRef,

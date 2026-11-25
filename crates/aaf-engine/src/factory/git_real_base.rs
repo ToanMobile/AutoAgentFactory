@@ -11,7 +11,7 @@ use super::adapters::SystemClock;
 use super::git_real::err;
 use crate::git::cmd::{Output, git, git_raw};
 use crate::git::pr::parse_pr_number_from_url;
-use crate::git::pr_merge::{PrMergeOutcome, PrMergeRequest, merge_pr};
+use crate::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 
 /// How long one unattended merge attempt waits for CI to register and
 /// finish. A PR still pending after it stays in Review with `ci_pending`

@@ -1,10 +1,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::ffi::OsString;
+use std::fs;
 use std::os::unix::fs::symlink;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use super::*;
+use super::path;
+use super::shell::{
+    ConfineMode, REASON_NO_DATA_DIR, bare_sh, build_bwrap_argv, build_seatbelt_profile,
+    linux_shell_argv_with_probe, macos_shell_argv, shell_argv,
+};
 
 fn canon_tempdir() -> (TempDir, PathBuf) {
     let tmp = TempDir::new().unwrap();
@@ -38,7 +45,7 @@ fn seatbelt_profile_rules_and_ancestors_for_normal_path() {
     assert!(profile.contains(&format!(
         "(deny file-write* (literal \"{d}/throttle/guest\"))\n"
     )));
-    let escaped = sandbox::regex_escape(d);
+    let escaped = path::regex_escape(d);
     assert!(profile.contains(&format!(
         "(allow file-read* (regex #\"^{escaped}/locks/heavy\\.[0-9]+\\.token$\"))\n"
     )));

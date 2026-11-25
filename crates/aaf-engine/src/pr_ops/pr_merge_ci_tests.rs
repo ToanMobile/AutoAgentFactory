@@ -3,9 +3,9 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use super::GitError;
-use super::gh_client::{GhClient, MergeStrategy, PrCheck, PrInfo};
 use super::pr_merge_support::check_ci;
+use crate::git::GitError;
+use crate::git::gh_client::{GhClient, MergeStrategy, PrCheck, PrInfo};
 
 struct Checks(Mutex<Vec<Vec<PrCheck>>>);
 

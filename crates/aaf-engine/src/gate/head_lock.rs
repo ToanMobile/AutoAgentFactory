@@ -236,16 +236,7 @@ fn locked_with(
     Ok((report, aaf_fp::sha256_hex(&material), entries))
 }
 
-pub(crate) fn common_repo_root(repo_root: &Path) -> Option<std::path::PathBuf> {
-    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
-    let common = aaf_fp::git(repo_root, &args, &[], GIT_TIMEOUT).ok()?;
-    let common = Path::new(&common);
-    let main_root = match common.parent() {
-        Some(parent) if common.file_name().is_some_and(|name| name == ".git") => parent,
-        _ => common,
-    };
-    Some(main_root.to_path_buf())
-}
+pub(crate) use crate::confine_core::git_refs::common_repo_root;
 
 fn valid_approval(
     data_dir: &Path,
@@ -353,7 +344,8 @@ pub fn evaluate(
                 GIT_TIMEOUT,
             )?;
             let (_, extra_hard) =
-                crate::proof::load_gate_base_capture_cmd(repo_root, Some(base_sha))?;
+                crate::proof::load_gate_base_capture_cmd(repo_root, Some(base_sha))
+                    .map_err(|e| GateError::Config(e.to_string()))?;
             let req = cfg.cross_audit.require_different_provider;
             evaluate_changes_with_common(
                 data_dir,
@@ -484,7 +476,8 @@ pub(super) fn approve_inner(
         seen_content.insert(path.to_string(), hash.clone());
         Ok(hash)
     };
-    let (_, extra_hard) = crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())?;
+    let (_, extra_hard) = crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())
+        .map_err(|e| GateError::Config(e.to_string()))?;
     let working_changes =
         changes::with_ignored_matching(repo_root, &extra_hard, &set.changes, GIT_TIMEOUT)?;
     let (locked_changes, lock_fp, primary_entries) = locked_with(

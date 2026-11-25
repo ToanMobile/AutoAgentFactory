@@ -8,6 +8,7 @@ pub mod daemons;
 mod drain;
 pub mod heavy;
 pub mod idle;
+pub mod inspect;
 mod legacy;
 pub mod orphans;
 pub mod paths;

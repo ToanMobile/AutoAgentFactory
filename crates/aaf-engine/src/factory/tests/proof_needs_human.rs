@@ -15,7 +15,8 @@ use super::fakes::{FakeGit, ok_outcome};
 use super::world::World;
 use crate::factory::ports::{GitOps, Integration};
 use crate::factory::{Hooks, Mode, run};
-use crate::git::{MergeOutcome, PrMergeOutcome, PrOutcome, TaskWorktree};
+use crate::git::{MergeOutcome, PrOutcome, TaskWorktree};
+use crate::pr_ops::PrMergeOutcome;
 use crate::proof::{HOST_PROOF_FLOWS_DEVICE, HOST_PROOF_FLOWS_TOOL, captured_proof_image_path};
 
 fn crc32(kind: &[u8; 4], data: &[u8]) -> u32 {

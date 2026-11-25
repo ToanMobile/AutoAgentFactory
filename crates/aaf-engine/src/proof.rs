@@ -60,6 +60,12 @@ pub enum ProofError {
     Io(#[from] std::io::Error),
 }
 
+impl From<crate::confine_core::ConfineError> for ProofError {
+    fn from(err: crate::confine_core::ConfineError) -> Self {
+        ProofError::Invalid(err.to_string())
+    }
+}
+
 /// Validates PNG structure, device denylist/allowlist, tool allow-list, and writes an
 /// HMAC-signed proof artifact bound to `repo_root` and current `tree_fp`.
 pub fn record_proof(

@@ -112,7 +112,7 @@ impl Db {
             };
             let global_frozen = meta_val(META_FACTORY_FROZEN)?.as_deref() == Some("1");
             let frozen = if let Some(root) = repo_root.as_deref() {
-                let key = crate::unblocker::ladder::repo_frozen_key(root);
+                let key = aaf_fp::fs_private::repo_frozen_key(root);
                 match meta_val(&key)?.as_deref() {
                     Some("1") => true,
                     Some("probe") => false,

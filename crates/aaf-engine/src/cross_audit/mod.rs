@@ -41,7 +41,7 @@ pub use verdict::{
 
 /// `runs.executor` of an audit run: it tells the auditor's run from the
 /// author's, both in the audit itself and in the account history.
-pub const AUDIT_EXECUTOR: &str = "cross-audit";
+pub use aaf_domain::engine_contracts::AUDIT_EXECUTOR;
 
 /// What the auditor judges. `spec` and `diff` are untrusted: the agent under
 /// review wrote them.

@@ -12,7 +12,7 @@ use serde_json::json;
 use super::world::World;
 use crate::factory::merge_retry::{MERGE_RETRY_MAX, backoff_secs, retry_task};
 use crate::git::PrOutcome;
-use crate::git::pr_merge::PrMergeOutcome;
+use crate::pr_ops::PrMergeOutcome;
 
 const URL: &str = "https://github.com/acme/app/pull/9";
 

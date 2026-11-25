@@ -1,12 +1,11 @@
-//! Always-on, read-only Cockpit service at a fixed loopback URL.
+//! Always-on Cockpit service at a fixed loopback URL.
 //!
 //! `aaf ui --service` serves the Cockpit on loopback (`127.0.0.1:4317`) with a
-//! persistent token stored in `<config_dir>/ui-service.token` (mode 0600), so
-//! bookmarks and local redirects (such as Agent Office `/studio`) keep working
-//! across restarts and upgrades. Because any process running as this user can
-//! read that file, service mode is unconditionally read-only: no rework,
-//! unblock, steer, unfreeze, or approve. Mutating actions stay on an explicit
-//! manual `aaf ui --port <port>` with an ephemeral per-run token.
+//! persistent token stored in `<data_dir>/ui-service.token` (mode 0600) — inside
+//! `AAF_DATA_DIR`, which Seatbelt, `aaf-hook` (`data_guard`), and gate/proof
+//! confinement all deny reading so confined agents cannot steal the token even
+//! when `--allow-actions` is enabled. `POST /api/approve` remains unconditionally
+//! locked in `--service` mode.
 //!
 //! `aaf ui --install-service` (macOS) writes and loads the `launchd` agent
 //! `com.autoagentfactory.ui` so the service survives reboots and restarts cleanly
@@ -33,9 +32,9 @@ const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Path of the persistent read-only service token.
-pub(crate) fn token_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(TOKEN_FILE)
+/// Path of the persistent service token (inside `AAF_DATA_DIR`, read-denied to agents).
+pub(crate) fn token_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(TOKEN_FILE)
 }
 
 pub(crate) fn valid_token(t: &str) -> bool {
@@ -60,15 +59,12 @@ fn read_existing_regular_token(path: &Path) -> io::Result<Option<String>> {
     let file = fs::File::open(path)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let fmeta = file.metadata()?;
-        if !fmeta.file_type().is_file() {
+        if !fmeta.file_type().is_file() || fmeta.dev() != meta.dev() || fmeta.ino() != meta.ino() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "refusing non-regular service token path: {}",
-                    path.display()
-                ),
+                format!("service token path changed during open: {}", path.display()),
             ));
         }
         if (fmeta.permissions().mode() & 0o777) != 0o600 {
@@ -100,20 +96,9 @@ fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Reads the service token, creating it (mode 0600, symlink-safe, race-safe) when missing or malformed.
-pub(crate) fn load_or_create_token(config_dir: &Path) -> io::Result<String> {
-    let path = token_path(config_dir);
-    let existed = match read_existing_regular_token(&path)? {
-        Some(t) => return Ok(t),
-        None => fs::symlink_metadata(&path).is_ok(),
-    };
-    ensure_private_dir(config_dir)?;
-    let token: String = generate_token().chars().take(TOKEN_LEN).collect();
-    if !valid_token(&token) {
-        return Err(io::Error::other("generated service token is malformed"));
-    }
+fn write_tmp_token(dir: &Path, token: &str) -> io::Result<PathBuf> {
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = config_dir.join(format!(".{TOKEN_FILE}.tmp-{}-{seq}", std::process::id()));
+    let tmp = dir.join(format!(".{TOKEN_FILE}.tmp-{}-{seq}", std::process::id()));
     let _ = fs::remove_file(&tmp);
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
@@ -131,50 +116,55 @@ pub(crate) fn load_or_create_token(config_dir: &Path) -> io::Result<String> {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
+    Ok(tmp)
+}
 
+fn publish_token_atomic(dir: &Path, path: &Path, token: &str, existed: bool) -> io::Result<String> {
+    let tmp = write_tmp_token(dir, token)?;
     if !existed {
         // Race-safe creation: first process wins via hard_link; concurrent callers adopt its token.
-        match fs::hard_link(&tmp, &path) {
+        match fs::hard_link(&tmp, path) {
             Ok(()) => {
                 let _ = fs::remove_file(&tmp);
-                return Ok(token);
+                return Ok(token.to_string());
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 let _ = fs::remove_file(&tmp);
-                if let Some(winner) = read_existing_regular_token(&path)? {
+                if let Some(winner) = read_existing_regular_token(path)? {
                     return Ok(winner);
                 }
-                // Existing file is malformed; fall through to atomic replace below.
-                return replace_malformed_token(config_dir, &path, &token);
+                return replace_malformed_token(dir, path, token);
             }
             Err(_) => {
                 // Filesystem without hard_link support: fall back to atomic rename.
             }
         }
     }
-    if let Err(e) = fs::rename(&tmp, &path) {
+    if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(token)
+    Ok(token.to_string())
+}
+
+/// Reads the service token, creating it (mode 0600, symlink-safe, race-safe) when missing or malformed.
+pub(crate) fn load_or_create_token(config_dir: &Path) -> io::Result<String> {
+    let path = token_path(config_dir);
+    let existed = match read_existing_regular_token(&path)? {
+        Some(t) => return Ok(t),
+        None => fs::symlink_metadata(&path).is_ok(),
+    };
+    ensure_private_dir(config_dir)?;
+    let token: String = generate_token().chars().take(TOKEN_LEN).collect();
+    if !valid_token(&token) {
+        return Err(io::Error::other("generated service token is malformed"));
+    }
+    publish_token_atomic(config_dir, &path, &token, existed)
 }
 
 fn replace_malformed_token(config_dir: &Path, path: &Path, token: &str) -> io::Result<String> {
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = config_dir.join(format!(".{TOKEN_FILE}.tmp-{}-{seq}", std::process::id()));
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(&tmp)?;
-    let written = file
-        .write_all(token.as_bytes())
-        .and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(e) = written.and_then(|()| fs::rename(&tmp, path)) {
+    let tmp = write_tmp_token(config_dir, token)?;
+    if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
@@ -289,16 +279,23 @@ pub(crate) fn plist_xml(
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn non_default_service_env(ctx: &Ctx) -> Vec<(&'static str, String)> {
+    let abs = |p: &Path| {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            ctx.cwd.join(p)
+        }
+    };
     let mut extra = Vec::new();
-    let default_cfg = ctx.home.join(".config/autofactory");
-    if ctx.config_dir != default_cfg {
-        extra.push(("AAF_CONFIG_DIR", ctx.config_dir.display().to_string()));
+    let cfg = abs(&ctx.config_dir);
+    if cfg != abs(&ctx.home.join(".config/autofactory")) {
+        extra.push(("AAF_CONFIG_DIR", cfg.display().to_string()));
     }
-    if let Some((_, val)) = ctx.aaf_env.iter().find(|(k, _)| k == "AAF_DATA_DIR")
-        && !val.trim().is_empty()
-    {
-        extra.push(("AAF_DATA_DIR", val.trim().to_string()));
+    let data = abs(&ctx.data_dir);
+    if data != abs(&ctx.home.join(".local/share/autofactory")) {
+        extra.push(("AAF_DATA_DIR", data.display().to_string()));
     }
     extra
 }
@@ -482,40 +479,91 @@ pub(crate) fn run_uninstall(ctx: &Ctx) -> CmdResult {
     .field("plist", json!(plist.display().to_string())))
 }
 
-/// Print the fixed bookmark URL for the read-only service.
-pub(crate) fn run_service_url(ctx: &Ctx, port: u16) -> CmdResult {
-    let token = load_or_create_token(&ctx.config_dir)
+/// Loads `<data_dir>/ui-service.token`, migrating a legacy `<config_dir>/ui-service.token`
+/// atomically (mode 0600) and removing the legacy file so agents cannot read it.
+pub(crate) fn load_or_migrate_token(
+    data_dir: &Path,
+    legacy_config_dir: &Path,
+) -> io::Result<String> {
+    let dest = token_path(data_dir);
+    let is_regular = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file());
+    if let Some(existing) = read_existing_regular_token(&dest)? {
+        let legacy = token_path(legacy_config_dir);
+        if legacy != dest && is_regular(&legacy) {
+            let _ = fs::remove_file(&legacy);
+        }
+        return Ok(existing);
+    }
+    let legacy = token_path(legacy_config_dir);
+    if legacy != dest
+        && is_regular(&legacy)
+        && let Ok(Some(migrated)) = read_existing_regular_token(&legacy)
+    {
+        ensure_private_dir(data_dir)?;
+        let dest_existed = fs::symlink_metadata(&dest).is_ok();
+        let saved = publish_token_atomic(data_dir, &dest, &migrated, dest_existed)?;
+        let _ = fs::remove_file(&legacy);
+        return Ok(saved);
+    }
+    load_or_create_token(data_dir)
+}
+
+/// Print the fixed bookmark URL for the Cockpit service (plus remote HTTPS URL & QR if configured).
+pub(crate) fn run_service_url(
+    ctx: &Ctx,
+    port: u16,
+    public_url: Option<&str>,
+    include_qr: bool,
+) -> CmdResult {
+    let token = load_or_migrate_token(&ctx.data_dir, &ctx.config_dir)
         .map_err(|e| CmdError::new(format!("service token: {e}")))?;
+    let origin = super::tailscale::resolve_public_origin(public_url, ctx).map_err(CmdError::new)?;
     let url = bookmark_url(port, &token);
     let studio = studio_url(&url);
-    let token_file = token_path(&ctx.config_dir);
-    Ok(CmdOutput::ok(
+    let token_file = token_path(&ctx.data_dir);
+    let out = CmdOutput::ok(
         "ok",
         format!("Cockpit (read-only): {url}\nStudio (statistics): {studio}"),
     )
     .field("url", json!(url))
     .field("studio_url", json!(studio))
     .field("token_file", json!(token_file.display().to_string()))
-    .field("read_only", json!(true)))
+    .field("read_only", json!(true));
+    Ok(super::tailscale::attach_remote_output(
+        out,
+        origin.as_ref(),
+        &token,
+        true,
+        include_qr,
+    ))
 }
 
 /// Create the persistent token, install/restart launchd, and print the bookmark URL.
-pub(crate) fn run_install(ctx: &Ctx, allow_actions: bool) -> CmdResult {
-    let token = load_or_create_token(&ctx.config_dir)
+pub(crate) fn run_install(
+    ctx: &Ctx,
+    allow_actions: bool,
+    public_url: Option<&str>,
+    use_tailscale: bool,
+    include_qr: bool,
+) -> CmdResult {
+    let token = load_or_migrate_token(&ctx.data_dir, &ctx.config_dir)
         .map_err(|e| CmdError::new(format!("service token: {e}")))?;
+    let origin =
+        super::tailscale::setup_remote_for_service(ctx, DEFAULT_PORT, public_url, use_tailscale)
+            .map_err(CmdError::new)?;
     let path_var = ctx.path_var.to_string_lossy();
     let extra_env = non_default_service_env(ctx);
     let plist = install(&ctx.home, &path_var, &extra_env, allow_actions).map_err(CmdError::new)?;
     let url = bookmark_url(DEFAULT_PORT, &token);
     let studio = studio_url(&url);
     let log = log_path(&ctx.home);
-    let token_file = token_path(&ctx.config_dir);
+    let token_file = token_path(&ctx.data_dir);
     let mode_lbl = if allow_actions {
         "board actions enabled, approve locked"
     } else {
         "read-only"
     };
-    Ok(CmdOutput::ok(
+    let out = CmdOutput::ok(
         "ok",
         format!(
             "installed {SERVICE_LABEL} ({})\nCockpit ({mode_lbl}): {url}\nStudio (statistics): {studio}\nLog: {}",
@@ -531,5 +579,12 @@ pub(crate) fn run_install(ctx: &Ctx, allow_actions: bool) -> CmdResult {
     .field("studio_url", json!(studio))
     .field("read_only", json!(!allow_actions))
     .field("allow_actions", json!(allow_actions))
-    .field("allow_approve", json!(false)))
+    .field("allow_approve", json!(false));
+    Ok(super::tailscale::attach_remote_output(
+        out,
+        origin.as_ref(),
+        &token,
+        !allow_actions,
+        include_qr,
+    ))
 }

@@ -8,6 +8,7 @@ use super::AuditInput;
 use super::checklist::build_checklist;
 use super::scoring::GOLDEN_STANDARDS;
 
+pub use aaf_domain::prompt_fence::{GUARD, NEUTRALISED, SPEC_BEGIN, SPEC_END, neutralise};
 pub use lockfile_summary::{
     ALLOWLISTED_LOCKFILES, LOCKFILE_SUMMARY_THRESHOLD_BYTES, is_allowlisted_lockfile,
     summarize_diff_lockfiles, summarize_diff_lockfiles_with_threshold,
@@ -17,40 +18,9 @@ pub use lockfile_summary::{
 /// the audit can no longer pass: unseen changes cannot be approved.
 pub const MAX_DIFF_BYTES: usize = 200_000;
 
-/// Token every delimiter carries. It is removed from untrusted text, so no
-/// delimiter (or truncation marker) can be forged from inside a block.
-pub const GUARD: &str = "AAF_UNTRUSTED";
-/// What an occurrence of [`GUARD`] inside untrusted text is rewritten to.
-pub const NEUTRALISED: &str = "AAF-NEUTRALISED";
-
-pub const SPEC_BEGIN: &str = "<<<AAF_UNTRUSTED_SPEC_BEGIN>>>";
-pub const SPEC_END: &str = "<<<AAF_UNTRUSTED_SPEC_END>>>";
 pub const DIFF_BEGIN: &str = "<<<AAF_UNTRUSTED_DIFF_BEGIN>>>";
 pub const DIFF_END: &str = "<<<AAF_UNTRUSTED_DIFF_END>>>";
 pub const TRUNCATION_MARKER: &str = "[AAF_UNTRUSTED_DIFF_TRUNCATED]";
-
-/// Rewrites every occurrence of [`GUARD`], in any ASCII case, so the text
-/// cannot contain a delimiter.
-pub fn neutralise(text: &str) -> String {
-    let needle = GUARD.as_bytes();
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut copied = 0;
-    let mut at = 0;
-    while at + needle.len() <= bytes.len() {
-        if bytes[at..at + needle.len()].eq_ignore_ascii_case(needle) {
-            // A match is pure ASCII, so both ends are char boundaries.
-            out.push_str(&text[copied..at]);
-            out.push_str(NEUTRALISED);
-            at += needle.len();
-            copied = at;
-        } else {
-            at += 1;
-        }
-    }
-    out.push_str(&text[copied..]);
-    out
-}
 
 /// The part of the diff the auditor sees, and whether anything was cut.
 pub fn truncate_diff(diff: &str) -> (&str, bool) {

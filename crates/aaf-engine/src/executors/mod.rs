@@ -19,7 +19,7 @@ pub mod stream_log;
 mod tests;
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -194,14 +194,7 @@ pub fn should_deny_macos_keychain(
     }
 }
 
-/// First regular file called `name` in the directories of `path_var`. Looking
-/// the binary up ourselves skips any shell function or alias of that name.
-pub fn find_on_path(path_var: &OsStr, name: &str) -> Option<PathBuf> {
-    std::env::split_paths(path_var)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
-}
+pub use crate::confine_core::find_on_path;
 
 /// Builds the runner `cfg.executor` names, using the real environment.
 pub fn build_runner(cfg: &RunConfig) -> PortResult<Box<dyn AgentRunner>> {

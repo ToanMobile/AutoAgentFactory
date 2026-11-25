@@ -160,6 +160,7 @@ fn start_test_server_opts(
         allow_mutating,
         allow_approve,
         lan_mode: false,
+        trusted_origin: None,
     };
     let handle = start_server(cfg, backend.clone()).unwrap();
     (handle, backend)
@@ -188,6 +189,7 @@ fn non_loopback_host_without_strong_key_is_refused() {
         allow_mutating: false,
         allow_approve: false,
         lan_mode: true,
+        trusted_origin: None,
     };
     assert!(matches!(
         validate_ui_config(&manual),

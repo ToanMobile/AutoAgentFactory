@@ -13,8 +13,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::{HandoverData, SOLO_DEV_BADGE};
 use crate::cross_audit::scoring::GOLDEN_STANDARDS;
-use crate::handover::{HandoverData, SOLO_DEV_BADGE};
 
 /// Verified device-proof metadata carried in [`HandoverData`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,7 +125,7 @@ pub(crate) fn standard_name(id: &str) -> &'static str {
 
 /// Renders a standalone, offline-safe HTML handover report.
 pub fn render_html(data: &HandoverData, data_dir: &Path) -> String {
-    crate::handover_devkit::render_devkit_html(data, data_dir)
+    super::devkit::render_devkit_html(data, data_dir)
 }
 
 /// Re-verifies HMAC + policy + live image SHA-256 via
@@ -200,7 +200,7 @@ pub(crate) fn load_verified_proof_png(
 
 /// Renders [`HandoverData`] as concise GitHub-flavored Markdown.
 pub fn render_markdown(data: &HandoverData) -> String {
-    crate::handover_devkit::render_devkit_markdown(data)
+    super::devkit::render_devkit_markdown(data)
 }
 
 /// Serializes [`HandoverData`] to a JSON [`Value`].

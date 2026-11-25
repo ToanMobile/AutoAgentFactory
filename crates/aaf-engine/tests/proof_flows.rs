@@ -13,8 +13,9 @@ use aaf_domain::proof::{
     AssertionResult, FlowResult, PROOF_SCHEMA_VERSION, PROOF_SCHEMA_VERSION_V2, ProofRecord,
 };
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
-use aaf_engine::git::{MergeStrategy, PrMergeOutcome, PrMergeRequest, merge_pr};
+use aaf_engine::git::MergeStrategy;
 use aaf_engine::handover::build_handover_from_parts;
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use aaf_engine::proof::{
     HOST_PROOF_FLOWS_DEVICE, HOST_PROOF_FLOWS_TOOL, ProofInput, load_base_flows, record_proof,
     run_flows_and_record_proof_with_env, run_single_flow_with_timeout, show_proof, verify_proof,

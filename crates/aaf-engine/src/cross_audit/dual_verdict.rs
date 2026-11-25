@@ -9,6 +9,9 @@ use aaf_domain::gate::GoldenScore;
 use aaf_domain::pipeline::{
     AdjudicateDecision, AdjudicateVerdict, IssueSeverity, PlanContract, ReviewIssue,
 };
+use aaf_domain::prompt_fence::{
+    PLAN_BEGIN, PLAN_END, format_plan_for_implementer, normalize_repo_path,
+};
 use aaf_domain::task::{ImmutableSpec, Task};
 use serde::{Deserialize, de::DeserializeOwned};
 
@@ -21,8 +24,6 @@ use super::prompt::{
 };
 use super::scoring::{GOLDEN_IDS, GOLDEN_STANDARDS, MechanicalScoreReport, evaluate_score_gate};
 use super::verdict::strip_ansi_escapes;
-use crate::plan_debate::prompt::{PLAN_BEGIN, PLAN_END, format_plan_for_implementer};
-use crate::plan_debate::schema::normalize_repo_path;
 
 pub type ChecklistItem = checklist::Item;
 pub const PLAN_DRIFT_ID: &str = "PLAN-DRIFT";

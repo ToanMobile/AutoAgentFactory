@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::Sleeper;
 use super::heavy::HeavyTool;
 use super::paths::{ensure_closed_dir, guest_dir, is_guest, open_guest_file, read_guest_file};
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 /// Runs remembered per command; the admission figure is their p75 (2nd
 /// highest once 4+ runs are recorded, conservative max for 1..=3 runs).

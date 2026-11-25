@@ -217,7 +217,7 @@ pub fn active_external_builds() -> Vec<String> {
 
 /// Collects live machine state and returns every reason the machine is not idle.
 pub fn probe_idle(data_dir: &Path, machine: &MachineConfig, probe: &dyn LoadProbe) -> Vec<String> {
-    let throttle = crate::telemetry::inspect_throttle(data_dir);
+    let throttle = super::inspect::inspect_throttle(data_dir);
     let snapshot = IdleSnapshot {
         active_slots: throttle.throttle_slots,
         draining: throttle.drain_lock_present,

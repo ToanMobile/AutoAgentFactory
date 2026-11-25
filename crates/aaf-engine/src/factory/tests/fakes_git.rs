@@ -9,8 +9,8 @@ use aaf_domain::ports::{PortError, PortResult};
 
 use crate::factory::ports::{GitOps, Integration};
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef};
-use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::{MergeOutcome, PrOutcome, TaskWorktree};
+use crate::pr_ops::PrMergeOutcome;
 
 pub(super) fn task_of(path: &Path) -> String {
     path.file_name()

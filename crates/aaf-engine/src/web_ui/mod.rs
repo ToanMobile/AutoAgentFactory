@@ -14,6 +14,10 @@
 //!   attached to every response.
 
 mod http_io;
+pub mod public_url;
+pub mod pwa;
+#[cfg(test)]
+mod pwa_tests;
 pub mod qr;
 mod routes;
 pub mod server;
@@ -39,6 +43,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub use public_url::{TrustedOrigin, parse_trusted_origin, render_remote_pairing_card};
 pub use qr::{pairing_url, render_pairing_card, render_qr_ascii};
 pub use server::{UiServerHandle, start_server};
 
@@ -49,7 +54,7 @@ pub const APPROVE_DISABLED_MSG: &str = "POST /api/approve is disabled by default
 
 pub const HTML_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
-    frame-ancestors 'none'";
+    frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
 
 static TOKEN_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -62,6 +67,8 @@ pub struct UiConfig {
     pub allow_mutating: bool,
     pub allow_approve: bool,
     pub lan_mode: bool,
+    /// Optional validated HTTPS reverse-proxy origin (e.g. Tailscale Serve).
+    pub trusted_origin: Option<TrustedOrigin>,
 }
 
 impl Default for UiConfig {
@@ -73,6 +80,7 @@ impl Default for UiConfig {
             allow_mutating: true,
             allow_approve: false,
             lan_mode: false,
+            trusted_origin: None,
         }
     }
 }
@@ -104,9 +112,16 @@ impl UiConfig {
             allow_mutating,
             allow_approve: false,
             lan_mode: !loopback,
+            trusted_origin: None,
         };
         validate_ui_config(&cfg)?;
         Ok(cfg)
+    }
+
+    /// Configures a trusted HTTPS reverse-proxy origin (e.g. Tailscale Serve).
+    pub fn with_trusted_origin(mut self, origin: Option<TrustedOrigin>) -> Self {
+        self.trusted_origin = origin;
+        self
     }
 
     /// Opts in to `POST /api/approve`; fail-closed (`false`) when `allow_mutating` is `false`.
@@ -201,6 +216,24 @@ pub trait UiBackend: Send + Sync {
     fn accounts_json(&self, _refresh: bool) -> Result<Value, String> {
         Err("not found: accounts panel is not available in this backend".into())
     }
+    /// Task execution pipeline DAG (read-only from DB events and runs).
+    fn task_pipeline_json(&self, _task_id: &str) -> Result<Value, String> {
+        Err("not found: pipeline is not available in this backend".into())
+    }
+    /// Read-only list of SOP run checkpoints under `<data_dir>/sops/*.json`.
+    fn sop_runs_json(&self) -> Result<Value, String> {
+        Ok(serde_json::json!({ "runs": [] }))
+    }
+    /// Mutates a task with optional structured inline diff review comments.
+    fn mutate_task_with_comments(
+        &self,
+        action: &str,
+        task_id: &str,
+        note: &str,
+        _comments: &[Value],
+    ) -> Result<Value, String> {
+        self.mutate_task(action, task_id, note)
+    }
 }
 
 /// Returns `true` strictly for loopback hosts (`127.0.0.1`, `localhost`, `::1`).
@@ -293,7 +326,7 @@ pub fn verify_request_security(
         None => None,
     };
     if let Some(origin) = req.origin_header {
-        verify_origin_header(cfg, bound_port, origin, parsed_host.as_deref())?;
+        verify_origin_header(cfg, bound_port, origin, parsed_host.as_ref())?;
     }
 
     if req.require_auth {
@@ -348,13 +381,29 @@ fn extract_bearer_token(header: &str) -> Option<&str> {
     Some(token)
 }
 
+struct VerifiedHost {
+    host: String,
+    via_trusted_origin_only: bool,
+}
+
 fn verify_host_header(
     cfg: &UiConfig,
     bound_port: u16,
     raw: &str,
-) -> Result<String, SecurityRejection> {
+) -> Result<VerifiedHost, SecurityRejection> {
     let (host, port) = parse_authority(raw)
         .ok_or_else(|| SecurityRejection::Forbidden("malformed Host header".to_string()))?;
+    if cfg
+        .trusted_origin
+        .as_ref()
+        .is_some_and(|o| o.matches_host(&host, port))
+    {
+        let also_loopback = is_loopback_host(&host) && port.is_none_or(|p| p == bound_port);
+        return Ok(VerifiedHost {
+            host,
+            via_trusted_origin_only: !also_loopback,
+        });
+    }
     if let Some(p) = port
         && p != bound_port
     {
@@ -367,25 +416,43 @@ fn verify_host_header(
             "foreign Host header rejected on loopback bind".to_string(),
         ));
     }
-    Ok(host)
+    Ok(VerifiedHost {
+        host,
+        via_trusted_origin_only: false,
+    })
 }
 
 fn verify_origin_header(
     cfg: &UiConfig,
     bound_port: u16,
     raw: &str,
-    request_host: Option<&str>,
+    verified_host: Option<&VerifiedHost>,
 ) -> Result<(), SecurityRejection> {
     let trimmed = raw.trim();
-    let (default_port, authority) = if let Some(rest) = trimmed.strip_prefix("http://") {
-        (80u16, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("https://") {
-        (443u16, rest)
-    } else {
-        return Err(SecurityRejection::Forbidden(
-            "cross-origin request rejected".to_string(),
-        ));
-    };
+    if verified_host.is_some_and(|h| h.via_trusted_origin_only) {
+        let matched = cfg
+            .trusted_origin
+            .as_ref()
+            .is_some_and(|o| trimmed.eq_ignore_ascii_case(o.origin_header()));
+        return if matched {
+            Ok(())
+        } else {
+            Err(SecurityRejection::Forbidden(
+                "cross-origin request rejected".to_string(),
+            ))
+        };
+    }
+    let request_host = verified_host.map(|h| h.host.as_str());
+    let (scheme_is_https, default_port, authority) =
+        if let Some(rest) = trimmed.strip_prefix("http://") {
+            (false, 80u16, rest)
+        } else if let Some(rest) = trimmed.strip_prefix("https://") {
+            (true, 443u16, rest)
+        } else {
+            return Err(SecurityRejection::Forbidden(
+                "cross-origin request rejected".to_string(),
+            ));
+        };
     if authority.contains('/') || authority.contains('?') || authority.contains('#') {
         return Err(SecurityRejection::Forbidden(
             "malformed Origin header".to_string(),
@@ -393,7 +460,15 @@ fn verify_origin_header(
     }
     let (origin_host, origin_port) = parse_authority(authority)
         .ok_or_else(|| SecurityRejection::Forbidden("malformed Origin header".to_string()))?;
-    if origin_port.unwrap_or(default_port) != bound_port {
+    let effective_port = origin_port.unwrap_or(default_port);
+    if cfg
+        .trusted_origin
+        .as_ref()
+        .is_some_and(|o| o.matches_origin(scheme_is_https, &origin_host, effective_port))
+    {
+        return Ok(());
+    }
+    if effective_port != bound_port {
         return Err(SecurityRejection::Forbidden(
             "Origin port does not match server port".to_string(),
         ));

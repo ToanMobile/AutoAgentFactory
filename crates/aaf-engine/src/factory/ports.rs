@@ -11,8 +11,8 @@ use aaf_domain::gate::{HeadLockReport, Receipt};
 use aaf_domain::ports::{LimitHit, PortError, PortResult};
 
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef};
-use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::{GitError, MergeOutcome, PrOutcome, TaskWorktree};
+use crate::pr_ops::PrMergeOutcome;
 use crate::unblocker::{QuotaRoute, RerunResult};
 use crate::webhook::WebhookEvent;
 

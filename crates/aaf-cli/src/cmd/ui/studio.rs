@@ -7,7 +7,7 @@ use aaf_domain::ports::{Clock, RunStore, TaskStore};
 use aaf_domain::run::RunStatus;
 use aaf_domain::task::TaskState;
 use aaf_engine::db::Db;
-use aaf_engine::telemetry::{CostPolicy, ReportWindow, collect_report};
+use aaf_engine::telemetry::{CostPolicy, ReportWindow, collect_report, compute_factory_score};
 use serde_json::{Value, json};
 
 use super::actions::format_blocked_detail;
@@ -127,12 +127,18 @@ pub(crate) fn report_json(
         Some(db) => collect_task_breakdown(db, repo, window.since, now)?,
         None => Vec::new(),
     };
-    let value = serde_json::to_value(&report).map_err(|e| format!("report: {e}"))?;
+    let score = compute_factory_score(&report);
+    let mut value = serde_json::to_value(&report).map_err(|e| format!("report: {e}"))?;
+    let score_val = serde_json::to_value(&score).map_err(|e| format!("score: {e}"))?;
+    if let Value::Object(ref mut map) = value {
+        map.insert("score".into(), score_val.clone());
+    }
     Ok(json!({
         "ok": true,
         "scope": repo.unwrap_or("all"),
         "since_hours": since_hours,
         "report": value,
+        "score": score_val,
         "task_breakdown": breakdown,
     }))
 }

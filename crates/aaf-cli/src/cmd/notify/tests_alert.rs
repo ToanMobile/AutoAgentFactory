@@ -1,8 +1,10 @@
 //! `alert_for` mapping of PR feedback, factory-freeze and cost-cap events.
 
 use aaf_domain::event::{EventKind, FactoryEvent};
+use aaf_engine::telegram::MAX_MESSAGE_BYTES;
 use serde_json::{Value, json};
 
+use super::deliver::{format_telegram_alert, parse_cockpit_url};
 use super::{alert_for, fmt_utc};
 
 fn pr_feedback(action: &str) -> FactoryEvent {
@@ -138,4 +140,110 @@ fn alert_for_cost_paused_and_cost_resumed() {
         resumed_alert.text,
         "aaf: daily token cap window cleared (0/1000 in 24h); new work resumes"
     );
+}
+
+#[test]
+fn format_telegram_alert_appends_task_deep_link() {
+    let out = format_telegram_alert(
+        "aaf: t-abc (Fix login) needs you: gate failed",
+        Some("https://mac.tailnet.ts.net"),
+        Some("t-abc"),
+    );
+    assert_eq!(
+        out,
+        "aaf: t-abc (Fix login) needs you: gate failed\nCockpit: https://mac.tailnet.ts.net/?task=t-abc"
+    );
+    assert!(!out.contains("#token="));
+}
+
+#[test]
+fn format_telegram_alert_appends_needyou_without_task_id() {
+    let base = "https://mac.tailnet.ts.net";
+    for task_id in [None, Some(""), Some("   ")] {
+        let out = format_telegram_alert("aaf: factory frozen", Some(base), task_id);
+        assert_eq!(
+            out,
+            "aaf: factory frozen\nCockpit: https://mac.tailnet.ts.net/?view=needyou"
+        );
+        assert!(!out.contains("#token="));
+    }
+}
+
+#[test]
+fn format_telegram_alert_rejects_malicious_task_id_and_falls_back_to_needyou() {
+    let base = "https://mac.tailnet.ts.net";
+    let too_long = "a".repeat(129);
+    for bad_id in [
+        "../bad&x=1",
+        "t-1#token=leak",
+        "t-1?extra=1",
+        "t-1/../../etc",
+        "t-1 with spaces",
+        too_long.as_str(),
+    ] {
+        let out = format_telegram_alert("aaf: needs you", Some(base), Some(bad_id));
+        assert_eq!(
+            out, "aaf: needs you\nCockpit: https://mac.tailnet.ts.net/?view=needyou",
+            "invalid task_id {bad_id:?} must not be interpolated into ?task="
+        );
+        assert!(!out.contains("?task="));
+    }
+}
+
+#[test]
+fn format_telegram_alert_unchanged_when_cockpit_url_is_none() {
+    let raw = "aaf: t-abc (Fix login) is ready for review";
+    let out = format_telegram_alert(raw, None, Some("t-abc"));
+    assert_eq!(out, raw);
+    assert!(!out.contains("Cockpit:"));
+    assert!(!out.contains("#token="));
+}
+
+#[test]
+fn format_telegram_alert_truncates_utf8_body_and_preserves_cockpit_link() {
+    // 4500+ bytes containing multi-byte Vietnamese UTF-8 characters.
+    let unit = "Cảnh báo lỗi hệ thống: tiếng Việt có dấu ệ ở ứ — ";
+    let repeats = (4500 / unit.len()) + 2;
+    let body = unit.repeat(repeats);
+    assert!(body.len() > 4500, "body should exceed 4500 bytes");
+
+    let expected_suffix = "\nCockpit: https://mac.tailnet.ts.net/?task=t-abc";
+    let out = format_telegram_alert(&body, Some("https://mac.tailnet.ts.net"), Some("t-abc"));
+    assert!(
+        out.len() <= MAX_MESSAGE_BYTES,
+        "expected <= {MAX_MESSAGE_BYTES} bytes, got {}",
+        out.len()
+    );
+    assert!(
+        out.ends_with(&format!("\n...(truncated){expected_suffix}")),
+        "deep link must remain intact after truncation"
+    );
+    assert!(!out.contains("#token="));
+
+    let no_task = format_telegram_alert(&body, Some("https://mac.tailnet.ts.net"), None);
+    assert!(no_task.len() <= MAX_MESSAGE_BYTES);
+    assert!(
+        no_task.ends_with("\n...(truncated)\nCockpit: https://mac.tailnet.ts.net/?view=needyou")
+    );
+    assert!(!no_task.contains("#token="));
+}
+
+#[test]
+fn parse_cockpit_url_accepts_canonical_https_and_rejects_invalid() {
+    assert_eq!(
+        parse_cockpit_url("  https://mac.tailnet.ts.net/ "),
+        Some("https://mac.tailnet.ts.net".to_string())
+    );
+    assert_eq!(
+        parse_cockpit_url("https://mac.tailnet.ts.net:8443"),
+        Some("https://mac.tailnet.ts.net:8443".to_string())
+    );
+    assert_eq!(parse_cockpit_url(""), None);
+    assert_eq!(parse_cockpit_url("   "), None);
+    assert_eq!(parse_cockpit_url("http://mac.tailnet.ts.net"), None);
+    assert_eq!(
+        parse_cockpit_url("https://mac.tailnet.ts.net/#token=secret"),
+        None
+    );
+    assert_eq!(parse_cockpit_url("https://mac.tailnet.ts.net/path"), None);
 }

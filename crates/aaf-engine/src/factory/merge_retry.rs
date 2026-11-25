@@ -13,7 +13,7 @@ use serde_json::json;
 use super::Deps;
 use super::scheduler::Scheduler;
 use crate::git::TaskWorktree;
-use crate::git::pr_merge::PrMergeOutcome;
+use crate::pr_ops::PrMergeOutcome;
 
 /// Block codes that only need time to clear.
 pub(crate) const RETRYABLE_MERGE_CODES: &[&str] =

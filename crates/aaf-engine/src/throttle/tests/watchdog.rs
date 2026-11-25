@@ -10,7 +10,7 @@ use super::super::slots::{Admission, try_acquire};
 use super::super::watchdog::{PriorityTools, Watchdog, heavy_argv};
 use super::super::{Pressure, SlotGuard};
 use super::support::Rig;
-use crate::gate::proc::Supervise;
+use crate::confine_core::proc::Supervise;
 
 const PGID: u32 = 4242;
 const STEP: Duration = Duration::from_millis(20);

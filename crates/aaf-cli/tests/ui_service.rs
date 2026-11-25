@@ -91,7 +91,7 @@ fn service_url_creates_persistent_0600_token_and_reuses_it() {
         "{studio1}"
     );
 
-    let tok_path = sb.home.join(".config/autofactory/ui-service.token");
+    let tok_path = sb.data.join("ui-service.token");
     assert!(tok_path.is_file());
     #[cfg(unix)]
     {
@@ -152,7 +152,7 @@ fn service_mode_serves_cockpit_and_studio_strictly_read_only() {
 
     wait_for_health(port);
 
-    let tok_path = sb.home.join(".config/autofactory/ui-service.token");
+    let tok_path = sb.data.join("ui-service.token");
     let token = fs::read_to_string(&tok_path).unwrap().trim().to_string();
     assert_eq!(token.len(), 32);
 
@@ -257,7 +257,7 @@ fn service_allow_actions_enables_ready_and_cancel_but_keeps_approve_locked() {
     let _guard = ChildGuard(child);
     wait_for_health(port);
 
-    let tok_path = sb.home.join(".config/autofactory/ui-service.token");
+    let tok_path = sb.data.join("ui-service.token");
     let token = fs::read_to_string(&tok_path).unwrap().trim().to_string();
 
     let (st_meta, meta_body) = raw_http(
@@ -329,7 +329,7 @@ fn service_new_endpoints_create_task_diff_proof_and_supervisor() {
     let _guard = ChildGuard(child);
     wait_for_health(port);
 
-    let tok_path = sb.home.join(".config/autofactory/ui-service.token");
+    let tok_path = sb.data.join("ui-service.token");
     let token = fs::read_to_string(&tok_path).unwrap().trim().to_string();
 
     // 1. Create a Backlog task via POST /api/tasks
@@ -484,7 +484,7 @@ fn service_read_only_blocks_create_task_and_supervisor_toggle() {
     let _guard = ChildGuard(child);
     wait_for_health(port);
 
-    let tok_path = sb.home.join(".config/autofactory/ui-service.token");
+    let tok_path = sb.data.join("ui-service.token");
     let token = fs::read_to_string(&tok_path).unwrap().trim().to_string();
 
     let create_payload = json!({
@@ -513,4 +513,31 @@ fn service_read_only_blocks_create_task_and_supervisor_toggle() {
         ),
     );
     assert_eq!(st_sup, 403, "{sup_body}");
+}
+
+#[cfg(unix)]
+#[test]
+fn service_url_ignores_legacy_symlink_without_following_or_deleting_it() {
+    let sb = Sandbox::new();
+    let outside = sb.home.join("do-not-read.token");
+    let secret = "fedcba9876543210fedcba9876543210";
+    let config_dir = sb.home.join(".config/autofactory");
+    fs::create_dir_all(&sb.home).unwrap();
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(&outside, secret).unwrap();
+    let legacy = config_dir.join("ui-service.token");
+    std::os::unix::fs::symlink(&outside, &legacy).unwrap();
+
+    let (code, out) = sb.json(&["ui", "--service-url"]);
+    assert_eq!(code, 0, "{out}");
+    let url = out["url"].as_str().unwrap();
+    assert!(
+        !url.contains(secret),
+        "must not adopt token from symlink: {url}"
+    );
+    assert!(
+        fs::symlink_metadata(&legacy).is_ok_and(|m| m.file_type().is_symlink()),
+        "legacy symlink must not be deleted"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), secret);
 }

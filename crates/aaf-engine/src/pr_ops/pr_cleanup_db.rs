@@ -10,8 +10,8 @@ use aaf_domain::task::TaskState;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
 
-use super::pr_cleanup::main_work_tree;
 use crate::db::SCHEMA_VERSION;
+use crate::git::main_work_tree;
 
 const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -160,8 +160,8 @@ pub(super) fn transition_review_task_done(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use crate::git::pr_cleanup::is_protected_branch;
-    use crate::git::pr_merge_support::TempRefGuard;
+    use super::super::pr_cleanup::is_protected_branch;
+    use super::super::pr_merge_support::TempRefGuard;
 
     #[test]
     fn protected_branches_are_case_insensitive_and_cover_base_and_prefixes() {

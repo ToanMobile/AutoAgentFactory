@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AAF Studio</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AAF Cockpit">
+<meta name="theme-color" content="#0F172A">
 <style>
 :root{
   --bg:#F4F6F9;--surface:#FFFFFF;--surface2:#EBF0F6;--ink:#0F172A;--ink2:#334155;--muted:#5B6B82;
@@ -116,7 +123,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 .tl time{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
 #auth{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:40;padding:16px}
 #auth .card{max-width:440px;width:100%}
-#auth input{width:100%;padding:9px;border:1px solid var(--border);border-radius:9px;background:var(--bg);margin:10px 0}
+#auth #tok{width:100%;padding:9px;border:1px solid var(--border);border-radius:9px;background:var(--bg);margin:0}
 #authErr{color:var(--err);font-size:13px;margin-bottom:8px;min-height:18px}
 #err{display:none}
 #toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:9px;font-size:13.5px;display:none;z-index:50}
@@ -143,6 +150,8 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     </div>
     <button id="refresh" title="Làm mới">↻<span class="hide-sm"> Làm mới</span></button>
     <button id="theme" title="Đổi Sáng / Tối">◐<span class="hide-sm"> Theme</span></button>
+    <button id="copyTokBtn" class="hidden" type="button" title="Copy session token">Copy Token</button>
+    <button id="lockBtn" class="hidden" type="button" title="Khoá phiên và xoá token">Khoá</button>
     <a class="btnlink" href="/?view=accounts" title="Quản lý Tài khoản &amp; Quota">Tài khoản</a>
     <a class="btnlink" href="/" title="Về bảng Kanban Cockpit">Cockpit →</a>
   </div>
@@ -151,6 +160,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   <div class="card err" id="err"></div>
   <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/?view=review">Mở trên Cockpit →</a></div>
   <section class="grid" id="kpis"></section>
+  <section class="card" id="scoreBox"></section>
 
   <section class="card">
     <div class="head">
@@ -223,14 +233,20 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 <div id="auth" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="card">
   <h2 id="authTitle">Session token</h2>
   <p class="muted">Dán token từ lệnh <span class="mono">aaf ui --service-url</span> hoặc mở link bookmark Cockpit.</p>
-  <input id="tok" type="password" placeholder="Bearer token…">
+  <div style="display:flex;gap:6px;align-items:center;margin:10px 0">
+    <input id="tok" type="password" placeholder="Bearer token…" style="flex:1;min-width:0">
+    <button id="tokPaste" type="button" title="Dán token từ clipboard">Paste</button>
+  </div>
+  <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0 8px;cursor:pointer"><input type="checkbox" id="rememberTok" checked> Remember on this device</label>
+  <p class="muted" style="font-size:12px;margin:0 0 8px">iPhone PWA: Add to Home Screen first, then paste token once.</p>
   <div id="authErr"></div>
   <button id="tokOk">Mở khoá</button>
 </div></div>
 <div id="toast" role="status" aria-live="polite"></div>
+<script src="/assets/pipeline.js"></script>
 <script>
 (() => {
-  const TOKEN_KEY = "aaf_ui_token", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period";
+  const TOKEN_KEY = "aaf_ui_token", REMEMBER_KEY = "aaf_ui_remember", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period";
   const STATE_CLASS = { done:"ok", running:"info", gating:"info", review:"warn", blocked:"err", ready:"", backlog:"", cancelled:"" };
   const STATE_LABEL = { queued:"Chờ hàng đợi", done:"Hoàn thành", running:"Đang chạy", gating:"Đang chạy Gate", review:"Chờ Review", blocked:"Bị Blocked", ready:"Sẵn sàng", backlog:"Backlog", cancelled:"Đã huỷ" };
   const REASON_LABEL = {
@@ -239,10 +255,11 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   };
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-  let token = "", hours = "168", timer = null, tasks = [], breakdown = [], lastStatus = null, isReadOnly = false, drawerSeq = 0, lastFocus = null, authChan = null;
+  let token = "", hours = "168", timer = null, tasks = [], breakdown = [], lastStatus = null, isReadOnly = false, drawerSeq = 0, lastFocus = null, authChan = null, bootedViaChannel = false;
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
+  function del(kind, key) { try { kind.removeItem(key); } catch (_) {} }
 
   function cleanSpec(raw) {
     let s = String(raw || "");
@@ -277,7 +294,9 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   const pill = (s) => `<span class="pill ${STATE_CLASS[s] || ""}">${esc(stateLabel(s))}</span>`;
 
   function showAuth(msg) {
+    if ($("rememberTok")) $("rememberTok").checked = getRememberPref();
     $("authErr").textContent = msg || "";
+    if ($("tok")) $("tok").value = "";
     $("auth").style.display = "flex";
     setTimeout(() => $("tok").focus(), 20);
   }
@@ -293,9 +312,16 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
           authChan.postMessage({ type: "tok", token });
         } else if (msg.type === "tok" && msg.token && !token) {
           token = String(msg.token).trim();
+          bootedViaChannel = true;
           saveTok(token);
+          syncAuthButtons();
           hideAuth();
           refresh().catch(() => {});
+        } else if (msg.type === "clear") {
+          clearTok();
+          token = "";
+          syncAuthButtons();
+          showAuth("Phiên đã bị khoá ở tab khác.");
         }
       };
     } catch (_) { authChan = null; }
@@ -304,17 +330,66 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   function isLoopbackHost() {
     return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
   }
+  function defaultRemember() {
+    const standalone = Boolean(
+      (window.matchMedia && matchMedia("(display-mode: standalone)").matches) ||
+      window.navigator.standalone === true
+    );
+    return location.protocol === "https:" || standalone || isLoopbackHost();
+  }
+  function getRememberPref() {
+    const saved = load(localStorage, REMEMBER_KEY);
+    if (saved === "1") return true;
+    if (saved === "0") return false;
+    return defaultRemember();
+  }
+  function setRememberPref(val) {
+    store(localStorage, REMEMBER_KEY, val ? "1" : "0");
+  }
   function saveTok(t) {
     store(sessionStorage, TOKEN_KEY, t);
-    if (isLoopbackHost()) store(localStorage, TOKEN_KEY, t);
+    if (getRememberPref()) store(localStorage, TOKEN_KEY, t);
+    else del(localStorage, TOKEN_KEY);
+  }
+  function clearTok() {
+    del(sessionStorage, TOKEN_KEY);
+    del(localStorage, TOKEN_KEY);
+  }
+  function syncAuthButtons() {
+    const hasTok = Boolean(token);
+    if ($("copyTokBtn")) $("copyTokBtn").classList.toggle("hidden", !hasTok);
+    if ($("lockBtn")) $("lockBtn").classList.toggle("hidden", !hasTok);
   }
   function hashToken() {
     const m = (location.hash || "").match(/(?:^#|&)token=([^&]+)/);
     if (m && m[1]) {
-      saveTok(decodeURIComponent(m[1]).trim());
+      let t = "";
+      try { t = decodeURIComponent(m[1]).trim(); } catch (_) { t = ""; }
+      if (t) saveTok(t);
       history.replaceState(null, "", location.pathname + location.search);
     }
-    return load(sessionStorage, TOKEN_KEY) || (isLoopbackHost() ? (load(localStorage, TOKEN_KEY) || "") : "");
+    return load(sessionStorage, TOKEN_KEY) || load(localStorage, TOKEN_KEY) || "";
+  }
+  async function pasteTok() {
+    const inp = $("tok");
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+      inp.focus();
+      $("authErr").textContent = "Không đọc được clipboard ở trình duyệt này — hãy chạm ô nhập và dán thủ công.";
+      toast("Hãy chạm ô nhập và dán thủ công");
+      return;
+    }
+    try {
+      const text = (await navigator.clipboard.readText() || "").trim();
+      if (!text) { toast("Clipboard trống"); inp.focus(); return; }
+      inp.value = text;
+      $("authErr").textContent = "";
+      inp.focus();
+      toast("Đã dán từ clipboard");
+    } catch (_) {
+      inp.focus();
+      $("authErr").textContent = "Trình duyệt chặn đọc clipboard — hãy chạm ô nhập và dán thủ công.";
+      toast("Hãy chạm ô nhập và dán thủ công");
+    }
   }
 
   async function api(path) {
@@ -322,7 +397,10 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     let data = {};
     try { data = await res.json(); } catch (_) {}
     if (res.status === 401) {
+      clearTok();
       token = "";
+      syncAuthButtons();
+      if (authChan) { try { authChan.postMessage({ type: "clear" }); } catch (_) {} }
       showAuth("Token bị từ chối (401). Vui lòng nhập lại token.");
       throw new Error("token rejected");
     }
@@ -652,6 +730,9 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       breakdown = Array.isArray(rep.value.task_breakdown) ? rep.value.task_breakdown : [];
       syncBreakdownRepoSelect();
       renderKpis(r);
+      if (window.AafPipelineUI && typeof window.AafPipelineUI.renderStudioScore === "function") {
+        window.AafPipelineUI.renderStudioScore($("scoreBox"), r.score !== undefined ? r.score : rep.value.score);
+      }
       renderTaskBreakdown();
       renderStages(r.stages);
       renderExecutors(r.executors, r.estimated_cost_usd);
@@ -711,10 +792,27 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       if (el.dataset.action === "needs") { location.href = "/?view=review"; return; }
       if (el.dataset.task) { if ($("drawer").classList.contains("open")) closeDrawer(); return openTask(el.dataset.task); }
     });
-    const submitTok = () => {
+    if ($("copyTokBtn")) $("copyTokBtn").onclick = () => { if (token) copy(token); };
+    if ($("lockBtn")) $("lockBtn").onclick = () => {
+      clearTok();
+      token = "";
+      syncAuthButtons();
+      if (authChan) { try { authChan.postMessage({ type: "clear" }); } catch (_) {} }
+      showAuth("Phiên đã được khoá.");
+    };
+    if ($("tokPaste")) $("tokPaste").onclick = pasteTok;
+    if ($("rememberTok")) {
+      $("rememberTok").checked = getRememberPref();
+      $("rememberTok").onchange = () => setRememberPref($("rememberTok").checked);
+    }
+    const submitTok = async () => {
       const t = $("tok").value.trim();
+      $("tok").value = "";
       if (!t) { $("authErr").textContent = "Cần nhập token."; return; }
-      token = t; saveTok(t); hideAuth(); refresh();
+      if ($("rememberTok")) setRememberPref($("rememberTok").checked);
+      token = t; saveTok(t); syncAuthButtons(); hideAuth();
+      await refresh().catch(() => {});
+      if (token && authChan) { try { authChan.postMessage({ type: "tok", token }); } catch (_) {} }
     };
     $("tokOk").onclick = submitTok;
     $("tok").onkeydown = (e) => { if (e.key === "Enter") submitTok(); };
@@ -723,7 +821,10 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       authChan.postMessage({ type: "req" });
       await new Promise((r) => setTimeout(r, 120));
     }
-    refresh().catch(() => {});
+    syncAuthButtons();
+    if (!bootedViaChannel) {
+      refresh().catch(() => {});
+    }
     schedule();
   }
   init();

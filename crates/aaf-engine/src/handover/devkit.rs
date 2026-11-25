@@ -5,10 +5,10 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::handover::{HandoverData, HandoverGateCommand, SOLO_DEV_BADGE};
-use crate::handover_html::{
+use super::html::{
     CSP_META, escape_html, format_scores_line, load_verified_proof_png, standard_name,
 };
+use super::{HandoverData, HandoverGateCommand, SOLO_DEV_BADGE};
 
 fn format_epoch_utc(epoch: i64) -> String {
     if epoch <= 0 {
@@ -122,7 +122,7 @@ pub(crate) fn render_devkit_html(data: &HandoverData, data_dir: &Path) -> String
     render_qa_suite_html(&mut html, data);
     render_scoring_html(&mut html, data);
     if !data.reviewers.is_empty() {
-        html.push_str(&crate::handover_dual::render_dual_reviewers_html(
+        html.push_str(&super::dual::render_dual_reviewers_html(
             &data.reviewers,
             data.adjudicated,
         ));

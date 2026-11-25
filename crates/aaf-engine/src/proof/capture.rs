@@ -19,7 +19,8 @@ use super::base_config::{
     load_base_proof_capture_cmd, load_base_proof_config, normalize_capture_lock_globs,
 };
 use super::{ProofError, RecordedProof};
-use crate::gate::{GIT_TIMEOUT, GateError, HiddenPolicy};
+use crate::confine_core::GIT_TIMEOUT;
+use crate::confine_core::hidden::{HiddenPolicy, When, inspect as inspect_hidden};
 
 /// Source tool identifier recorded for host-side `capture_cmd` proofs.
 pub const HOST_CAPTURE_TOOL: &str = "host:capture_cmd";
@@ -183,7 +184,7 @@ fn write_private_bytes(data_dir: &Path, dest: &Path, bytes: &[u8]) -> Result<Pat
         .collect();
     dirs.reverse();
     for dir in dirs {
-        crate::db::private::create_dir(dir)?;
+        aaf_fp::fs_private::create_dir(dir)?;
     }
     let parent = dest
         .parent()
@@ -216,7 +217,7 @@ fn write_private_bytes(data_dir: &Path, dest: &Path, bytes: &[u8]) -> Result<Pat
         let _ = fs::remove_file(&tmp);
         return Err(err.into());
     }
-    crate::db::private::restrict_file_if_present(dest)?;
+    aaf_fp::fs_private::restrict_file_if_present(dest)?;
     Ok(fs::canonicalize(dest)?)
 }
 
@@ -276,7 +277,7 @@ fn run_capture_attempt(
     cfg: &ProofConfig,
 ) -> Result<(Vec<u8>, u32, u32), ProofError> {
     let temp_out = PrivateTempFile::create_outside(data_dir, canon_root)?;
-    let (argv, _mode) = crate::gate::confine::shell_argv(capture_cmd, canon_root, Some(data_dir))?;
+    let (argv, _mode) = crate::confine_core::shell_argv(capture_cmd, canon_root, Some(data_dir))?;
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(canon_root);
     for var in SCRUBBED_CAPTURE_ENV {
@@ -292,8 +293,12 @@ fn run_capture_attempt(
     }
     cmd.env("AAF_PROOF_OUT", &temp_out.path);
 
-    let done =
-        crate::gate::proc::capture(cmd, CAPTURE_TIMEOUT, Some(CAPTURE_LOG_TAIL_BYTES), true)?;
+    let done = crate::confine_core::proc::capture(
+        cmd,
+        CAPTURE_TIMEOUT,
+        Some(CAPTURE_LOG_TAIL_BYTES),
+        true,
+    )?;
     if done.timed_out {
         return Err(ProofError::Invalid(format!(
             "proof capture_cmd timed out after {}s",
@@ -435,13 +440,11 @@ pub(crate) struct GateProofCheck<'a> {
 pub(crate) fn load_gate_base_capture_cmd(
     repo_root: &Path,
     base_sha: Option<&str>,
-) -> Result<(Option<String>, Vec<String>), GateError> {
+) -> Result<(Option<String>, Vec<String>), ProofError> {
     let Some(sha) = base_sha else {
         return Ok((None, Vec::new()));
     };
-    let Some(proof) =
-        load_base_proof_config(repo_root, sha).map_err(|e| GateError::Config(e.to_string()))?
-    else {
+    let Some(proof) = load_base_proof_config(repo_root, sha)? else {
         return Ok((None, Vec::new()));
     };
     let cmd = proof.capture_cmd.trim();
@@ -460,7 +463,7 @@ pub(crate) fn finalize_gate_proof(
     tree_fp: &mut String,
     hidden: &mut Vec<String>,
     hidden_notes: &mut Vec<String>,
-) -> Result<Option<String>, GateError> {
+) -> Result<Option<String>, aaf_fp::FpError> {
     if !proof_needed {
         return Ok(None);
     }
@@ -510,12 +513,7 @@ pub(crate) fn finalize_gate_proof(
         return Ok(Some(err.to_string()));
     }
     if ctx.policy == HiddenPolicy::Remove || ctx.release {
-        let after = crate::gate::hidden::inspect(
-            ctx.repo_root,
-            ctx.policy,
-            crate::gate::hidden::When::AfterCommands,
-            ctx.release,
-        )?;
+        let after = inspect_hidden(ctx.repo_root, ctx.policy, When::AfterCommands, ctx.release)?;
         hidden.extend(after.blocks);
         hidden_notes.extend(after.notes);
     }

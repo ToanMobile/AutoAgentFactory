@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::paths::{is_guest, locks_dir, throttle_dir};
 use super::slot_file::unlock_all;
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 const QUEUE_DIR: &str = "queue";
 const EXT: &str = ".wait";

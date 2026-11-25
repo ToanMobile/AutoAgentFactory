@@ -22,10 +22,8 @@ use aaf_engine::git::warm_slot::{
     SlotKind, WarmSlot, base_snapshots_dir, promote_from_pure_base_slot,
     restore_clean_base_snapshot,
 };
-use aaf_engine::git::{
-    GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
-    worktree,
-};
+use aaf_engine::git::{GhClient, GitError, MergeStrategy, PrCheck, PrInfo, worktree};
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use aaf_engine::proof::{ProofError, capture_and_record_proof, is_likely_blank_png, verify_proof};
 use aaf_engine::throttle::{SystemProbe, Throttle};
 use tempfile::TempDir;

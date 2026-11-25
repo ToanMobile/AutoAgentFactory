@@ -7,7 +7,10 @@ use std::path::Path;
 use aaf_domain::config::GlobalConfig;
 use aaf_domain::event::EventKind;
 use aaf_engine::db::Db;
-use aaf_engine::telegram::{TelegramError, send_alert_each, validate_config};
+use aaf_engine::telegram::{
+    MAX_MESSAGE_BYTES, TelegramError, send_alert_each, truncate_message, validate_config,
+};
+use aaf_engine::web_ui::parse_trusted_origin;
 use aaf_engine::webhook::{self, WebhookError, WebhookEvent, WebhookOptions};
 
 use super::super::board::store::err;
@@ -65,11 +68,65 @@ pub(super) fn is_permanent_telegram_error(err: &TelegramError) -> bool {
 pub(super) struct Channels {
     pub(super) webhook_url: Option<String>,
     pub(super) telegram: Option<(aaf_domain::telegram::TelegramConfig, String)>,
+    pub(super) cockpit_url: Option<String>,
+}
+
+/// Validates Tier-1 `notifications.cockpit_url` as a strict HTTPS origin.
+pub(super) fn parse_cockpit_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match parse_trusted_origin(trimmed) {
+        Ok(origin) => Some(origin.canonical),
+        Err(e) => {
+            eprintln!("aaf notify: ignoring invalid notifications.cockpit_url: {e}");
+            None
+        }
+    }
+}
+
+/// Formats a Telegram alert body with an optional Cockpit deep-link suffix.
+///
+/// Never includes `#token=` or any secret. Truncates `text` on a valid UTF-8
+/// boundary before appending the suffix when needed so the link stays intact
+/// within [`MAX_MESSAGE_BYTES`].
+pub(super) fn format_telegram_alert(
+    text: &str,
+    cockpit_url: Option<&str>,
+    task_id: Option<&str>,
+) -> String {
+    let Some(base) = cockpit_url
+        .map(|u| u.trim().trim_end_matches('/'))
+        .filter(|u| !u.is_empty())
+    else {
+        return text.to_string();
+    };
+    let valid_tid = task_id
+        .map(str::trim)
+        .filter(|tid| tid.len() <= 128 && aaf_engine::git::worktree::validate_task_id(tid).is_ok());
+    let suffix = match valid_tid {
+        Some(id) => format!("\nCockpit: {base}/?task={id}"),
+        None => format!("\nCockpit: {base}/?view=needyou"),
+    };
+    if text.len() + suffix.len() <= MAX_MESSAGE_BYTES {
+        let mut out = String::with_capacity(text.len() + suffix.len());
+        out.push_str(text);
+        out.push_str(&suffix);
+        return out;
+    }
+    let body_budget = MAX_MESSAGE_BYTES.saturating_sub(suffix.len());
+    let truncated = truncate_message(text, body_budget);
+    let mut out = String::with_capacity(truncated.len() + suffix.len());
+    out.push_str(&truncated);
+    out.push_str(&suffix);
+    out
 }
 
 impl Channels {
     fn from_global(ctx: &Ctx, global: GlobalConfig) -> Channels {
         let url = global.notifications.webhook_url.trim().to_string();
+        let cockpit_url = parse_cockpit_url(&global.notifications.cockpit_url);
         let tg = global.telegram;
         let telegram = if tg.enabled && !tg.allowed_chat_ids.is_empty() {
             match read_bot_token(&tg.bot_token_env, ctx) {
@@ -91,6 +148,7 @@ impl Channels {
         Channels {
             webhook_url: (!url.is_empty()).then_some(url),
             telegram,
+            cockpit_url,
         }
     }
 
@@ -228,7 +286,12 @@ pub(super) fn deliver_alert(
             .filter(|id| !pending.is_resolved(&format!("tg:{id}")))
             .collect();
         if !chat_ids.is_empty() {
-            match send_alert_each(cfg, token, &alert.text, &chat_ids) {
+            let tg_text = format_telegram_alert(
+                &alert.text,
+                channels.cockpit_url.as_deref(),
+                alert.task_id.as_deref(),
+            );
+            match send_alert_each(cfg, token, &tg_text, &chat_ids) {
                 Ok(outcomes) => {
                     for (chat_id, res) in outcomes {
                         let target = format!("tg:{chat_id}");

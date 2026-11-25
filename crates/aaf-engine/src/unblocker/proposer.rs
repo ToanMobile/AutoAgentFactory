@@ -16,7 +16,7 @@ use aaf_domain::task::Task;
 use super::classifier::neutralize_untrusted_tags;
 
 /// `runs.executor` value recorded for T4 subtask-proposer runs.
-pub const PROPOSER_EXECUTOR: &str = "unblock-proposer";
+pub use aaf_domain::engine_contracts::PROPOSER_EXECUTOR;
 
 pub const MAX_PLANS: usize = 4;
 const MAX_TITLE_CHARS: usize = 200;

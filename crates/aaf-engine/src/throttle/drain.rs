@@ -8,7 +8,7 @@ use std::path::Path;
 use super::legacy;
 use super::paths::{drain_path, is_guest};
 use super::slots::{is_locked, locks_dir, unlock_all};
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 /// Held by a command that runs alone and has waited long enough: while it
 /// is held no measured command is admitted, so the slots empty and the

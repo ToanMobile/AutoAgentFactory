@@ -8,10 +8,6 @@ use std::path::{Path, PathBuf};
 use aaf_domain::config::{GlobalConfig, OracleMode, RepoConfig, StoreMode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-mod load_worktree;
-
-#[allow(unused_imports)]
-pub use load_worktree::load_base_worktree_config;
 
 use super::detect::PROFILES;
 use super::merge::{
@@ -24,7 +20,7 @@ use super::merge_pipeline::{
 };
 
 /// Tier 2, relative to the repo root.
-pub const REPO_CONFIG_REL: &str = ".autofactory/config.toml";
+pub use aaf_domain::engine_contracts::REPO_CONFIG_REL;
 /// Tier 3, relative to the repo root. Not committed.
 pub const LOCAL_CONFIG_REL: &str = ".autofactory/config.local.toml";
 

@@ -22,16 +22,16 @@ use aaf_domain::config::{GlobalConfig, MachineConfig, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus, LockStatus, Receipt};
 use aaf_domain::ports::Clock;
 
-use super::cmd::{git, git_raw};
-use super::gh_client::{GhClient, MergeStrategy, PrInfo};
 use super::pr_cleanup::{PrCleanupReport, finalize_early, finish_merged};
 use super::pr_merge_support::{
     InMemoryMerge, ScratchWorktree, acquire_merge_lock, bounded_deadline, check_ci,
     fetch_base_and_pr, has_local_commit_and_tree, in_memory_merge_tree, load_trusted_base_config,
     ls_remote_head, sync_local_base as sync_local_base_impl, valid_sha40,
 };
-use super::{GitError, has_remote};
 use crate::gate::{self, HiddenPolicy};
+use crate::git::cmd::{git, git_raw};
+use crate::git::gh_client::{GhClient, MergeStrategy, PrInfo};
+use crate::git::{GitError, has_remote};
 use crate::throttle::{Progress, SystemProbe, Throttle};
 
 const MAX_OPTIMISTIC_RETRIES: usize = 2;

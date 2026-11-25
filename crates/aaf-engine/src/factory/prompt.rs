@@ -6,6 +6,7 @@ use std::path::Path;
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
 use aaf_domain::ports::SandboxPolicy;
+pub use aaf_domain::prompt_fence::{PLAN_APPROVED_PREFIX, PromptContext};
 use aaf_domain::task::Task;
 
 use super::Settings;
@@ -13,21 +14,11 @@ use super::Settings;
 /// `runs.executor` of a read-only plan-stage run: separates plan runs from
 /// implementation runs in account history, audit author lookup, and worktree
 /// rebase checks.
-pub const PLAN_EXECUTOR: &str = "plan";
-/// Context note prefix rendered under `# Approved Plan`.
-pub const PLAN_APPROVED_PREFIX: &str = "plan_approved:";
+pub use aaf_domain::engine_contracts::PLAN_EXECUTOR;
 /// Context note prefix rendered under `# Operator Steering`.
 pub const STEER_PREFIX: &str = "steer:";
 
 const MAX_LISTED_SKILLS: usize = 20;
-
-/// Repository runtime hints appended to an agent prompt.
-#[derive(Debug, Clone)]
-pub struct PromptContext<'a> {
-    pub repo_root: &'a Path,
-    pub profile: &'a str,
-    pub proof_required: bool,
-}
 
 /// The prompt of one agent run: fixed rules, the immutable spec, then the
 /// notes earlier attempts left. Notes are passed through untouched, the
@@ -82,7 +73,7 @@ pub fn build_prompt(task: &Task, branch: &str) -> String {
              <<<AAF_UNTRUSTED_PLAN_BEGIN>>>\n",
         );
         for plan in approved_plans {
-            prompt.push_str(&crate::cross_audit::prompt::neutralise(plan));
+            prompt.push_str(&aaf_domain::prompt_fence::neutralise(plan));
             prompt.push('\n');
         }
         prompt.push_str("<<<AAF_UNTRUSTED_PLAN_END>>>\n");

@@ -1,8 +1,25 @@
 [English](../README.md) | Tiếng Việt
 
-# AutoAgentFactory (`aaf`)
+# 🏭 AutoAgentFactory (`aaf`) — 100% Autonomous Agent Work
 
-`aaf` là một CLI Rust cho người chạy nhiều coding agent trên một máy: một gate ký biên nhận (`aaf gate`), một hook bảo vệ đa host cho Claude Code, Codex CLI, Gemini CLI, Antigravity và OpenCode (`aaf-hook`), một hàng chờ toàn máy cho lệnh build nặng (`aaf slot`), và một vòng chạy task qua agent → gate → PR (`aaf board`, `aaf run`). Nó thay cho bộ script gate + hook viết tay theo từng repo: cùng một binary, cùng một cấu hình ba tầng cho mọi repo, và biên nhận nằm ngoài repo, có chữ ký, agent không tự ghi được.
+<p align="center">
+  <img src="images/architecture-3d.jpg" alt="AutoAgentFactory — Kiến trúc 3D 100% Agent Tự Động 24/7" width="100%" />
+</p>
+
+`aaf` là một CLI Rust cho người chạy nhiều coding agent **tự động 100% 24/7** trên một máy: lập kế hoạch DAG (`aaf board`), cô lập từng task trên git worktree + sandbox (`aaf run --auto`), cổng kiểm định ký HMAC ngoài sandbox (`aaf gate`), tự chữa lỗi (`Unblocker` tự retry/split/đổi account), hook bảo vệ đa host cho Claude Code, Codex CLI, Gemini CLI, Antigravity và OpenCode (`aaf-hook`), hàng chờ toàn máy cho lệnh build nặng (`aaf slot`), và **Cockpit + Studio PWA** dùng mượt trên cả Desktop lẫn iPhone qua **Tailscale Serve + Telegram Deep-Link** (`aaf ui --install-service --allow-actions --tailscale --qr`).
+
+<details>
+<summary>📸 Ảnh chụp màn hình Cockpit & Studio (Desktop & Mobile PWA)</summary>
+
+| Desktop Cockpit Kanban | Desktop Pipeline SVG DAG | Desktop Inline Diff Review |
+|---|---|---|
+| ![Cockpit Kanban](images/cockpit-kanban.png) | ![Pipeline DAG](images/cockpit-pipeline.png) | ![Inline Diff](images/cockpit-diff.png) |
+
+| Studio Factory Score (Light) | Studio Factory Score (Dark) | iPhone PWA Cockpit | iPhone PWA Pipeline |
+|---|---|---|---|
+| ![Studio Light](images/studio.png) | ![Studio Dark](images/studio-dark.png) | ![Mobile Cockpit](images/mobile-cockpit-board.png) | ![Mobile Pipeline](images/mobile-cockpit-pipeline.png) |
+
+</details>
 
 Hợp đồng kỹ thuật: [`docs/PLAN.md`](PLAN.md). Mô hình đe doạ và các lỗ hổng đã biết: [`SECURITY.md`](../SECURITY.md). Giấy phép: Apache-2.0.
 

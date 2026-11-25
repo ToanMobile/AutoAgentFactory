@@ -4,9 +4,9 @@
 use std::path::Path;
 
 use aaf_domain::config::{ProofConfig, RepoConfig};
+use aaf_domain::engine_contracts::REPO_CONFIG_REL;
 
 use super::ProofError;
-use crate::config::REPO_CONFIG_REL;
 
 pub(super) fn validate_base_sha(base_sha: &str) -> Result<&str, ProofError> {
     let sha = base_sha.trim();

@@ -17,7 +17,7 @@ use super::super::paths::{
 };
 use super::super::probe::{GroupState, Unreadable};
 use super::super::slot_file::{SlotFile, lock_text, unlock_all};
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 const MAX_SIDECAR_BYTES: u64 = 4096;
 const MAX_LSTART_LEN: usize = 40;

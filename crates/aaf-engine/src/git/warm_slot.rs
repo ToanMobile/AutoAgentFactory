@@ -15,7 +15,7 @@ use super::warm_slot_ops::{
     path_contains_symlink, read_dir_paths, remove_path_any, unlock_and_remove,
 };
 use super::{GitError, path_str};
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 const MAX_BASE_SNAPS: usize = 2;
 /// Hooks never run in a slot: a repo-relative `core.hooksPath` resolves to

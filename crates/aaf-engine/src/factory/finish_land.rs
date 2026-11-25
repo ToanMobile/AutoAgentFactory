@@ -20,8 +20,8 @@ use super::finish::{
 use super::post_audit;
 use super::worker::GateJob;
 use super::{Deps, merge_retry, unblock};
-use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::{MergeOutcome, PrOutcome};
+use crate::pr_ops::PrMergeOutcome;
 use crate::unblocker::FailureSignal;
 
 const MERGE_ATTEMPTS: u32 = 3;

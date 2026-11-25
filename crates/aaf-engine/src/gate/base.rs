@@ -27,42 +27,12 @@ pub struct GateRunOptions<'a> {
     pub proof_secret_allowlist: Option<&'a [String]>,
 }
 
-/// Trunks `auto` tries after `origin/HEAD`, as full ref names: a short
-/// name would let a tag or local branch called `origin/main` stand in.
-pub(crate) const AUTO_FALLBACKS: [&str; 4] = [
-    "refs/remotes/origin/main",
-    "refs/remotes/origin/master",
-    "refs/heads/main",
-    "refs/heads/master",
-];
+pub(crate) use crate::confine_core::git_refs::{
+    AUTO_FALLBACKS, origin_head_branch, parse_remote_tracking_ref,
+};
 
 const ORIGIN_HEAD: &str = "refs/remotes/origin/HEAD";
 const AUTO_REFS_FORMAT: &str = "--format=%(refname)%09%(symref)%09%(objecttype)%09%(objectname)%09%(*objecttype)%09%(*objectname)%09end";
-
-/// The branch of `origin` the `origin/HEAD` symref names, if it may be a
-/// base. A direct ref, a symref leaving `refs/remotes/origin/` or naming a
-/// task branch would let the change pick its own base and empty the change
-/// set.
-pub(crate) fn origin_head_branch(target: &str) -> Option<&str> {
-    let branch = target.strip_prefix("refs/remotes/origin/")?;
-    let task = branch.starts_with(crate::git::worktree::BRANCH_PREFIX);
-    let parts_ok = branch.split('/').all(|p| !matches!(p, "" | "." | ".."));
-    (parts_ok && branch != "HEAD" && !task).then_some(branch)
-}
-
-/// Parses a full remote-tracking ref (`refs/remotes/<remote>/<branch>`) into
-/// `(remote, branch)`, rejecting invalid segments, `HEAD`, and task branches
-/// (`aaf/*`) so an upstream ref can never empty the change set.
-pub(crate) fn parse_remote_tracking_ref(full_ref: &str) -> Option<(&str, &str)> {
-    let rest = full_ref.strip_prefix("refs/remotes/")?;
-    let (remote, branch) = rest.split_once('/')?;
-    if remote.is_empty() || remote.starts_with('-') || matches!(remote, "." | "..") {
-        return None;
-    }
-    let task = branch.starts_with(crate::git::worktree::BRANCH_PREFIX);
-    let parts_ok = branch.split('/').all(|p| !matches!(p, "" | "." | ".."));
-    (parts_ok && branch != "HEAD" && !task).then_some((remote, branch))
-}
 
 /// Probes `@{upstream}` as a fallback when `origin/HEAD` and `AUTO_FALLBACKS`
 /// did not resolve, rejecting `aaf/*` task branches.

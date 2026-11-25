@@ -24,7 +24,7 @@ use std::path::Path;
 use super::paths::{
     ensure_closed_dir, guest_record_path, open_guest_file, read_guest_file, slot_path, token_path,
 };
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 /// Where this process writes what it holds a slot with.
 #[derive(Debug)]

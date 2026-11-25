@@ -2,7 +2,7 @@
 
 use aaf_domain::blocked::BlockedReason;
 use aaf_domain::event::{EventKind, FactoryEvent};
-use aaf_domain::ports::{Clock, EventSink, TaskStore};
+use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::db::{CancelRefusal, Db};
 use aaf_engine::gate::GateError;
@@ -191,6 +191,92 @@ pub(super) fn collect_recent_runs(db: &Db, repo_root: Option<&str>) -> Vec<Value
             })
         })
         .collect()
+}
+
+pub(super) fn read_task_pipeline(db: &Db, task_id: &str) -> Result<Value, String> {
+    let task = db.get_task(task_id).map_err(s_err)?;
+    let runs = db.runs_for_task(&task.id).map_err(s_err)?;
+    let events = db.events_for_task(&task.id, 500).map_err(s_err)?;
+    let pipe = aaf_engine::telemetry::build_task_pipeline(&task, &runs, &events);
+    serde_json::to_value(pipe).map_err(s_err)
+}
+
+pub(super) fn read_sop_runs(ctx: &Ctx) -> Result<Value, String> {
+    let runs = aaf_engine::telemetry::list_sop_runs(&ctx.data_dir, 50);
+    Ok(json!({ "runs": runs }))
+}
+
+pub(super) fn parse_and_format_comments(
+    action: &str,
+    base_note: &str,
+    raw_comments: &[Value],
+) -> Result<String, String> {
+    let max_bytes = if action == "steer" {
+        super::diff_parse::MAX_STEER_NOTE_BYTES
+    } else {
+        super::diff_parse::MAX_COMMENTS_TOTAL_BYTES
+    };
+    if raw_comments.is_empty() {
+        if action == "steer" && base_note.trim().len() > max_bytes {
+            return Err(format!(
+                "invalid steer note: exceeds {max_bytes}-byte steer limit ({} bytes); shorten note or use rework (up to {} bytes)",
+                base_note.trim().len(),
+                super::diff_parse::MAX_COMMENTS_TOTAL_BYTES
+            ));
+        }
+        return Ok(base_note.to_string());
+    }
+    let mut parsed = Vec::with_capacity(raw_comments.len());
+    for item in raw_comments {
+        let c: super::diff_parse::DiffComment =
+            serde_json::from_value(item.clone()).map_err(|e| format!("invalid comment: {e}"))?;
+        parsed.push(c);
+    }
+    super::diff_parse::format_inline_comments_bounded(base_note, &parsed, max_bytes)
+}
+
+pub(super) fn dispatch_db_action(
+    db: &Db,
+    ctx: &Ctx,
+    config_base: &std::path::Path,
+    repo: Option<&str>,
+    action: &str,
+    task_id: &str,
+    note: &str,
+) -> Result<Value, String> {
+    match action {
+        "ready" => do_ready(db, task_id),
+        "ready_all" | "ready-all" => do_ready_all(db, repo),
+        "cancel" => do_cancel(db, task_id, note),
+        "unblock" => do_unblock(db, task_id),
+        "unblock_all" | "unblock-all" => do_unblock_all(db, repo),
+        "approve_plan" | "approve-plan" => do_approve_plan(db, task_id),
+        "rework" => do_rework(db, ctx, task_id, note),
+        "steer" => {
+            if note.trim().len() > super::diff_parse::MAX_STEER_NOTE_BYTES {
+                return Err(format!(
+                    "invalid steer note: exceeds {}-byte steer limit ({} bytes)",
+                    super::diff_parse::MAX_STEER_NOTE_BYTES,
+                    note.trim().len()
+                ));
+            }
+            let recorded =
+                aaf_engine::factory::snapshots::steer_task(db, task_id, note, SystemClock.now())?;
+            Ok(json!({ "action": "steer", "task_id": task_id, "note": recorded }))
+        }
+        "unfreeze" => {
+            aaf_engine::factory::unfreeze(db, &SystemClock).map_err(s_err)?;
+            Ok(json!({ "action": "unfreeze", "frozen": false }))
+        }
+        "stop_run" => super::proof_stop::do_stop_run(db, ctx, task_id),
+        "account_cooldown" => {
+            super::extras::do_account_cooldown(db, ctx, config_base, task_id, note, false)
+        }
+        "account_clear" => {
+            super::extras::do_account_cooldown(db, ctx, config_base, task_id, "", true)
+        }
+        other => Err(format!("invalid action: {other}")),
+    }
 }
 
 pub(super) fn s_err(e: impl std::fmt::Display) -> String {

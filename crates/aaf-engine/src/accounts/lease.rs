@@ -4,7 +4,7 @@ use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
 
 use super::AccountsError;
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 /// Holds `leases/<account_id>.lock` locked for as long as the value lives.
 /// The OS drops the lock when the file handle closes, so a crashed process

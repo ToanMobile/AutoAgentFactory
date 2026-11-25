@@ -12,7 +12,7 @@ use super::probe::{self, GroupState, LoadProbe, PROBE_TIMEOUT, PS, Pressure, Pro
 use super::relay::SignalRelay;
 use super::slots::SlotGuard;
 use super::{Progress, Sleeper};
-use crate::gate::proc::Supervise;
+use crate::confine_core::proc::Supervise;
 
 /// Niceness added to a heavy command.
 pub const NICE_INCREMENT: &str = "10";

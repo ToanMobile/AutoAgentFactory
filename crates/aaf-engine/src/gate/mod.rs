@@ -27,17 +27,15 @@ use aaf_domain::config::{MachineConfig, RepoConfig};
 use aaf_domain::gate::{CommandResult, GateMode, GateStatus, RECEIPT_SCHEMA_VERSION, Receipt};
 use aaf_domain::ports::Clock;
 
-use crate::db::private;
 use crate::throttle::{Progress, SystemProbe, Throttle};
+use aaf_fp::fs_private as private;
 pub use base::GateRunOptions;
 pub(crate) use helpers::{Evidence, decide};
 pub use hidden::HiddenPolicy;
 use hidden::When;
 pub use reuse::{config_hash, repo_root_and_stats_id, stats_repo_id};
 
-/// Budget for one git call of the gate. Larger than `aaf_fp::GIT_TIMEOUT`
-/// because fingerprinting or diffing a big tree is not a ten-second job.
-pub const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+pub use crate::confine_core::GIT_TIMEOUT;
 
 pub const REASON_TREE_CHANGED: &str = "tree changed during gate";
 
@@ -170,7 +168,8 @@ pub fn run_gate_with_options(
     let cfg_hash = config_hash(cfg);
     let alt_config_hash = reuse::alt_config_hash(cfg, opts.require_independent_approval);
     let base_flows = if cfg.proof.required {
-        crate::proof::load_gate_base_flows(repo_root, base.sha.as_deref())?
+        crate::proof::load_gate_base_flows(repo_root, base.sha.as_deref())
+            .map_err(|e| GateError::Config(e.to_string()))?
     } else {
         Vec::new()
     };
@@ -244,7 +243,8 @@ pub fn run_gate_with_options(
     )?;
     let statics = static_checks::scan(&added)?;
     let (base_capture_cmd, base_capture_lock_globs) =
-        crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())?;
+        crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())
+            .map_err(|e| GateError::Config(e.to_string()))?;
     let head_lock = head_lock::evaluate_changes_with_common(
         data_dir,
         repo_root,
@@ -572,4 +572,22 @@ pub fn run_gate(
     clock: &dyn Clock,
 ) -> Result<Receipt, GateError> {
     run_gate_in(&aaf_fp::data_dir()?, repo_root, cfg, mode, clock)
+}
+
+/// Compiles a lightweight predicate checking whether a repo-relative path matches
+/// any configured `gate.head_lock_globs` (case-insensitive for non-test globs).
+pub fn head_lock_path_matcher(globs: &[String]) -> impl Fn(&str) -> bool {
+    let mut b = globset::GlobSetBuilder::new();
+    for g in globs {
+        let ci = !aaf_domain::config::TEST_FILE_GLOBS.contains(&g.as_str());
+        if let Ok(pat) = globset::GlobBuilder::new(g)
+            .literal_separator(true)
+            .case_insensitive(ci)
+            .build()
+        {
+            b.add(pat);
+        }
+    }
+    let set = b.build().ok();
+    move |path: &str| set.as_ref().is_some_and(|s| s.is_match(path))
 }

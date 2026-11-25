@@ -17,7 +17,12 @@ const FIX: &str = "leave it alone: the factory or the operator runs aaf gate aft
                    ends; an agent runs its tests directly and heavy builds through aaf slot -- \
                    <command>";
 /// Spellings of the data directory that do not depend on its real location.
-const NEEDLES: &[&str] = &[".local/share/autofactory", "AAF_DATA_DIR", "receipt.key"];
+const NEEDLES: &[&str] = &[
+    ".local/share/autofactory",
+    "AAF_DATA_DIR",
+    "receipt.key",
+    "ui-service.token",
+];
 
 fn deny(what: &str) -> Denial {
     Denial::new(

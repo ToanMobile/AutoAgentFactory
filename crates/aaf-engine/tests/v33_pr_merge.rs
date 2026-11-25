@@ -12,9 +12,8 @@ use aaf_domain::gate::GateMode;
 use aaf_domain::ports::Clock;
 use aaf_engine::gate::docs_fast::DOCS_FAST_PATH_NOTE;
 use aaf_engine::gate::head_lock;
-use aaf_engine::git::{
-    GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
-};
+use aaf_engine::git::{GhClient, GitError, MergeStrategy, PrCheck, PrInfo};
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use tempfile::TempDir;
 
 #[path = "../../aaf-fp/tests/exec_support.rs"]

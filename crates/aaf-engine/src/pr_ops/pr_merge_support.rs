@@ -9,15 +9,15 @@ use std::time::{Duration, Instant};
 
 use aaf_domain::config::{GlobalConfig, RepoConfig};
 
-use super::cmd::{failure, git, git_raw};
-use super::gh_client::{GhClient, PrInfo};
-use super::hydration::load_base_worktree_config;
-use super::warm_slot::{
+use crate::config::{self, REPO_CONFIG_REL};
+use crate::git::cmd::{failure, git, git_raw};
+use crate::git::gh_client::{GhClient, PrInfo};
+use crate::git::hydration::load_base_worktree_config;
+use crate::git::warm_slot::{
     SlotKind, WarmSlot, base_snapshots_dir, promote_from_pure_base_slot,
     restore_clean_base_snapshot,
 };
-use super::{GitError, check_branch_name, worktree};
-use crate::config::{self, REPO_CONFIG_REL};
+use crate::git::{GitError, check_branch_name, worktree};
 use crate::throttle::Progress;
 
 /// Maximum wait duration (24 hours) for lock or CI polling to prevent overflow
@@ -295,9 +295,9 @@ pub(super) fn acquire_merge_lock(
     timeout: Duration,
     progress: &dyn Fn(&Progress<'_>),
 ) -> Result<Option<(MergeLockGuard, bool)>, GitError> {
-    crate::db::private::create_dir(locks_dir)?;
+    aaf_fp::fs_private::create_dir(locks_dir)?;
     let lock_path = locks_dir.join(format!("{common_id}.merge.lock"));
-    drop(crate::db::private::open_file(&lock_path)?);
+    drop(aaf_fp::fs_private::open_file(&lock_path)?);
     let started = Instant::now();
     let deadline = bounded_deadline(timeout);
     let mut last_report: Option<Instant> = None;

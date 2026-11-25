@@ -20,10 +20,8 @@ use aaf_engine::cross_audit::{AuditReport, AuditVerdict, approve_if_pass_with_co
 use aaf_engine::gate::{
     GIT_TIMEOUT, HiddenPolicy, config_hash, head_lock, run_gate_policy, stats_repo_id,
 };
-use aaf_engine::git::{
-    GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
-    worktree,
-};
+use aaf_engine::git::{GhClient, GitError, MergeStrategy, PrCheck, PrInfo, worktree};
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use aaf_engine::throttle::{SystemProbe, Throttle};
 use tempfile::TempDir;
 

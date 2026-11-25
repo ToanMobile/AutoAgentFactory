@@ -129,6 +129,10 @@ pub struct SafetyConfig {
 pub struct NotificationsConfig {
     /// Generic JSON POST target; empty disables notifications.
     pub webhook_url: String,
+    /// Optional Tier-1 HTTPS public origin of the Cockpit (e.g. Tailscale Serve
+    /// `https://<machine>.<tailnet>.ts.net`). Used by `aaf ui --service` as a
+    /// trusted reverse-proxy origin and by `aaf notify` for Telegram deep-links.
+    pub cockpit_url: String,
 }
 
 /// Tier 2: `.autofactory/config.toml`, committed to the repo.

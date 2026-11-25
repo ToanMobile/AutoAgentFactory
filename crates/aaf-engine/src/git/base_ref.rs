@@ -6,7 +6,9 @@ use aaf_domain::ports::{PortError, PortResult};
 
 use super::cmd::{git, git_raw};
 use super::{GitError, has_remote};
-use crate::gate::base::{AUTO_FALLBACKS, origin_head_branch, parse_remote_tracking_ref};
+use crate::confine_core::git_refs::{
+    AUTO_FALLBACKS, origin_head_branch, parse_remote_tracking_ref,
+};
 
 pub(crate) const DEFAULT_REMOTE: &str = "origin";
 

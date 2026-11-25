@@ -4,11 +4,13 @@
 
 pub(crate) mod accounts_panel;
 mod actions;
+mod diff_parse;
 mod extras;
 mod proof_stop;
 mod service;
 mod studio;
 mod supervisor;
+mod tailscale;
 
 use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -20,7 +22,6 @@ use std::time::{Duration, Instant};
 use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_engine::db::Db;
 use aaf_engine::executors::stream_log::read_tail_lines;
-use aaf_engine::factory::{snapshots::steer_task, unfreeze};
 use aaf_engine::telemetry::{
     RunCounts, StatusQuery, TaskCounts, collect_status_from_db_with_throttle, scan_throttle,
 };
@@ -33,10 +34,7 @@ use aaf_engine::web_ui::{
 };
 use serde_json::{Value, json};
 
-use self::actions::{
-    collect_recent_runs, do_approve_commit, do_approve_plan, do_cancel, do_ready, do_ready_all,
-    do_rework, do_unblock, do_unblock_all, resolve_explicit_key, s_err,
-};
+use self::actions::{collect_recent_runs, do_approve_commit, resolve_explicit_key, s_err};
 use super::board::store::{SharedRoDb, open_db, refuse_inside_agent_run};
 use super::scope::resolve_scope;
 use crate::ctx::{Ctx, SystemClock};
@@ -76,27 +74,33 @@ pub struct UiArgs {
     /// Scope cockpit data to a specific repository path.
     #[arg(long)]
     pub repo: Option<PathBuf>,
-    /// Run as an always-on read-only loopback service with a persistent token in config_dir/ui-service.token.
+    /// Run as an always-on loopback service with a persistent token in data_dir/ui-service.token.
     #[arg(
         long,
         conflicts_with_all = ["install_service", "uninstall_service", "service_url", "allow_approve", "key", "qr", "open"]
     )]
     pub service: bool,
-    /// Install/restart the macOS launchd agent (`com.autoagentfactory.ui`) for the read-only Cockpit service.
+    /// Install/restart the macOS launchd agent (`com.autoagentfactory.ui`) for the Cockpit service.
     #[arg(
         long,
-        conflicts_with_all = ["service", "uninstall_service", "service_url", "allow_approve", "key", "qr", "open"]
+        conflicts_with_all = ["service", "uninstall_service", "service_url", "allow_approve", "key", "open"]
     )]
     pub install_service: bool,
     /// Unload and remove the macOS launchd agent (`com.autoagentfactory.ui`).
     #[arg(long, conflicts_with_all = ["service", "install_service", "service_url"])]
     pub uninstall_service: bool,
-    /// Print the fixed bookmark URL of the read-only Cockpit service and exit.
+    /// Print the fixed bookmark URL of the Cockpit service and exit.
     #[arg(long, conflicts_with_all = ["service", "install_service", "uninstall_service"])]
     pub service_url: bool,
     /// Opt in to board actions (ready, cancel, unblock, rework, steer, unfreeze) in `--service` / `--install-service` mode (approve remains locked).
     #[arg(long, conflicts_with_all = ["read_only", "allow_approve"])]
     pub allow_actions: bool,
+    /// Trusted HTTPS reverse-proxy origin (e.g. Tailscale Serve `https://mac.tailnet.ts.net`).
+    #[arg(long)]
+    pub public_url: Option<String>,
+    /// Configure persistent `tailscale serve --bg` and save the Tailscale HTTPS URL in Tier-1 config.
+    #[arg(long, conflicts_with = "public_url")]
+    pub tailscale: bool,
 }
 
 pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
@@ -107,10 +111,16 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
         return service::run_uninstall(ctx);
     }
     if args.service_url {
-        return service::run_service_url(ctx, args.port);
+        return service::run_service_url(ctx, args.port, args.public_url.as_deref(), args.qr);
     }
     if args.install_service {
-        return service::run_install(ctx, args.allow_actions);
+        return service::run_install(
+            ctx,
+            args.allow_actions,
+            args.public_url.as_deref(),
+            args.tailscale,
+            args.qr,
+        );
     }
     if args.service && !is_loopback_host(&args.host) {
         return Ok(CmdOutput::policy(
@@ -132,14 +142,18 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
     let allow_approve = args.allow_approve && !read_only && !args.service;
     let explicit_key = if args.service {
         Some(
-            service::load_or_create_token(&ctx.config_dir)
+            service::load_or_migrate_token(&ctx.data_dir, &ctx.config_dir)
                 .map_err(|e| CmdError::new(format!("service token: {e}")))?,
         )
     } else {
         resolve_explicit_key(args.key.as_deref(), ctx)
     };
+    let trusted_origin =
+        tailscale::resolve_public_origin(args.public_url.as_deref(), ctx).map_err(CmdError::new)?;
     let cfg = match UiConfig::resolve(args.host.clone(), args.port, explicit_key, !read_only) {
-        Ok(c) => c.with_allow_approve(allow_approve),
+        Ok(c) => c
+            .with_allow_approve(allow_approve)
+            .with_trusted_origin(trusted_origin.clone()),
         Err(err @ UiError::InsecureLanBind { .. }) => {
             return Ok(CmdOutput::policy("refused", err.to_string()));
         }
@@ -165,7 +179,7 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
         Ok(h) => h,
         Err(UiError::Io(e)) if e.kind() == ErrorKind::AddrInUse => {
             sup_shutdown.shutdown();
-            let msg = service::port_in_use_message(args.port, args.service, &ctx.config_dir);
+            let msg = service::port_in_use_message(args.port, args.service, &ctx.data_dir);
             return Err(CmdError::new(msg));
         }
         Err(e) => {
@@ -183,7 +197,7 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
         } else {
             "actions enabled; approve locked"
         };
-        let tok_path = service::token_path(&ctx.config_dir);
+        let tok_path = service::token_path(&ctx.data_dir);
         eprintln!(
             "AAF Cockpit service ({mode}) listening on http://{bound} (scope: {scope}; token file: {})",
             tok_path.display()
@@ -194,6 +208,14 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
             "{card}\nStudio (statistics only): {}",
             studio::studio_url(&url)
         );
+        if let Some(orig) = &trusted_origin {
+            eprintln!(
+                "{}",
+                aaf_engine::web_ui::render_remote_pairing_card(
+                    orig, &cfg.token, read_only, args.qr
+                )
+            );
+        }
         eprintln!("Listening on http://{bound} (press q + Enter or Ctrl-C to stop)");
     }
     #[cfg(target_os = "macos")]
@@ -529,35 +551,38 @@ impl UiBackend for CliUiBackend {
         }
         let db = open_db(&self.ctx).map_err(|e| e.message)?;
         let repo = self.repo_root.as_deref().and_then(Path::to_str);
-        let res = match action {
-            "ready" => do_ready(&db, task_id),
-            "ready_all" | "ready-all" => do_ready_all(&db, repo),
-            "cancel" => do_cancel(&db, task_id, note),
-            "unblock" => do_unblock(&db, task_id),
-            "unblock_all" | "unblock-all" => do_unblock_all(&db, repo),
-            "approve_plan" | "approve-plan" => do_approve_plan(&db, task_id),
-            "rework" => do_rework(&db, &self.ctx, task_id, note),
-            "steer" => {
-                let recorded = steer_task(&db, task_id, note, SystemClock.now())?;
-                Ok(json!({ "action": "steer", "task_id": task_id, "note": recorded }))
-            }
-            "unfreeze" => {
-                unfreeze(&db, &SystemClock).map_err(s_err)?;
-                Ok(json!({ "action": "unfreeze", "frozen": false }))
-            }
-            "stop_run" => proof_stop::do_stop_run(&db, &self.ctx, task_id),
-            "account_cooldown" => {
-                extras::do_account_cooldown(&db, &self.ctx, &self.config_base, task_id, note, false)
-            }
-            "account_clear" => {
-                extras::do_account_cooldown(&db, &self.ctx, &self.config_base, task_id, "", true)
-            }
-            other => Err(format!("invalid action: {other}")),
-        };
+        let res = actions::dispatch_db_action(
+            &db,
+            &self.ctx,
+            &self.config_base,
+            repo,
+            action,
+            task_id,
+            note,
+        );
         if res.is_ok() {
             self.invalidate_status_cache();
         }
         res
+    }
+
+    fn task_pipeline_json(&self, task_id: &str) -> Result<Value, String> {
+        actions::read_task_pipeline(&self.require_db_ro()?, task_id)
+    }
+
+    fn sop_runs_json(&self) -> Result<Value, String> {
+        actions::read_sop_runs(&self.ctx)
+    }
+
+    fn mutate_task_with_comments(
+        &self,
+        action: &str,
+        task_id: &str,
+        note: &str,
+        comments: &[Value],
+    ) -> Result<Value, String> {
+        let combined = actions::parse_and_format_comments(action, note, comments)?;
+        self.mutate_task(action, task_id, &combined)
     }
 
     fn stream_tail_lines(&self, run_id: &str, max_lines: usize) -> Result<Vec<String>, String> {

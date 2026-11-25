@@ -7,6 +7,7 @@ use aaf_domain::ports::Clock;
 use aaf_engine::factory::adapters::SystemClock;
 use aaf_engine::telemetry::{
     CostBasis, DurationStats, FactoryReport, ReportWindow, TaskCounts, collect_report,
+    compute_factory_score,
 };
 use serde_json::json;
 
@@ -44,10 +45,16 @@ pub fn run(args: &ReportArgs, ctx: &Ctx) -> CmdResult {
     };
     let scope = repo.clone().unwrap_or_else(|| "all".to_string());
     let text = render_text(&report, &scope, args.since);
-    let value = serde_json::to_value(&report).map_err(|e| err("report", e))?;
+    let score = compute_factory_score(&report);
+    let mut value = serde_json::to_value(&report).map_err(|e| err("report", e))?;
+    let score_val = serde_json::to_value(&score).map_err(|e| err("score", e))?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.insert("score".into(), score_val.clone());
+    }
     Ok(CmdOutput::ok("ok", text)
         .field("scope", json!(scope))
-        .field("report", value))
+        .field("report", value)
+        .field("score", score_val))
 }
 
 pub(crate) fn since_cutoff(now: i64, hours: u64) -> i64 {

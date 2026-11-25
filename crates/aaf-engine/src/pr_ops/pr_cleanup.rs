@@ -11,14 +11,16 @@ use std::time::Duration;
 use aaf_domain::ports::Clock;
 use serde::Serialize;
 
-use super::cmd::{git, git_raw};
-use super::gh_client::PrInfo;
 use super::pr_cleanup_db::{DbDecision, transition_review_task_done};
 use super::pr_merge::{PrMergeOutcome, PrMergeRequest, sync_local_base};
 use super::pr_merge_support::{MergeLockGuard, valid_sha40};
-use super::worktree::{self, WorktreeEntry};
-use super::{GitError, check_branch_name, path_str};
 use crate::gate;
+use crate::git::cmd::{git, git_raw};
+use crate::git::gh_client::PrInfo;
+pub(crate) use crate::git::is_protected_branch;
+pub use crate::git::main_work_tree;
+use crate::git::worktree::{self, WorktreeEntry};
+use crate::git::{GitError, check_branch_name, path_str};
 
 const OP_MARKERS: [&str; 5] = [
     "rebase-merge",
@@ -65,42 +67,6 @@ impl PrCleanupReport {
     }
 }
 
-/// Resolves the main worktree root for `path`, even when invoked inside a linked worktree.
-pub fn main_work_tree(path: &Path) -> PathBuf {
-    if let Some(main) = aaf_fp::repository_dirs(path).into_iter().last() {
-        return main;
-    }
-    if let Ok(common) = git(
-        path,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    ) {
-        let common_path = PathBuf::from(common.trim());
-        if common_path.file_name().is_some_and(|n| n == ".git")
-            && let Some(parent) = common_path.parent()
-        {
-            return fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-        }
-    }
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Case-insensitive ASCII protection for base/default/release/public/non-ASCII branches.
-pub(crate) fn is_protected_branch(branch: &str, base_ref_name: &str) -> bool {
-    let trimmed = branch.trim();
-    if trimmed.is_empty()
-        || !trimmed.is_ascii()
-        || trimmed.eq_ignore_ascii_case(base_ref_name.trim())
-    {
-        return true;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "main" | "master" | "develop" | "development" | "trunk" | "head"
-    ) || lower.starts_with("release/")
-        || lower.starts_with("public-")
-}
-
 /// Runs post-merge remote deletion, local cleanup, and base fast-forward after
 /// `gh pr merge` succeeds. Never fails the merge itself.
 pub(super) fn finish_merged(
@@ -145,9 +111,9 @@ fn try_lock_for_already_merged(
 ) -> Result<MergeLockGuard, String> {
     let locks_dir = data_dir.join("locks");
     let common_id = gate::stats_repo_id(main_repo);
-    crate::db::private::create_dir(&locks_dir).map_err(|e| format!("lock dir error: {e}"))?;
+    aaf_fp::fs_private::create_dir(&locks_dir).map_err(|e| format!("lock dir error: {e}"))?;
     let lock_path = locks_dir.join(format!("{common_id}.merge.lock"));
-    crate::db::private::open_file(&lock_path).map_err(|e| format!("lock file error: {e}"))?;
+    aaf_fp::fs_private::open_file(&lock_path).map_err(|e| format!("lock file error: {e}"))?;
     match MergeLockGuard::acquire(&locks_dir, &common_id, Duration::ZERO) {
         Ok(guard) => Ok(guard),
         Err(GitError::LockTimeout(_)) => Err("merge lock is busy".to_string()),

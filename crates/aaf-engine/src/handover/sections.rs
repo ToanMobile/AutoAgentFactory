@@ -7,12 +7,12 @@ use aaf_domain::proof::ProofRecord;
 use aaf_domain::task::{Task, TaskState};
 use serde_json::Value;
 
+use super::html::HandoverProof;
 use super::{
     CompactAudit, CompactGate, HandoverGateCommand, SOLO_DEV_BADGE, enum_label, latest_event,
     non_empty,
 };
 use crate::cross_audit::scoring::compute_mechanical_score;
-use crate::handover_html::HandoverProof;
 
 pub(super) struct ScoreBundle {
     pub(super) mechanical: Option<u8>,
@@ -304,7 +304,7 @@ fn extract_event_summary_text(events: &[FactoryEvent], kind: EventKind) -> Optio
 
 pub(super) fn extract_root_cause(task: &Task, events: &[FactoryEvent], what_done: &str) -> String {
     for note in task.context_notes.iter().rev() {
-        if crate::handover_dual::is_internal_note(note) {
+        if super::dual::is_internal_note(note) {
             continue;
         }
         if let Some(found) = find_root_cause_in_text(note) {

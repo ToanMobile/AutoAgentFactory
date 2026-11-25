@@ -19,9 +19,8 @@ use aaf_engine::gc::{GcOptions, run_gc};
 use aaf_engine::git::warm_slot::{
     SlotKind, WarmSlot, promote_clean_base_snapshot, warm_slots_root,
 };
-use aaf_engine::git::{
-    GhClient, GitError, MergeStrategy, PrCheck, PrInfo, PrMergeOutcome, PrMergeRequest, merge_pr,
-};
+use aaf_engine::git::{GhClient, GitError, MergeStrategy, PrCheck, PrInfo};
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr};
 use tempfile::TempDir;
 
 struct FixedClock(i64);

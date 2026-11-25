@@ -351,7 +351,17 @@ fn dispatch_request(
         origin_header: req.headers.get("origin").map(String::as_str),
         auth_header: req.headers.get("authorization").map(String::as_str),
         query_token: req.query.get("token").map(String::as_str),
-        require_auth: !matches!(route, Route::Index | Route::Studio | Route::Health),
+        require_auth: !matches!(
+            route,
+            Route::Index
+                | Route::Studio
+                | Route::Manifest
+                | Route::AppleTouchIcon
+                | Route::IconSvg
+                | Route::DiffJs
+                | Route::PipelineJs
+                | Route::Health
+        ),
         allow_query_token: matches!(route, Route::Events),
         is_mutating: matches!(
             route,
@@ -370,6 +380,11 @@ fn dispatch_request(
     match route {
         Route::Index => write_html(stream, INDEX_HTML),
         Route::Studio => write_html(stream, STUDIO_HTML),
+        Route::Manifest => super::pwa::serve_static(stream, 0),
+        Route::AppleTouchIcon => super::pwa::serve_static(stream, 1),
+        Route::IconSvg => super::pwa::serve_static(stream, 2),
+        Route::DiffJs => super::pwa::serve_static(stream, 3),
+        Route::PipelineJs => super::pwa::serve_static(stream, 4),
         Route::Report => {
             let since = req.query.get("since").and_then(|s| s.parse::<u64>().ok());
             write_backend_result(stream, backend.report_json(since));
@@ -395,8 +410,10 @@ fn dispatch_request(
                 .filter(|s| !s.is_empty());
             write_backend_result(stream, backend.board_json(st));
         }
+        Route::SopRuns => write_backend_result(stream, backend.sop_runs_json()),
         Route::TaskDetail(id) => with_task_id(stream, &id, |id| backend.task_detail_json(id)),
         Route::TaskDiff(id) => with_task_id(stream, &id, |id| backend.task_diff_json(id)),
+        Route::TaskPipeline(id) => with_task_id(stream, &id, |id| backend.task_pipeline_json(id)),
         Route::TaskProof(id) => with_task_id(stream, &id, |id| backend.task_proof_json(id)),
         Route::ProofImage(id, idx) => match validate_task_id(&id) {
             Ok(()) => match backend.task_proof_image(&id, idx) {
@@ -504,6 +521,8 @@ struct ActionBody {
     task_id: String,
     #[serde(default)]
     note: String,
+    #[serde(default)]
+    comments: Vec<Value>,
 }
 
 fn handle_action_post(stream: &mut TcpStream, backend: &dyn UiBackend, body: &[u8]) {
@@ -522,10 +541,12 @@ fn handle_action_post(stream: &mut TcpStream, backend: &dyn UiBackend, body: &[u
     {
         return send_err(stream, 400, &format!("invalid task id: {e}"));
     }
-    write_backend_result(
-        stream,
-        backend.mutate_task(normalized, p.task_id.trim(), p.note.trim()),
-    );
+    let res = if p.comments.is_empty() {
+        backend.mutate_task(normalized, p.task_id.trim(), p.note.trim())
+    } else {
+        backend.mutate_task_with_comments(normalized, p.task_id.trim(), p.note.trim(), &p.comments)
+    };
+    write_backend_result(stream, res);
 }
 
 fn serve_sse(

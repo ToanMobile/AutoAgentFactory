@@ -12,7 +12,7 @@ use super::paths::{closed_dir, ensure_closed_dir, guest_dir, is_guest, open_gues
 use super::probe::{GroupState, ProcId, Unreadable};
 use super::slot_file::unlock_all;
 use super::watchdog::GroupControl;
-use crate::db::private;
+use aaf_fp::fs_private as private;
 
 const PREFIX: &str = "paused.";
 /// Cap on reading a pause record (matches `paths::GUEST_FILE_MAX`) so a

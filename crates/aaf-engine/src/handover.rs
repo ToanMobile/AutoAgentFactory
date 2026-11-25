@@ -11,11 +11,15 @@ use serde_json::Value;
 
 use crate::cross_audit::scoring::GOLDEN_STANDARDS;
 
+pub(crate) mod devkit;
+pub mod dual;
+pub mod export;
+pub(crate) mod html;
 mod load;
 mod sections;
 
-pub use crate::handover_export::{AutoHandoverPaths, HandoverError, write_auto_handover_reports};
-pub use crate::handover_html::{
+pub use export::{AutoHandoverPaths, HandoverError, write_auto_handover_reports};
+pub use html::{
     CSP_META, HandoverProof, MAX_HTML_PROOF_BYTES, MAX_PR_BODY_BYTES, compose_pr_body,
     encode_base64, escape_html, render_html, render_json, render_markdown,
     sanitize_external_markdown,
@@ -302,7 +306,7 @@ pub fn build_handover_from_parts_with_dual(
         (None, None) => (false, false, Vec::new()),
     };
 
-    let what_done = crate::handover_dual::build_clean_what_done(task, events).join(" · ");
+    let what_done = dual::build_clean_what_done(task, events).join(" · ");
     let handover_proof = proof.map(HandoverProof::from_record);
     let verdict_label = verdict_label_for(&status);
     let generated_at = receipt.map(|r| r.created_at).unwrap_or(task.updated_at);
@@ -421,7 +425,7 @@ fn collect_missing(
         .is_none()
         .then(|| ctx.ca.and_then(|a| a.to_dual_record(ctx.task, &ctx.bundle)))
         .flatten();
-    missing.extend(crate::handover_dual::check_dual_review_missing(
+    missing.extend(dual::check_dual_review_missing(
         ctx.audit.or(compact_audit.as_ref()),
         dual_review,
         require_different_provider,

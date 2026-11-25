@@ -13,7 +13,7 @@ use aaf_domain::config::LandMode;
 use aaf_engine::config::{ConfigInputs, ConfigOverlay, RunOverlay};
 use aaf_engine::factory::{BaseRef, GitOps, RealGit, resolve_base};
 use aaf_engine::gate::base as gate_base;
-use aaf_engine::git::pr_merge::sync_local_base;
+use aaf_engine::pr_ops::sync_local_base;
 use tempfile::TempDir;
 
 fn git_cmd(dir: &Path, args: &[&str]) -> String {

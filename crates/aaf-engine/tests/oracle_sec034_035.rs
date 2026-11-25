@@ -12,7 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use aaf_engine::gate::base as gate_base;
-use aaf_engine::git::pr_merge::sync_local_base;
+use aaf_engine::pr_ops::sync_local_base;
 use tempfile::TempDir;
 
 const SCRUBBED_GIT_ENV: [&str; 6] = [

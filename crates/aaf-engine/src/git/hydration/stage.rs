@@ -80,8 +80,8 @@ pub(crate) fn stage_for_gate_from_base(
     let Some(sha) = base_sha else {
         return Ok(None);
     };
-    let main_root =
-        crate::gate::head_lock::common_repo_root(wt_root).unwrap_or_else(|| wt_root.to_path_buf());
+    let main_root = crate::confine_core::git_refs::common_repo_root(wt_root)
+        .unwrap_or_else(|| wt_root.to_path_buf());
     let cfg = load_base_worktree_config(&main_root, sha)?;
     if cfg.gate_copy_files.is_empty() {
         return Ok(None);
@@ -160,7 +160,7 @@ pub(super) fn run_setup_cmd(
     setup_cmd: &str,
     data_dir: Option<&Path>,
 ) -> Result<(), GitError> {
-    let (argv, _mode) = crate::gate::confine::shell_argv(setup_cmd, wt_root, data_dir)?;
+    let (argv, _mode) = crate::confine_core::shell_argv(setup_cmd, wt_root, data_dir)?;
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(wt_root);
     for var in SCRUBBED_GIT_ENV {

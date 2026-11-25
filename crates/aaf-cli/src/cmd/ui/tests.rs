@@ -146,3 +146,31 @@ fn service_bookmark_plist_and_port_in_use_behave_safely() {
     assert!(with_svc.contains("--service-url") && with_svc.contains("4319"));
     assert!(service::port_in_use_message(DEFAULT_PORT, true, tmp.path()).contains("launchd"));
 }
+
+#[test]
+fn service_token_migrates_legacy_config_dir_into_data_dir_and_deletes_old() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let legacy = service::token_path(&cfg_dir);
+    let orig = "0123456789abcdef0123456789abcdef";
+    std::fs::write(&legacy, orig).unwrap();
+
+    let tok = service::load_or_migrate_token(&data_dir, &cfg_dir).unwrap();
+    assert_eq!(tok, orig);
+    assert!(service::token_path(&data_dir).is_file());
+    assert!(
+        !legacy.exists(),
+        "legacy config_dir token must be removed after migration"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(service::token_path(&data_dir))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}

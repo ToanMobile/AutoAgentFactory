@@ -13,10 +13,8 @@ use aaf_domain::gate::GateMode;
 use aaf_domain::ports::{Clock, EventSink, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::gate::GIT_TIMEOUT;
-use aaf_engine::git::{
-    GhClient, MergeStrategy, PrMergeOutcome, PrMergeRequest, SystemGh, main_work_tree,
-    merge_pr_with_cwd, worktree,
-};
+use aaf_engine::git::{GhClient, MergeStrategy, SystemGh, main_work_tree, worktree};
+use aaf_engine::pr_ops::{PrMergeOutcome, PrMergeRequest, merge_pr_with_cwd};
 use aaf_engine::throttle::Progress;
 use clap::ValueEnum;
 use serde_json::{Value, json};

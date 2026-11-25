@@ -12,7 +12,7 @@ use super::unblock::block;
 
 /// Automatic comebacks from an infra block (RFC-033); the store's
 /// `wake_due_blocked_tasks` uses the same cap.
-pub(crate) const INFRA_RETRY_MAX: u32 = 6;
+pub(crate) use aaf_domain::engine_contracts::INFRA_RETRY_MAX;
 
 /// Wait before infra comeback `attempt + 1`: 60 s doubling, capped at 30 min.
 pub(crate) fn infra_backoff_secs(attempt: u32) -> i64 {

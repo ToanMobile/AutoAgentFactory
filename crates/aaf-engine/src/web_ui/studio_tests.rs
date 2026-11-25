@@ -59,6 +59,7 @@ fn start() -> (super::UiServerHandle, Arc<StudioBackend>) {
         allow_mutating: false,
         allow_approve: false,
         lan_mode: false,
+        trusted_origin: None,
     };
     (start_server(cfg, backend.clone()).unwrap(), backend)
 }

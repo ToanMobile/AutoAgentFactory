@@ -275,6 +275,7 @@ fn read_only_forces_403_even_when_allow_approve_is_true() {
         allow_mutating: false,
         allow_approve: true,
         lan_mode: false,
+        trusted_origin: None,
     };
     assert!(!manual.effective_allow_approve());
     let handle = start_server(manual, backend.clone()).unwrap();

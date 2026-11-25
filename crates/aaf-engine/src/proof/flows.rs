@@ -20,7 +20,6 @@ use super::capture::{choose_temp_dir, run_capture_with_retry, write_and_mirror_p
 use super::{HOST_PROOF_FLOWS_DEVICE, HOST_PROOF_FLOWS_TOOL, ProofError, RecordedProof};
 use crate::executors::env::validate_machine_env_pass;
 use crate::executors::stream_log::scrub_secrets;
-use crate::gate::GateError;
 
 fn one_line(text: &str, max_chars: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -63,11 +62,11 @@ pub fn load_base_flows(repo_root: &Path, base_sha: &str) -> Result<Vec<ProofFlow
 pub(crate) fn load_gate_base_flows(
     repo_root: &Path,
     base_sha: Option<&str>,
-) -> Result<Vec<ProofFlow>, GateError> {
+) -> Result<Vec<ProofFlow>, ProofError> {
     let Some(sha) = base_sha else {
         return Ok(Vec::new());
     };
-    load_base_flows(repo_root, sha).map_err(|e| GateError::Config(e.to_string()))
+    load_base_flows(repo_root, sha)
 }
 
 /// Checks whether an existing signed proof satisfies `cfg` (and, when
@@ -207,7 +206,7 @@ fn load_base_script_bytes(
         )));
     }
     let spec = format!("{sha}:{script}");
-    crate::gate::proc::git_bytes(repo_root, &["show", &spec], aaf_fp::GIT_TIMEOUT)
+    crate::confine_core::proc::git_bytes(repo_root, &["show", &spec], aaf_fp::GIT_TIMEOUT)
         .map_err(|err| ProofError::Invalid(format!("failed to read {spec}: {err}")))
 }
 
@@ -375,7 +374,7 @@ pub fn run_single_flow_with_timeout(
     let assertions_path = temp_dir.create_file("assertions.json", 0o600, &[])?;
     let out_png_path = temp_dir.create_file("out.png", 0o600, &[])?;
 
-    let (argv, _mode) = crate::gate::confine::shell_argv(
+    let (argv, _mode) = crate::confine_core::shell_argv(
         "exec /bin/sh \"$AAF_PROOF_SCRIPT\"",
         &canon_root,
         Some(data_dir),
@@ -397,7 +396,7 @@ pub fn run_single_flow_with_timeout(
     cmd.env("AAF_PROOF_ASSERTIONS", &assertions_path);
     cmd.env("AAF_PROOF_FLOW", &flow.name);
 
-    let done = crate::gate::proc::capture(cmd, timeout, Some(FLOW_LOG_TAIL_BYTES), true)?;
+    let done = crate::confine_core::proc::capture(cmd, timeout, Some(FLOW_LOG_TAIL_BYTES), true)?;
     let duration_ms = u64::try_from(done.duration.as_millis()).unwrap_or(u64::MAX);
     if done.timed_out {
         return Err(ProofError::Invalid(format!(

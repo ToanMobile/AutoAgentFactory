@@ -6,6 +6,11 @@ pub(super) enum Route {
     Index,
     /// The all-in-one metrics page.
     Studio,
+    Manifest,
+    AppleTouchIcon,
+    IconSvg,
+    DiffJs,
+    PipelineJs,
     Report,
     Doctor,
     Health,
@@ -13,8 +18,10 @@ pub(super) enum Route {
     Status,
     Accounts,
     Board,
+    SopRuns,
     TaskDetail(String),
     TaskDiff(String),
+    TaskPipeline(String),
     TaskProof(String),
     ProofImage(String, usize),
     Handover(String),
@@ -40,6 +47,11 @@ pub(super) fn match_route(method: &str, path: &str) -> Route {
     match path {
         "/" => return exact("GET", Route::Index),
         "/studio" => return exact("GET", Route::Studio),
+        "/manifest.webmanifest" => return exact("GET", Route::Manifest),
+        "/apple-touch-icon.png" => return exact("GET", Route::AppleTouchIcon),
+        "/icon.svg" => return exact("GET", Route::IconSvg),
+        "/assets/diff.js" => return exact("GET", Route::DiffJs),
+        "/assets/pipeline.js" => return exact("GET", Route::PipelineJs),
         "/api/report" => return exact("GET", Route::Report),
         "/api/doctor" => return exact("GET", Route::Doctor),
         "/api/health" => return exact("GET", Route::Health),
@@ -47,6 +59,7 @@ pub(super) fn match_route(method: &str, path: &str) -> Route {
         "/api/status" => return exact("GET", Route::Status),
         "/api/accounts" => return exact("GET", Route::Accounts),
         "/api/board" => return exact("GET", Route::Board),
+        "/api/sop/runs" => return exact("GET", Route::SopRuns),
         "/api/events" => return exact("GET", Route::Events),
         "/api/tasks" => return exact("POST", Route::CreateTask),
         "/api/approve" => return exact("POST", Route::ApproveCommit),
@@ -71,9 +84,10 @@ pub(super) fn match_route(method: &str, path: &str) -> Route {
         return Route::ProofImage(id, idx);
     }
     type RouteCtor = fn(String) -> Route;
-    let prefixes: [(&str, RouteCtor); 6] = [
+    let prefixes: [(&str, RouteCtor); 7] = [
         ("/api/task/", Route::TaskDetail),
         ("/api/diff/", Route::TaskDiff),
+        ("/api/pipeline/", Route::TaskPipeline),
         ("/api/proof/", Route::TaskProof),
         ("/api/handover/", Route::Handover),
         ("/api/approve/preview/", Route::ApprovePreview),

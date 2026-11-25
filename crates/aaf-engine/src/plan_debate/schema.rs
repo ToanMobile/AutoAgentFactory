@@ -1,12 +1,11 @@
 //! Strict JSON schemas, repo-relative path normalization, canonical hashing,
 //! and downstream stripping for Plan Debate artifacts.
 
-use std::path::{Component, Path};
-
 use aaf_domain::pipeline::{MAX_PLAN_CONTRACT_BYTES, PlanContract, PlanCritique};
+use aaf_domain::prompt_fence::PLAN_APPROVED_PREFIX;
+pub use aaf_domain::prompt_fence::{normalize_repo_path, strip_for_downstream};
 
 use super::PLAN_CONTRACT_HASH_TAG;
-use crate::factory::prompt::PLAN_APPROVED_PREFIX;
 
 const MAX_APPROVED_SUMMARY_CHARS: usize = 240;
 const SHA256_HEX_LEN: usize = 64;
@@ -158,55 +157,6 @@ pub fn plan_critique_json_schema() -> &'static str {
 }"#
 }
 
-/// Validates and normalizes a repo-relative path (R3-SEC-8).
-///
-/// Rejects empty/whitespace paths, leading `/`, any `\`, any NUL or ASCII
-/// control character (`< 0x20` or `0x7f`), or any `..` path segment (never
-/// silently collapses parent traversal). Strips redundant `.` segments and
-/// duplicate `/`, ensuring every remaining segment is a `Component::Normal`.
-pub fn normalize_repo_path(raw: &str) -> Result<String, String> {
-    if raw.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return Err("path must not contain NUL or ASCII control characters".to_string());
-    }
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("path must not be empty".to_string());
-    }
-    if trimmed.starts_with('/') {
-        return Err("path must be repo-relative (leading '/' forbidden)".to_string());
-    }
-    if trimmed.contains('\\') {
-        return Err("path must not contain backslashes".to_string());
-    }
-    let mut parts: Vec<&str> = Vec::new();
-    for seg in trimmed.split('/') {
-        if seg.is_empty() || seg == "." {
-            continue;
-        }
-        if seg == ".." {
-            return Err("path must not contain '..' traversal segments".to_string());
-        }
-        let mut comps = Path::new(seg).components();
-        match (comps.next(), comps.next()) {
-            (Some(Component::Normal(_)), None) => parts.push(seg),
-            _ => {
-                return Err(format!("invalid path segment {seg:?}"));
-            }
-        }
-    }
-    if parts.is_empty() {
-        return Err("path resolves to empty repo-relative path".to_string());
-    }
-    let normalized = parts.join("/");
-    if !Path::new(&normalized)
-        .components()
-        .all(|c| matches!(c, Component::Normal(_)))
-    {
-        return Err("normalized path contains non-normal components".to_string());
-    }
-    Ok(normalized)
-}
-
 /// Returns the byte offset just past the matching `}` for the `{` at `start`.
 fn balanced_json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut depth: usize = 0;
@@ -354,15 +304,6 @@ pub fn validate_plan_critique(raw_json: &str) -> Result<PlanCritique, String> {
         return Err("plan critique checklist must not be empty".to_string());
     }
     Ok(critique)
-}
-
-/// Strips debate-only fields (`dispositions` and `open_questions`) before
-/// handing a [`PlanContract`] to downstream Implementer or Reviewer stages (R3-SEC-8).
-pub fn strip_for_downstream(plan: &PlanContract) -> PlanContract {
-    let mut stripped = plan.clone();
-    stripped.dispositions.clear();
-    stripped.open_questions.clear();
-    stripped
 }
 
 /// Formats a compact single-line `plan_approved:` context note binding the

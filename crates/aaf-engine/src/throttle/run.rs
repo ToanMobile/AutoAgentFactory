@@ -15,8 +15,7 @@ use super::{
     Ask, Budget, HeavyJob, HeavyRun, HeavySample, Progress, Throttle, orphans, stats, token,
     watchdog,
 };
-use crate::gate::confine::{self, ConfineMode};
-use crate::gate::proc;
+use crate::confine_core::{self as confine, ConfineMode, proc};
 
 pub use super::token::SLOT_ENV;
 

@@ -179,6 +179,25 @@ pub(super) fn build_sandbox_paths(
     }
     let worktree = (!read_only).then(|| request.cwd.clone());
     let mut read_denied: Vec<String> = env.data_dir.iter().cloned().collect();
+    // Defense-in-depth (S-UI-1): block reading any legacy ui-service.token in config_dir
+    // even though current builds store it under `AAF_DATA_DIR` (already read-denied above).
+    if let Some(cfg_dir) = toolchain_home(None, &env.parent_env, "AAF_CONFIG_DIR") {
+        push_unique(
+            &mut read_denied,
+            format!("{}/ui-service.token", cfg_dir.trim_end_matches('/')),
+        );
+    }
+    if let Some(home) = env.home.as_deref().filter(|h| !h.is_empty()) {
+        let home = home.trim_end_matches('/');
+        push_unique(
+            &mut read_denied,
+            format!("{home}/.config/autofactory/ui-service.token"),
+        );
+        push_unique(
+            &mut read_denied,
+            format!("{home}/.local/share/autofactory/ui-service.token"),
+        );
+    }
     for (warm, explicit) in [
         (
             env.home
@@ -204,7 +223,7 @@ pub(super) fn build_sandbox_paths(
                     .is_some_and(|(w, r)| w.starts_with(r))
         });
         if under_writable || (cfg!(target_os = "linux") && explicit) {
-            let _ = crate::db::private::create_dir(warm_path);
+            let _ = aaf_fp::fs_private::create_dir(warm_path);
         }
         push_unique(&mut write_denied, warm.clone());
         push_unique(&mut read_denied, warm);

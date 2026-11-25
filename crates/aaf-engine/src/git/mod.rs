@@ -4,6 +4,7 @@
 //! Every git call goes through [`cmd`], so none can trigger an automatic gc
 //! or be redirected by a `GIT_DIR` inherited from a hook.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -13,13 +14,7 @@ pub mod gh_client;
 pub mod hydration;
 pub mod merge_queue;
 pub mod pr;
-pub mod pr_cleanup;
-mod pr_cleanup_db;
 pub mod pr_feedback_gh;
-pub mod pr_merge;
-#[cfg(test)]
-mod pr_merge_ci_tests;
-mod pr_merge_support;
 pub mod warm_slot;
 mod warm_slot_ops;
 pub mod worktree;
@@ -35,8 +30,6 @@ pub use hydration::{
 };
 pub use merge_queue::{MergeOutcome, MergeRequest, merge};
 pub use pr::{PrOutcome, PrRequest, open_pr, open_pr_with_proof, pr_body, pr_body_with_proof};
-pub use pr_cleanup::{PrCleanupReport, main_work_tree};
-pub use pr_merge::{PrMergeOutcome, PrMergeRequest, merge_pr, merge_pr_with_cwd};
 pub use warm_slot::{
     SlotKind, WarmSlot, base_snapshots_dir, promote_clean_base_snapshot,
     promote_from_pure_base_slot, restore_clean_base_snapshot, warm_slots_root,
@@ -69,6 +62,48 @@ pub enum GitError {
     },
     #[error("io: {0}")]
     Io(#[from] io::Error),
+}
+
+impl From<crate::confine_core::ConfineError> for GitError {
+    fn from(err: crate::confine_core::ConfineError) -> Self {
+        GitError::Invalid(err.to_string())
+    }
+}
+
+/// Resolves the main worktree root for `path`, even when invoked inside a linked worktree.
+pub fn main_work_tree(path: &Path) -> PathBuf {
+    if let Some(main) = aaf_fp::repository_dirs(path).into_iter().last() {
+        return main;
+    }
+    if let Ok(common) = cmd::git(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        let common_path = PathBuf::from(common.trim());
+        if common_path.file_name().is_some_and(|n| n == ".git")
+            && let Some(parent) = common_path.parent()
+        {
+            return fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        }
+    }
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Case-insensitive ASCII protection for base/default/release/public/non-ASCII branches.
+pub(crate) fn is_protected_branch(branch: &str, base_ref_name: &str) -> bool {
+    let trimmed = branch.trim();
+    if trimmed.is_empty()
+        || !trimmed.is_ascii()
+        || trimmed.eq_ignore_ascii_case(base_ref_name.trim())
+    {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "main" | "master" | "develop" | "development" | "trunk" | "head"
+    ) || lower.starts_with("release/")
+        || lower.starts_with("public-")
 }
 
 /// Git arguments are passed as `&str`; a path that is not UTF-8 is refused

@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AAF Cockpit</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AAF Cockpit">
+<meta name="theme-color" content="#0F172A">
 <style>
 :root{
   --bg:#F4F6F9;--surface:#FFFFFF;--surface2:#EBF0F6;--ink:#0F172A;--ink2:#334155;--muted:#5B6B82;
@@ -204,6 +211,19 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 .toast.show{display:block}
 .empty{padding:28px 14px;text-align:center;color:var(--muted);border:1px dashed var(--border);border-radius:10px}
 .hidden{display:none!important}
+.mobile-nav{display:none;position:fixed;left:0;right:0;bottom:0;z-index:30;background:color-mix(in srgb,var(--surface) 94%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--border);padding:4px 6px calc(4px + env(safe-area-inset-bottom));gap:4px;box-shadow:0 -2px 12px rgba(15,23,42,.08)}
+.mnav-btn{flex:1;min-height:48px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:0;border-radius:10px;background:transparent;color:var(--muted);font-size:11px;font-weight:600;padding:4px 6px;text-decoration:none;position:relative;transition:background .12s,color .12s}
+.mnav-btn:hover{background:var(--surface2);color:var(--ink)}
+.mnav-btn.active,.mnav-btn.active:hover{background:var(--accent-soft);color:var(--accent)}
+.mnav-btn.mnav-need.active,.mnav-btn.mnav-need.active:hover{background:var(--err-bg);color:var(--err)}
+.mnav-ic{font-size:15px;line-height:1;display:inline-flex;align-items:center;gap:4px}
+.mnav-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;background:var(--surface2);color:var(--ink)}
+.mnav-badge.hot{background:var(--err);color:#fff}
+@media(max-width:768px){
+  .mobile-nav{display:flex}
+  .app{padding-bottom:calc(88px + env(safe-area-inset-bottom))}
+  .toast{bottom:calc(68px + env(safe-area-inset-bottom))}
+}
 </style>
 </head>
 <body>
@@ -225,6 +245,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <a href="/studio" class="btn-link" title="Thống kê chi tiết từng task, thời gian &amp; token">Studio</a>
         <button id="refreshBtn" class="btn-sm" title="Refresh now">Refresh</button>
         <button id="themeBtn" class="btn-sm" title="Toggle light/dark">Theme</button>
+        <button id="copyTokBtn" class="btn-sm hidden" type="button" title="Copy session token">Copy Token</button>
         <button id="lockBtn" class="btn-sm hidden" title="Clear session token">Lock</button>
       </div>
     </div>
@@ -324,8 +345,34 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       <div class="kv-title">Heavy Throttle Slots &amp; Pressure</div>
       <div id="throttleBox"></div>
     </div>
+    <div class="card" style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+        <div class="kv-title" style="margin-bottom:0">SOP Workflow Runs</div>
+        <button id="sopRefreshBtn" class="btn-sm" type="button">Refresh</button>
+      </div>
+      <div id="sopRunsBox" class="muted">Loading SOP runs…</div>
+    </div>
   </section>
 </div>
+
+<nav id="mobileNav" class="mobile-nav" aria-label="Mobile navigation">
+  <button type="button" class="mnav-btn mnav-need" id="mnavNeedYou" data-mnav="need_you">
+    <span class="mnav-ic">! <span id="mnavNeedCnt" class="mnav-badge">0</span></span>
+    <span>Need You</span>
+  </button>
+  <button type="button" class="mnav-btn active" id="mnavBoard" data-mnav="board">
+    <span class="mnav-ic">▦</span>
+    <span>Board</span>
+  </button>
+  <button type="button" class="mnav-btn" id="mnavAccounts" data-mnav="accounts">
+    <span class="mnav-ic">◎</span>
+    <span>Accounts</span>
+  </button>
+  <a href="/studio" class="mnav-btn" id="mnavStudio" data-mnav="studio">
+    <span class="mnav-ic">▤</span>
+    <span>Studio</span>
+  </a>
+</nav>
 
 <div id="drawerBg" class="drawer-bg" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
   <div class="drawer">
@@ -362,7 +409,12 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   <div class="modal">
     <h3 id="authTitle">Sign in to AAF Cockpit</h3>
     <p class="muted" style="margin-top:0">Paste the bearer token printed by <span class="mono">aaf ui</span> / <span class="mono">aaf ui --service-url</span>, or reopen <span class="mono">/studio</span> from Agent Office.</p>
-    <input id="tokenInput" type="password" class="mono" placeholder="Bearer token…" style="width:100%">
+    <div style="display:flex;gap:6px;align-items:center">
+      <input id="tokenInput" type="password" class="mono" placeholder="Bearer token…" style="flex:1;min-width:0">
+      <button id="tokenPasteBtn" type="button" title="Paste token from clipboard">Paste</button>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;margin-top:8px;cursor:pointer"><input type="checkbox" id="rememberTok" checked> Remember on this device</label>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">iPhone PWA: Add to Home Screen first, then paste token once.</p>
     <div id="authErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
       <button id="tokenSubmit" class="btn-primary" type="button">Unlock</button>
@@ -372,9 +424,12 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
+<script src="/assets/diff.js"></script>
+<script src="/assets/pipeline.js"></script>
 <script>
 (() => {
   const TOKEN_KEY = "aaf_ui_token";
+  const REMEMBER_KEY = "aaf_ui_remember";
   const THEME_KEY = "aaf_ui_theme";
   const VIEW_KEY = "aaf_ui_board_view";
   const SORT_KEY = "aaf_ui_sort";
@@ -415,6 +470,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let sseHadError = false;
   let sseRetryTimer = null;
   let sseRetryDelay = 2000;
+  let sseHideTimer = null;
+  let pendingTaskParam = "";
   let modalHandler = null;
   let drawerSeq = 0;
   let drawerRenderSeq = 0;
@@ -432,6 +489,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let accountsQueuedLive = false;
   const pendingAccounts = new Set();
   let authChan = null;
+  let bootedViaChannel = false;
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -535,9 +593,16 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           authChan.postMessage({ type: "tok", token });
         } else if (msg.type === "tok" && msg.token && !token) {
           token = String(msg.token).trim();
+          bootedViaChannel = true;
           saveToken(token);
+          syncAuthButtons();
           closeAuth();
-          refreshAll().then(() => { startSse(); loadAccountsPanel(false); }).catch(() => {});
+          refreshAll().then(() => { consumePendingTaskParam(); startSse(); loadAccountsPanel(false); }).catch(() => {});
+        } else if (msg.type === "clear") {
+          clearToken();
+          token = "";
+          syncAuthButtons();
+          openAuth("Session locked in another tab.");
         }
       };
     } catch (_) { authChan = null; }
@@ -546,23 +611,77 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function isLoopbackHost() {
     return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
   }
+  function defaultRemember() {
+    const standalone = Boolean(
+      (window.matchMedia && matchMedia("(display-mode: standalone)").matches) ||
+      window.navigator.standalone === true
+    );
+    return location.protocol === "https:" || standalone || isLoopbackHost();
+  }
+  function getRememberPref() {
+    const saved = sGet(localStorage, REMEMBER_KEY);
+    if (saved === "1") return true;
+    if (saved === "0") return false;
+    return defaultRemember();
+  }
+  function setRememberPref(val) {
+    sSet(localStorage, REMEMBER_KEY, val ? "1" : "0");
+  }
   function saveToken(t) {
     sSet(sessionStorage, TOKEN_KEY, t);
-    if (isLoopbackHost()) sSet(localStorage, TOKEN_KEY, t);
+    if (getRememberPref()) sSet(localStorage, TOKEN_KEY, t);
+    else sDel(localStorage, TOKEN_KEY);
   }
   function clearToken() {
     sDel(sessionStorage, TOKEN_KEY);
-    if (isLoopbackHost()) sDel(localStorage, TOKEN_KEY);
+    sDel(localStorage, TOKEN_KEY);
+  }
+  function syncAuthButtons() {
+    const hasTok = Boolean(token);
+    if ($("copyTokBtn")) $("copyTokBtn").classList.toggle("hidden", !hasTok);
+    if ($("lockBtn")) $("lockBtn").classList.toggle("hidden", !hasTok);
   }
   function extractHashToken() {
     const h = location.hash || "";
     const m = h.match(/(?:^#|&)token=([^&]+)/);
     if (m && m[1]) {
-      const t = decodeURIComponent(m[1]).trim();
+      let t = "";
+      try { t = decodeURIComponent(m[1]).trim(); } catch (_) { t = ""; }
       if (t) saveToken(t);
       history.replaceState(null, "", location.pathname + location.search);
     }
-    return sGet(sessionStorage, TOKEN_KEY) || (isLoopbackHost() ? (sGet(localStorage, TOKEN_KEY) || "") : "");
+    return sGet(sessionStorage, TOKEN_KEY) || sGet(localStorage, TOKEN_KEY) || "";
+  }
+  function consumePendingTaskParam() {
+    if (!pendingTaskParam) return;
+    const id = pendingTaskParam;
+    pendingTaskParam = "";
+    const params = new URLSearchParams(location.search);
+    params.delete("task");
+    const qs = params.toString();
+    history.replaceState(null, "", location.pathname + (qs ? "?" + qs : ""));
+    openTaskDrawer(id);
+  }
+  async function pasteIntoTokenInput() {
+    const inp = $("tokenInput");
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+      inp.focus();
+      $("authErr").textContent = "Clipboard paste unavailable here — tap the field and paste manually.";
+      toast("Tap input field and paste manually");
+      return;
+    }
+    try {
+      const text = (await navigator.clipboard.readText() || "").trim();
+      if (!text) { toast("Clipboard is empty"); inp.focus(); return; }
+      inp.value = text;
+      $("authErr").textContent = "";
+      inp.focus();
+      toast("Pasted from clipboard");
+    } catch (_) {
+      inp.focus();
+      $("authErr").textContent = "Clipboard access denied — tap the field and paste manually.";
+      toast("Tap input field and paste manually");
+    }
   }
 
   async function api(path, opts = {}) {
@@ -572,6 +691,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     let data = {};
     try { data = await res.json(); } catch (_) {}
     if (res.status === 401) {
+      clearToken();
+      token = "";
+      syncAuthButtons();
+      if (authChan) { try { authChan.postMessage({ type: "clear" }); } catch (_) {} }
       openAuth("Session token rejected (401). Please re-enter token.");
       throw new Error(data.error || "unauthorized");
     }
@@ -593,6 +716,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
   function openAuth(msg) {
     stopSse();
+    if ($("rememberTok")) $("rememberTok").checked = getRememberPref();
     $("authErr").textContent = msg || "";
     $("tokenInput").value = "";
     $("authBg").classList.add("open");
@@ -620,6 +744,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function stopSse() {
     clearTimeout(sseRetryTimer);
     sseRetryTimer = null;
+    clearTimeout(sseHideTimer);
+    sseHideTimer = null;
     if (sse) { sse.close(); sse = null; }
     setSseState("", "Disconnected");
   }
@@ -669,12 +795,20 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     sseRetryDelay = Math.min(10000, Math.round(sseRetryDelay * 1.6));
     sseRetryTimer = setTimeout(async () => {
       if (!token) return;
-      try { await api("/api/meta"); startSse(); }
-      catch (_) { if (token) scheduleSseReconnect(); }
+      if (document.visibilityState === "hidden") return;
+      try {
+        await api("/api/meta");
+        if (document.visibilityState === "hidden") return;
+        startSse();
+      } catch (_) {
+        if (token && document.visibilityState !== "hidden") scheduleSseReconnect();
+      }
     }, delay);
   }
 
   function startSse() {
+    clearTimeout(sseHideTimer);
+    sseHideTimer = null;
     stopSse();
     if (!token) return;
     let url = "/api/events?token=" + encodeURIComponent(token);
@@ -815,6 +949,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const nyActive = onBoard && stateFilter === "need_you";
     $("needYouTabBtn").classList.toggle("active", nyActive);
     $("needYouTabBtn").setAttribute("aria-selected", String(nyActive));
+    if ($("mnavNeedYou")) $("mnavNeedYou").classList.toggle("active", nyActive);
+    if ($("mnavBoard")) $("mnavBoard").classList.toggle("active", onBoard && stateFilter !== "need_you");
+    if ($("mnavAccounts")) $("mnavAccounts").classList.toggle("active", activeTab === "accounts");
   }
 
   function renderStatusChrome() {
@@ -884,7 +1021,12 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("filterMeta").classList.toggle("hidden", !hasFilter);
     $("clearFiltersBtn").classList.toggle("hidden", !hasFilter);
     $("cntBoard").textContent = String(scopedTasks.filter((t) => showCancelled || t.state !== "cancelled").length);
-    $("cntNeedYou").textContent = String(scopedTasks.filter(isNeedYouTask).length);
+    const needYouCount = scopedTasks.filter(isNeedYouTask).length;
+    $("cntNeedYou").textContent = String(needYouCount);
+    if ($("mnavNeedCnt")) {
+      $("mnavNeedCnt").textContent = String(needYouCount);
+      $("mnavNeedCnt").classList.toggle("hot", needYouCount > 0);
+    }
     $("cntReview").textContent = String(scopedTasks.filter((t) => t.state === "review" || t.state === "blocked").length);
     syncBoardTabHighlight();
 
@@ -1053,6 +1195,12 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     });
   }
 
+  function switchDrawerTab(tab) {
+    drawerTab = tab;
+    syncDrawerTabs();
+    renderDrawerTab();
+  }
+
   async function renderDrawerTab() {
     if (!drawerTaskId || !drawerDetail) return;
     const renderSeq = ++drawerRenderSeq;
@@ -1087,6 +1235,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         ${t.repo_root ? `<div class="mono" style="font-size:12px;color:var(--muted);overflow-wrap:anywhere">${esc(t.repo_root)}</div>` : ""}
         ${blkText ? `<div class="blocked-callout"><strong>Blocked:</strong> ${esc(blkText)}</div>` : ""}
         ${plan.needs_approval ? `<div class="plan-callout"><strong>Plan waiting for approval:</strong> ${esc(plan.summary || "Inspect Plan tab to review details.")}</div>` : ""}
+        <div class="kv-section"><div class="kv-title">Execution Pipeline</div><div id="drawerPipeBox" class="muted">Loading pipeline…</div></div>
         ${specText ? `<div class="kv-section"><div class="kv-title">Task Content / Spec</div><div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(specText)}</div></div>` : ""}
         ${acceptance.length ? `<div class="kv-section"><div class="kv-title">Acceptance Criteria</div>${acceptance.map((a)=>`<div style="margin-bottom:4px">• ${esc(a)}</div>`).join("")}</div>` : ""}
         ${deps.length ? `<div class="kv-section"><div class="kv-title">Dependencies</div><div class="mono">${esc(deps.join(", "))}</div></div>` : ""}
@@ -1128,6 +1277,36 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       if ($("drawerReviewBtn")) $("drawerReviewBtn").onclick = () => { closeDrawer(); switchTab("review"); loadReviewDetail(taskId); };
       $("drawerSteerBtn").onclick = () => promptMutate("steer", taskId);
       if ($("drawerCancelBtn")) $("drawerCancelBtn").onclick = () => promptMutate("cancel", taskId);
+      const pipeBox = $("drawerPipeBox");
+      if (pipeBox) {
+        if (window.AafPipelineUI && typeof window.AafPipelineUI.renderTaskPipeline === "function") {
+          api("/api/pipeline/" + encodeURIComponent(taskId)).then((pipeResp) => {
+            if (renderSeq !== drawerRenderSeq || drawerTab !== "overview") return;
+            const box = $("drawerPipeBox");
+            if (!box) return;
+            window.AafPipelineUI.renderTaskPipeline(box, pipeResp, (node) => {
+              if (!node) return;
+              if (node.id === "plan") switchDrawerTab("plan");
+              else if (node.id === "proof") switchDrawerTab("proof");
+              else if (node.id === "implement" || node.id === "review") switchDrawerTab("diff");
+            }, {
+              getActionLabel: (node) => {
+                if (!node) return null;
+                if (node.id === "plan") return "Plan";
+                if (node.id === "proof") return "Proof";
+                if (node.id === "implement" || node.id === "review") return "Diff";
+                return null;
+              },
+            });
+          }).catch((e) => {
+            if (renderSeq !== drawerRenderSeq || drawerTab !== "overview") return;
+            const box = $("drawerPipeBox");
+            if (box) box.innerHTML = `<div class="muted" style="font-size:12px">Pipeline unavailable: ${esc(e.message)}</div>`;
+          });
+        } else {
+          pipeBox.textContent = "Pipeline renderer unavailable.";
+        }
+      }
       return;
     }
 
@@ -1136,6 +1315,45 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       try {
         const df = await api("/api/diff/" + encodeURIComponent(taskId));
         if (renderSeq !== drawerRenderSeq || drawerTab !== "diff") return;
+        const taskState = (drawerDetail && drawerDetail.task && drawerDetail.task.state) || (drawerDetail && drawerDetail.state) || "";
+        if (df.available && window.AafDiffUI && typeof window.AafDiffUI.renderStructuredDiff === "function") {
+          $("drawerBody").innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+              <span class="mono muted">${esc(df.branch || df.worktree_path || "Worktree diff")}</span>
+              <div style="display:flex;gap:6px">
+                ${df.branch ? `<button class="btn-sm" id="diffCopyBr" type="button">Copy branch</button>` : ""}
+              </div>
+            </div>
+            <div id="diffStructuredBox"></div>`;
+          if ($("diffCopyBr")) $("diffCopyBr").onclick = () => copyText(df.branch, "branch " + df.branch);
+          const diffBox = $("diffStructuredBox");
+          window.AafDiffUI.renderStructuredDiff(
+            diffBox,
+            df,
+            taskState,
+            async (action, note, comments) => {
+              const payloadComments = Array.isArray(comments)
+                ? comments.map((c) => ({
+                    path: c.path,
+                    line_start: typeof c.line_start === "number" && c.line_start >= 0
+                      ? c.line_start
+                      : (typeof c.line === "number" && c.line > 0 ? c.line : 0),
+                    side: c.side || "new",
+                    body: c.body,
+                  }))
+                : [];
+              await api("/api/action", {
+                method: "POST",
+                body: JSON.stringify({ action, task_id: taskId, note, comments: payloadComments }),
+              });
+              toast("Submitted " + action);
+              await refreshAll();
+              await refreshOpenContext();
+            },
+            { readOnly: ro, wrap: diffWrap }
+          );
+          return;
+        }
         $("drawerBody").innerHTML = `
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
             <span class="mono muted">${esc(df.branch || df.worktree_path || "No worktree")}</span>
@@ -1834,6 +2052,26 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     renderMachine(true);
   }
 
+  let sopLoadInFlight = false;
+  async function loadSopRuns() {
+    if (!token || sopLoadInFlight) return;
+    const sopBox = $("sopRunsBox");
+    if (!sopBox) return;
+    sopLoadInFlight = true;
+    try {
+      const sopResp = await api("/api/sop/runs");
+      if (window.AafPipelineUI && typeof window.AafPipelineUI.renderSopRuns === "function") {
+        window.AafPipelineUI.renderSopRuns(sopBox, sopResp);
+      } else {
+        sopBox.innerHTML = `<div class="muted">SOP renderer unavailable.</div>`;
+      }
+    } catch (e) {
+      sopBox.innerHTML = `<div class="muted">SOP runs unavailable: ${esc(e.message)}</div>`;
+    } finally {
+      sopLoadInFlight = false;
+    }
+  }
+
   function switchTab(tab) {
     activeTab = tab;
     syncBoardTabHighlight();
@@ -1841,7 +2079,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     syncRepoFilterOptions();
     if (tab === "review") renderReviewQueue();
     if (tab === "accounts") { renderAccountsPanel(); loadAccountsPanel(false); }
-    if (tab === "machine") renderMachine();
+    if (tab === "machine") { renderMachine(); loadSopRuns(); }
   }
 
   async function refreshAll() {
@@ -1859,6 +2097,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const aafCnt = ((s.watch_accounts && s.watch_accounts.entries) || s.accounts || []).length;
     if (!accountsPanelData) $("cntAccounts").textContent = String(aafCnt);
     if (activeTab === "machine" || activeTab === "accounts") renderMachine();
+    if (activeTab === "machine") loadSopRuns();
     if (activeTab === "accounts") loadAccountsPanel(false);
   }
 
@@ -1875,7 +2114,19 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       };
     });
     $("needYouTabBtn").onclick = () => { stateFilter = "need_you"; switchTab("board"); renderChips(); renderBoard(); };
-    const viewParam = new URLSearchParams(location.search).get("view");
+    if ($("mnavNeedYou")) $("mnavNeedYou").onclick = () => { stateFilter = "need_you"; switchTab("board"); renderChips(); renderBoard(); window.scrollTo({ top: 0, behavior: "smooth" }); };
+    if ($("mnavBoard")) $("mnavBoard").onclick = () => {
+      if (stateFilter === "need_you" || (activeTab === "board" && stateFilter !== "all")) {
+        stateFilter = "all"; renderChips(); renderBoard();
+      }
+      switchTab("board");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    };
+    if ($("mnavAccounts")) $("mnavAccounts").onclick = () => { switchTab("accounts"); window.scrollTo({ top: 0, behavior: "smooth" }); };
+    const qsParams = new URLSearchParams(location.search);
+    const viewParam = qsParams.get("view");
+    const taskParam = qsParams.get("task");
+    pendingTaskParam = taskParam ? taskParam.trim() : "";
     if (viewParam === "needyou") { stateFilter = "need_you"; renderChips(); syncBoardTabHighlight(); }
     else if (viewParam === "blocked") { stateFilter = "blocked"; renderChips(); syncBoardTabHighlight(); }
     else if (viewParam === "review") { switchTab("review"); }
@@ -1925,13 +2176,41 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     };
     $("stopStreamRunBtn").onclick = () => { if (activeRunId) promptStopRun(activeRunId); };
 
-    $("lockBtn").classList.toggle("hidden", isLoopbackHost());
-    $("lockBtn").onclick = () => { clearToken(); token = ""; openAuth("Session locked."); };
+    if ($("copyTokBtn")) $("copyTokBtn").onclick = () => { if (token) copyText(token, "session token"); };
+    $("lockBtn").onclick = () => {
+      clearToken();
+      token = "";
+      syncAuthButtons();
+      if (authChan) { try { authChan.postMessage({ type: "clear" }); } catch (_) {} }
+      openAuth("Session locked.");
+    };
+    if ($("tokenPasteBtn")) $("tokenPasteBtn").onclick = pasteIntoTokenInput;
+    if ($("rememberTok")) {
+      $("rememberTok").checked = getRememberPref();
+      $("rememberTok").onchange = () => setRememberPref($("rememberTok").checked);
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        clearTimeout(sseHideTimer);
+        sseHideTimer = setTimeout(() => {
+          sseHideTimer = null;
+          if (document.visibilityState === "hidden") stopSse();
+        }, 5000);
+      } else if (document.visibilityState === "visible") {
+        clearTimeout(sseHideTimer);
+        sseHideTimer = null;
+        if (token && !sse && !$("authBg").classList.contains("open")) {
+          refreshAll().catch(() => {});
+          startSse();
+        }
+      }
+    });
     $("unfreezeBtn").onclick = () => promptMutate("unfreeze", "");
+    if ($("sopRefreshBtn")) $("sopRefreshBtn").onclick = loadSopRuns;
     $("drawerClose").onclick = closeDrawer;
     $("drawerBg").onclick = (e) => { if (e.target === $("drawerBg")) closeDrawer(); };
     $("drawerTabs").querySelectorAll(".dtab").forEach((b) => {
-      b.onclick = () => { drawerTab = b.dataset.dtab; syncDrawerTabs(); renderDrawerTab(); };
+      b.onclick = () => switchDrawerTab(b.dataset.dtab);
     });
     $("modalCancel").onclick = closeModal;
     $("modalBg").onclick = (e) => { if (e.target === $("modalBg")) closeModal(); };
@@ -1953,10 +2232,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("runSelect").onchange = () => { const val = $("runSelect").value.trim(); if (val) { $("runManual").value = val; followRun(val); } };
     $("tokenSubmit").onclick = async () => {
       const val = $("tokenInput").value.trim();
+      $("tokenInput").value = "";
       if (!val) { $("authErr").textContent = "Token is required."; return; }
-      token = val; saveToken(token);
-      try { await refreshAll(); closeAuth(); startSse(); loadAccountsPanel(false); }
-      catch (e) { $("authErr").textContent = e.message; }
+      if ($("rememberTok")) setRememberPref($("rememberTok").checked);
+      token = val; saveToken(token); syncAuthButtons();
+      try {
+        await refreshAll();
+        closeAuth();
+        if (authChan) { try { authChan.postMessage({ type: "tok", token }); } catch (_) {} }
+        consumePendingTaskParam();
+        startSse();
+        loadAccountsPanel(false);
+      } catch (e) { if (e.message !== "unauthorized") $("authErr").textContent = e.message; }
     };
     $("tokenInput").onkeydown = (e) => { if (e.key === "Enter") $("tokenSubmit").click(); };
 
@@ -1965,8 +2252,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       authChan.postMessage({ type: "req" });
       await new Promise((r) => setTimeout(r, 120));
     }
+    if (bootedViaChannel) return;
+    syncAuthButtons();
     if (!token) { openAuth(""); return; }
-    try { await refreshAll(); startSse(); loadAccountsPanel(false); } catch (_) {}
+    try { await refreshAll(); consumePendingTaskParam(); startSse(); loadAccountsPanel(false); } catch (_) {}
   }
   boot();
 })();

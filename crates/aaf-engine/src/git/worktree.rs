@@ -21,7 +21,7 @@ pub use cleanup::{
     is_operation_in_progress, remove_verified_merged,
 };
 
-pub const BRANCH_PREFIX: &str = "aaf/";
+pub use aaf_domain::engine_contracts::BRANCH_PREFIX;
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/aaf/snapshots/";
 pub(super) const BATCH_PREFIX: &str = "batch-";
 pub(super) const SUBMODULES_REFUSAL: &str =

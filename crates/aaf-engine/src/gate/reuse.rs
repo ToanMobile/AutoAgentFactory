@@ -1,7 +1,7 @@
 //! Signed receipt reuse (local and cross-worktree common receipt cache) and
 //! receipt/config hashing helpers.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aaf_domain::config::{AuditScope, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus, LockStatus, RECEIPT_SCHEMA_VERSION, Receipt};
@@ -9,6 +9,9 @@ use aaf_domain::pipeline::canonical_provider;
 use sha2::{Digest, Sha256};
 
 use super::{GIT_TIMEOUT, GateError};
+#[cfg(test)]
+pub(crate) use crate::confine_core::git_refs::repo_root_and_stats_id_by;
+pub use crate::confine_core::git_refs::{repo_root_and_stats_id, stats_repo_id};
 
 const WORK_TREE_WARNING_MARKER: &str = "warning: work tree:";
 
@@ -79,65 +82,6 @@ pub(crate) fn alt_config_hash(cfg: &RepoConfig, _require_independent: bool) -> O
     } else {
         None
     }
-}
-
-/// Key of the repository in the learned memory statistics. Every worktree
-/// of one repository shares it, so a task's fresh worktree starts with the
-/// measurements of its siblings instead of as "never measured".
-pub fn stats_repo_id(repo_root: &Path) -> String {
-    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
-    let Ok(common) = aaf_fp::git(repo_root, &args, &[], GIT_TIMEOUT) else {
-        return aaf_fp::repo_id(repo_root);
-    };
-    stats_id_of_common_dir(Path::new(&common))
-}
-
-fn stats_id_of_common_dir(common: &Path) -> String {
-    let main_root = match common.parent() {
-        Some(parent) if common.file_name().is_some_and(|name| name == ".git") => parent,
-        _ => common,
-    };
-    aaf_fp::repo_id(main_root)
-}
-
-/// `(aaf_fp::repo_root(dir), stats_repo_id(root))` from one git call where
-/// git answers both at once; the two calls otherwise. `None` when `dir` is
-/// not in a work tree git can read.
-pub fn repo_root_and_stats_id(dir: &Path) -> Option<(PathBuf, String)> {
-    repo_root_and_stats_id_by(
-        |args| aaf_fp::git(dir, args, &[], GIT_TIMEOUT).ok(),
-        || {
-            let root = aaf_fp::repo_root(dir).ok()?;
-            let id = stats_repo_id(&root);
-            Some((root, id))
-        },
-    )
-}
-
-/// [`repo_root_and_stats_id`] with its combined git call and its two-call
-/// fallback passed in, so a test can count which one answered.
-pub(crate) fn repo_root_and_stats_id_by(
-    git: impl FnOnce(&[&str]) -> Option<String>,
-    fallback: impl FnOnce() -> Option<(PathBuf, String)>,
-) -> Option<(PathBuf, String)> {
-    let args = [
-        "rev-parse",
-        "--show-toplevel",
-        "--path-format=absolute",
-        "--git-common-dir",
-    ];
-    if let Some(out) = git(&args)
-        && let Some((root, common)) = out.split_once('\n')
-        && !root.is_empty()
-        && !common.is_empty()
-        && !common.contains('\n')
-    {
-        return Some((
-            PathBuf::from(root),
-            stats_id_of_common_dir(Path::new(common)),
-        ));
-    }
-    fallback()
 }
 
 fn mode_rank(mode: GateMode) -> u8 {

@@ -22,22 +22,7 @@ const SETTINGS_MAX_BYTES: u64 = 1024 * 1024;
 /// What the run history says about accounts. Cross-audit runs are left out
 /// by the implementations: the auditor's account is not the one a
 /// repository or task "runs on".
-pub trait RunHistory: Send + Sync {
-    /// Account of the newest run of any task of `repo_root`, among the
-    /// accounts of `provider`.
-    fn last_account_of_repo(
-        &self,
-        repo_root: &str,
-        provider: ProviderKind,
-    ) -> PortResult<Option<String>>;
-    /// Account of the newest run of `task_id`, among the accounts of
-    /// `provider`.
-    fn last_account_of_task(
-        &self,
-        task_id: &str,
-        provider: ProviderKind,
-    ) -> PortResult<Option<String>>;
-}
+pub use aaf_domain::engine_contracts::RunHistory;
 
 /// Where a binding comes from, strongest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

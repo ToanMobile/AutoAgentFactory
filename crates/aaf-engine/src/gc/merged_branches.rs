@@ -27,9 +27,8 @@ use super::{GcOptions, GcReport};
 use crate::config::{ConfigInputs, ConfigOverlay, load as load_config};
 use crate::git::base_ref::{BaseRef, resolve_base};
 use crate::git::cmd::{git, git_raw};
-use crate::git::pr_cleanup::{is_protected_branch, main_work_tree};
 use crate::git::worktree::{self, BRANCH_PREFIX, WorktreeEntry};
-use crate::git::{GitError, check_branch_name, path_str};
+use crate::git::{GitError, check_branch_name, is_protected_branch, main_work_tree, path_str};
 use crate::process::{CommandRunner, SystemRunner};
 
 const ALLOWED_PREFIXES: [&str; 3] = ["audit/", "fix/", "lane/"];

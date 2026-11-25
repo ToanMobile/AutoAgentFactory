@@ -20,8 +20,8 @@ use stage::{cow_clone_dir, run_setup_cmd};
 use super::cmd::{self, git, git_raw};
 use super::worktree::{self, TaskWorktree};
 use super::{GitError, path_str};
-use crate::config::REPO_CONFIG_REL;
-use crate::gate::base::{AUTO_FALLBACKS, origin_head_branch};
+use crate::confine_core::git_refs::{AUTO_FALLBACKS, origin_head_branch, stats_repo_id};
+use aaf_domain::engine_contracts::REPO_CONFIG_REL;
 
 /// Paths materialized into a task worktree that must remain read-only
 /// (`SandboxPaths::write_denied`) during sandboxed agent turns.
@@ -443,7 +443,7 @@ pub fn hydrate_fresh_worktree(
     base_sha: &str,
 ) -> Result<HydratedPaths, GitError> {
     if let Some(data_dir) = std::env::var_os("AAF_DATA_DIR").filter(|v| !v.is_empty()) {
-        let common_id = crate::gate::stats_repo_id(repo_root);
+        let common_id = stats_repo_id(repo_root);
         return hydrate_fresh_worktree_with_snaps(
             repo_root,
             worktree,
