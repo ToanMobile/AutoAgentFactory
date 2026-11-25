@@ -23,6 +23,7 @@ mod git_real;
 mod halt_alert;
 mod infra;
 mod merge_lock_retry;
+mod merge_retry;
 mod opt12;
 mod oracle_g3_rework_filter;
 mod policy;

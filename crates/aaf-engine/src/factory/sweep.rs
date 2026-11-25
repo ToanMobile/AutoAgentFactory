@@ -452,6 +452,7 @@ impl<'a> Scheduler<'a> {
             self.summary.done.push(task.id);
         }
         self.sweep_squash_merged(remaining)?;
+        self.sweep_merge_retry()?;
         self.sweep_pr_feedback()
     }
 

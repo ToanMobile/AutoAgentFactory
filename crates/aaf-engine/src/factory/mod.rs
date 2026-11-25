@@ -23,6 +23,7 @@ mod finish;
 mod finish_land;
 mod git_real;
 mod git_real_base;
+mod merge_retry;
 pub(crate) mod plan_job;
 mod plan_legacy;
 pub mod ports;

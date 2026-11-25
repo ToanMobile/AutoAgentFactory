@@ -9,6 +9,7 @@ use aaf_domain::ports::{PortError, PortResult};
 
 use crate::factory::ports::{GitOps, Integration};
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef};
+use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::{MergeOutcome, PrOutcome, TaskWorktree};
 
 pub(super) fn task_of(path: &Path) -> String {
@@ -56,6 +57,10 @@ pub struct GitState {
     pub pr_feedback: HashMap<u64, PortResult<Option<PrFeedbackSnapshot>>>,
     /// Number of times `GitOps::pr_feedback` was called.
     pub pr_feedback_calls: u32,
+    /// Scripted `merge_pr` outcomes, oldest first; empty means unsupported.
+    pub merge_pr_script: VecDeque<PrMergeOutcome>,
+    /// `(pr_url, head_sha)` of every `merge_pr` call.
+    pub merge_pr_calls: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -214,6 +219,21 @@ impl GitOps for FakeGit {
     fn cleanup(&self, task_id: &str) -> PortResult<()> {
         self.0.lock().unwrap().cleaned.push(task_id.to_string());
         Ok(())
+    }
+    fn merge_pr(
+        &self,
+        _wt: &TaskWorktree,
+        pr_url: &str,
+        head_sha: &str,
+    ) -> PortResult<PrMergeOutcome> {
+        let mut state = self.0.lock().unwrap();
+        state
+            .merge_pr_calls
+            .push((pr_url.to_string(), head_sha.to_string()));
+        state
+            .merge_pr_script
+            .pop_front()
+            .ok_or_else(|| PortError::Invalid("merge_pr not supported".to_string()))
     }
     fn pr_feedback(
         &self,

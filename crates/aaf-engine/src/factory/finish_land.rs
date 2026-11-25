@@ -19,7 +19,7 @@ use super::finish::{
 };
 use super::post_audit;
 use super::worker::GateJob;
-use super::{Deps, unblock};
+use super::{Deps, merge_retry, unblock};
 use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::{MergeOutcome, PrOutcome};
 use crate::unblocker::FailureSignal;
@@ -251,6 +251,7 @@ pub(super) fn land_pr_merge(
             Ok(Resolution::Settled(TaskState::Done))
         }
         Ok(PrMergeOutcome::Blocked { code, reason, .. }) => {
+            merge_retry::record_block(deps, &task.id, &url, head_sha, &code)?;
             let short = unblock::one_line(&reason, 240);
             push_warning(
                 warnings,
@@ -271,6 +272,7 @@ pub(super) fn land_pr_merge(
             Ok(Resolution::Settled(TaskState::Review))
         }
         Err(err) => {
+            merge_retry::record_block(deps, &task.id, &url, head_sha, "merge_error")?;
             let short = unblock::one_line(&err.to_string(), 240);
             push_warning(
                 warnings,
