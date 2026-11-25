@@ -294,7 +294,7 @@ Dọn thư mục tạm của fingerprint (`crates/aaf-fp/src/stale.rs`): mỗi l
 
 ## 14. Cách ly lệnh gate, proof_capture và hydration khỏi `AAF_DATA_DIR`
 
-Mọi lệnh shell do `aaf` chạy thay cho repo — gồm lệnh nhẹ và lệnh nặng của `aaf gate` (`gate/runner.rs`, `throttle/run.rs`), Red->Green oracle G6 (`gate/oracle.rs`), `[proof].capture_cmd` (`proof_capture.rs`) và `[worktree].setup_cmd` (`git/hydration_stage.rs`) — đều được bọc qua `gate/confine.rs` để không đọc được `receipt.key` và không ghi được vào `approvals/`, `receipts/`, `aaf.db` hay các khoá nội bộ trong `AAF_DATA_DIR`, trong khi vẫn giữ nguyên quyền đọc/ghi trong repo, worktree và thư mục tạm:
+Mọi lệnh shell do `aaf` chạy thay cho repo — gồm lệnh nhẹ và lệnh nặng của `aaf gate` (`gate/runner.rs`, `throttle/run.rs`), Red->Green oracle G6 (`gate/oracle.rs`), `[proof].capture_cmd` (`proof/capture.rs`) và `[worktree].setup_cmd` (`git/hydration/stage.rs`) — đều được bọc qua `gate/confine.rs` để không đọc được `receipt.key` và không ghi được vào `approvals/`, `receipts/`, `aaf.db` hay các khoá nội bộ trong `AAF_DATA_DIR`, trong khi vẫn giữ nguyên quyền đọc/ghi trong repo, worktree và thư mục tạm:
 
 - **Chặn đổi tên thư mục cha và thay symlink `AAF_DATA_DIR`**:
   - **macOS (Seatbelt `/usr/bin/sandbox-exec`)**: phát `(deny file-write* (literal "<entry>"))` cho mọi thư mục cha trên đường tới `AAF_DATA_DIR`, chính `AAF_DATA_DIR` gốc (kể cả khi là symlink) và mọi chặng trong chuỗi symlink nhiều cấp (`links_to` + `entries_to`). Nhờ vậy lệnh không thể `mv` thư mục cha ra tên khác để vượt luật `(subpath "<data_dir>")` hay `rm` rồi tạo lại symlink `AAF_DATA_DIR`, nhưng vẫn tạo/ghi được file anh em bên trong thư mục cha.

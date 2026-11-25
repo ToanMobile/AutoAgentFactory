@@ -80,6 +80,10 @@ enum Command {
     Notify(cmd::notify::NotifyArgs),
     /// Manual operator pre-flight: confirm a bug reproduces before creating a task.
     Repro(cmd::repro::ReproArgs),
+    /// Period report: tasks done, cost per executor, time per lifecycle stage.
+    Report(cmd::report::ReportArgs),
+    /// One-step setup: detect agents, register hooks, sync skills, run doctor. Safe to re-run.
+    Setup(cmd::setup::SetupArgs),
 }
 
 impl Command {
@@ -110,6 +114,8 @@ impl Command {
             Command::Watch(_) => "watch",
             Command::Notify(_) => "notify",
             Command::Repro(_) => "repro",
+            Command::Report(_) => "report",
+            Command::Setup(_) => "setup",
         }
     }
 }
@@ -167,6 +173,8 @@ fn main() -> ExitCode {
         Command::Watch(args) => cmd::watch::run(args, &ctx, cli.json),
         Command::Notify(args) => cmd::notify::run(args, &ctx),
         Command::Repro(args) => cmd::repro::run(args, &ctx),
+        Command::Report(args) => cmd::report::run(args, &ctx),
+        Command::Setup(args) => cmd::setup::run(args, &ctx),
     });
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     ExitCode::from(output::emit(cli.json, name, &result, millis))

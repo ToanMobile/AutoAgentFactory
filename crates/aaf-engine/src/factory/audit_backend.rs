@@ -14,7 +14,6 @@ use aaf_domain::task::Task;
 use serde_json::json;
 
 #[allow(dead_code)]
-#[path = "audit_backend_policy.rs"]
 mod policy;
 
 pub use super::rework_filter::{findings_from_review_issues, is_valid_rework_finding};

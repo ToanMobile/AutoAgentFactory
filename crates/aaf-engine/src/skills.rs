@@ -531,5 +531,4 @@ fn atomic_write_file(dir: &Path, dest: &Path, content: &str) -> PortResult<()> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[path = "skills_tests.rs"]
 mod tests;

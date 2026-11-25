@@ -433,5 +433,4 @@ pub fn probe() -> Result<String, String> {
 }
 
 #[cfg(test)]
-#[path = "confine_tests.rs"]
 mod tests;

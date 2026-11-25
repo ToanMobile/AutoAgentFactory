@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 use aaf_domain::config::{GlobalConfig, OracleMode, RepoConfig, StoreMode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-
-#[path = "load_worktree.rs"]
 mod load_worktree;
 
 #[allow(unused_imports)]

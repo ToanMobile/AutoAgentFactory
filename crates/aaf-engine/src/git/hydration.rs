@@ -11,8 +11,6 @@ use std::path::{Component, Path, PathBuf};
 
 use aaf_domain::config::RepoConfig;
 use aaf_domain::worktree_config::{WorktreeConfig, is_secret_file};
-
-#[path = "hydration_stage.rs"]
 mod stage;
 
 pub(crate) use stage::stage_for_gate_from_base;

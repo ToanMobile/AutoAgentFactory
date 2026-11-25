@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AAF Studio</title>
+<style>
+:root{
+  --bg:#FAF8F5;--surface:#FFFFFF;--surface2:#F3EFE8;--ink:#1F1D1A;--muted:#6E685F;
+  --border:#E6E1D9;--accent:#B45309;--ok:#0F766E;--ok-bg:#ECFDF5;
+  --warn:#B45309;--warn-bg:#FEF3C7;--err:#B91C1C;--err-bg:#FEE2E2;--info:#3730A3;--info-bg:#EEF2FF;
+  --bar:#B45309;--bar2:#E7C9A0;
+  --shadow:0 1px 2px rgba(31,29,26,.06),0 8px 24px rgba(31,29,26,.06);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+}
+[data-theme="dark"]{
+  --bg:#151412;--surface:#1F1D1A;--surface2:#292622;--ink:#F4F1EA;--muted:#A49D92;
+  --border:#35312B;--accent:#F59E0B;--ok:#2DD4BF;--ok-bg:#102D2A;
+  --warn:#FBBF24;--warn-bg:#382811;--err:#F87171;--err-bg:#3A1818;--info:#A5B4FC;--info-bg:#1E2042;
+  --bar:#F59E0B;--bar2:#5A4423;
+  --shadow:0 1px 2px rgba(0,0,0,.35),0 10px 28px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+button,select{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:6px 11px}
+button:hover{background:var(--surface2)}
+a{color:var(--accent)}
+header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border)}
+.brand{font-weight:700;font-size:16px}.brand small{font-weight:400;color:var(--muted);margin-left:8px}
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:6px 10px}
+.seg button.on{background:var(--ink);color:var(--bg)}
+main{max-width:1240px;margin:0 auto;padding:18px 20px 60px;display:grid;gap:16px}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr))}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 10px;font-weight:600}
+.kpi .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .l{color:var(--muted);font-size:12px}.kpi .s{color:var(--muted);font-size:12px;margin-top:2px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600}
+td.n,th.n{text-align:right}
+.tablewrap{overflow-x:auto}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--surface2)}
+.ok{background:var(--ok-bg);color:var(--ok)}.warn{background:var(--warn-bg);color:var(--warn)}
+.err{background:var(--err-bg);color:var(--err)}.info{background:var(--info-bg);color:var(--info)}
+.muted{color:var(--muted)}.mono{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+.card{overflow-x:auto}
+@media (max-width:600px){header,main{padding-left:16px;padding-right:16px}}
+.bar{position:relative;height:16px;background:var(--surface2);border-radius:4px;overflow:hidden;min-width:80px}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:var(--bar2)}
+.bar b{position:absolute;left:0;top:0;bottom:0;background:var(--bar)}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:8px}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:var(--bar)}
+.legend span.p90::before{background:var(--bar2)}
+details summary{cursor:pointer}
+ul.ac{margin:6px 0 0;padding-left:18px}
+.empty{color:var(--muted);padding:10px 0}
+#auth{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+#auth .card{max-width:440px;width:100%}
+#auth input{width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);margin:8px 0}
+#err{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">AAF Studio<small id="scope"></small></div>
+  <div class="controls">
+    <div class="seg" id="period">
+      <button data-h="24">24h</button><button data-h="168" class="on">7 days</button><button data-h="720">30 days</button><button data-h="">All</button>
+    </div>
+    <button id="refresh" title="Refresh now">Refresh</button>
+    <button id="theme" title="Toggle theme">Theme</button>
+    <a href="/" title="Board, approvals and live logs">Cockpit →</a>
+  </div>
+</header>
+<main>
+  <div class="card err" id="err"></div>
+  <section class="grid" id="kpis"></section>
+  <section class="two">
+    <div class="card"><h2>Time per stage</h2><div id="stages"></div>
+      <div class="legend"><span>p50</span><span class="p90">p90</span></div></div>
+    <div class="card"><h2>Executors and cost</h2><div class="tablewrap" id="executors"></div></div>
+  </section>
+  <section class="two">
+    <div class="card"><h2>Why tasks are blocked</h2><div id="blocked"></div></div>
+    <div class="card"><h2>Live factory</h2><div id="live"></div></div>
+  </section>
+  <section class="card"><h2>Tasks and acceptance criteria</h2><div class="tablewrap" id="tasks"></div></section>
+  <section class="card"><h2>Machine and repo health <button id="runDoctor" style="float:right">Run checks</button></h2><div id="doctor" class="empty">Press “Run checks” to run aaf doctor here.</div></section>
+  <p class="muted" id="foot"></p>
+</main>
+<div id="auth"><div class="card">
+  <h2>Session token</h2>
+  <p class="muted">Open the Studio link that <span class="mono">aaf ui</span> prints, or paste its token.</p>
+  <input id="tok" type="password" placeholder="Bearer token…">
+  <button id="tokOk">Unlock</button>
+</div></div>
+<script>
+(() => {
+  const TOKEN_KEY = "aaf_ui_token", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period";
+  const STATE_CLASS = { done:"ok", running:"info", gating:"info", review:"warn", blocked:"err", ready:"", backlog:"", cancelled:"" };
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  let token = "", hours = "168", timer = null;
+
+  function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
+  function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
+
+  function dur(s) {
+    s = Number(s) || 0;
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m";
+    if (s < 86400) return Math.floor(s / 3600) + "h" + String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+    return Math.floor(s / 86400) + "d" + String(Math.floor((s % 86400) / 3600)).padStart(2, "0") + "h";
+  }
+  const pct = (v) => v == null ? "n/a" : Number(v).toFixed(1) + "%";
+  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
+  const num = (v) => (Number(v) || 0).toLocaleString();
+
+  function hashToken() {
+    const m = (location.hash || "").match(/(?:^#|&)token=([^&]+)/);
+    if (m && m[1]) {
+      store(sessionStorage, TOKEN_KEY, decodeURIComponent(m[1]).trim());
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    return load(sessionStorage, TOKEN_KEY) || "";
+  }
+
+  async function api(path) {
+    const res = await fetch(path, { headers: { "Authorization": "Bearer " + token } });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (res.status === 401) { $("auth").style.display = "flex"; throw new Error("token rejected"); }
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  function kpi(label, value, sub, cls) {
+    return `<div class="card kpi"><div class="l">${esc(label)}</div><div class="v ${cls || ""}">${esc(value)}</div><div class="s">${esc(sub || "")}</div></div>`;
+  }
+
+  function renderKpis(r, st) {
+    const c = r.counts || {}, a = r.autonomy || {}, lt = r.lead_time || {};
+    const active = (c.ready || 0) + (c.running || 0) + (c.gating || 0) + (c.review || 0);
+    $("kpis").innerHTML = [
+      kpi("Tasks done", num(r.tasks_done), `${num(c.total)} touched in period`),
+      kpi("Autonomy", pct(a.autonomy_rate_pct), `${num(a.done_without_human)} of ${num(a.done_tasks)} done without you`),
+      kpi("Gate first pass", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `avg gate ${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : ""),
+      kpi("Estimated cost", usd(r.estimated_cost_usd), `${num(r.total_tokens_in)} in / ${num(r.total_tokens_out)} out tokens`),
+      kpi("Lead time p50", lt.samples ? dur(lt.p50_secs) : "n/a", lt.samples ? `p90 ${dur(lt.p90_secs)} · max ${dur(lt.max_secs)}` : "created → done"),
+      kpi("In progress", num(active), `${num(c.blocked)} blocked`),
+      kpi("Factory", st && st.frozen ? "Frozen" : "Running", st && st.frozen ? "run aaf board unfreeze or use Cockpit" : "accepting work"),
+    ].join("");
+  }
+
+  function renderStages(stages) {
+    if (!stages || !stages.length) { $("stages").innerHTML = `<div class="empty">No stage data in this period yet.</div>`; return; }
+    const max = Math.max(1, ...stages.map((s) => s.durations.p90_secs || 0));
+    $("stages").innerHTML = `<table><tr><th>Stage</th><th>Distribution</th><th class="n">p50</th><th class="n">p90</th><th class="n">Stays</th><th class="n">Now</th></tr>` +
+      stages.map((s) => {
+        const d = s.durations;
+        const w50 = (100 * (d.p50_secs || 0) / max).toFixed(1), w90 = (100 * (d.p90_secs || 0) / max).toFixed(1);
+        return `<tr><td>${esc(s.stage)}</td><td><div class="bar" title="p50 ${dur(d.p50_secs)}, p90 ${dur(d.p90_secs)}, max ${dur(d.max_secs)}"><i style="width:${w90}%"></i><b style="width:${w50}%"></b></div></td>` +
+          `<td class="n">${d.samples ? dur(d.p50_secs) : "—"}</td><td class="n">${d.samples ? dur(d.p90_secs) : "—"}</td><td class="n">${num(d.samples)}</td><td class="n">${num(s.open_now)}</td></tr>`;
+      }).join("") + `</table>`;
+  }
+
+  function renderExecutors(list, total) {
+    if (!list || !list.length) { $("executors").innerHTML = `<div class="empty">No agent run in this period yet.</div>`; return; }
+    $("executors").innerHTML = `<table><tr><th>Executor</th><th class="n">Runs</th><th class="n">OK</th><th class="n">Failed</th><th class="n">Time</th><th class="n">Tokens in/out</th><th class="n">Cost</th></tr>` +
+      list.map((e) => `<tr><td>${esc(e.executor)}</td><td class="n">${num(e.runs)}</td><td class="n">${num(e.succeeded)}</td><td class="n">${num(e.failed)}${e.running ? ` <span class="pill info">${num(e.running)} live</span>` : ""}</td>` +
+        `<td class="n">${dur(e.wall_secs)}</td><td class="n">${num(e.tokens_in)} / ${num(e.tokens_out)}</td><td class="n">${usd(e.estimated_cost_usd)}</td></tr>`).join("") +
+      `<tr><th>Total</th><td></td><td></td><td></td><td></td><td></td><th class="n">${usd(total)}</th></tr></table>`;
+  }
+
+  function renderBlocked(top) {
+    if (!top || !top.length) { $("blocked").innerHTML = `<div class="empty">Nothing is blocked.</div>`; return; }
+    const max = Math.max(1, ...top.map((t) => t[1]));
+    $("blocked").innerHTML = `<table>` + top.map(([kind, n]) =>
+      `<tr><td>${esc(kind)}</td><td style="width:55%"><div class="bar"><b style="width:${(100 * n / max).toFixed(1)}%"></b></div></td><td class="n">${num(n)}</td></tr>`).join("") + `</table>`;
+  }
+
+  function renderLive(st) {
+    if (!st) { $("live").innerHTML = `<div class="empty">No status yet.</div>`; return; }
+    const runs = (st.recent_runs || []).slice(0, 6);
+    const accounts = st.accounts || [];
+    const t = st.throttle || {};
+    let html = `<table><tr><th>Heavy slots in use</th><td class="n">${num(t.throttle_slots)}</td></tr>` +
+      `<tr><th>Drain lock</th><td class="n">${t.drain_lock_present ? `<span class="pill warn">held</span>` : "free"}</td></tr></table>`;
+    if (accounts.length) {
+      html += `<h2 style="margin-top:14px">Accounts</h2><table>` + accounts.map((a) =>
+        `<tr><td>${esc(a.name)}</td><td>${esc(a.provider)}</td><td><span class="pill ${a.status === "available" || a.status === "ready" ? "ok" : "warn"}">${esc(a.status)}</span></td></tr>`).join("") + `</table>`;
+    }
+    if (runs.length) {
+      html += `<h2 style="margin-top:14px">Recent runs</h2><table>` + runs.map((r) =>
+        `<tr><td class="mono">${esc(r.task_id || r.id || "")}</td><td>${esc(r.executor || "")}</td><td><span class="pill">${esc(r.status || "")}</span></td></tr>`).join("") + `</table>`;
+    }
+    $("live").innerHTML = html;
+  }
+
+  function renderTasks(tasks) {
+    if (!tasks || !tasks.length) { $("tasks").innerHTML = `<div class="empty">No task yet. Add one with aaf board add or from the Cockpit.</div>`; return; }
+    const rows = tasks.slice().sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).slice(0, 60);
+    $("tasks").innerHTML = `<table><tr><th>Task</th><th>State</th><th class="n">Criteria</th><th class="n">Updated</th></tr>` +
+      rows.map((t) => {
+        const ac = t.acceptance || [];
+        const list = ac.length ? `<details><summary>${esc(t.title)}</summary><ul class="ac">${ac.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></details>` : esc(t.title);
+        const when = t.updated_at ? new Date(t.updated_at * 1000).toLocaleString() : "";
+        const why = t.state === "blocked" && t.blocked_reason ? ` <span class="muted">(${esc(t.blocked_reason)})</span>` : "";
+        return `<tr><td>${list}<div class="mono muted">${esc(t.id)}</div></td><td><span class="pill ${STATE_CLASS[t.state] || ""}">${esc(t.state)}</span>${why}</td>` +
+          `<td class="n">${ac.length ? (t.state === "done" ? `✓ ${ac.length}/${ac.length}` : `${ac.length}`) : "—"}</td><td class="n muted">${esc(when)}</td></tr>`;
+      }).join("") + `</table>`;
+  }
+
+  async function runDoctor() {
+    $("doctor").className = "empty"; $("doctor").textContent = "Running checks…";
+    try {
+      const d = await api("/api/doctor");
+      const checks = (d.checks || []).filter((c) => c.applicable !== false);
+      const bad = checks.filter((c) => !c.ok);
+      $("doctor").className = "";
+      $("doctor").innerHTML = `<p>${bad.length ? `<span class="pill err">${bad.length} problem(s)</span>` : `<span class="pill ok">All checks pass</span>`}</p><table>` +
+        checks.sort((a, b) => Number(a.ok) - Number(b.ok)).map((c) =>
+          `<tr><td>${c.ok ? `<span class="pill ok">ok</span>` : `<span class="pill ${c.required ? "err" : "warn"}">${c.required ? "fail" : "advice"}</span>`}</td><td>${esc(c.name)}</td><td class="mono">${esc(c.detail)}</td></tr>`).join("") + `</table>`;
+    } catch (e) { $("doctor").textContent = "Checks failed: " + e.message; }
+  }
+
+  async function refresh() {
+    if (!token) { $("auth").style.display = "flex"; return; }
+    const q = hours ? "?since=" + encodeURIComponent(hours) : "";
+    const [rep, st, meta, board] = await Promise.allSettled([api("/api/report" + q), api("/api/status"), api("/api/meta"), api("/api/board")]);
+    const errors = [rep, st, meta, board].filter((p) => p.status === "rejected").map((p) => p.reason.message);
+    $("err").style.display = errors.length ? "block" : "none";
+    $("err").textContent = errors.length ? "Some data could not load: " + [...new Set(errors)].join("; ") : "";
+    const status = st.status === "fulfilled" ? st.value : null;
+    if (meta.status === "fulfilled") $("scope").textContent = `${meta.value.repo_name || meta.value.scope || ""} · v${meta.value.version || "?"}`;
+    if (rep.status === "fulfilled") {
+      const r = rep.value.report || {};
+      renderKpis(r, status);
+      renderStages(r.stages);
+      renderExecutors(r.executors, r.estimated_cost_usd);
+      renderBlocked(r.top_blocked);
+    }
+    renderLive(status);
+    if (board.status === "fulfilled") renderTasks(board.value.tasks);
+    $("foot").textContent = "Updated " + new Date().toLocaleTimeString() + " · refreshes every 15 s";
+  }
+
+  function schedule() { clearInterval(timer); timer = setInterval(() => { if (!document.hidden) refresh(); }, 15000); }
+
+  function init() {
+    const theme = load(localStorage, THEME_KEY);
+    if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
+    else if (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.dataset.theme = "dark";
+    $("theme").onclick = () => {
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = next; store(localStorage, THEME_KEY, next);
+    };
+    const saved = load(localStorage, PERIOD_KEY);
+    if (saved !== null) hours = saved;
+    document.querySelectorAll("#period button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.h === hours);
+      b.onclick = () => {
+        hours = b.dataset.h; store(localStorage, PERIOD_KEY, hours);
+        document.querySelectorAll("#period button").forEach((x) => x.classList.toggle("on", x === b));
+        refresh();
+      };
+    });
+    $("refresh").onclick = refresh;
+    $("runDoctor").onclick = runDoctor;
+    $("tokOk").onclick = () => {
+      const t = $("tok").value.trim(); if (!t) return;
+      token = t; store(sessionStorage, TOKEN_KEY, t); $("auth").style.display = "none"; refresh();
+    };
+    token = hashToken();
+    refresh().catch(() => {});
+    schedule();
+  }
+  init();
+})();
+</script>
+</body>
+</html>

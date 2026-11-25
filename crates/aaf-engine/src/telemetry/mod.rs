@@ -15,14 +15,18 @@ use aaf_domain::task::TaskState;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::clock::SystemClock;
 use crate::db::Db;
-use crate::factory::adapters::SystemClock;
 
-#[path = "telemetry_autonomy.rs"]
 mod autonomy;
+mod report;
 pub use autonomy::{
     AutonomyMetrics, CostRates, collect_autonomy_metrics, collect_autonomy_metrics_for_tasks,
     compute_autonomy_metrics,
+};
+pub use report::{
+    DurationStats, ExecutorStat, FactoryReport, ReportWindow, StageStat, collect_report,
+    compute_report,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

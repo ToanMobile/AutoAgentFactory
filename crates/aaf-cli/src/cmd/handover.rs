@@ -18,8 +18,6 @@ use serde_json::json;
 use super::board::store::{err, open_db_read_only, refuse_inside_agent_run};
 use crate::ctx::Ctx;
 use crate::output::{CmdError, CmdOutput, CmdResult};
-
-#[path = "handover_summary.rs"]
 mod summary;
 
 static TEMP_OUT_SEQ: AtomicU64 = AtomicU64::new(0);

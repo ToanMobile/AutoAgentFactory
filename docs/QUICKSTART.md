@@ -7,6 +7,8 @@ Get from zero to a receipt-verified autonomous agent workflow on macOS, Linux, o
 ## 1. Install `aaf` and `aaf-hook`
 
 Every release binary is verified byte-for-byte against `SHA256SUMS.txt` before extraction.
+Until a release is published, the installer builds from source automatically when
+`cargo` is installed (and tells you to install Rust from https://rustup.rs when it is not).
 
 ### macOS & Linux (1-line installer)
 
@@ -75,14 +77,18 @@ aaf completions powershell | Out-String | Invoke-Expression
 
 ---
 
-## 3. Initialize Your Repository
-
-Run inside any git repository to detect the stack, write `.autofactory/config.toml`, sync bundled domain skills, and install PreToolUse hooks for Claude Code, Codex CLI, and Gemini CLI:
+## 3. Set Up Your Repository (one command)
 
 ```sh
 cd /path/to/your-repo
-aaf init --with-skills --hook-host all
+aaf setup
 ```
+
+`aaf setup` detects which coding agents are installed (Claude Code, Codex CLI, Gemini CLI,
+Antigravity, OpenCode), registers the `aaf-hook` for each, writes `.autofactory/config.toml`
+for your stack (an existing one is kept), syncs the bundled skills, then runs every
+`aaf doctor` check and lists what is left to fix. It is safe to re-run: running it again
+is how you repair a hook that went missing.
 
 Commit the generated repo config and hook registration so isolated task worktrees inherit them:
 
@@ -90,6 +96,9 @@ Commit the generated repo config and hook registration so isolated task worktree
 git add .autofactory/config.toml .claude/settings.json .gitignore
 git commit -m "chore: initialize aaf"
 ```
+
+Prefer the individual steps? `aaf init --with-skills --hook-host all` then `aaf doctor`
+do the same thing.
 
 ---
 
@@ -99,7 +108,7 @@ git commit -m "chore: initialize aaf"
 aaf doctor
 ```
 
-`aaf doctor` exits `0` when git, config, hook registration, `aaf-hook` binary, data directory, and HMAC receipt key are all healthy (or `2` if a required check fails). Add `--json` for machine-readable output.
+`aaf doctor` exits `0` when git, config, hook registration, `aaf-hook` binary, data directory, and HMAC receipt key are all healthy (or `2` if a required check fails). Add `--json` for machine-readable output. The same checks are one click away in Studio (section 6).
 
 ---
 
@@ -126,13 +135,20 @@ aaf run
 
 ---
 
-## 6. Local Web UI & Mobile QR Pairing
+## 6. Studio: every number on one page
 
-Launch the zero-dependency local web dashboard and print a terminal QR code to pair from your phone on the local network:
+Start the local web UI and open the **Studio** link it prints
+(`http://127.0.0.1:4317/studio#token=…`; `aaf ui --open` opens it for you on macOS):
 
 ```sh
-aaf ui --qr
+aaf ui          # add --qr to pair a phone on the local network
 ```
+
+Studio shows, for the last 24 hours, 7 days, 30 days or all history: tasks done,
+autonomy and first-pass gate rate, estimated cost per executor, lead time, time per
+lifecycle stage (p50/p90), why tasks are blocked, each task's acceptance criteria,
+live runs and accounts, and the `aaf doctor` checks on one click. It refreshes every
+15 seconds. The same report is available in the terminal as `aaf report [--since HOURS]`.
 
 ---
 

@@ -4,6 +4,7 @@
 
 pub mod agy;
 pub mod claude;
+mod confined_paths;
 pub mod env;
 pub mod generic;
 pub mod linux_sandbox;
@@ -16,9 +17,6 @@ pub mod secret_mask;
 pub mod stream_log;
 #[cfg(test)]
 mod tests;
-
-#[path = "confined_paths.rs"]
-mod confined_paths;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

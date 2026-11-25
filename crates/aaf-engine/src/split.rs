@@ -2,8 +2,6 @@
 //!
 //! Partitions a complex root task into 2..=[`MAX_SPLIT_SUBTASKS`] subtasks with
 //! disjoint `owned_paths` across parallelizable pairs, wired as an acyclic DAG.
-
-#[path = "split_validate.rs"]
 mod validate;
 
 use std::collections::{HashMap, HashSet};

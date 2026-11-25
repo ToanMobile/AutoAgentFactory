@@ -586,6 +586,5 @@ fn build_unverified(ctx: &BuildCtx<'_>, missing: &[String]) -> String {
 }
 
 /// Loads task, events, and verified signed receipt/audit/proof artifacts from
-#[path = "handover_load.rs"]
 mod load;
 pub use load::load_handover;

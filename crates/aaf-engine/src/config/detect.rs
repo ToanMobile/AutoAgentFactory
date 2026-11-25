@@ -1,6 +1,4 @@
 //! Stack detection by marker files, for `aaf init` and for `profile = "auto"`.
-
-#[path = "detect_scripts.rs"]
 mod detect_scripts;
 
 use std::fs;

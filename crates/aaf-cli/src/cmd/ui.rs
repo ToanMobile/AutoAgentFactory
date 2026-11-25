@@ -3,6 +3,7 @@
 //! binds, re-verifies `lock_fp` on disk before signing, and honors `--read-only`.
 
 pub(crate) mod actions;
+mod studio;
 
 use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -51,7 +52,7 @@ pub struct UiArgs {
     /// Bind address (default: 127.0.0.1; non-loopback requires AAF_UI_TOKEN or --key).
     #[arg(long, default_value = DEFAULT_HOST)]
     pub host: String,
-    /// Listening TCP port (default: 4319).
+    /// Listening TCP port (default: 4317).
     #[arg(long, default_value_t = DEFAULT_PORT)]
     pub port: u16,
     /// Explicit bearer token (prefer AAF_UI_TOKEN env var; --key exposes the token in argv/ps).
@@ -114,10 +115,12 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
     let pairing_host = display_host_for_pairing(&cfg.host);
     let url = pairing_url(&pairing_host, bound.port(), &cfg.token);
     let card = render_pairing_card(&url, args.read_only, cfg.lan_mode, args.qr);
-    eprintln!("{card}\nListening on http://{bound} (press q + Enter or Ctrl-C to stop)");
+    let studio = studio::studio_url(&url);
+    eprintln!("{card}\nStudio (all metrics): {studio}");
+    eprintln!("Listening on http://{bound} (press q + Enter or Ctrl-C to stop)");
     #[cfg(target_os = "macos")]
     if args.open && ctx.stdin_is_tty {
-        let _ = std::process::Command::new("open").arg(&url).spawn();
+        let _ = std::process::Command::new("open").arg(&studio).spawn();
     }
     let quit = Arc::new(AtomicBool::new(false));
     if ctx.stdin_is_tty {
@@ -229,6 +232,16 @@ impl CliUiBackend {
 }
 
 impl UiBackend for CliUiBackend {
+    fn report_json(&self, since_hours: Option<u64>) -> Result<Value, String> {
+        let db = self.ro_db.get().map_err(|e| e.message)?;
+        let repo = self.repo_root.as_deref().and_then(Path::to_str);
+        studio::report_json(db.as_ref(), repo, since_hours)
+    }
+
+    fn doctor_json(&self) -> Result<Value, String> {
+        studio::doctor_json(&self.ctx)
+    }
+
     fn meta_json(&self) -> Result<Value, String> {
         let repo = self.repo_root.as_deref().and_then(Path::to_str);
         let name = self

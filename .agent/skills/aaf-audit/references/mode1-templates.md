@@ -100,7 +100,7 @@ Dùng `CARGO_TARGET_DIR=/Volumes/Data/Toan/.aaf-audit-tmp/aaf-target-<ID>` (mồ
 - Kịch bản: <đầu vào → hành vi sai được cho là xảy ra>
 
 ## Việc
-1. Viết một test nhỏ nhất có assertion mô tả **hành vi đúng**. Đặt test cạnh các test hiện có của crate (đảm bảo mọi file `.rs <= 600` dòng; với Kênh A sửa `templates/skills/**/*.md`, đặt test hồi quy tại `crates/aaf-engine/src/skills_tests.rs` kiểm tra nội dung `all_skills()`), rồi chạy `rustfmt <file test>`.
+1. Viết một test nhỏ nhất có assertion mô tả **hành vi đúng**. Đặt test cạnh các test hiện có của crate (đảm bảo mọi file `.rs <= 600` dòng; với Kênh A sửa `templates/skills/**/*.md`, đặt test hồi quy tại `crates/aaf-engine/src/skills/tests.rs` kiểm tra nội dung `all_skills()`), rồi chạy `rustfmt <file test>`.
 2. Chạy `cargo test -p <crate> <tên test>` (nếu `<crate>` là `aaf-cli`, bọc `AAF_REQUIRE_REAL=1`, `aaf slot`, và `python3` đặt `SIGHUP = SIG_DFL`). Kết quả mong đợi: ĐỎ ở assertion. Lỗi biên dịch không tính.
 3. Sau một lượt mà test vẫn xanh: ghi "không tái hiện", kèm điều bạn quan sát thấy. Không cố ép cho đỏ.
 

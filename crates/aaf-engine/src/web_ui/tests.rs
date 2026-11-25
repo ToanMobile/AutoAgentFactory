@@ -16,7 +16,7 @@ use super::{
     validate_ui_config,
 };
 
-const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+pub(super) const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 #[derive(Default)]
 struct FakeBackend {
@@ -101,13 +101,13 @@ impl UiBackend for FakeBackend {
     }
 }
 
-struct RawResp {
-    status: u16,
-    headers: HashMap<String, String>,
-    body: String,
+pub(super) struct RawResp {
+    pub(super) status: u16,
+    pub(super) headers: HashMap<String, String>,
+    pub(super) body: String,
 }
 
-fn send_raw(addr: SocketAddr, request: &str) -> RawResp {
+pub(super) fn send_raw(addr: SocketAddr, request: &str) -> RawResp {
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))

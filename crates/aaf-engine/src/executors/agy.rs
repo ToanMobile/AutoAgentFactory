@@ -18,8 +18,6 @@ use super::sandbox;
 use super::{AccountPaths, ExecEnv, find_on_path, open_stream_log, run_confined_with_tail};
 
 const RAW_LIMIT_CHARS: usize = 500;
-
-#[path = "agy_classify.rs"]
 mod classify;
 use classify::classify_text_failure;
 
