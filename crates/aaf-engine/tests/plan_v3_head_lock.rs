@@ -187,6 +187,7 @@ require_different_provider = false
                 is_draft: false,
                 title: format!("PR #{number}"),
                 url: format!("https://github.com/org/repo/pull/{number}"),
+                ..Default::default()
             },
             merged: AtomicUsize::new(0),
         }

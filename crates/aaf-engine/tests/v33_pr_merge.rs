@@ -184,9 +184,9 @@ fn pr_info(number: u64, branch: &str, head: &str) -> PrInfo {
         head_ref_name: branch.to_string(),
         base_ref_name: "main".to_string(),
         mergeable: "MERGEABLE".to_string(),
-        is_draft: false,
         title: format!("PR #{number}"),
         url: format!("https://github.com/org/repo/pull/{number}"),
+        ..Default::default()
     }
 }
 

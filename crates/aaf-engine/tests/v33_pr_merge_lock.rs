@@ -123,6 +123,7 @@ fn pr_info(number: u64, branch: &str, head: &str) -> PrInfo {
         is_draft: false,
         title: format!("PR #{number}"),
         url: format!("https://github.com/org/repo/pull/{number}"),
+        ..Default::default()
     }
 }
 

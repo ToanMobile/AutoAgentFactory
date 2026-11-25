@@ -330,6 +330,7 @@ fn mock_pr(number: u64, branch: &str, head: &str) -> MockGh {
             is_draft: false,
             title: format!("PR #{number}"),
             url: format!("https://example.invalid/pr/{number}"),
+            ..Default::default()
         },
         merged: AtomicUsize::new(0),
     }
