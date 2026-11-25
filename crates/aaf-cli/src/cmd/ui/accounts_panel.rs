@@ -22,9 +22,11 @@ use super::extras::{
 };
 use crate::ctx::{Ctx, SystemClock};
 
-const CC_TIMEOUT: Duration = Duration::from_secs(20);
-const CC_CACHE_TTL: Duration = Duration::from_secs(10);
+const CC_READ_TIMEOUT: Duration = Duration::from_secs(45);
+const CC_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
+const CC_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_CC_STDOUT_BYTES: usize = 512 * 1024;
+const MAX_CC_STDERR_BYTES: usize = 4 * 1024;
 static CC_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static CC_READ_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
 
@@ -86,6 +88,19 @@ fn invalidate_read_cache() {
 }
 
 fn run_cc_switcher(ctx: &Ctx, args: &[&str]) -> Result<Value, String> {
+    let timeout = if args.contains(&"--refresh") {
+        CC_REFRESH_TIMEOUT
+    } else {
+        CC_READ_TIMEOUT
+    };
+    run_cc_switcher_with_timeout(ctx, args, timeout)
+}
+
+fn run_cc_switcher_with_timeout(
+    ctx: &Ctx,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Value, String> {
     let script = find_cc_switcher_script(ctx)
         .ok_or_else(|| "not found: cc-switcher-mcp is not installed on this machine".to_string())?;
     let node = find_node_bin(ctx)
@@ -95,7 +110,7 @@ fn run_cc_switcher(ctx: &Ctx, args: &[&str]) -> Result<Value, String> {
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .env("PATH", &ctx.path_var)
         .env("HOME", &ctx.home)
         .env("CC_SWITCHER_QUIET", "1");
@@ -107,6 +122,15 @@ fn run_cc_switcher(ctx: &Ctx, args: &[&str]) -> Result<Value, String> {
         let _ = child.wait();
         return Err("cc-switcher stdout unavailable".into());
     };
+    let stderr_handle = child.stderr.take().map(|err_pipe| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err_pipe
+                .take((MAX_CC_STDERR_BYTES + 1) as u64)
+                .read_to_end(&mut buf);
+            buf
+        })
+    });
     let reader = thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout
@@ -114,7 +138,7 @@ fn run_cc_switcher(ctx: &Ctx, args: &[&str]) -> Result<Value, String> {
             .read_to_end(&mut buf);
         buf
     });
-    let deadline = Instant::now() + CC_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut exit_status: Option<ExitStatus> = None;
     while Instant::now() < deadline {
         match child.try_wait() {
@@ -129,17 +153,34 @@ fn run_cc_switcher(ctx: &Ctx, args: &[&str]) -> Result<Value, String> {
     let Some(status) = exit_status else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("cc-switcher timed out".into());
+        return Err(format!(
+            "cc-switcher timed out after {}s",
+            timeout.as_secs()
+        ));
     };
     let bytes = reader.join().unwrap_or_default();
+    let err_bytes = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
     let text = String::from_utf8_lossy(&bytes);
     let last_line = text
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
-    let val: Value = serde_json::from_str(last_line)
-        .map_err(|_| format!("cc-switcher returned invalid JSON (status {status})"))?;
+    let val: Value = serde_json::from_str(last_line).map_err(|_| {
+        let err_tail = String::from_utf8_lossy(&err_bytes);
+        let detail = err_tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        if detail.is_empty() {
+            format!("cc-switcher returned invalid JSON (status {status})")
+        } else {
+            format!("cc-switcher failed ({status}): {}", detail.trim())
+        }
+    })?;
     if status.code() == Some(2) {
         let msg = val["error"].as_str().unwrap_or("invalid cc-switcher input");
         return Err(format!("invalid cc-switcher: {msg}"));
@@ -229,6 +270,27 @@ fn validate_repo_target(
     Ok(canon)
 }
 
+fn normalize_switcher_value(v: Value) -> Value {
+    v.get("state")
+        .filter(|s| s.get("profiles").is_some())
+        .cloned()
+        .unwrap_or(v)
+}
+
+fn fallback_switcher_snapshot(ctx: &Ctx) -> Option<Value> {
+    let cached = CC_READ_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(_, v)| v.clone());
+    if cached.is_some() {
+        return cached;
+    }
+    run_cc_switcher(ctx, &["--panel-json", "--no-sync"])
+        .ok()
+        .map(normalize_switcher_value)
+}
+
 fn fetch_switcher_state(
     ctx: &Ctx,
     read_only: bool,
@@ -250,7 +312,8 @@ fn fetch_switcher_state(
     } else if refresh {
         &["--panel-json", "--refresh"]
     } else {
-        &["--panel-json", "--no-sync"]
+        // Match CC Switcher's smart TTL sync (instant when fresh, auto-syncs when stale).
+        &["--panel-json"]
     };
     let _write_guard = if refresh {
         match CC_WRITE_LOCK.try_lock() {
@@ -258,7 +321,7 @@ fn fetch_switcher_state(
             Err(_) => {
                 return (
                     true,
-                    None,
+                    fallback_switcher_snapshot(ctx),
                     "another account operation is already in progress".into(),
                 );
             }
@@ -268,16 +331,23 @@ fn fetch_switcher_state(
     };
     match run_cc_switcher(ctx, args) {
         Ok(v) => {
-            let normalized = v
-                .get("state")
-                .filter(|s| s.get("profiles").is_some())
-                .cloned()
-                .unwrap_or(v);
+            let normalized = normalize_switcher_value(v);
             let mut cache = CC_READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             *cache = Some((Instant::now(), normalized.clone()));
             (true, Some(normalized), String::new())
         }
-        Err(e) => (true, None, e),
+        Err(e) => {
+            let fallback = if refresh {
+                fallback_switcher_snapshot(ctx)
+            } else {
+                CC_READ_CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .map(|(_, v)| v.clone())
+            };
+            (true, fallback, e)
+        }
     }
 }
 

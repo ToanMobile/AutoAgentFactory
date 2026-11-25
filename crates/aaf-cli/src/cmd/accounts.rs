@@ -161,13 +161,14 @@ fn list(ctx: &Ctx) -> CmdResult {
             None => status_word(&view.status).to_string(),
         };
         text.push_str(&format!(
-            "\n{}  {}  {}  {}  {}  tokens_5h={}",
+            "\n{}  {}  {}  {}  {}  tokens_5h={}  tokens_7d={}",
             view.name,
             view.provider.as_str(),
             view.id,
             view.config_dir,
             state,
-            view.tokens_5h
+            view.tokens_5h,
+            view.tokens_7d
         ));
     }
     let rows: Vec<Value> = views.iter().map(view_json).collect();

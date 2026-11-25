@@ -30,6 +30,7 @@ use crate::throttle::stats::stats_path;
 use crate::throttle::{LoadProbe, Pressure, SystemProbe};
 
 const FIVE_HOURS_SECS: i64 = 5 * 3600;
+const SEVEN_DAYS_SECS: i64 = 7 * 24 * 3600;
 const MAX_READ_BYTES: u64 = 1 << 20;
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
@@ -94,6 +95,7 @@ pub struct WatchAccount {
     pub state: String,
     pub cooldown_until: Option<i64>,
     pub tokens_5h: u64,
+    pub tokens_7d: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -277,9 +279,12 @@ fn build_accounts_inner(
     } else {
         None
     };
-    let tokens = match db {
-        Some(db) => db.tokens_since_all(q.now.saturating_sub(FIVE_HOURS_SECS))?,
-        None => HashMap::new(),
+    let (tokens_5h, tokens_7d) = match db {
+        Some(db) => (
+            db.tokens_since_all(q.now.saturating_sub(FIVE_HOURS_SECS))?,
+            db.tokens_since_all(q.now.saturating_sub(SEVEN_DAYS_SECS))?,
+        ),
+        None => (HashMap::new(), HashMap::new()),
     };
     let entries = summaries
         .iter()
@@ -291,7 +296,8 @@ fn build_accounts_inner(
             cooldown_until: (a.status == "cooldown")
                 .then_some(a.cooldown_until)
                 .flatten(),
-            tokens_5h: tokens.get(&a.id).copied().unwrap_or(0),
+            tokens_5h: tokens_5h.get(&a.id).copied().unwrap_or(0),
+            tokens_7d: tokens_7d.get(&a.id).copied().unwrap_or(0),
         })
         .collect();
     Ok(WatchAccounts {
