@@ -596,7 +596,7 @@ How `[cross_audit]` merges:
 | **`v3.2`** `aaf board undo <ID>` | Roll back a task worktree to its latest verified `refs/aaf/snapshots/*` commit (**human only**) | `--dry-run` |
 | **`v3.2`** `aaf board steer <ID>` | Append a sanitized `steer:` note without editing `ImmutableSpec` (**human only**) | `--note "…"` |
 | **`v3.2`** `aaf gc` | Clean orphaned worktrees, finished task refs/snapshots, expired streams/reports, and (opt-in) merged non-`aaf/*` branches | `--dry-run`, `--merged-branches`, `--base <ref>` |
-| **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
+| **`v3.2`** `aaf handover <ID>` | Read-only DevKit-style acceptance handover report (3-line B10 header, 5 sections with `Nguyên nhân:`, `[tự chạy]` Automated QA Suite, 7 Golden Standards, `md`/CSP `html` with verified PNG `<= 4 MiB`/`json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
 | **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
 | **`v3.4`** `aaf telegram` | Zero-port outbound Telegram companion for status, handover, and opt-in two-step `/confirm` approvals (**human only**) | `--once`, `--all`, `--repo <path>`, `--send-test` |
 | `aaf notify` | Push "needs you" moments (factory frozen, factory halted, task blocked, ready for review) or a one-shot `--message` to webhook / Telegram (**human only**) | `--once`, `--all`, `--repo <path>`, `--interval <s>`, `--dry-run`, `--message <text>` |
@@ -667,7 +667,7 @@ aaf run --auto-split             # v3: split Ready root tasks with the read-only
 - there is no sandbox and you did not pass `--unsandboxed`;
 - the hook registration on the base branch is invalid.
 
-The summary line reports the number of agent runs and gate runs, then how many tasks are done, in review, blocked, back to ready, or waiting for an account. In JSON, the run summary also includes `account_binding` and the config `warnings`.
+The summary line reports the number of agent runs and gate runs, then how many tasks are done, in review, blocked, back to ready, or waiting for an account. In JSON, the run summary also includes `account_binding` and the config `warnings`. When a task finishes into `Review` or `Done` (via `aaf run` or `aaf merge`), `aaf` automatically exports `<data_dir>/reports/handover-<task_id>.{html,md}` (`0600`, strict-CSP HTML, cleaned on expiry by `aaf gc --older-than-days N`).
 
 ### `aaf slot`
 
@@ -811,7 +811,7 @@ aaf gc --merged-branches --base main         # opt-in cleanup against explicit b
 
 - **`aaf gc --merged-branches [--base <ref>] [--dry-run]`** is opt-in (off by default) and fail-closed: it only scans `audit/*`, `fix/*`, and `lane/*` (ignoring `aaf/*` and other prefixes), never applies `--force` to dirty worktrees (keeping both worktree and branch when dirty/locked/in-rebase/containing `cwd`), protects `main`/`master`/`develop`/`development`/`trunk`/`head`/`release/*`/`public-*`/non-ASCII/`base.branch`/main `HEAD` (case-insensitive ASCII), refuses 0-commit branches (including renamed branches via `git branch -m`), and never runs `git fetch` during `--dry-run`.
 
-- **`aaf handover`** never creates `receipt.key` or writes to the database. HTML output uses std base64 (zero extra crates) and embeds `Content-Security-Policy: default-src 'none'; img-src data:; style-src 'unsafe-inline';`. PR bodies are secret-scrubbed and bounded under `60 KB`.
+- **`aaf handover`** never creates `receipt.key` or writes to the database. It follows the DevKit acceptance handover template: a 3-line B10 header (`XONG`/`CHƯA XONG`/`CHỜ DUYỆT`, user outcome, gate exit code + proof + next step), 5 sections tagged `[tự chạy]`/`[agent báo]` with a dedicated `Nguyên nhân:` line, an `[tự chạy]` Automated QA Suite table from the signed gate receipt, 7 Golden Standards (`G1..G7`, `/100`), Dual-Review verdict (when present), and strict-CSP HTML (`Content-Security-Policy: default-src 'none'; img-src data:; style-src 'unsafe-inline';`) embedding std-base64 re-verified PNG proof (`<= 4 MiB`). `aaf run` and `aaf merge` automatically export `<data_dir>/reports/handover-<task_id>.{html,md}` (`0600`) whenever a task completes into `Review` or `Done` (expired files are cleaned by `aaf gc --older-than-days N`). PR bodies are secret-scrubbed and bounded under `60 KB`.
 - **`aaf cockpit`** opens zero network ports, adds zero crate dependencies, uses zero `unsafe`, refuses non-TTY stdin and `AAF_RUN_ID` (exit 2), strips all ANSI/OSC/DCS/APC/PM/SOS and C0/C1 controls, and never auto-refreshes in the background while waiting for input. Short read-only commands (`d`, `t`, `h`, `g`, `tail <id>`) run immediately; every mutating command (`approve`, `rework`, `steer`, `undo`, `unblock`, `unfreeze`) previews its target (`locked_changes` or `commit_oid`) and requires explicit `y/N` confirmation (defaulting to NO).
 
 ---
