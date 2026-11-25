@@ -119,7 +119,11 @@ impl GitOps for TestGit {
         Ok(true)
     }
     fn diff(&self, _: &TaskWorktree) -> PortResult<String> {
-        Ok("+modified locked file\n".to_string())
+        Ok(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n\
+            @@ -1,1 +1,2 @@\n x\n+modified locked file\n"
+                .to_string(),
+        )
     }
     fn integrate(&self, _: &[String]) -> PortResult<Integration> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
@@ -232,6 +236,18 @@ impl GateRunner for LockedGate {
             approval: None,
         })
     }
+}
+
+/// A Fail verdict backed by file:line evidence (an inconclusive reply no
+/// longer reaches the unblocker: RFC-032 parks it as an infra block).
+fn fail_audit_json(spec: &ImmutableSpec) -> String {
+    let mut answers: Vec<serde_json::Value> = build_checklist(spec, false)
+        .iter()
+        .map(|item| serde_json::json!({ "id": item.id, "answer": "no" }))
+        .collect();
+    answers[0]["answer"] = serde_json::json!("yes");
+    answers[0]["evidence"] = serde_json::json!("src/lib.rs:2 weakened assertion");
+    serde_json::json!({ "answers": answers }).to_string()
 }
 
 fn pass_audit_json(spec: &ImmutableSpec) -> String {
@@ -419,11 +435,13 @@ fn non_claude_auditor_http_401_and_429_route_to_halt_or_cooldown_not_task_failur
 
 #[test]
 fn audit_rejection_hands_off_to_scheduler_unblock_with_real_work_grant() {
-    let (_tmp, db, author_runner, deps, _spec) = setup_factory(false);
-    // Trigger audit rejection (inconclusive non-JSON output) twice so second hits T4 proposer.
+    let (_tmp, db, author_runner, mut deps, spec) = setup_factory(false);
+    // Trigger audit rejection (an evidenced Fail with no audit rework rounds
+    // allowed) twice so the second hits the T4 proposer.
+    deps.settings.repo.pipeline.max_audit_reworks = 0;
     let audit_fail = AuditBackend {
         provider: "gemini".to_string(),
-        runner: Arc::new(TestRunner::ok("not valid audit json")),
+        runner: Arc::new(TestRunner::ok(fail_audit_json(&spec))),
         accounts: Arc::new(TestPool(vec![AccountProfile {
             id: "gemini-auditor".into(),
             provider: ProviderKind::Antigravity,

@@ -454,9 +454,8 @@ fn audit_rework_skips_inconclusive_verdict() {
             .iter()
             .any(|n| n.starts_with("audit_rework:"))
     );
-    assert!(
-        t.context_notes
-            .iter()
-            .any(|n| n.contains("cross-audit rejected"))
-    );
+    // RFC-032: no verdict is the auditor's failure, not a rework round.
+    assert!(t.context_notes.is_empty(), "{:?}", t.context_notes);
+    assert_eq!(t.state, TaskState::Blocked);
+    assert!(t.retry_after.is_some());
 }

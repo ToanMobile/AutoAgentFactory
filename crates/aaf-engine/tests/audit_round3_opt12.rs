@@ -523,7 +523,8 @@ fn opt12_1_12_2_and_12_3_audit_and_diagnostics() {
                 assert!(repair.contains(needle), "repair prompt lacks {needle}");
             }
         } else {
-            assert_eq!(sr.requeued, vec!["t1"]);
+            // RFC-032: no verdict parks the task as a self-retrying infra block.
+            assert_eq!(sr.blocked, vec!["t1"], "{sr:?}");
         }
     }
     let input = AuditInput {

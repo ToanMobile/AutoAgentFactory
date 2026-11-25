@@ -19,9 +19,10 @@ fn infra() -> BlockedReason {
 }
 
 fn to_blocked(world: &World, id: &str) {
-    for state in [TaskState::Running] {
-        world.db.set_state(id, state, None, 900).unwrap();
-    }
+    world
+        .db
+        .set_state(id, TaskState::Running, None, 900)
+        .unwrap();
 }
 
 fn webhooks(world: &World) -> usize {
