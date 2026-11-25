@@ -117,9 +117,32 @@ fn send_alert_each_http_mock_returns_per_chat_outcomes_and_redacts_token() {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            // Read the whole request: under load the body can arrive after
+            // the headers, and one read() then misses `chat_id`.
+            let mut raw = Vec::new();
             let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if raw.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&raw).into_owned();
             let (status, body) = if req.contains("\"chat_id\":1001") {
                 (
                     "403 Forbidden",
