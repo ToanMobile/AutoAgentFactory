@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AAF Studio</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" href="/apple-touch-icon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="AAF Cockpit">
+<meta name="apple-mobile-web-app-title" content="AAF Dashboard">
 <meta name="theme-color" content="#0F172A">
 <style>
 :root{
@@ -40,6 +40,7 @@ a{color:var(--accent);font-weight:500}
 h1,h2,h3{margin:0}
 header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--surface);border-bottom:1px solid var(--border)}
 .brand{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}
+.brand-logo{width:32px;height:32px;border-radius:9px;object-fit:cover;display:block;flex:none;box-shadow:0 2px 10px rgba(15,23,42,.22)}
 .brand h1{font-size:18px;font-weight:700;white-space:nowrap}
 .brand .scope{color:var(--muted);font-size:13.5px;overflow-wrap:anywhere}
 .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -98,6 +99,11 @@ tr[data-task]:hover{background:var(--surface2)}
 .tb-summary{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:13px;color:var(--ink2)}
 .tb-why{font-size:12.5px;color:var(--err);line-height:1.4;max-width:340px;overflow-wrap:anywhere}
 .tb-sub{font-size:11.5px;color:var(--muted);margin-top:2px}
+.tb-pager{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:12.5px;color:var(--muted)}
+.tb-pager-btns{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.tb-pager-btns button{padding:4px 10px;font-size:12.5px;min-width:34px}
+.tb-pager-btns button.on{background:var(--ink);color:var(--bg);border-color:var(--ink);font-weight:600}
+.tb-pager-dots{padding:0 4px;color:var(--muted)}
 .empty{color:var(--muted);padding:12px 0}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;align-items:center}
 .kv dt{color:var(--muted);font-size:13.5px}.kv dd{margin:0;text-align:right;font-weight:600}
@@ -138,6 +144,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 <body>
 <header>
   <div class="brand">
+    <img src="/apple-touch-icon.png" alt="AutoAgentFactory" class="brand-logo" width="32" height="32">
     <h1>AAF Studio</h1>
     <span class="pill hidden" id="roPill">READ-ONLY</span>
     <span class="scope" id="scope"></span>
@@ -153,12 +160,12 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     <button id="copyTokBtn" class="hidden" type="button" title="Copy session token">Copy Token</button>
     <button id="lockBtn" class="hidden" type="button" title="Khoá phiên và xoá token">Khoá</button>
     <a class="btnlink" href="/?view=accounts" title="Quản lý Tài khoản &amp; Quota">Tài khoản</a>
-    <a class="btnlink" href="/" title="Về bảng Kanban Cockpit">Cockpit →</a>
+    <a class="btnlink" href="/" title="Về bảng Kanban Dashboard">Dashboard →</a>
   </div>
 </header>
 <main>
   <div class="card err" id="err"></div>
-  <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/?view=review">Mở trên Cockpit →</a></div>
+  <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/?view=review">Mở trên Dashboard →</a></div>
   <section class="grid" id="kpis"></section>
   <section class="card" id="scoreBox"></section>
 
@@ -561,6 +568,21 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     if (prev && repos.includes(prev)) sel.value = prev;
   }
 
+  const TB_PAGE_SIZE = 10;
+  let tbPage = 1;
+
+  function pageWindow(cur, total) {
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    const out = [1];
+    const lo = Math.max(2, cur - 1);
+    const hi = Math.min(total - 1, cur + 1);
+    if (lo > 2) out.push("…");
+    for (let i = lo; i <= hi; i += 1) out.push(i);
+    if (hi < total - 1) out.push("…");
+    out.push(total);
+    return out;
+  }
+
   function renderTaskBreakdown() {
     const q = $("tbSearch").value.trim().toLowerCase();
     const repo = $("tbRepo").value;
@@ -599,7 +621,24 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       $("taskBreakdown").innerHTML = `<div class="empty">Không có task nào khớp bộ lọc.</div>`;
       return;
     }
-    const shown = list.slice(0, 150);
+    const totalPages = Math.max(1, Math.ceil(list.length / TB_PAGE_SIZE));
+    if (tbPage > totalPages) tbPage = totalPages;
+    if (tbPage < 1) tbPage = 1;
+    const startIdx = (tbPage - 1) * TB_PAGE_SIZE;
+    const shown = list.slice(startIdx, startIdx + TB_PAGE_SIZE);
+    const pagerHtml = totalPages > 1
+      ? `<div class="tb-pager">
+          <span>Hiển thị <b>${num(startIdx + 1)}–${num(startIdx + shown.length)}</b> / ${num(list.length)} task · Trang <b>${tbPage}</b> / ${totalPages}</span>
+          <div class="tb-pager-btns">
+            <button type="button" data-tb-page="${tbPage - 1}" ${tbPage <= 1 ? "disabled" : ""}>‹ Trước</button>
+            ${pageWindow(tbPage, totalPages).map((p) => p === "…"
+              ? `<span class="tb-pager-dots">…</span>`
+              : `<button type="button" data-tb-page="${p}" class="${p === tbPage ? "on" : ""}" aria-current="${p === tbPage ? "page" : "false"}">${p}</button>`
+            ).join("")}
+            <button type="button" data-tb-page="${tbPage + 1}" ${tbPage >= totalPages ? "disabled" : ""}>Sau ›</button>
+          </div>
+        </div>`
+      : `<div class="tb-pager"><span>Hiển thị <b>1–${num(shown.length)}</b> / ${num(list.length)} task</span></div>`;
     $("taskBreakdown").innerHTML = `<table><thead><tr>
       <th>Task</th><th>Trạng thái</th><th class="n">Thời gian chạy</th><th class="n">Lượt chạy</th><th class="n">Token tiêu thụ</th><th>Agent / Tài khoản</th><th>Nguyên nhân Blocked / Lỗi</th>
     </tr></thead><tbody>` + shown.map((t) => {
@@ -633,7 +672,16 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
         </td>
         <td>${whyHtml}</td>
       </tr>`;
-    }).join("") + `</tbody></table>` + (list.length > 150 ? `<div class="muted" style="padding:8px 4px;font-size:12.5px">Đang hiện 150 / ${num(list.length)} task — dùng ô tìm kiếm hoặc lọc theo repo/trạng thái để thu hẹp.</div>` : "");
+    }).join("") + `</tbody></table>` + pagerHtml;
+    $("taskBreakdown").querySelectorAll("[data-tb-page]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const next = Number(btn.dataset.tbPage);
+        if (!Number.isFinite(next) || next < 1 || next > totalPages || next === tbPage) return;
+        tbPage = next;
+        renderTaskBreakdown();
+      };
+    });
   }
 
   function renderStages(stages) {
@@ -770,10 +818,11 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
         refresh();
       };
     });
-    $("tbSearch").oninput = renderTaskBreakdown;
-    $("tbRepo").onchange = renderTaskBreakdown;
-    $("tbState").onchange = renderTaskBreakdown;
-    $("tbSort").onchange = renderTaskBreakdown;
+    const resetAndRenderTb = () => { tbPage = 1; renderTaskBreakdown(); };
+    $("tbSearch").oninput = resetAndRenderTb;
+    $("tbRepo").onchange = resetAndRenderTb;
+    $("tbState").onchange = resetAndRenderTb;
+    $("tbSort").onchange = resetAndRenderTb;
     $("refresh").onclick = refresh;
     $("runDoctor").onclick = runDoctor;
     $("drawerClose").onclick = closeDrawer;

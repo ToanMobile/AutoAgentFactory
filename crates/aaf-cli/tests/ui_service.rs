@@ -162,7 +162,7 @@ fn service_mode_serves_cockpit_and_studio_strictly_read_only() {
         &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
     );
     assert_eq!(st_idx, 200);
-    assert!(idx_body.contains("AutoAgentFactory Cockpit"));
+    assert!(idx_body.contains("AutoAgentFactory Dashboard"));
     assert!(idx_body.contains("Kanban"));
     assert!(!idx_body.contains(&token));
 

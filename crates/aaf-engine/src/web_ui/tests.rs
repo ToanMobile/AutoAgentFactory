@@ -228,7 +228,7 @@ fn index_returns_html_with_strict_csp_and_security_headers() {
     let resp = send_raw(addr, &format!("GET / HTTP/1.1\r\nHost: {addr}\r\n\r\n"));
     assert_eq!(resp.status, 200);
     assert!(resp.body.contains("<!DOCTYPE html>"));
-    assert!(resp.body.contains("AutoAgentFactory Cockpit"));
+    assert!(resp.body.contains("AutoAgentFactory Dashboard"));
     assert!(resp.body.contains("subscription accounts: tokens only"));
     assert_eq!(
         resp.headers

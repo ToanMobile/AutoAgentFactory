@@ -13,25 +13,35 @@ pub const DIFF_UI_JS: &str = include_str!("diff_ui.js");
 /// Embedded zero-CDN SVG pipeline DAG, SOP runs, and Studio score JS module.
 pub const PIPELINE_UI_JS: &str = include_str!("pipeline_ui.js");
 
-/// Vector app icon for desktop/Android favicons and PWA splash.
+/// Vector app icon matching the 3D hexagonal core emblem.
 pub const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
   <defs>
-    <radialGradient id="bg" cx="25%" cy="20%" r="85%">
-      <stop offset="0%" stop-color="#2563EB"/>
-      <stop offset="100%" stop-color="#0F172A"/>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090F1F"/>
+      <stop offset="100%" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <linearGradient id="hex" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E2E8F0"/>
+      <stop offset="50%" stop-color="#64748B"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+    <radialGradient id="core" cx="45%" cy="40%" r="55%">
+      <stop offset="0%" stop-color="#A7F3D0"/>
+      <stop offset="55%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0284C7"/>
     </radialGradient>
   </defs>
   <rect width="180" height="180" rx="38" fill="url(#bg)"/>
-  <rect x="16" y="16" width="148" height="148" rx="28" fill="none" stroke="#60A5FA" stroke-opacity="0.35" stroke-width="2.5"/>
-  <path d="M90 42 L128 136 L111 136 L102 112 L78 112 L69 136 L52 136 Z M83 98 L97 98 L90 74 Z" fill="#F8FAFC"/>
-  <circle cx="138" cy="44" r="11" fill="#34D399"/>
+  <polygon points="90,26 145,58 145,122 90,154 35,122 35,58" fill="none" stroke="url(#hex)" stroke-width="14" stroke-linejoin="round"/>
+  <ellipse cx="90" cy="90" rx="42" ry="18" transform="rotate(-32 90 90)" fill="none" stroke="#CBD5E1" stroke-width="6" stroke-opacity="0.85"/>
+  <polygon points="90,66 111,78 111,102 90,114 69,102 69,78" fill="url(#core)"/>
 </svg>
 "##;
 
 /// Web App Manifest enabling full-screen standalone launch on iOS and Android.
 pub const MANIFEST_JSON: &str = r##"{
-  "name": "AAF Cockpit",
-  "short_name": "AAF Cockpit",
+  "name": "AutoAgentFactory Dashboard",
+  "short_name": "AAF Dashboard",
   "description": "AutoAgentFactory Kanban Cockpit & Studio",
   "start_url": "/",
   "scope": "/",

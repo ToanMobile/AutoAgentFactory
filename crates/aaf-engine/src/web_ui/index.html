@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>AAF Cockpit</title>
+<title>AutoAgentFactory Dashboard</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" href="/apple-touch-icon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="AAF Cockpit">
+<meta name="apple-mobile-web-app-title" content="AAF Dashboard">
 <meta name="theme-color" content="#0F172A">
 <style>
 :root{
@@ -53,11 +53,11 @@ input,select,textarea{background:var(--surface);border:1px solid var(--border);b
 input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .mono{font-family:var(--mono);font-size:12px}
 .muted{color:var(--muted)}
-.app{max-width:1540px;margin:0 auto;padding:0 18px 72px}
-.topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:10px 0;margin-bottom:14px}
+.app{max-width:100%;width:100%;margin:0 auto;padding:0 10px 48px}
+.topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:8px 0;margin-bottom:10px}
 .topbar-inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:10px;min-width:0}
-.logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--accent),#4F46E5);color:#fff;display:grid;place-items:center;font-family:var(--display);font-weight:800;font-size:12px;letter-spacing:.04em;flex:none;box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 35%,transparent)}
+.logo{width:34px;height:34px;border-radius:9px;object-fit:cover;display:block;flex:none;box-shadow:0 2px 10px rgba(15,23,42,.22),0 0 0 1px color-mix(in srgb,var(--border) 60%,transparent)}
 .brand-title{font-family:var(--display);font-weight:700;font-size:15.5px;letter-spacing:-.02em;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .brand-sub{font-size:11.5px;color:var(--muted);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .top-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
@@ -82,7 +82,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .pill-p1{color:var(--warn);background:var(--warn-bg)}
 .pill-p2{color:var(--info);background:var(--info-bg)}
 .pill-p3{color:var(--slate);background:var(--slate-bg)}
-.tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.tabs{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
 .tab{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:9px;border:1px solid var(--border);background:var(--surface);font-weight:600;font-size:13px;white-space:nowrap}
 .tab.active,.tab.active:hover,.tab.active:focus-visible{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .tab .count{padding:1px 6px;border-radius:999px;font-size:11px;font-variant-numeric:tabular-nums;background:color-mix(in srgb,currentColor 14%,transparent)}
@@ -95,9 +95,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .stat-label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
 .stat-val{font-family:var(--display);font-size:24px;font-weight:700;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
 .stat-sub{font-size:12px;color:var(--muted);margin-top:2px;font-variant-numeric:tabular-nums}
-.repo-bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px;padding:7px 10px;border-radius:10px;border:1px solid var(--border);background:var(--surface)}
+.repo-bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;padding:6px 8px;border-radius:10px;border:1px solid var(--border);background:var(--surface)}
 .repo-bar-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-right:2px}
-.filters{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.filters{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
 .chips{display:flex;gap:5px;flex-wrap:wrap}
 .chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);background:var(--surface)}
 .chip .c{font-size:11px;opacity:.75;font-variant-numeric:tabular-nums}
@@ -108,27 +108,29 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .viewseg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface)}
 .viewseg button{border:0;border-radius:0;padding:5px 11px;font-size:12.5px}
 .viewseg button.on,.viewseg button.on:hover{background:var(--ink);color:var(--bg)}
-.kanban{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(230px,1fr);gap:10px;overflow-x:auto;padding-bottom:6px;align-items:start}
-.kcol{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:10px;min-height:140px;max-height:calc(100vh - 240px);overflow-y:auto;display:flex;flex-direction:column;gap:8px;border-top:3px solid var(--slate)}
+.kanban{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(224px,1fr);gap:8px;overflow-x:auto;padding-bottom:4px;align-items:start}
+.kcol{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:7px;min-height:140px;max-height:calc(100vh - 196px);overflow-y:auto;display:flex;flex-direction:column;gap:6px;border-top:3px solid var(--slate)}
 .kcol[data-col="ready"]{border-top-color:var(--info)}
 .kcol[data-col="running"]{border-top-color:var(--warn)}
 .kcol[data-col="review"]{border-top-color:var(--rev)}
 .kcol[data-col="blocked"]{border-top-color:var(--err)}
 .kcol[data-col="done"]{border-top-color:var(--ok)}
-.kcol-head{position:sticky;top:-10px;z-index:2;background:var(--surface2);margin:-10px -10px 0;padding:10px 11px 7px;display:flex;flex-direction:column;gap:6px;font-family:var(--display);font-weight:700;font-size:13px;border-bottom:1px solid color-mix(in srgb,var(--border) 65%,transparent)}
+.kcol-head{position:sticky;top:-7px;z-index:2;background:var(--surface2);margin:-7px -7px 0;padding:7px 9px 6px;display:flex;flex-direction:column;gap:5px;font-family:var(--display);font-weight:700;font-size:13px;border-bottom:1px solid color-mix(in srgb,var(--border) 65%,transparent)}
 .kcol-head-row{display:flex;align-items:center;justify-content:space-between;gap:6px}
 .kcol-acts{display:flex;gap:5px;flex-wrap:wrap;align-items:center;font-family:var(--sans);font-weight:500}
-.kcol-acts button{padding:3px 8px;font-size:11.5px;border-radius:6px}
-.kcol-head .count{background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:0 8px;font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums}
-.kcard{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 11px;cursor:pointer;box-shadow:var(--shadow-card);transition:border-color .12s,transform .08s,box-shadow .12s}
+.kcol-acts button{padding:3px 7px;font-size:11.5px;border-radius:6px}
+.kcol-head .count{background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:0 7px;font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.kcard{background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:8px 9px;cursor:pointer;box-shadow:var(--shadow-card);transition:border-color .12s,transform .08s,box-shadow .12s}
 .kcard:hover{border-color:var(--accent-b);transform:translateY(-1px);box-shadow:var(--shadow)}
 .kcard.need{border-left:3px solid var(--err)}
 .kcard.checked{border-color:var(--accent);background:color-mix(in srgb,var(--accent-soft) 50%,var(--surface))}
 .kchk{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;margin:0;flex:none}
-.kcard-title{font-weight:600;font-size:13.5px;line-height:1.35;margin:5px 0;overflow-wrap:anywhere;color:var(--ink)}
+.kcard-title{font-weight:600;font-size:13px;line-height:1.32;margin:4px 0;overflow-wrap:anywhere;color:var(--ink)}
 .kcard-meta{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
-.kcard-why{margin-top:6px;font-size:12px;color:var(--err);background:var(--err-bg);border-radius:7px;padding:5px 8px;overflow-wrap:anywhere}
-.kcard-acts{display:flex;justify-content:flex-end;gap:6px;margin-top:7px;padding-top:6px;border-top:1px solid color-mix(in srgb,var(--border) 60%,transparent)}
+.kcard-why{margin:5px 0 6px;font-size:12px;line-height:1.38;color:var(--err);background:color-mix(in srgb,var(--err) 10%,var(--surface));border:1px solid color-mix(in srgb,var(--err) 30%,var(--border));border-left:3px solid var(--err);border-radius:7px;padding:6px 8px;overflow-wrap:anywhere}
+.kcard-why-head{font-weight:700;display:flex;align-items:center;gap:5px;color:var(--err)}
+.kcard-why-sub{margin-top:2px;font-size:11.5px;color:var(--ink2);font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.kcard-acts{display:flex;justify-content:flex-end;gap:5px;margin-top:6px;padding-top:5px;border-top:1px solid color-mix(in srgb,var(--border) 60%,transparent)}
 .kcard-acts button{padding:3px 8px;font-size:11.5px;border-radius:6px}
 .kempty{color:var(--muted);font-size:12px;text-align:center;padding:16px 4px}
 .kmore{color:var(--muted);font-size:12px;text-align:center;padding:8px 6px;border-top:1px dashed var(--border)}
@@ -245,9 +247,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">
-        <div class="logo">AAF</div>
+        <img src="/apple-touch-icon.png" alt="AutoAgentFactory" class="logo" width="34" height="34">
         <div style="min-width:0">
-          <div class="brand-title">AutoAgentFactory Cockpit <span id="roBadge" class="pill pill-slate hidden">READ-ONLY</span></div>
+          <div class="brand-title">AutoAgentFactory Dashboard <span id="roBadge" class="pill pill-slate hidden">READ-ONLY</span></div>
           <div id="scopeLine" class="brand-sub">Connecting…</div>
         </div>
       </div>
@@ -270,7 +272,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     <button id="unfreezeBtn" class="btn-danger btn-sm">Unfreeze Factory</button>
   </div>
 
-  <nav class="tabs" role="tablist" aria-label="Cockpit sections">
+  <nav class="tabs" role="tablist" aria-label="Dashboard sections">
     <button class="tab active" role="tab" aria-selected="true" data-tab="board">Board <span id="cntBoard" class="count">0</span></button>
     <button class="tab need-you-tab" role="tab" aria-selected="false" id="needYouTabBtn" type="button">Need You <span id="cntNeedYou" class="count">0</span></button>
     <button class="tab" role="tab" aria-selected="false" data-tab="review">Needs Review <span id="cntReview" class="count">0</span></button>
@@ -423,7 +425,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
 <div id="authBg" class="auth-bg" role="dialog" aria-modal="true" aria-labelledby="authTitle">
   <div class="modal">
-    <h3 id="authTitle">Sign in to AAF Cockpit</h3>
+    <h3 id="authTitle">Sign in to AutoAgentFactory Dashboard</h3>
     <p class="muted" style="margin-top:0">Paste the bearer token printed by <span class="mono">aaf ui</span> / <span class="mono">aaf ui --service-url</span>, or reopen <span class="mono">/studio</span> from Agent Office.</p>
     <div style="display:flex;gap:6px;align-items:center">
       <input id="tokenInput" type="password" class="mono" placeholder="Bearer token…" style="flex:1;min-width:0">
@@ -1008,6 +1010,58 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
   function matchesRepo(t) { return selectedRepos.size === 0 || selectedRepos.has(t.repo_name); }
 
+  function formatBlockedReason(t) {
+    const rawDetail = String(t.blocked_detail || "").trim();
+    const rawKind = String(t.blocked_kind || t.blocked_reason || "").trim();
+    const combined = (rawKind + " " + rawDetail).toLowerCase();
+    const rawAll = rawDetail || rawKind;
+    const cleanText = (s) => {
+      const oneLine = String(s || "").replace(/\s+/g, " ").replace(/^(needs_human|blocked|gate_failed|quota|dependency)\s*[:\-]\s*/i, "").trim();
+      return oneLine.length > 92 ? oneLine.slice(0, 89) + "…" : oneLine;
+    };
+    const sub = cleanText(rawDetail);
+    if (/needs?\s*you\s*on\s*github/i.test(rawDetail)) {
+      return { head: "✋ Chờ bạn xử lý trên GitHub", sub: "Task đang nằm ở cột Need You", raw: rawAll };
+    }
+    if (/blocked\s*on\s*github/i.test(rawDetail)) {
+      return { head: "🚧 Bị gắn nhãn Blocked trên GitHub", sub: "Cần gỡ chặn hoặc cập nhật trên board", raw: rawAll };
+    }
+    if (/(head[_ -]?lock|lock[_ ]?fp|approv|protected file|file.*khóa)/i.test(combined)) {
+      return { head: "🔒 Đụng file được khóa (test/CI)", sub: "Cần bạn xem diff và ký duyệt (aaf approve)", raw: rawAll };
+    }
+    if (/(plan[_ ]?approv|approve[_ -]?plan|awaiting plan)/i.test(combined) || t.needs_plan_approval) {
+      return { head: "🧭 Chờ bạn duyệt kế hoạch", sub: "Xem tab Plan rồi bấm Approve Plan", raw: rawAll };
+    }
+    if (/(proof|screenshot|ảnh minh chứng|adb)/i.test(combined)) {
+      return { head: "📸 Thiếu / chưa đạt ảnh Proof", sub: sub || "Cần ảnh chụp xác minh hợp lệ", raw: rawAll };
+    }
+    if (/(quota|429|rate[_ ]?limit|cooldown|token[_ ]?(cap|spike))/i.test(combined)) {
+      return { head: "⏳ Hết quota / chạm giới hạn tài khoản", sub: sub || "Chờ quota mở lại hoặc đổi tài khoản", raw: rawAll };
+    }
+    if (/(dependency|blocked_by|phụ thuộc)/i.test(combined)) {
+      return { head: "🔗 Chờ task phụ thuộc hoàn thành", sub: sub || "Sẽ tự chạy khi task trước xong", raw: rawAll };
+    }
+    if (/(merge|conflict|rebase|dirty|diverged)/i.test(combined)) {
+      return { head: "🔀 Xung đột Git / cần merge lại", sub: sub || "Kiểm tra nhánh và đồng bộ lại base", raw: rawAll };
+    }
+    if (/(cross[_ -]?audit|score[_ -]?gate|dual[_ -]?review|audit)/i.test(combined)) {
+      return { head: "🧐 Chưa đạt Cross-Audit", sub: sub || "Cần xử lý góp ý từ vòng kiểm duyệt", raw: rawAll };
+    }
+    if (/(gate|test|clippy|lint|compile|build fail|red[_ -]?green)/i.test(combined)) {
+      return { head: "❌ Không qua cổng kiểm định (Gate)", sub: sub || "Build/test hoặc lint đang đỏ", raw: rawAll };
+    }
+    if (/(hook|sandbox|confined|forbidden|refused)/i.test(combined)) {
+      return { head: "🛡️ Bị chặn bởi Hook / Sandbox", sub: sub || "Agent đụng thao tác ngoài quyền cho phép", raw: rawAll };
+    }
+    if (/(timeout|timed out|network|infra|halted|login|auth)/i.test(combined)) {
+      return { head: "⚡ Lỗi mạng / Timeout / Đăng nhập", sub: sub || "Kiểm tra kết nối hoặc phiên agent rồi Unblock", raw: rawAll };
+    }
+    if (rawKind === "needs_human" || /needs_human/i.test(combined)) {
+      return { head: "✋ Cần bạn can thiệp", sub: sub || "Mở chi tiết task để xem nguyên nhân cụ thể", raw: rawAll };
+    }
+    return { head: "⚠️ Đang bị chặn", sub: sub || cleanText(rawKind) || "Mở chi tiết để xem thêm", raw: rawAll };
+  }
+
   function renderBoard() {
     const prio = $("prioFilter").value;
     const q = $("searchBox").value.trim().toLowerCase();
@@ -1086,7 +1140,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           const ny = isNeedYouTask(t);
           const isBl = t.state === "backlog";
           const checked = isBl && selectedBacklog.has(t.id);
-          const why = t.state === "blocked" && (t.blocked_detail || t.blocked_reason) ? `<div class="kcard-why">${esc(t.blocked_detail || t.blocked_reason)}</div>` : "";
+          const whyInfo = t.state === "blocked" ? formatBlockedReason(t) : null;
+          const why = whyInfo
+            ? `<div class="kcard-why" title="${esc(whyInfo.raw)}"><div class="kcard-why-head">${esc(whyInfo.head)}</div>${whyInfo.sub ? `<div class="kcard-why-sub">${esc(whyInfo.sub)}</div>` : ""}</div>`
+            : "";
           const updated = t.updated_at ? `<span>· ${esc(ago(t.updated_at))}</span>` : "";
           const chk = isBl && !ro ? `<input type="checkbox" class="kchk" data-chk="${esc(t.id)}" aria-label="Select ${esc(t.id)}" ${checked ? "checked" : ""}>` : "";
           const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : "";
@@ -1097,8 +1154,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
                 : "");
           return `<div class="kcard ${ny ? "need" : ""} ${checked ? "checked" : ""}" data-id="${esc(t.id)}" tabindex="0" role="button">
             <div class="kcard-meta">${chk}<span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>${t.state !== key && t.state !== "review" && t.state !== "blocked" ? `<span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>` : ""}${ny ? `<span class="pill pill-blocked">Need You</span>` : ""}${planBadge}${t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : ""}</div>
-            <div class="kcard-title">${esc(t.title)}</div>
-            <div class="kcard-meta"><span class="mono">${esc(t.id)}</span>${(t.acceptance || []).length ? `<span>· ${t.acceptance.length} criteria</span>` : ""}${updated}</div>${why}${quickBtn}
+            <div class="kcard-title">${esc(t.title)}</div>${why}
+            <div class="kcard-meta"><span class="mono">${esc(t.id)}</span>${(t.acceptance || []).length ? `<span>· ${t.acceptance.length} criteria</span>` : ""}${updated}</div>${quickBtn}
           </div>`;
         }).join("");
         const more = col.length > 100 ? `<div class="kmore">+${col.length - 100} more — filter or switch to List</div>` : "";
@@ -1159,8 +1216,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     }
     $("boardList").innerHTML = list.map((t) => {
       const deps = (t.deps || []).length ? `<span>Deps: <span class="mono">${esc(t.deps.join(", "))}</span></span>` : "";
-      const blkText = t.blocked_detail || t.blocked_reason || "";
-      const blk = blkText ? `<span style="color:var(--err);font-weight:600">Blocked: ${esc(blkText)}</span>` : "";
+      const blkInfo = t.state === "blocked" ? formatBlockedReason(t) : null;
+      const blk = blkInfo ? `<span style="color:var(--err);font-weight:600" title="${esc(blkInfo.raw)}">${esc(blkInfo.head)}${blkInfo.sub ? ` — ${esc(blkInfo.sub)}` : ""}</span>` : "";
       const repoBadge = t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : "";
       const fpBadge = t.fingerprint ? `<span class="mono" style="font-size:11px;color:var(--muted)">${esc(t.fingerprint)}</span>` : "";
       const needYouBadge = isNeedYouTask(t) ? `<span class="pill pill-blocked">${/needs?\s*you/i.test(t.blocked_detail || "") ? "Need You" : "Human"}</span>` : "";
