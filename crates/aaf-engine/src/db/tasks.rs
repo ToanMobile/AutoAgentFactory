@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
 use super::{Db, corrupt, sql_err, to_i64};
 
-const MAX_AUTO_RECOVER_COUNT: u32 = 6;
+const MAX_AUTO_RECOVER_COUNT: u32 = crate::factory::INFRA_RETRY_MAX;
 
 const TASK_COLS_V3: &str = "id, repo_root, parent_id, root_id, depth, title, spec, context_notes, \
      state, priority, fingerprint, blocked_reason, unblock_cycles, created_at, updated_at";

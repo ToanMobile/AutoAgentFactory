@@ -23,6 +23,7 @@ mod finish;
 mod finish_land;
 mod git_real;
 mod git_real_base;
+mod infra_retry;
 mod merge_retry;
 pub(crate) mod plan_job;
 mod plan_legacy;
@@ -65,6 +66,7 @@ pub use audit_backend::{
 };
 pub use base_ref::{BaseRef, resolve_base};
 pub use git_real::RealGit;
+pub(crate) use infra_retry::INFRA_RETRY_MAX;
 pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
 pub use post_audit::is_large_diff;
 pub use scheduler::{

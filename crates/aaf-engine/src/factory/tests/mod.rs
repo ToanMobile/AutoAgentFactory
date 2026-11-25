@@ -22,6 +22,7 @@ mod g3_rework_edges;
 mod git_real;
 mod halt_alert;
 mod infra;
+mod infra_retry;
 mod merge_lock_retry;
 mod merge_retry;
 mod opt12;

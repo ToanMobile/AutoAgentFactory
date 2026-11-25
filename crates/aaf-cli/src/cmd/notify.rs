@@ -118,6 +118,8 @@ pub(crate) fn alert_for(event: &FactoryEvent, title: &dyn Fn(&str) -> String) ->
                 "review",
                 format!("aaf: {} is ready for review", name(&task)),
             ),
+            // An infra block with a scheduled comeback (RFC-033) needs no one.
+            Some("blocked") if payload.get("auto_retry_at").is_some() => return None,
             Some("blocked") => {
                 let why = payload["why"].as_str().unwrap_or("blocked");
                 let why: String = why.chars().take(300).collect();

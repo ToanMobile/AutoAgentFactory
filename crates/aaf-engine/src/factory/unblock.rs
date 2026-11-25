@@ -326,7 +326,7 @@ pub(crate) fn handle_with(
             UnblockAction::EscalateHuman { why } => {
                 if matches!(decision.reason, BlockedReason::Infra { .. }) {
                     // Upstream infra failures must never count toward the global freeze.
-                    block(deps, &task, &decision.reason, "infra", &why, false)?;
+                    super::infra_retry::block_infra(deps, &task, &decision.reason, &why)?;
                 } else {
                     let reason = BlockedReason::NeedsHuman { why: why.clone() };
                     block(deps, &task, &reason, "needs_human", &why, true)?;
@@ -394,7 +394,7 @@ fn spawn_subtasks(deps: &Deps, parent: &Task, plans: Vec<SubtaskPlan>) -> PortRe
 
 /// T5: the task stops, a human is told, and with `counts` the failed root
 /// counts towards the global freeze.
-fn block(
+pub(super) fn block(
     deps: &Deps,
     task: &Task,
     reason: &BlockedReason,

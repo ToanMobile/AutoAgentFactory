@@ -25,3 +25,17 @@ fn pr_feedback_rework_and_skipped_are_not_alerts() {
         assert!(alert_for(&pr_feedback(action), &|_| String::new()).is_none());
     }
 }
+
+#[test]
+fn infra_block_with_a_scheduled_retry_is_silent_but_the_final_one_alerts() {
+    let ev = |payload: serde_json::Value| {
+        FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), 7).for_task("t1")
+    };
+    let silent = ev(json!({"to": "blocked", "why": "infra", "auto_retry_at": 99, "auto_retry": 1}));
+    assert!(alert_for(&silent, &|_| String::new()).is_none());
+    let last = ev(json!({"to": "blocked", "why": "infra; 6 automatic retries used"}));
+    assert_eq!(
+        alert_for(&last, &|_| String::new()).unwrap().kind,
+        "blocked"
+    );
+}
