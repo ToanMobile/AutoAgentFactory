@@ -1,5 +1,6 @@
-//! Shared heavy-build tool tables used by both `aaf-engine` (machine-queue
-//! scheduler) and `aaf-hook` (PreToolUse guard) so the two cannot drift.
+//! Shared heavy-build tool tables and mobile-subcommand scanner used by both
+//! `aaf-engine` (machine-queue scheduler) and `aaf-hook` (PreToolUse guard)
+//! so the two cannot drift.
 //!
 //! Invariant: `aaf-engine` MUST classify a superset of every command that
 //! `aaf-hook` rejects under `heavy_cmd_guard`.
@@ -54,78 +55,291 @@ fn strip_basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// Evaluates whether `(program, args)` invokes a heavy mobile build command,
-/// unwrapping common runners (`npx`, `bunx`, `yarn`, `pnpm [exec]`,
-/// `bundle exec`).
-pub fn is_mobile_heavy_command(program: &str, args: &[&str]) -> bool {
-    let base = strip_basename(program);
-    if base.eq_ignore_ascii_case("npx") || base.eq_ignore_ascii_case("bunx") {
-        let mut idx = 0;
-        while let Some(&arg) = args.get(idx) {
-            if arg == "--" {
-                idx += 1;
-                break;
-            }
-            if matches!(arg, "-p" | "--package" | "-c" | "--call") {
-                idx += 2;
-                continue;
-            }
-            if arg.starts_with('-') {
-                idx += 1;
-                continue;
-            }
-            break;
-        }
-        let Some(&sub_prog) = args.get(idx) else {
-            return false;
-        };
-        return is_mobile_heavy_command(sub_prog, &args[idx + 1..]);
-    }
-    if base.eq_ignore_ascii_case("pnpm") || base.eq_ignore_ascii_case("yarn") {
-        let mut idx = 0;
-        while let Some(&arg) = args.get(idx) {
-            if arg == "--" {
-                idx += 1;
-                break;
-            }
-            if arg.starts_with('-') {
-                idx += 1;
-                continue;
-            }
-            if arg.eq_ignore_ascii_case("exec") || arg.eq_ignore_ascii_case("dlx") {
-                idx += 1;
-                continue;
-            }
-            break;
-        }
-        let Some(&sub_prog) = args.get(idx) else {
-            return false;
-        };
-        return is_mobile_heavy_command(sub_prog, &args[idx + 1..]);
-    }
-    if base.eq_ignore_ascii_case("bundle") || base.eq_ignore_ascii_case("bundler") {
-        let mut idx = 0;
-        while let Some(&arg) = args.get(idx) {
-            if arg.starts_with('-') {
-                idx += 1;
-                continue;
-            }
-            if arg.eq_ignore_ascii_case("exec") {
-                let Some(&sub_prog) = args.get(idx + 1) else {
-                    return false;
-                };
-                return is_mobile_heavy_command(sub_prog, &args[idx + 2..]);
-            }
-            return false;
-        }
-        return false;
+const NODE_VALUED_OPTS: &[&str] = &[
+    "-p",
+    "--package",
+    "--prefix",
+    "-w",
+    "--workspace",
+    "-C",
+    "--dir",
+    "--cwd",
+    "--filter",
+    "-F",
+    "--include",
+    "--exclude",
+    "--from",
+    "-j",
+    "--jobs",
+];
+
+const MISE_VALUED_OPTS: &[&str] = &[
+    "-C",
+    "--cd",
+    "-j",
+    "--jobs",
+    "-E",
+    "--env",
+    "-P",
+    "--profile",
+    "--log-level",
+    "--raw",
+];
+
+#[derive(Debug, Clone, Copy, Default)]
+enum Stage {
+    #[default]
+    Idle,
+    /// `npx` / `bunx`: skip options until delegated binary.
+    DirectNode { skip_next: bool },
+    /// `npm` (`exec`/`x`), `bun` (`x`), `pnpm`/`yarn` (`exec`/`dlx`/`run`).
+    SubcmdNode {
+        subcmds: &'static [&'static str],
+        allow_direct: bool,
+        skip_next: bool,
+    },
+    /// `bundle`/`bundler`/`rbenv`/`mise`/`direnv`/`asdf` waiting for `exec`/`x`.
+    ExecLauncher {
+        subcmds: &'static [&'static str],
+        valued: &'static [&'static str],
+        skip_dir_after_exec: bool,
+        skip_next: bool,
+    },
+    /// Saw `direnv exec`; skip the `<dir>` positional argument before the binary.
+    DirenvDir,
+    /// Saw `exec`/`x` of a launcher; next non-flag is the delegated binary.
+    AfterExec,
+    /// Saw a mobile CLI (`flutter`, `expo`, `react-native`, `pod`); waiting for
+    /// its first non-flag subcommand.
+    Candidate(&'static str),
+    /// Finished deciding this command; ignore remaining arguments.
+    Done,
+}
+
+/// Incremental scanner for heavy mobile subcommands, shared by `aaf-engine`
+/// and `aaf-hook` so both agree on every wrapper and option form.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MobileScan {
+    stage: Stage,
+}
+
+impl MobileScan {
+    pub fn reset(&mut self) {
+        self.stage = Stage::Idle;
     }
 
-    if !is_mobile_candidate(base) {
-        return false;
+    /// True once a mobile CLI head (`flutter`, `expo`, `react-native`, `pod`)
+    /// has been recognized and we are still looking for its subcommand.
+    pub fn awaiting_subcommand(&self) -> bool {
+        matches!(self.stage, Stage::Candidate(_))
     }
-    let Some(&subcmd) = args.iter().find(|arg| !arg.starts_with('-')) else {
-        return false;
-    };
-    is_mobile_heavy_subcommand(base, subcmd)
+
+    /// Called when the command's main executable (`base`) is recognized.
+    pub fn on_command(&mut self, base: &str) {
+        self.stage = Self::classify_head(strip_basename(base));
+    }
+
+    fn classify_head(base: &str) -> Stage {
+        if base.eq_ignore_ascii_case("flutter") {
+            Stage::Candidate("flutter")
+        } else if base.eq_ignore_ascii_case("expo") {
+            Stage::Candidate("expo")
+        } else if base.eq_ignore_ascii_case("react-native") {
+            Stage::Candidate("react-native")
+        } else if base.eq_ignore_ascii_case("pod") {
+            Stage::Candidate("pod")
+        } else if base.eq_ignore_ascii_case("npx") || base.eq_ignore_ascii_case("bunx") {
+            Stage::DirectNode { skip_next: false }
+        } else if base.eq_ignore_ascii_case("npm") {
+            Stage::SubcmdNode {
+                subcmds: &["exec", "x"],
+                allow_direct: false,
+                skip_next: false,
+            }
+        } else if base.eq_ignore_ascii_case("bun") {
+            Stage::SubcmdNode {
+                subcmds: &["x"],
+                allow_direct: false,
+                skip_next: false,
+            }
+        } else if base.eq_ignore_ascii_case("pnpm") || base.eq_ignore_ascii_case("yarn") {
+            Stage::SubcmdNode {
+                subcmds: &["exec", "dlx", "run"],
+                allow_direct: true,
+                skip_next: false,
+            }
+        } else if base.eq_ignore_ascii_case("bundle")
+            || base.eq_ignore_ascii_case("bundler")
+            || base.eq_ignore_ascii_case("rbenv")
+        {
+            Stage::ExecLauncher {
+                subcmds: &["exec", "x"],
+                valued: &[],
+                skip_dir_after_exec: false,
+                skip_next: false,
+            }
+        } else if base.eq_ignore_ascii_case("mise") {
+            Stage::ExecLauncher {
+                subcmds: &["exec", "x"],
+                valued: MISE_VALUED_OPTS,
+                skip_dir_after_exec: false,
+                skip_next: false,
+            }
+        } else if base.eq_ignore_ascii_case("direnv") {
+            Stage::ExecLauncher {
+                subcmds: &["exec"],
+                valued: &[],
+                skip_dir_after_exec: true,
+                skip_next: false,
+            }
+        } else if base.eq_ignore_ascii_case("asdf") {
+            Stage::ExecLauncher {
+                subcmds: &["exec"],
+                valued: &[],
+                skip_dir_after_exec: false,
+                skip_next: false,
+            }
+        } else {
+            Stage::Done
+        }
+    }
+
+    fn enter_candidate(&mut self, word: &str) {
+        let head = strip_basename(word);
+        self.stage = if is_mobile_candidate(head) {
+            Self::classify_head(head)
+        } else {
+            Stage::Done
+        };
+    }
+
+    /// Feeds one argument word of the active command. Returns `true` when the
+    /// command is confirmed to be a heavy mobile build.
+    pub fn on_arg(&mut self, word: &str) -> bool {
+        match self.stage {
+            Stage::Idle | Stage::Done => false,
+            Stage::DirectNode { skip_next } => {
+                if skip_next {
+                    self.stage = Stage::DirectNode { skip_next: false };
+                    return false;
+                }
+                if word == "--" {
+                    return false;
+                }
+                if NODE_VALUED_OPTS.contains(&word) {
+                    self.stage = Stage::DirectNode { skip_next: true };
+                    return false;
+                }
+                if word.starts_with('-') {
+                    return false;
+                }
+                self.enter_candidate(word);
+                false
+            }
+            Stage::SubcmdNode {
+                subcmds,
+                allow_direct,
+                skip_next,
+            } => {
+                if skip_next {
+                    self.stage = Stage::SubcmdNode {
+                        subcmds,
+                        allow_direct,
+                        skip_next: false,
+                    };
+                    return false;
+                }
+                if word == "--" {
+                    return false;
+                }
+                if NODE_VALUED_OPTS.contains(&word) {
+                    self.stage = Stage::SubcmdNode {
+                        subcmds,
+                        allow_direct,
+                        skip_next: true,
+                    };
+                    return false;
+                }
+                if word.starts_with('-') {
+                    return false;
+                }
+                if subcmds.iter().any(|s| s.eq_ignore_ascii_case(word)) {
+                    self.stage = Stage::AfterExec;
+                    return false;
+                }
+                if allow_direct {
+                    self.enter_candidate(word);
+                } else {
+                    self.stage = Stage::Done;
+                }
+                false
+            }
+            Stage::ExecLauncher {
+                subcmds,
+                valued,
+                skip_dir_after_exec,
+                skip_next,
+            } => {
+                if skip_next {
+                    self.stage = Stage::ExecLauncher {
+                        subcmds,
+                        valued,
+                        skip_dir_after_exec,
+                        skip_next: false,
+                    };
+                    return false;
+                }
+                if valued.contains(&word) {
+                    self.stage = Stage::ExecLauncher {
+                        subcmds,
+                        valued,
+                        skip_dir_after_exec,
+                        skip_next: true,
+                    };
+                    return false;
+                }
+                if word.starts_with('-') {
+                    return false;
+                }
+                self.stage = if subcmds.iter().any(|s| s.eq_ignore_ascii_case(word)) {
+                    if skip_dir_after_exec {
+                        Stage::DirenvDir
+                    } else {
+                        Stage::AfterExec
+                    }
+                } else {
+                    Stage::Done
+                };
+                false
+            }
+            Stage::DirenvDir => {
+                if !word.starts_with('-') {
+                    self.stage = Stage::AfterExec;
+                }
+                false
+            }
+            Stage::AfterExec => {
+                if word == "--" || word.starts_with('-') {
+                    return false;
+                }
+                self.enter_candidate(word);
+                false
+            }
+            Stage::Candidate(program) => {
+                if word.starts_with('-') {
+                    return false;
+                }
+                self.stage = Stage::Done;
+                is_mobile_heavy_subcommand(program, word)
+            }
+        }
+    }
+}
+
+/// Evaluates whether `(program, args)` invokes a heavy mobile build command,
+/// using the exact same [`MobileScan`] state machine as `aaf-engine`.
+pub fn is_mobile_heavy_command(program: &str, args: &[&str]) -> bool {
+    let mut scan = MobileScan::default();
+    scan.on_command(program);
+    args.iter().any(|arg| scan.on_arg(arg))
 }

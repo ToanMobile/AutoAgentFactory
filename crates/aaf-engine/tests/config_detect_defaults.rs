@@ -124,7 +124,10 @@ fn go_projects_include_gofmt_in_full_lint() {
     assert_eq!(d.commands.build, "go build ./...");
     assert_eq!(d.commands.test_scoped, "go test ./...");
     assert_eq!(d.commands.lint, "go vet ./...");
-    assert_eq!(d.commands.lint_full, "test -z \"$(gofmt -l .)\"");
+    assert_eq!(
+        d.commands.lint_full,
+        "out=$(gofmt -l .) && test -z \"$out\" || { printf '%s\\n' \"$out\" >&2; exit 1; }"
+    );
 }
 
 #[test]

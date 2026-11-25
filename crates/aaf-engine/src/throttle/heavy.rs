@@ -12,6 +12,8 @@
 
 use std::ffi::OsStr;
 
+use aaf_domain::heavy::MobileScan;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeavyTool {
     Gradle,
@@ -53,45 +55,6 @@ pub const HEAVY_FLAGS: &[(&str, HeavyTool)] = &[
     ("-batchmode", HeavyTool::Unity),
     ("-runTests", HeavyTool::Unity),
     ("-executeMethod", HeavyTool::Unity),
-];
-
-/// Common build/test tool families used ONLY to share learned peak-RSS
-/// measurements across custom `--label` runs in the same repository (e.g.
-/// `aaf slot --label fix-g6 -- cargo test ...` reusing `@cmd:cargo` instead of
-/// falling back to `Admission::Unmeasured` and triggering a machine-wide drain).
-/// Separate from [`HEAVY_PROGRAMS`] so daemon-exclusive policy and `aaf-hook`
-/// rules remain unchanged.
-const STATS_FAMILIES: &[(&str, &str)] = &[
-    ("cargo", "cargo"),
-    ("rustc", "cargo"),
-    ("gradle", "gradle"),
-    ("gradlew", "gradle"),
-    ("gradlew.bat", "gradle"),
-    ("xcodebuild", "xcodebuild"),
-    ("unity", "unity"),
-    ("unity.exe", "unity"),
-    ("unity-editor", "unity"),
-    ("mvn", "maven"),
-    ("mvnw", "maven"),
-    ("flutter", "flutter"),
-    ("dart", "flutter"),
-    ("npm", "node"),
-    ("npx", "node"),
-    ("pnpm", "node"),
-    ("yarn", "node"),
-    ("bun", "node"),
-    ("pytest", "python"),
-    ("uv", "python"),
-    ("go", "go"),
-    ("swift", "swift"),
-    ("bazel", "bazel"),
-    ("bazelisk", "bazel"),
-    ("make", "make"),
-    ("cmake", "make"),
-    ("ninja", "make"),
-    ("dotnet", "dotnet"),
-    ("sbt", "sbt"),
-    ("zig", "zig"),
 ];
 
 /// Words after which the real program is still to come. Their own options
@@ -370,13 +333,6 @@ fn lookup(table: &[(&str, HeavyTool)], word: &str) -> Option<HeavyTool> {
         .map(|(_, tool)| *tool)
 }
 
-fn lookup_family(word: &str) -> Option<&'static str> {
-    STATS_FAMILIES
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(word))
-        .map(|(_, family)| *family)
-}
-
 /// What one word did to the scan.
 enum Step<'a> {
     Heavy(HeavyTool),
@@ -406,7 +362,7 @@ struct Scanner {
     value_next: bool,
     after_aaf: bool,
     queued: bool,
-    mobile: subcommand::MobileScan,
+    mobile: MobileScan,
 }
 
 impl Scanner {
@@ -422,7 +378,7 @@ impl Scanner {
             value_next: false,
             after_aaf: false,
             queued: false,
-            mobile: subcommand::MobileScan::default(),
+            mobile: MobileScan::default(),
         }
     }
 
@@ -455,6 +411,11 @@ impl Scanner {
             return Step::Heavy(tool);
         }
         if word == "--" {
+            // If we already matched a mobile CLI (e.g. `flutter -- build apk`),
+            // keep waiting for its subcommand instead of starting a new command.
+            if !self.at_command && self.mobile.awaiting_subcommand() {
+                return Step::Next;
+            }
             // What follows is usually the program a wrapper runs.
             self.at_command = true;
             self.in_wrapper = true;
@@ -513,7 +474,7 @@ impl Scanner {
             return Step::Heavy(tool);
         }
         self.mobile.on_command(base);
-        if let Some(family) = lookup_family(base) {
+        if let Some(family) = family::lookup_family(base) {
             return Step::Family(family);
         }
         self.after_aaf = base == "aaf";
@@ -590,5 +551,4 @@ pub fn heavy_tool_argv<S: AsRef<OsStr>>(argv: &[S]) -> Option<HeavyTool> {
 }
 
 mod family;
-mod subcommand;
 pub use family::{stats_command_family, stats_command_family_argv};

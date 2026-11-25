@@ -12,7 +12,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use aaf_engine::throttle::{HeavyTool, heavy_tool, heavy_tool_argv};
+use aaf_domain::heavy::{GRADLE_PROGRAMS, UNITY_HEAVY_FLAGS, UNITY_PROGRAMS, XCODEBUILD_PROGRAMS};
+use aaf_engine::throttle::heavy::{HEAVY_FLAGS, HEAVY_PROGRAMS};
+use aaf_engine::throttle::{HeavyTool, heavy_tool, heavy_tool_argv, unqueued_heavy_tool};
 use serde_json::json;
 
 fn aaf_hook_bin() -> PathBuf {
@@ -59,18 +61,29 @@ fn mobile_heavy_subcommands_are_classified_and_guarded() {
     let heavy_cases = [
         "flutter build apk",
         "flutter --no-version-check build ios --release",
+        "flutter -- build apk",
         "expo run:ios",
         "expo run:android --variant release",
         "npx expo run:ios",
         "npx -y expo run:android",
+        "npx --package @expo/cli expo run:ios",
+        "npm exec expo run:ios",
+        "npm exec -- expo run:ios",
         "bunx expo run:ios",
+        "bun x react-native run-ios",
         "yarn expo run:ios",
+        "yarn --cwd apps/mobile expo run:ios",
         "pnpm exec expo run:android",
+        "pnpm -C apps/mobile exec expo run:android",
         "react-native run-ios",
         "npx react-native run-android",
         "pod install",
         "pod --verbose install",
         "bundle exec pod install",
+        "rbenv exec pod install",
+        "direnv exec . pod install",
+        "mise exec -- pod install",
+        "mise -C ios exec -- flutter build ipa",
     ];
     for cmd in heavy_cases {
         assert_eq!(
@@ -89,6 +102,26 @@ fn mobile_heavy_subcommands_are_classified_and_guarded() {
             "aaf-hook failed to deny mobile heavy command: {cmd}"
         );
     }
+    for quoted in [
+        "npx -c 'expo run:ios'",
+        "sh -c 'flutter build apk'",
+        "cd ios && pod install",
+    ] {
+        assert_eq!(
+            heavy_tool(quoted),
+            Some(HeavyTool::Mobile),
+            "engine missed shell-quoted mobile heavy command: {quoted}"
+        );
+        assert!(
+            hook_denies_heavy(quoted),
+            "aaf-hook failed to deny shell-quoted mobile heavy command: {quoted}"
+        );
+    }
+    assert_eq!(unqueued_heavy_tool("aaf slot -- flutter build apk"), None);
+    assert_eq!(
+        heavy_tool("aaf slot -- flutter build apk"),
+        Some(HeavyTool::Mobile)
+    );
 }
 
 #[test]
@@ -100,6 +133,8 @@ fn mobile_light_commands_are_not_misclassified() {
         "flutter --version",
         "expo start",
         "npx expo doctor",
+        "npm run build",
+        "yarn run build",
         "react-native info",
         "pod --version",
         "pod env",
@@ -115,6 +150,30 @@ fn mobile_light_commands_are_not_misclassified() {
         assert!(
             !hook_denies_heavy(cmd),
             "aaf-hook false-positive on light command: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn engine_tables_contain_all_shared_domain_heavy_entries() {
+    for &prog in GRADLE_PROGRAMS
+        .iter()
+        .chain(XCODEBUILD_PROGRAMS)
+        .chain(UNITY_PROGRAMS)
+    {
+        assert!(
+            HEAVY_PROGRAMS
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(prog)),
+            "engine HEAVY_PROGRAMS missing shared domain entry: {prog}"
+        );
+    }
+    for &flag in UNITY_HEAVY_FLAGS {
+        assert!(
+            HEAVY_FLAGS
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(flag)),
+            "engine HEAVY_FLAGS missing shared domain entry: {flag}"
         );
     }
 }

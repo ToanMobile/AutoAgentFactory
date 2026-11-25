@@ -43,29 +43,30 @@ fn binary_switches_claude_account_when_first_account_hits_rate_limit() {
     let bin_dir = fx.root().join("fake-bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let calls_log = fx.root().join("claude-calls.log");
+    let first_acct = fx.root().join("first-account.txt");
+    // Whichever account `aaf` picks first (hashed from tempdir path) always
+    // returns `rate_limit_event` (`status: "rejected"`), so the test is 100%
+    // deterministic regardless of tempdir hash ordering.
     let fake_claude = format!(
         r#"#!/bin/sh
 set -eu
 cfg="${{CLAUDE_CONFIG_DIR:-none}}"
 printf '%s\n' "$cfg" >> {log}
-case "$cfg" in
-  */.claude-a)
-    printf '%s\n' '{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":4102444800}}}}'
-    printf '%s\n' '{{"type":"result","result":"rate limit reached","is_error":true}}'
-    exit 1
-    ;;
-  */.claude-b)
-    printf 'switched\n' > switched.txt
-    printf '%s\n' '{{"type":"result","result":"done","is_error":false,"usage":{{"input_tokens":12,"output_tokens":6}}}}'
-    exit 0
-    ;;
-  *)
-    printf '%s\n' '{{"type":"result","result":"unexpected account","is_error":true}}'
-    exit 2
-    ;;
-esac
+if [ ! -f {first} ]; then
+  printf '%s' "$cfg" > {first}
+fi
+first_cfg=$(cat {first})
+if [ "$cfg" = "$first_cfg" ]; then
+  printf '%s\n' '{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":4102444800}}}}'
+  printf '%s\n' '{{"type":"result","result":"rate limit reached","is_error":true}}'
+  exit 1
+fi
+printf 'switched\n' > switched.txt
+printf '%s\n' '{{"type":"result","result":"done","is_error":false,"usage":{{"input_tokens":12,"output_tokens":6}}}}'
+exit 0
 "#,
-        log = calls_log.display()
+        log = calls_log.display(),
+        first = first_acct.display()
     );
     write_executable(&bin_dir.join("claude"), &fake_claude);
     write_executable(&bin_dir.join("aaf-hook"), "#!/bin/sh\nexit 0\n");

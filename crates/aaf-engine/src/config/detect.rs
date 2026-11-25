@@ -253,7 +253,9 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
             "go test ./...",
             "go vet ./...",
         );
-        cmds.lint_full = "test -z \"$(gofmt -l .)\"".to_string();
+        cmds.lint_full =
+            "out=$(gofmt -l .) && test -z \"$out\" || { printf '%s\\n' \"$out\" >&2; exit 1; }"
+                .to_string();
         return found("backend", cmds, vec!["go.mod".to_string()]);
     }
     if is_file("pyproject.toml") {
