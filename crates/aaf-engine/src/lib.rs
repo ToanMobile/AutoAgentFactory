@@ -2,6 +2,7 @@
 //! (see docs/PLAN.md section D).
 
 pub mod accounts;
+pub mod clock;
 pub mod config;
 pub mod cross_audit;
 pub mod db;

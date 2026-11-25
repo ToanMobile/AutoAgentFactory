@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use aaf_domain::account::{AccountProfile, AccountState, ProviderKind};
 use aaf_domain::config::{MachineConfig, RepoConfig};
@@ -19,18 +19,7 @@ use crate::throttle::{Progress, SystemProbe, Throttle};
 use crate::unblocker::{RerunResult, is_pure_test_failure};
 use crate::webhook::{self, WebhookEvent, WebhookOptions};
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> i64 {
-        // A clock before 1970 is a broken machine; 0 keeps time monotone
-        // enough for the stores instead of panicking.
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-    }
-}
+pub use crate::clock::SystemClock;
 
 /// The scoped gate of the repository's configuration, run on whichever
 /// worktree the factory points it at.

@@ -15,8 +15,8 @@ use aaf_domain::task::TaskState;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::clock::SystemClock;
 use crate::db::Db;
-use crate::factory::adapters::SystemClock;
 
 mod autonomy;
 mod report;
