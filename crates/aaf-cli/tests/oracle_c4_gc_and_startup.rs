@@ -10,7 +10,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use aaf_domain::ports::TaskStore;
+use aaf_domain::event::{EventKind, FactoryEvent};
+use aaf_domain::ports::{EventSink, TaskStore};
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 use aaf_engine::db::Db;
 use aaf_engine::executors::DEFAULT_WORKTREES_REL;
@@ -312,9 +313,10 @@ fn c4_startup_sweep_under_run_lock_cleans_done_squash_task_without_deadlock() {
     fs::create_dir_all(&sb.data).unwrap();
     let db = Db::open(&sb.data.join("aaf.db")).unwrap();
     insert_task(&db, &sb.repo, "t-done-squash", TaskState::Done);
-    drop(db);
+    insert_task(&db, &sb.repo, "t-done-extra", TaskState::Done);
 
-    // Create Done task worktree with a commit NOT an ancestor of main (squash-merged).
+    // Create Done task worktree with a commit NOT an ancestor of main (squash-merged),
+    // with `MergeResult.head_sha` matching its current tip.
     let wt_done = worktree::create(&sb.repo, &worktrees_dir, "t-done-squash", "main").unwrap();
     fs::write(wt_done.path.join("feature.txt"), "squash feature\n").unwrap();
     git_out(&wt_done.path, &sb.home, &["add", "-A"]);
@@ -324,6 +326,15 @@ fn c4_startup_sweep_under_run_lock_cleans_done_squash_task_without_deadlock() {
         &["commit", "-q", "-m", "task commit"],
     );
     let task_head = git_out(&wt_done.path, &sb.home, &["rev-parse", "HEAD"]);
+    db.emit(
+        &FactoryEvent::new(
+            EventKind::MergeResult,
+            json!({ "merged": true, "kind": "squash_pr", "head_sha": task_head }).to_string(),
+            1_700_000_001,
+        )
+        .for_task("t-done-squash"),
+    )
+    .unwrap();
     git_out(
         &sb.repo,
         &sb.home,
@@ -333,6 +344,27 @@ fn c4_startup_sweep_under_run_lock_cleans_done_squash_task_without_deadlock() {
             &task_head,
         ],
     );
+
+    // Second Done task: squash-merged at H1, then user added an extra unmerged commit H2.
+    let wt_extra = worktree::create(&sb.repo, &worktrees_dir, "t-done-extra", "main").unwrap();
+    fs::write(wt_extra.path.join("h1.txt"), "h1\n").unwrap();
+    git_out(&wt_extra.path, &sb.home, &["add", "-A"]);
+    git_out(&wt_extra.path, &sb.home, &["commit", "-q", "-m", "h1"]);
+    let h1 = git_out(&wt_extra.path, &sb.home, &["rev-parse", "HEAD"]);
+    db.emit(
+        &FactoryEvent::new(
+            EventKind::MergeResult,
+            json!({ "merged": true, "kind": "squash_pr", "head_sha": h1 }).to_string(),
+            1_700_000_002,
+        )
+        .for_task("t-done-extra"),
+    )
+    .unwrap();
+    drop(db);
+    fs::write(wt_extra.path.join("h2.txt"), "extra unmerged work\n").unwrap();
+    git_out(&wt_extra.path, &sb.home, &["add", "-A"]);
+    git_out(&wt_extra.path, &sb.home, &["commit", "-q", "-m", "h2"]);
+    let h2 = git_out(&wt_extra.path, &sb.home, &["rev-parse", "HEAD"]);
 
     // Simulate squash-merge on main with a distinct commit SHA.
     fs::write(sb.repo.join("feature.txt"), "squash feature\n").unwrap();
@@ -367,6 +399,19 @@ fn c4_startup_sweep_under_run_lock_cleans_done_squash_task_without_deadlock() {
     assert!(
         !has_ref(&sb.repo, &sb.home, "refs/aaf/snapshots/t-done-squash/s1"),
         "startup_sweep must remove Done task snapshot refs"
+    );
+    assert!(
+        wt_extra.path.is_dir() && has_branch(&sb.repo, &sb.home, "aaf/t-done-extra"),
+        "startup_sweep must keep Done task with extra unmerged commit beyond MergeResult.head_sha"
+    );
+    assert_eq!(
+        git_out(
+            &sb.repo,
+            &sb.home,
+            &["rev-parse", "refs/heads/aaf/t-done-extra"]
+        ),
+        h2,
+        "extra unmerged commit H2 must be preserved"
     );
     assert!(
         !wt_dead_batch.path.exists()

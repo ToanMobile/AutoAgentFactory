@@ -89,10 +89,17 @@ pub(super) fn startup_sweep(deps: &Deps) -> Vec<String> {
         }
     };
     let active_ids: HashSet<String> = tasks.iter().map(|task| task.id.clone()).collect();
-    let done_ids: Vec<String> = tasks
+    let done_tasks: Vec<(String, Option<String>)> = tasks
         .iter()
         .filter(|task| task.state == TaskState::Done)
-        .map(|task| task.id.clone())
+        .map(|task| {
+            let expected_head = deps
+                .store
+                .events_for_task_by_kinds(&task.id, &[EventKind::MergeResult], 10)
+                .ok()
+                .and_then(|events| crate::gc::verified_merged_head_from_events(&events));
+            (task.id.clone(), expected_head)
+        })
         .collect();
     match deps.git.sweep_orphan_batches(&active_ids) {
         Ok(refused) => {
@@ -104,7 +111,10 @@ pub(super) fn startup_sweep(deps: &Deps) -> Vec<String> {
         }
         Err(err) => warnings.push(format!("startup_sweep orphan batches: {err}")),
     }
-    match deps.git.sweep_offline_done(&done_ids, &active_ids, None) {
+    match deps
+        .git
+        .sweep_offline_done_with_heads(&done_tasks, &active_ids, None)
+    {
         Ok(offline_warnings) => {
             for w in offline_warnings {
                 if seen_raw.insert(w.clone()) {
