@@ -89,32 +89,32 @@ Keep both `aaf` and `aaf-hook` on your `PATH`. Details: [Quickstart](docs/QUICKS
 > (for example `claude`) logged in. `gh` is optional, for pull requests.
 > On Linux, agents run without a sandbox for now (`aaf run --unsandboxed`).
 
-## 🖥️ Cockpit and 📊 Studio
+## 🖥️ Cockpit: your Kanban board
 
 ```sh
-aaf ui --open        # opens the Cockpit; it also prints the Studio link
+aaf ui --open        # opens the Cockpit on the Kanban board
 ```
 
-`aaf ui` serves two screens on `http://127.0.0.1:4317`:
+![aaf Cockpit Kanban board](docs/images/cockpit-kanban.png)
 
-| Screen | For | What is on it |
-|---|---|---|
-| **Cockpit** `/` | Working | Board, **Need You** list, approvals, live agent logs, machine and accounts |
-| **Studio** `/studio` | Watching | Statistics only: KPIs, time per stage, cost per agent, why tasks block, health checks |
+`aaf ui` opens on a **Kanban board**: Ready → Running → Review → Blocked → Done.
+Click a card for its runs, events and handover; switch to **List** any time.
+The **Need You** tab, approvals, live agent logs and accounts are one click away.
 
-Each has a button to the other. Studio's **Needs you** counter opens the Cockpit's Need You list.
-
-![aaf Studio statistics screen](docs/images/studio.png)
+**📊 Studio** (`/studio`, the *Studio* button) is the optional statistics screen:
+KPIs, time per stage, cost per agent, why tasks block and health checks.
+The same report is in the terminal with `aaf report --since 24`.
 
 <details>
-<summary>Studio in dark mode</summary>
+<summary>Studio screenshots</summary>
+
+![aaf Studio statistics screen](docs/images/studio.png)
 
 ![Studio in dark mode](docs/images/studio-dark.png)
 
 </details>
 
-<sub>Screenshots use demo data.</sub> Studio refreshes every 15 seconds and works on your
-phone. The same report is in the terminal with `aaf report --since 24`.
+<sub>Screenshots use demo data.</sub>
 
 ## 🧰 Everyday commands
 

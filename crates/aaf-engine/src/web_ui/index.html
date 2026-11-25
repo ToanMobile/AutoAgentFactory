@@ -76,6 +76,20 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 .chip{padding:4px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);background:var(--surface)}
 .chip.active{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .task-list{display:flex;flex-direction:column;gap:8px}
+.viewseg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.viewseg button{border:0;border-radius:0;padding:6px 12px}
+.viewseg button.on{background:var(--ink);color:var(--bg)}
+.kanban{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(220px,1fr);gap:10px;overflow-x:auto;padding-bottom:6px;align-items:start}
+.kcol{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:10px;min-height:120px;display:flex;flex-direction:column;gap:8px}
+.kcol-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;font-size:13px;padding:2px 4px 4px}
+.kcol-head .count{background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:0 8px;font-size:12px;font-weight:600}
+.kcard{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 11px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:border-color .12s,transform .08s}
+.kcard:hover{border-color:var(--accent);transform:translateY(-1px)}
+.kcard.need{border-left:3px solid var(--err)}
+.kcard-title{font-weight:600;font-size:14px;line-height:1.35;margin:4px 0;overflow-wrap:anywhere}
+.kcard-meta{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:12px;color:var(--muted)}
+.kcard-why{margin-top:6px;font-size:12.5px;color:var(--err);background:var(--err-bg);border-radius:7px;padding:5px 8px;overflow-wrap:anywhere}
+.kempty{color:var(--muted);font-size:12.5px;text-align:center;padding:14px 4px}
 .task-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:border-color .12s,transform .08s}
 .task-row:hover{border-color:var(--accent);transform:translateY(-1px)}
 .task-main{min-width:0;flex:1}
@@ -157,6 +171,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <option value="P2">P2</option><option value="P3">P3</option>
       </select>
       <input id="searchBox" type="search" placeholder="Filter tasks by ID or title…" style="flex:1;min-width:180px">
+      <div class="viewseg" id="viewSeg" role="group" aria-label="Board layout"><button data-view="kanban">Kanban</button><button data-view="list">List</button></div>
     </div>
     <div id="boardList" class="task-list"></div>
   </section>
@@ -250,6 +265,15 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let statusData = null;
   let boardTasks = [];
   let activeTab = "board";
+  const VIEW_KEY = "aaf_ui_board_view";
+  let boardView = (() => { try { return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "kanban"; } catch (_) { return "kanban"; } })();
+  const KANBAN_COLS = [
+    ["ready", "Ready", ["backlog", "ready"]],
+    ["running", "Running", ["running", "gating"]],
+    ["review", "Review", ["review"]],
+    ["blocked", "Blocked", ["blocked"]],
+    ["done", "Done", ["done", "cancelled"]],
+  ];
   let stateFilter = "all";
   let selectedReviewId = null;
   let activeRunId = "";
@@ -472,8 +496,33 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const reviewCount = boardTasks.filter((t) => t.state === "review" || t.state === "blocked").length;
     $("cntReview").textContent = String(reviewCount);
     syncBoardTabHighlight();
-    if (!list.length) {
+    if (!list.length && boardView === "list") {
+      $("boardList").className = "task-list";
       $("boardList").innerHTML = `<div class="empty">No tasks match the current filters.</div>`;
+      return;
+    }
+    document.querySelectorAll("#viewSeg button").forEach((b) => b.classList.toggle("on", b.dataset.view === boardView));
+    $("boardList").className = boardView === "kanban" ? "kanban" : "task-list";
+    if (boardView === "kanban") {
+      $("boardList").innerHTML = KANBAN_COLS.map(([key, label, states]) => {
+        const col = list.filter((t) => states.includes(t.state))
+          .sort((a, b) => String(a.priority).localeCompare(String(b.priority)) || (b.updated_at || 0) - (a.updated_at || 0));
+        if (stateFilter !== "all" && stateFilter !== "need_you" && !states.includes(stateFilter)) return "";
+        const cards = col.slice(0, 100).map((t) => {
+          const ny = isNeedYouTask(t);
+          const why = t.state === "blocked" && (t.blocked_detail || t.blocked_reason) ? `<div class="kcard-why">${esc(t.blocked_detail || t.blocked_reason)}</div>` : "";
+          return `<div class="kcard ${ny ? "need" : ""}" data-id="${esc(t.id)}" tabindex="0">
+            <div class="kcard-meta"><span class="pill pill-${esc(String(t.priority || "").toLowerCase())}">${esc(t.priority || "")}</span>${t.state !== key && t.state !== "review" && t.state !== "blocked" ? `<span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>` : ""}${ny ? `<span class="pill pill-blocked">Need You</span>` : ""}${t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : ""}</div>
+            <div class="kcard-title">${esc(t.title)}</div>
+            <div class="kcard-meta"><span class="mono">${esc(t.id)}</span>${(t.acceptance || []).length ? `<span>· ${t.acceptance.length} criteria</span>` : ""}</div>${why}
+          </div>`;
+        }).join("");
+        return `<div class="kcol"><div class="kcol-head"><span>${esc(label)}</span><span class="count">${col.length}</span></div>${cards || `<div class="kempty">No task</div>`}</div>`;
+      }).join("");
+      $("boardList").querySelectorAll(".kcard").forEach((el) => {
+        el.onclick = () => openTaskDrawer(el.dataset.id);
+        el.onkeydown = (e) => { if (e.key === "Enter") openTaskDrawer(el.dataset.id); };
+      });
       return;
     }
     $("boardList").innerHTML = list.map((t) => {
@@ -801,6 +850,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("needYouTabBtn").onclick = () => { stateFilter = "need_you"; switchTab("board"); renderChips(); renderBoard(); };
     if (new URLSearchParams(location.search).get("view") === "needyou") { stateFilter = "need_you"; renderChips(); }
     $("prioFilter").onchange = renderBoard;
+    document.querySelectorAll("#viewSeg button").forEach((b) => { b.onclick = () => { boardView = b.dataset.view; try { localStorage.setItem(VIEW_KEY, boardView); } catch (_) {} renderBoard(); }; });
     $("searchBox").oninput = renderBoard;
     $("refreshBtn").onclick = () => refreshAll().then(() => toast("Refreshed")).catch((e) => toast(e.message));
     $("lockBtn").onclick = () => { sessionStorage.removeItem(TOKEN_KEY); token = ""; openAuth("Session locked."); };
