@@ -6,123 +6,201 @@
 <title>AAF Cockpit</title>
 <style>
 :root{
-  --bg:#FAF8F5;--surface:#FFFFFF;--surface2:#F3EFE8;--ink:#1F1D1A;--muted:#6E685F;
-  --border:#E6E1D9;--accent:#B45309;--accent-soft:#FEF3C7;--ok:#0F766E;--ok-bg:#ECFDF5;
-  --warn:#B45309;--warn-bg:#FEF3C7;--err:#B91C1C;--err-bg:#FEE2E2;--info:#3730A3;--info-bg:#EEF2FF;
-  --slate:#475569;--slate-bg:#F1F5F9;--shadow:0 1px 2px rgba(31,29,26,.06),0 8px 24px rgba(31,29,26,.06);
-  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
-  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --bg:#F4F6F9;--surface:#FFFFFF;--surface2:#EBF0F6;--ink:#0F172A;--ink2:#334155;--muted:#5B6B82;
+  --border:#DCE3EE;--border-strong:#C5D0E0;--accent:#2563EB;--accent-soft:rgba(37,99,235,.10);--accent-b:rgba(37,99,235,.32);
+  --ok:#059669;--ok-bg:#ECFDF5;--warn:#D97706;--warn-bg:#FFFBEB;--err:#DC2626;--err-bg:#FEF2F2;
+  --info:#2563EB;--info-bg:#EFF6FF;--rev:#7C3AED;--rev-bg:#F5F3FF;--slate:#475569;--slate-bg:#F1F5F9;
+  --shadow:0 1px 2px rgba(15,23,42,.05),0 6px 20px rgba(15,23,42,.05);
+  --shadow-card:0 1px 2px rgba(15,23,42,.04),0 2px 6px rgba(15,23,42,.03);
+  --mono:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  --sans:"SF Pro Text",-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --display:"SF Pro Display",-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
 }
 [data-theme="dark"]{
-  --bg:#151412;--surface:#1F1D1A;--surface2:#292622;--ink:#F4F1EA;--muted:#A49D92;
-  --border:#35312B;--accent:#F59E0B;--accent-soft:#3B2C12;--ok:#2DD4BF;--ok-bg:#102D2A;
-  --warn:#FBBF24;--warn-bg:#382811;--err:#F87171;--err-bg:#3A1818;--info:#A5B4FC;--info-bg:#1E2042;
-  --slate:#CBD5E1;--slate-bg:#272C33;--shadow:0 1px 2px rgba(0,0,0,.35),0 10px 28px rgba(0,0,0,.45);
+  --bg:#0B0E14;--surface:#121721;--surface2:#0E131C;--ink:#F1F5F9;--ink2:#CBD5E1;--muted:#8B9BB4;
+  --border:#222B3A;--border-strong:#313E54;--accent:#3B82F6;--accent-soft:rgba(59,130,246,.16);--accent-b:rgba(96,165,250,.40);
+  --ok:#34D399;--ok-bg:rgba(16,185,129,.14);--warn:#FBBF24;--warn-bg:rgba(245,158,11,.14);--err:#F87171;--err-bg:rgba(239,68,68,.15);
+  --info:#60A5FA;--info-bg:rgba(59,130,246,.15);--rev:#A78BFA;--rev-bg:rgba(139,92,246,.16);--slate:#94A3B8;--slate-bg:rgba(148,163,184,.12);
+  --shadow:0 2px 8px rgba(0,0,0,.4),0 12px 32px rgba(0,0,0,.45);
+  --shadow-card:0 1px 3px rgba(0,0,0,.35);
 }
 *{box-sizing:border-box}
-html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13.5px;line-height:1.45;-webkit-font-smoothing:antialiased;font-feature-settings:"cv02","cv03","cv04","cv11"}
 button,input,select,textarea{font:inherit;color:inherit}
-button{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:7px 12px;transition:background .12s,border-color .12s,opacity .12s}
-button:hover:not(:disabled){background:var(--surface2)}
-button:disabled{opacity:.48;cursor:not-allowed}
-.btn-primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
-.btn-primary:hover:not(:disabled){opacity:.9;background:var(--ink)}
+button{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:6px 11px;font-weight:500;transition:background .12s,border-color .12s,box-shadow .12s,opacity .12s}
+button:hover:not(:disabled){background:var(--surface2);border-color:var(--border-strong)}
+button:disabled{opacity:.42;cursor:not-allowed}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex="0"]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-primary:hover:not(:disabled){filter:brightness(1.06);background:var(--accent);border-color:var(--accent)}
 .btn-ok{background:var(--ok);color:#fff;border-color:var(--ok)}
-.btn-ok:hover:not(:disabled){opacity:.9;background:var(--ok)}
+.btn-ok:hover:not(:disabled){filter:brightness(1.06);background:var(--ok);border-color:var(--ok)}
 .btn-danger{background:var(--err);color:#fff;border-color:var(--err)}
-.btn-danger:hover:not(:disabled){opacity:.9;background:var(--err)}
-.btn-sm{padding:4px 9px;font-size:12px;border-radius:6px}
-input,select,textarea{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 10px;outline:none}
-input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+.btn-danger:hover:not(:disabled){filter:brightness(1.06);background:var(--err);border-color:var(--err)}
+.btn-ghost{background:transparent;border-color:transparent;color:var(--muted)}
+.btn-ghost:hover:not(:disabled){background:var(--surface2);color:var(--ink)}
+.btn-sm{padding:4px 9px;font-size:12px;border-radius:7px}
+.btn-link{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);background:var(--surface);color:var(--ink);text-decoration:none;border-radius:7px;padding:4px 10px;font-size:12px;font-weight:500;transition:background .12s,border-color .12s}
+.btn-link:hover{background:var(--surface2);border-color:var(--border-strong)}
+input,select,textarea{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .mono{font-family:var(--mono);font-size:12px}
 .muted{color:var(--muted)}
-.app{max-width:1220px;margin:0 auto;padding:0 14px 76px}
-.topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);padding:10px 0;margin-bottom:14px}
-.topbar-inner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.app{max-width:1540px;margin:0 auto;padding:0 18px 72px}
+.topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:10px 0;margin-bottom:14px}
+.topbar-inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:10px;min-width:0}
-.logo{width:28px;height:28px;border-radius:8px;background:var(--ink);color:var(--bg);display:grid;place-items:center;font-weight:700;font-size:13px;letter-spacing:.03em;flex:none}
-.brand-title{font-weight:700;font-size:15px;letter-spacing:-.01em}
-.brand-sub{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
-.top-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sse-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);font-size:12px}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--accent),#4F46E5);color:#fff;display:grid;place-items:center;font-family:var(--display);font-weight:800;font-size:12px;letter-spacing:.04em;flex:none;box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 35%,transparent)}
+.brand-title{font-family:var(--display);font-weight:700;font-size:15.5px;letter-spacing:-.02em;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.brand-sub{font-size:11.5px;color:var(--muted);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.top-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.sse-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);font-size:12px;font-weight:500}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
 .dot.live{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)}
 .dot.warn{background:var(--warn)}
 .dot.err{background:var(--err)}
-.pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid transparent;white-space:nowrap}
+.sup-btn{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--border);background:var(--surface)}
+.sup-btn.on{border-color:color-mix(in srgb,var(--ok) 45%,transparent);background:var(--ok-bg);color:var(--ok)}
+.sup-btn.on .dot{background:var(--ok);animation:pulse 1.8s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 45%,transparent)}50%{box-shadow:0 0 0 4px transparent}}
+@media(prefers-reduced-motion:reduce){.sup-btn.on .dot{animation:none}}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid transparent;white-space:nowrap;font-variant-numeric:tabular-nums}
 .pill-ready{color:var(--info);background:var(--info-bg)}
 .pill-running,.pill-gating{color:var(--warn);background:var(--warn-bg)}
-.pill-review{color:var(--accent);background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 28%,transparent)}
+.pill-review{color:var(--rev);background:var(--rev-bg);border-color:color-mix(in srgb,var(--rev) 28%,transparent)}
 .pill-blocked,.pill-err{color:var(--err);background:var(--err-bg)}
 .pill-done,.pill-ok{color:var(--ok);background:var(--ok-bg)}
 .pill-backlog,.pill-cancelled,.pill-slate{color:var(--slate);background:var(--slate-bg)}
-.pill-p0{color:var(--err);background:var(--err-bg)}
+.pill-p0{color:var(--err);background:var(--err-bg);border-color:color-mix(in srgb,var(--err) 30%,transparent)}
 .pill-p1{color:var(--warn);background:var(--warn-bg)}
 .pill-p2{color:var(--info);background:var(--info-bg)}
 .pill-p3{color:var(--slate);background:var(--slate-bg)}
-.tabs{display:flex;gap:6px;margin-bottom:14px;overflow-x:auto;padding-bottom:2px}
-.tab{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface);font-weight:600;font-size:13px;white-space:nowrap}
-.tab.active{background:var(--ink);color:var(--bg);border-color:var(--ink)}
-.tab .count{padding:1px 6px;border-radius:999px;font-size:11px;background:color-mix(in srgb,currentColor 14%,transparent)}
-.banner{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border-radius:10px;border:1px solid color-mix(in srgb,var(--err) 35%,var(--border));background:var(--err-bg);color:var(--err);margin-bottom:14px;flex-wrap:wrap}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;box-shadow:var(--shadow)}
+.tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.tab{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:9px;border:1px solid var(--border);background:var(--surface);font-weight:600;font-size:13px;white-space:nowrap}
+.tab.active,.tab.active:hover,.tab.active:focus-visible{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.tab .count{padding:1px 6px;border-radius:999px;font-size:11px;font-variant-numeric:tabular-nums;background:color-mix(in srgb,currentColor 14%,transparent)}
+.tab.need-you-tab{border-color:color-mix(in srgb,var(--err) 38%,var(--border));color:var(--err)}
+.tab.need-you-tab.active,.tab.need-you-tab.active:hover,.tab.need-you-tab.active:focus-visible{background:var(--err);color:#fff;border-color:var(--err)}
+.banner{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border-radius:10px;border:1px solid color-mix(in srgb,var(--err) 35%,var(--border));background:var(--err-bg);color:var(--err);margin-bottom:12px;flex-wrap:wrap}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
 .grid-4{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:14px}
-.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));gap:12px;align-items:start}
 .stat-label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
-.stat-val{font-size:22px;font-weight:700;letter-spacing:-.02em;margin-top:4px}
-.stat-sub{font-size:12px;color:var(--muted);margin-top:2px}
-.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.stat-val{font-family:var(--display);font-size:24px;font-weight:700;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
+.stat-sub{font-size:12px;color:var(--muted);margin-top:2px;font-variant-numeric:tabular-nums}
+.repo-bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px;padding:7px 10px;border-radius:10px;border:1px solid var(--border);background:var(--surface)}
+.repo-bar-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-right:2px}
+.filters{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .chips{display:flex;gap:5px;flex-wrap:wrap}
-.chip{padding:4px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);background:var(--surface)}
-.chip.active{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);background:var(--surface)}
+.chip .c{font-size:11px;opacity:.75;font-variant-numeric:tabular-nums}
+.chip.active,.chip.active:hover{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.chip.repo-on,.chip.repo-on:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent-b);font-weight:600}
+.filter-meta{font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
 .task-list{display:flex;flex-direction:column;gap:8px}
-.viewseg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.viewseg button{border:0;border-radius:0;padding:6px 12px}
-.viewseg button.on{background:var(--ink);color:var(--bg)}
-.kanban{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(220px,1fr);gap:10px;overflow-x:auto;padding-bottom:6px;align-items:start}
-.kcol{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:10px;min-height:120px;display:flex;flex-direction:column;gap:8px}
-.kcol-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;font-size:13px;padding:2px 4px 4px}
-.kcol-head .count{background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:0 8px;font-size:12px;font-weight:600}
-.kcard{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 11px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.04);transition:border-color .12s,transform .08s}
-.kcard:hover{border-color:var(--accent);transform:translateY(-1px)}
+.viewseg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface)}
+.viewseg button{border:0;border-radius:0;padding:5px 11px;font-size:12.5px}
+.viewseg button.on,.viewseg button.on:hover{background:var(--ink);color:var(--bg)}
+.kanban{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(230px,1fr);gap:10px;overflow-x:auto;padding-bottom:6px;align-items:start}
+.kcol{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:10px;min-height:140px;max-height:calc(100vh - 240px);overflow-y:auto;display:flex;flex-direction:column;gap:8px;border-top:3px solid var(--slate)}
+.kcol[data-col="ready"]{border-top-color:var(--info)}
+.kcol[data-col="running"]{border-top-color:var(--warn)}
+.kcol[data-col="review"]{border-top-color:var(--rev)}
+.kcol[data-col="blocked"]{border-top-color:var(--err)}
+.kcol[data-col="done"]{border-top-color:var(--ok)}
+.kcol-head{position:sticky;top:-10px;z-index:2;background:var(--surface2);margin:-10px -10px 0;padding:10px 11px 7px;display:flex;flex-direction:column;gap:6px;font-family:var(--display);font-weight:700;font-size:13px;border-bottom:1px solid color-mix(in srgb,var(--border) 65%,transparent)}
+.kcol-head-row{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.kcol-acts{display:flex;gap:5px;flex-wrap:wrap;align-items:center;font-family:var(--sans);font-weight:500}
+.kcol-acts button{padding:3px 8px;font-size:11.5px;border-radius:6px}
+.kcol-head .count{background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:0 8px;font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.kcard{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 11px;cursor:pointer;box-shadow:var(--shadow-card);transition:border-color .12s,transform .08s,box-shadow .12s}
+.kcard:hover{border-color:var(--accent-b);transform:translateY(-1px);box-shadow:var(--shadow)}
 .kcard.need{border-left:3px solid var(--err)}
-.kcard-title{font-weight:600;font-size:14px;line-height:1.35;margin:4px 0;overflow-wrap:anywhere}
-.kcard-meta{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:12px;color:var(--muted)}
-.kcard-why{margin-top:6px;font-size:12.5px;color:var(--err);background:var(--err-bg);border-radius:7px;padding:5px 8px;overflow-wrap:anywhere}
-.kempty{color:var(--muted);font-size:12.5px;text-align:center;padding:14px 4px}
-.task-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:border-color .12s,transform .08s}
-.task-row:hover{border-color:var(--accent);transform:translateY(-1px)}
+.kcard.checked{border-color:var(--accent);background:color-mix(in srgb,var(--accent-soft) 50%,var(--surface))}
+.kchk{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;margin:0;flex:none}
+.kcard-title{font-weight:600;font-size:13.5px;line-height:1.35;margin:5px 0;overflow-wrap:anywhere;color:var(--ink)}
+.kcard-meta{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.kcard-why{margin-top:6px;font-size:12px;color:var(--err);background:var(--err-bg);border-radius:7px;padding:5px 8px;overflow-wrap:anywhere}
+.kcard-acts{display:flex;justify-content:flex-end;gap:6px;margin-top:7px;padding-top:6px;border-top:1px solid color-mix(in srgb,var(--border) 60%,transparent)}
+.kcard-acts button{padding:3px 8px;font-size:11.5px;border-radius:6px}
+.kempty{color:var(--muted);font-size:12px;text-align:center;padding:16px 4px}
+.kmore{color:var(--muted);font-size:12px;text-align:center;padding:8px 6px;border-top:1px dashed var(--border)}
+.task-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:11px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;box-shadow:var(--shadow-card);transition:border-color .12s,transform .08s}
+.task-row:hover{border-color:var(--accent-b);transform:translateY(-1px)}
 .task-main{min-width:0;flex:1}
 .task-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px}
 .task-title{font-weight:600;font-size:14px;word-break:break-word}
-.task-desc{font-size:12.5px;color:var(--muted);margin-top:5px;white-space:pre-line;word-break:break-word;line-height:1.45}
-.task-meta{font-size:12px;color:var(--muted);margin-top:4px;display:flex;gap:10px;flex-wrap:wrap}
-.tab.need-you-tab{border-color:color-mix(in srgb,var(--err) 40%,var(--border));color:var(--err)}
-.tab.need-you-tab.active{background:var(--err);color:#fff;border-color:var(--err)}
-.review-grid{display:grid;grid-template-columns:minmax(260px,360px) minmax(0,1fr);gap:12px;align-items:start}
+.task-desc{font-size:12.5px;color:var(--muted);margin-top:5px;white-space:pre-line;word-break:break-word;line-height:1.45;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.task-meta{font-size:12px;color:var(--muted);margin-top:4px;display:flex;gap:10px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.review-grid{display:grid;grid-template-columns:minmax(260px,380px) minmax(0,1fr);gap:12px;align-items:start}
+@media(min-width:861px){#reviewDetail{position:sticky;top:74px;max-height:calc(100vh - 96px);overflow-y:auto}}
 @media(max-width:860px){.review-grid{grid-template-columns:1fr}}
-.review-item{padding:11px 12px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;margin-bottom:8px}
-.review-item.selected{border-color:var(--accent);background:var(--surface2)}
-.score-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px;margin:10px 0}
+@media(max-width:760px){
+  .kanban{grid-auto-flow:row;grid-template-columns:1fr;overflow-x:visible}
+  .kcol{max-height:none;overflow-y:visible}
+  .kcol-head{position:static;margin:0;padding:2px 4px 6px;border-bottom:0}
+  .tab{padding:6px 10px;font-size:12.5px}
+}
+.review-item{padding:11px 12px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;margin-bottom:8px;transition:border-color .12s}
+.review-item:hover{border-color:var(--accent-b)}
+.review-item.selected{border-color:var(--accent);background:var(--accent-soft)}
+.score-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:10px 0}
 .score-box{padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)}
 .kv-section{margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}
-.kv-title{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700;margin-bottom:5px}
-.action-bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
-.stream-box{background:#151412;color:#EFECE6;border:1px solid var(--border);border-radius:10px;padding:10px;height:460px;overflow:auto;font-family:var(--mono);font-size:12px}
+.kv-title{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700;margin-bottom:6px}
+.blocked-callout{padding:9px 11px;border-radius:9px;border:1px solid color-mix(in srgb,var(--err) 35%,var(--border));background:var(--err-bg);color:var(--err);font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
+.plan-callout{padding:10px 12px;border-radius:9px;border:1px solid color-mix(in srgb,var(--rev) 35%,var(--border));background:var(--rev-bg);color:var(--ink);font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
+.action-bar{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
+.stream-box{background:#090C10;color:#E2E8F0;border:1px solid var(--border);border-radius:10px;padding:10px;height:460px;overflow:auto;font-family:var(--mono);font-size:12px}
 .stream-line{padding:3px 4px;border-bottom:1px solid rgba(255,255,255,.06);white-space:pre-wrap;word-break:break-word}
 .s-kind{display:inline-block;min-width:68px;font-weight:700;color:#FBBF24}
-.s-tool{color:#5EEAD4;margin-right:6px}
-.table-wrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:13px}
+.s-tool{color:#34D399;margin-right:6px}
+.diff-box{background:#0B0F17;color:#E2E8F0;border:1px solid var(--border);border-radius:10px;padding:10px;max-height:460px;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.5;white-space:pre}
+.diff-box.wrap{white-space:pre-wrap;word-break:break-word}
+.diff-add{color:#4ADE80;background:rgba(34,197,94,.12);display:block;padding:0 4px}
+.diff-del{color:#F87171;background:rgba(239,68,68,.12);display:block;padding:0 4px}
+.diff-hunk{color:#60A5FA;display:block;padding:2px 4px;font-weight:600}
+.diff-meta{color:#94A3B8;display:block;padding:0 4px}
+.diff-ctx{display:block;padding:0 4px}
+.proof-grid{display:grid;gap:10px}
+.proof-img{width:100%;max-height:460px;object-fit:contain;border-radius:9px;border:1px solid var(--border);background:var(--surface2)}
+.acc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin-bottom:16px}
+.acc-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:13px 14px;display:flex;flex-direction:column;gap:8px;box-shadow:var(--shadow-card)}
+.acc-card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),var(--shadow-card)}
+.acc-card.frozen{border-color:color-mix(in srgb,var(--err) 40%,var(--border))}
+.acc-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.acc-name{font-weight:700;font-size:14px;line-height:1.3}
+.acc-sub{font-size:11.5px;color:var(--muted)}
+.meter{display:flex;flex-direction:column;gap:3px}
+.meter-row{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.meter-row b{color:var(--ink)}
+.meter-track{height:8px;border-radius:999px;background:var(--surface2);overflow:hidden}
+.meter-fill{height:100%;border-radius:999px;background:var(--ok);transition:width .25s ease}
+.meter-fill.warn{background:var(--warn)}
+.meter-fill.err{background:var(--err)}
+.acc-top-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);font-size:12px;font-weight:600;color:var(--ink)}
+.acc-top-pill:hover{background:var(--surface2)}
+.acc-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.table-wrap{overflow-x:auto;max-width:100%}
+table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
 th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-.drawer-bg,.modal-bg,.auth-bg{position:fixed;inset:0;background:rgba(15,14,12,.55);z-index:40;display:none;align-items:center;justify-content:center;padding:14px}
+.drawer-bg,.modal-bg,.auth-bg{position:fixed;inset:0;background:rgba(9,12,18,.58);backdrop-filter:blur(2px);z-index:40;display:none;align-items:center;justify-content:center;padding:14px}
 .drawer-bg.open{display:flex;justify-content:flex-end;padding:0}
-.drawer{width:min(560px,100vw);height:100vh;background:var(--surface);border-left:1px solid var(--border);padding:16px;overflow:auto;display:flex;flex-direction:column;gap:12px}
+.drawer{width:min(640px,100vw);height:100vh;background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;box-shadow:var(--shadow)}
+.drawer-head{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px 16px;border-bottom:1px solid var(--border);background:var(--surface);flex:none}
+.drawer-tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--border);background:var(--surface2);flex:none}
+.dtab{padding:5px 11px;border-radius:7px;font-size:12px;font-weight:600;border:1px solid transparent;background:transparent;color:var(--muted)}
+.dtab:hover{color:var(--ink);background:var(--surface)}
+.dtab.active,.dtab.active:hover{background:var(--surface);color:var(--ink);border-color:var(--border);box-shadow:var(--shadow-card)}
+.drawer-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
 .modal-bg.open,.auth-bg.open{display:flex}
-.modal{width:min(480px,100%);background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px;box-shadow:var(--shadow)}
-.modal h3{margin:0 0 8px;font-size:16px}
-.toast{position:fixed;right:16px;bottom:16px;z-index:60;background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:10px;box-shadow:var(--shadow);font-size:13px;display:none;max-width:min(420px,calc(100vw - 32px))}
+.modal{width:min(540px,100%);max-height:90vh;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px;box-shadow:var(--shadow)}
+.modal h3{margin:0 0 8px;font-family:var(--display);font-size:16.5px;letter-spacing:-.01em}
+.form-row{display:grid;gap:5px;margin-bottom:10px}
+.form-row label{font-size:11.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.form-2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.toast{position:fixed;right:16px;bottom:16px;z-index:60;background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:10px;box-shadow:var(--shadow);font-size:13px;font-weight:500;display:none;max-width:min(420px,calc(100vw - 32px))}
 .toast.show{display:block}
 .empty{padding:28px 14px;text-align:center;color:var(--muted);border:1px dashed var(--border);border-radius:10px}
 .hidden{display:none!important}
@@ -141,10 +219,13 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       </div>
       <div class="top-actions">
         <span class="sse-pill"><span id="sseDot" class="dot"></span><span id="sseLabel">Idle</span></span>
-        <a href="/studio" class="btn-sm" title="Statistics screen: KPIs, time per stage, cost per agent" style="border:1px solid var(--border);background:var(--surface);color:inherit;text-decoration:none">Studio</a>
+        <button id="topAccPill" class="acc-top-pill hidden" type="button" title="Tài khoản đang hoạt động — bấm để mở tab Accounts"></button>
+        <button id="supBtn" class="sup-btn hidden" type="button" aria-pressed="false" title="Toggle multi-repo auto-runner (aaf run + caffeinate)"><span class="dot"></span><span id="supLabel">Auto-Run: OFF</span></button>
+        <button id="newTaskBtn" class="btn-primary btn-sm hidden" type="button">+ New Task</button>
+        <a href="/studio" class="btn-link" title="Thống kê chi tiết từng task, thời gian &amp; token">Studio</a>
         <button id="refreshBtn" class="btn-sm" title="Refresh now">Refresh</button>
         <button id="themeBtn" class="btn-sm" title="Toggle light/dark">Theme</button>
-        <button id="lockBtn" class="btn-sm" title="Clear session token">Lock</button>
+        <button id="lockBtn" class="btn-sm hidden" title="Clear session token">Lock</button>
       </div>
     </div>
   </header>
@@ -154,13 +235,16 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     <button id="unfreezeBtn" class="btn-danger btn-sm">Unfreeze Factory</button>
   </div>
 
-  <nav class="tabs" role="tablist">
-    <button class="tab active" data-tab="board">Board <span id="cntBoard" class="count">0</span></button>
-    <button class="tab need-you-tab" id="needYouTabBtn" type="button">Need You <span id="cntNeedYou" class="count">0</span></button>
-    <button class="tab" data-tab="review">Needs Review <span id="cntReview" class="count">0</span></button>
-    <button class="tab" data-tab="stream">Live Stream</button>
-    <button class="tab" data-tab="machine">Machine &amp; Accounts</button>
+  <nav class="tabs" role="tablist" aria-label="Cockpit sections">
+    <button class="tab active" role="tab" aria-selected="true" data-tab="board">Board <span id="cntBoard" class="count">0</span></button>
+    <button class="tab need-you-tab" role="tab" aria-selected="false" id="needYouTabBtn" type="button">Need You <span id="cntNeedYou" class="count">0</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="review">Needs Review <span id="cntReview" class="count">0</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="stream">Live Stream</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="accounts">Accounts <span id="cntAccounts" class="count">0</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="machine">Machine</button>
   </nav>
+
+  <div id="repoBar" class="repo-bar hidden" role="group" aria-label="Filter by repositories (multi-select)"></div>
 
   <section id="view-board">
     <div class="filters">
@@ -170,8 +254,19 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <option value="P0">P0</option><option value="P1">P1</option>
         <option value="P2">P2</option><option value="P3">P3</option>
       </select>
-      <input id="searchBox" type="search" placeholder="Filter tasks by ID or title…" style="flex:1;min-width:180px">
-      <div class="viewseg" id="viewSeg" role="group" aria-label="Board layout"><button data-view="kanban">Kanban</button><button data-view="list">List</button></div>
+      <select id="sortBy" aria-label="Sort tasks">
+        <option value="priority">Sort: Priority (P0→P3)</option>
+        <option value="updated_desc">Sort: Updated (Newest)</option>
+        <option value="updated_asc">Sort: Updated (Oldest)</option>
+        <option value="created_desc">Sort: Created (Newest)</option>
+        <option value="created_asc">Sort: Created (Oldest)</option>
+        <option value="title_asc">Sort: Title (A→Z)</option>
+        <option value="repo_asc">Sort: Repo (A→Z)</option>
+      </select>
+      <input id="searchBox" type="search" placeholder="Filter tasks by ID, title, or repo…" style="flex:1;min-width:180px">
+      <span id="filterMeta" class="filter-meta hidden"></span>
+      <button id="clearFiltersBtn" class="btn-sm hidden" type="button" title="Reset all filters and sort">Reset</button>
+      <div class="viewseg" id="viewSeg" role="group" aria-label="Board layout"><button data-view="kanban" aria-pressed="true">Kanban</button><button data-view="list" aria-pressed="false">List</button></div>
     </div>
     <div id="boardList" class="task-list"></div>
   </section>
@@ -183,7 +278,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <div id="reviewQueue"></div>
       </div>
       <div id="reviewDetail" class="card">
-        <div class="empty">Select a review or blocked task to inspect handover report, Golden Standards score, and locked diff.</div>
+        <div class="empty">Select a review or blocked task to inspect handover report, diff, proof, plan, and actions.</div>
       </div>
     </div>
   </section>
@@ -194,6 +289,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <select id="runSelect" style="min-width:220px"><option value="">Select recent run…</option></select>
         <input id="runManual" class="mono" placeholder="Or enter run_id…" style="min-width:200px">
         <button id="watchRunBtn" class="btn-primary btn-sm">Follow Run</button>
+        <button id="stopStreamRunBtn" class="btn-danger btn-sm hidden" type="button">Stop Run</button>
         <label style="display:inline-flex;align-items:center;gap:5px;font-size:12px;margin-left:auto">
           <input type="checkbox" id="autoScroll" checked> Auto-scroll
         </label>
@@ -203,79 +299,112 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     </div>
   </section>
 
+  <section id="view-accounts" class="hidden">
+    <div class="acc-toolbar">
+      <button id="accRefreshBtn" class="btn-primary btn-sm" type="button">↻ Làm mới Quota (Live)</button>
+      <button id="ccRotateBtn" class="btn-sm hidden" type="button">Xoay tài khoản (Rotate)</button>
+      <button id="ccUnfreezeBtn" class="btn-sm hidden" type="button">Gỡ đóng băng (Unfreeze)</button>
+      <button id="ccBalanceBtn" class="btn-sm hidden" type="button">Chia đều Repo (Balance)</button>
+      <span id="accMetaNote" class="muted" style="font-size:12px;margin-left:auto"></span>
+    </div>
+    <div id="ccProfilesBox" class="acc-grid"></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="kv-title">Repo ↔ Tài khoản (<span class="mono">.claude/settings.local.json</span>)</div>
+      <div id="repoAssignBox" class="table-wrap"><div class="muted">Đang tải danh sách repo…</div></div>
+    </div>
+    <div class="card">
+      <div class="kv-title">AAF Router Account Pool &amp; Cooldowns</div>
+      <div id="accountsBox" class="table-wrap"></div>
+    </div>
+  </section>
+
   <section id="view-machine" class="hidden">
     <div id="metricCards" class="grid-4"></div>
-    <div class="grid-2">
-      <div class="card">
-        <div class="kv-title">Heavy Throttle Slots &amp; Pressure</div>
-        <div id="throttleBox"></div>
-      </div>
-      <div class="card">
-        <div class="kv-title">Account Pool &amp; Cooldowns</div>
-        <div id="accountsBox" class="table-wrap"></div>
-      </div>
+    <div class="card">
+      <div class="kv-title">Heavy Throttle Slots &amp; Pressure</div>
+      <div id="throttleBox"></div>
     </div>
   </section>
 </div>
 
-<div id="drawerBg" class="drawer-bg">
+<div id="drawerBg" class="drawer-bg" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
   <div class="drawer">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+    <div class="drawer-head">
       <strong id="drawerTitle" class="mono">Task</strong>
-      <button id="drawerClose" class="btn-sm">Close</button>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button id="drawerCopyBranch" class="btn-sm hidden" type="button" title="Copy git branch name">Copy branch</button>
+        <button id="drawerClose" class="btn-sm" aria-label="Close task details">Close</button>
+      </div>
     </div>
-    <div id="drawerBody"></div>
+    <div class="drawer-tabs" id="drawerTabs" role="tablist">
+      <button type="button" class="dtab active" role="tab" aria-selected="true" data-dtab="overview">Overview</button>
+      <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="diff">Diff</button>
+      <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="plan">Plan</button>
+      <button type="button" class="dtab" role="tab" aria-selected="false" data-dtab="proof">Proof</button>
+    </div>
+    <div id="drawerBody" class="drawer-body"></div>
   </div>
 </div>
 
-<div id="modalBg" class="modal-bg">
+<div id="modalBg" class="modal-bg" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
   <div class="modal">
     <h3 id="modalTitle">Confirm action</h3>
     <div id="modalDesc" class="muted" style="margin-bottom:10px"></div>
     <div id="modalFields"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
-      <button id="modalCancel">Cancel</button>
-      <button id="modalConfirm" class="btn-primary">Confirm</button>
+      <button id="modalCancel" type="button">Cancel</button>
+      <button id="modalConfirm" class="btn-primary" type="button">Confirm</button>
     </div>
   </div>
 </div>
 
-<div id="authBg" class="auth-bg">
+<div id="authBg" class="auth-bg" role="dialog" aria-modal="true" aria-labelledby="authTitle">
   <div class="modal">
-    <h3>Sign in to AAF Cockpit</h3>
-    <p class="muted" style="margin-top:0">Paste the session bearer token printed by <span class="mono">aaf ui</span>, or scan the QR pairing URL.</p>
+    <h3 id="authTitle">Sign in to AAF Cockpit</h3>
+    <p class="muted" style="margin-top:0">Paste the bearer token printed by <span class="mono">aaf ui</span> / <span class="mono">aaf ui --service-url</span>, or reopen <span class="mono">/studio</span> from Agent Office.</p>
     <input id="tokenInput" type="password" class="mono" placeholder="Bearer token…" style="width:100%">
     <div id="authErr" style="color:var(--err);font-size:12px;margin-top:6px"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
-      <button id="tokenSubmit" class="btn-primary">Unlock</button>
+      <button id="tokenSubmit" class="btn-primary" type="button">Unlock</button>
     </div>
   </div>
 </div>
 
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script>
 (() => {
   const TOKEN_KEY = "aaf_ui_token";
   const THEME_KEY = "aaf_ui_theme";
-  const STATES = ["all","need_you","ready","running","gating","review","blocked","done","backlog"];
-  const STATE_LABELS = { need_you: "Need You" };
-  let token = "";
-  let meta = { read_only: true, allow_approve: false, scope: "", version: "" };
-  let statusData = null;
-  let boardTasks = [];
-  let activeTab = "board";
   const VIEW_KEY = "aaf_ui_board_view";
-  let boardView = (() => { try { return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "kanban"; } catch (_) { return "kanban"; } })();
+  const SORT_KEY = "aaf_ui_sort";
+  const REPOS_KEY = "aaf_ui_repos";
+  const VALID_SORTS = new Set(["priority","updated_desc","updated_asc","created_desc","created_asc","title_asc","repo_asc"]);
+  const PRIO_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
+  const RO_HINT = "Read-only mode: run `aaf ui --install-service --allow-actions` or use CLI commands in a terminal.";
+  const STATES = ["all","backlog","ready","running","gating","review","blocked","done"];
+  const STATE_LABELS = { need_you: "Need You" };
   const KANBAN_COLS = [
-    ["ready", "Ready", ["backlog", "ready"]],
+    ["backlog", "Backlog", ["backlog"]],
+    ["ready", "Ready", ["ready"]],
     ["running", "Running", ["running", "gating"]],
     ["review", "Review", ["review"]],
     ["blocked", "Blocked", ["blocked"]],
     ["done", "Done", ["done", "cancelled"]],
   ];
+
+  let token = "";
+  let meta = { read_only: true, allow_approve: false, scope: "", version: "", repos: [] };
+  let statusData = null;
+  let boardTasks = [];
+  let activeTab = "board";
   let stateFilter = "all";
+  let showCancelled = false;
+  let selectedRepos = new Set();
+  let selectedBacklog = new Set();
+  let sortBy = "priority";
   let selectedReviewId = null;
+  let selectedReviewSig = "";
   let activeRunId = "";
   let lastRunsSig = null;
   let lastBoardSig = null;
@@ -283,10 +412,85 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let boardRefreshQueued = false;
   let lastStreamSig = null;
   let sse = null;
+  let sseHadError = false;
+  let sseRetryTimer = null;
+  let sseRetryDelay = 2000;
   let modalHandler = null;
+  let drawerSeq = 0;
+  let drawerRenderSeq = 0;
+  let drawerTaskId = null;
+  let drawerDetail = null;
+  let drawerTab = "overview";
+  let diffWrap = false;
+  let reviewSeq = 0;
+  let lastFocusBeforeDrawer = null;
+  let lastFocusBeforeModal = null;
+  let lastMachineSig = null;
+  let accountsPanelData = null;
+  let accountsLoadInFlight = false;
+  let accountsLoadQueued = false;
+  let accountsQueuedLive = false;
+  const pendingAccounts = new Set();
+  let authChan = null;
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  function sGet(kind, k) { try { return kind.getItem(k); } catch (_) { return null; } }
+  function sSet(kind, k, v) { try { kind.setItem(k, v); } catch (_) {} }
+  function sDel(kind, k) { try { kind.removeItem(k); } catch (_) {} }
+
+  let boardView = sGet(localStorage, VIEW_KEY) === "list" ? "list" : "kanban";
+  {
+    const savedSort = sGet(localStorage, SORT_KEY);
+    if (savedSort && VALID_SORTS.has(savedSort)) sortBy = savedSort;
+    try {
+      const savedRepos = JSON.parse(sGet(localStorage, REPOS_KEY) || "[]");
+      if (Array.isArray(savedRepos)) selectedRepos = new Set(savedRepos.filter((x) => typeof x === "string" && x));
+    } catch (_) {}
+  }
+
+  function saveSelectedRepos() { sSet(localStorage, REPOS_KEY, JSON.stringify([...selectedRepos])); }
+
+  function compareTasks(a, b) {
+    const pA = PRIO_RANK[String(a.priority || "").toUpperCase()] ?? 9;
+    const pB = PRIO_RANK[String(b.priority || "").toUpperCase()] ?? 9;
+    const uA = Number(a.updated_at) || 0;
+    const uB = Number(b.updated_at) || 0;
+    const cA = Number(a.created_at) || 0;
+    const cB = Number(b.created_at) || 0;
+    switch (sortBy) {
+      case "updated_desc": return (uB - uA) || (pA - pB) || String(a.id).localeCompare(String(b.id));
+      case "updated_asc": return (uA - uB) || (pA - pB) || String(a.id).localeCompare(String(b.id));
+      case "created_desc": return (cB - cA) || (pA - pB) || String(a.id).localeCompare(String(b.id));
+      case "created_asc": return (cA - cB) || (pA - pB) || String(a.id).localeCompare(String(b.id));
+      case "title_asc": return String(a.title || "").localeCompare(String(b.title || ""), undefined, { sensitivity: "base" }) || (pA - pB);
+      case "repo_asc": return String(a.repo_name || "").localeCompare(String(b.repo_name || ""), undefined, { sensitivity: "base" }) || (pA - pB) || (uB - uA);
+      default: return (pA - pB) || (uB - uA) || String(a.id).localeCompare(String(b.id));
+    }
+  }
+
+  function dur(s) {
+    s = Number(s) || 0;
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m";
+    if (s < 86400) return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+    return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+  }
+  function ago(ts) {
+    if (!ts) return "";
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return String(ts);
+    const s = Math.max(0, Math.round(Date.now() / 1000 - n));
+    return s < 45 ? "just now" : dur(s) + " ago";
+  }
+  function untilStr(ts) {
+    if (!ts) return "—";
+    const left = Math.round(Number(ts) - Date.now() / 1000);
+    if (left <= 0) return "expired";
+    return "in " + dur(left);
+  }
+  function prioClass(p) { return String(p || "p2").toLowerCase(); }
+
   function toast(msg) {
     const el = $("toast");
     el.textContent = msg;
@@ -294,26 +498,71 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     clearTimeout(toast._t);
     toast._t = setTimeout(() => el.classList.remove("show"), 3200);
   }
+  async function copyText(text, label) {
+    try { await navigator.clipboard.writeText(text); toast("Copied " + (label || text)); }
+    catch (_) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        const ok = document.execCommand("copy");
+        toast(ok ? ("Copied " + (label || text)) : "Copy failed");
+      } catch (_) { toast("Copy failed"); }
+      ta.remove();
+    }
+  }
 
   function initTheme() {
-    const saved = localStorage.getItem(THEME_KEY);
+    const saved = sGet(localStorage, THEME_KEY);
     if (saved === "dark" || saved === "light") document.documentElement.dataset.theme = saved;
+    else if (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.dataset.theme = "dark";
     $("themeBtn").onclick = () => {
       const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
       document.documentElement.dataset.theme = next;
-      localStorage.setItem(THEME_KEY, next);
+      sSet(localStorage, THEME_KEY, next);
     };
   }
 
+  function initAuthChannel() {
+    if (typeof BroadcastChannel === "undefined") return;
+    try {
+      authChan = new BroadcastChannel("aaf_ui_auth");
+      authChan.onmessage = (ev) => {
+        const msg = ev.data || {};
+        if (msg.type === "req" && token) {
+          authChan.postMessage({ type: "tok", token });
+        } else if (msg.type === "tok" && msg.token && !token) {
+          token = String(msg.token).trim();
+          saveToken(token);
+          closeAuth();
+          refreshAll().then(() => { startSse(); loadAccountsPanel(false); }).catch(() => {});
+        }
+      };
+    } catch (_) { authChan = null; }
+  }
+
+  function isLoopbackHost() {
+    return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
+  }
+  function saveToken(t) {
+    sSet(sessionStorage, TOKEN_KEY, t);
+    if (isLoopbackHost()) sSet(localStorage, TOKEN_KEY, t);
+  }
+  function clearToken() {
+    sDel(sessionStorage, TOKEN_KEY);
+    if (isLoopbackHost()) sDel(localStorage, TOKEN_KEY);
+  }
   function extractHashToken() {
     const h = location.hash || "";
     const m = h.match(/(?:^#|&)token=([^&]+)/);
     if (m && m[1]) {
       const t = decodeURIComponent(m[1]).trim();
-      if (t) sessionStorage.setItem(TOKEN_KEY, t);
+      if (t) saveToken(t);
       history.replaceState(null, "", location.pathname + location.search);
     }
-    return sessionStorage.getItem(TOKEN_KEY) || "";
+    return sGet(sessionStorage, TOKEN_KEY) || (isLoopbackHost() ? (sGet(localStorage, TOKEN_KEY) || "") : "");
   }
 
   async function api(path, opts = {}) {
@@ -326,8 +575,20 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       openAuth("Session token rejected (401). Please re-enter token.");
       throw new Error(data.error || "unauthorized");
     }
-    if (!res.ok || data.ok === false) throw new Error(data.error || ("HTTP " + res.status));
+    if (!res.ok || data.ok === false) throw new Error(data.error || data.message || ("HTTP " + res.status));
     return data;
+  }
+
+  async function fetchImageDataUrl(url) {
+    const res = await fetch(url, { headers: { "Authorization": "Bearer " + token } });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const blob = await res.blob();
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ""));
+      fr.onerror = () => reject(new Error("decode failed"));
+      fr.readAsDataURL(blob);
+    });
   }
 
   function openAuth(msg) {
@@ -337,15 +598,28 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("authBg").classList.add("open");
     setTimeout(() => $("tokenInput").focus(), 20);
   }
-
   function closeAuth() { $("authBg").classList.remove("open"); }
+
+  function closeDrawer() {
+    drawerSeq++;
+    drawerRenderSeq++;
+    drawerTaskId = null;
+    drawerDetail = null;
+    $("drawerBg").classList.remove("open");
+    document.body.style.overflow = "";
+    if (lastFocusBeforeDrawer && typeof lastFocusBeforeDrawer.focus === "function") {
+      try { lastFocusBeforeDrawer.focus(); } catch (_) {}
+    }
+    lastFocusBeforeDrawer = null;
+  }
 
   function setSseState(cls, text) {
     $("sseDot").className = "dot " + cls;
     $("sseLabel").textContent = text;
   }
-
   function stopSse() {
+    clearTimeout(sseRetryTimer);
+    sseRetryTimer = null;
     if (sse) { sse.close(); sse = null; }
     setSseState("", "Disconnected");
   }
@@ -360,31 +634,44 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       s.frozen ? 1 : 0,
       c.total ?? 0, c.backlog ?? 0, c.ready ?? 0, c.running ?? 0,
       c.gating ?? 0, c.review ?? 0, c.blocked ?? 0, c.done ?? 0, c.cancelled ?? 0,
-      brKey,
-      r.total ?? 0,
+      brKey, r.total ?? 0,
     ].join("|");
   }
 
   async function refreshBoard() {
     if (!token) return;
-    if (boardRefreshInFlight) {
-      boardRefreshQueued = true;
-      return;
-    }
+    if (boardRefreshInFlight) { boardRefreshQueued = true; return; }
     boardRefreshInFlight = true;
     try {
       const b = await api("/api/board");
       boardTasks = b.tasks || [];
+      syncRepoFilterOptions();
       renderBoard();
       renderReviewQueue();
+      if (activeTab === "review" && selectedReviewId) {
+        const cur = boardTasks.find((t) => t.id === selectedReviewId);
+        const nextSig = cur ? `${cur.state}|${cur.updated_at || 0}|${cur.blocked_detail || ""}` : "missing";
+        if (nextSig !== selectedReviewSig) {
+          selectedReviewSig = nextSig;
+          loadReviewDetail(selectedReviewId);
+        }
+      }
     } catch (_) {
     } finally {
       boardRefreshInFlight = false;
-      if (boardRefreshQueued) {
-        boardRefreshQueued = false;
-        refreshBoard();
-      }
+      if (boardRefreshQueued) { boardRefreshQueued = false; refreshBoard(); }
     }
+  }
+
+  function scheduleSseReconnect() {
+    clearTimeout(sseRetryTimer);
+    const delay = sseRetryDelay;
+    sseRetryDelay = Math.min(10000, Math.round(sseRetryDelay * 1.6));
+    sseRetryTimer = setTimeout(async () => {
+      if (!token) return;
+      try { await api("/api/meta"); startSse(); }
+      catch (_) { if (token) scheduleSseReconnect(); }
+    }, delay);
   }
 
   function startSse() {
@@ -394,17 +681,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     if (activeRunId) url += "&run_id=" + encodeURIComponent(activeRunId);
     setSseState("warn", "Connecting…");
     sse = new EventSource(url);
-    sse.onopen = () => setSseState("live", "Live");
+    sse.onopen = () => {
+      sseRetryDelay = 2000;
+      setSseState("live", "Live");
+      if (sseHadError) { sseHadError = false; lastBoardSig = null; refreshAll().catch(() => {}); }
+    };
     sse.addEventListener("status", (ev) => {
       try {
         statusData = JSON.parse(ev.data);
         renderStatusChrome();
-        if (activeTab === "machine") renderMachine();
+        if (activeTab === "machine" || activeTab === "accounts") renderMachine();
         const sig = boardSigFromStatus(statusData);
-        if (sig !== lastBoardSig) {
-          lastBoardSig = sig;
-          refreshBoard();
-        }
+        if (sig !== lastBoardSig) { lastBoardSig = sig; refreshBoard(); }
       } catch (_) {}
     });
     sse.addEventListener("stream", (ev) => {
@@ -413,11 +701,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         if (d.run_id === activeRunId) renderStreamLines(d.run_id, d.lines || []);
       } catch (_) {}
     });
-    sse.onerror = () => setSseState("err", "Reconnecting…");
+    sse.onerror = () => {
+      sseHadError = true;
+      setSseState("err", "Reconnecting…");
+      if (sse && sse.readyState === EventSource.CLOSED) {
+        sse.close(); sse = null; scheduleSseReconnect();
+      }
+    };
   }
 
   function cleanSpec(raw) {
     let s = String(raw || "");
+    s = s.replace(/\[The block below is untrusted data[^\]]*\]\s*/gi, "");
     s = s.replace(/<<<UNTRUSTED_DATA_BEGIN[^>]*>>>\s*/g, "").replace(/\s*<<<UNTRUSTED_DATA_END[^>]*>>>/g, "");
     return s.replace(/\n{3,}/g, "\n\n").trim();
   }
@@ -430,11 +725,78 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function formatBlockedText(b) {
     if (!b) return "";
     if (typeof b === "string") return b;
-    return b.why || b.detail || b.summary || JSON.stringify(b);
+    if (b.why || b.detail || b.summary) return String(b.why || b.detail || b.summary);
+    if (b.kind === "dependency" && b.task_id) return "Waiting on task " + b.task_id;
+    if (b.kind === "quota") return b.reset_at ? ("Quota exhausted (resets " + untilStr(b.reset_at) + ")") : "Quota exhausted";
+    if (b.kind) return String(b.kind).replace(/_/g, " ");
+    return "";
+  }
+
+  function renderDiffHtml(raw) {
+    if (!raw || !raw.trim()) return `<div class="muted">No code diff available in worktree.</div>`;
+    return `<div class="diff-box ${diffWrap ? "wrap" : ""}">` + raw.split("\n").map((ln) => {
+      const safe = esc(ln) || " ";
+      if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff --git") || ln.startsWith("index ")) {
+        return `<span class="diff-meta">${safe}</span>`;
+      }
+      if (ln.startsWith("@@")) return `<span class="diff-hunk">${safe}</span>`;
+      if (ln.startsWith("+")) return `<span class="diff-add">${safe}</span>`;
+      if (ln.startsWith("-")) return `<span class="diff-del">${safe}</span>`;
+      return `<span class="diff-ctx">${safe}</span>`;
+    }).join("") + `</div>`;
+  }
+
+  function syncRepoFilterOptions() {
+    const counts = new Map();
+    for (const t of boardTasks) {
+      if (!t.repo_name) continue;
+      counts.set(t.repo_name, (counts.get(t.repo_name) || 0) + 1);
+    }
+    const repos = [...counts.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    const bar = $("repoBar");
+    if (repos.length <= 1) {
+      bar.classList.add("hidden");
+      if (selectedRepos.size) { selectedRepos.clear(); saveSelectedRepos(); }
+      return;
+    }
+    let pruned = false;
+    for (const r of [...selectedRepos]) {
+      if (!counts.has(r)) { selectedRepos.delete(r); pruned = true; }
+    }
+    if (pruned) saveSelectedRepos();
+
+    const allOn = selectedRepos.size === 0;
+    const repoChips = repos.map((r) => {
+      const on = selectedRepos.has(r);
+      return `<button type="button" class="chip ${on ? "repo-on" : ""}" data-repo="${esc(r)}" aria-pressed="${on}">${on ? "✓ " : ""}${esc(r)} <span class="c">${counts.get(r)}</span></button>`;
+    }).join("");
+    const selNote = selectedRepos.size > 0
+      ? `<span class="filter-meta" style="margin-left:auto">${selectedRepos.size} selected</span><button type="button" class="btn-sm" id="repoClearBtn">All repos</button>`
+      : `<span class="filter-meta" style="margin-left:auto">Click multiple repos to combine</span>`;
+    bar.innerHTML = `<span class="repo-bar-label">Repos</span><button type="button" class="chip ${allOn ? "active" : ""}" data-repo="" aria-pressed="${allOn}">All <span class="c">${boardTasks.length}</span></button>${repoChips}${selNote}`;
+    bar.classList.toggle("hidden", activeTab === "stream" || activeTab === "machine" || activeTab === "accounts");
+    bar.querySelectorAll("[data-repo]").forEach((btn) => {
+      btn.onclick = () => {
+        const r = btn.dataset.repo;
+        if (!r) selectedRepos.clear();
+        else if (selectedRepos.has(r)) selectedRepos.delete(r);
+        else selectedRepos.add(r);
+        saveSelectedRepos();
+        syncRepoFilterOptions();
+        renderBoard();
+        renderReviewQueue();
+      };
+    });
+    if ($("repoClearBtn")) {
+      $("repoClearBtn").onclick = () => {
+        selectedRepos.clear(); saveSelectedRepos(); syncRepoFilterOptions(); renderBoard(); renderReviewQueue();
+      };
+    }
   }
 
   function renderChips() {
-    $("stateChips").innerHTML = STATES.map((s) =>
+    const list = boardTasks.some((t) => t.state === "cancelled") ? STATES.concat(["cancelled"]) : STATES;
+    $("stateChips").innerHTML = list.map((s) =>
       `<button class="chip ${stateFilter===s?"active":""}" data-st="${s}">${esc(STATE_LABELS[s] || s)}</button>`
     ).join("");
     $("stateChips").querySelectorAll(".chip").forEach((b) => {
@@ -446,17 +808,36 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const onBoard = activeTab === "board";
     document.querySelectorAll(".tab[data-tab]").forEach((b) => {
       const isBoardTab = b.dataset.tab === "board";
-      b.classList.toggle("active", isBoardTab ? (onBoard && stateFilter !== "need_you") : b.dataset.tab === activeTab);
+      const isActive = isBoardTab ? (onBoard && stateFilter !== "need_you") : b.dataset.tab === activeTab;
+      b.classList.toggle("active", isActive);
+      b.setAttribute("aria-selected", String(isActive));
     });
-    $("needYouTabBtn").classList.toggle("active", onBoard && stateFilter === "need_you");
+    const nyActive = onBoard && stateFilter === "need_you";
+    $("needYouTabBtn").classList.toggle("active", nyActive);
+    $("needYouTabBtn").setAttribute("aria-selected", String(nyActive));
   }
 
   function renderStatusChrome() {
     $("scopeLine").textContent = (meta.repo_name || meta.scope || "AAF") + (meta.version ? " · v" + meta.version : "");
-    $("roBadge").classList.toggle("hidden", !meta.read_only);
+    const ro = Boolean(meta.read_only);
+    $("roBadge").classList.toggle("hidden", !ro);
+    $("newTaskBtn").classList.toggle("hidden", ro);
+    $("supBtn").classList.toggle("hidden", ro);
+    const sup = (statusData && statusData.supervisor) || { enabled: false, active_repos: [], caffeinate: false };
+    const supOn = Boolean(sup.enabled);
+    $("supBtn").classList.toggle("on", supOn);
+    $("supBtn").setAttribute("aria-pressed", String(supOn));
+    const activeN = (sup.active_repos || []).length;
+    const caff = sup.caffeinate ? " · awake" : "";
+    $("supLabel").textContent = supOn ? `Auto-Run: ON${activeN ? ` (${activeN})` : ""}${caff}` : "Auto-Run: OFF";
+    $("supBtn").title = supOn
+      ? `Active repos: ${(sup.active_repos || []).join(", ") || "idle (watching for Ready tasks)"}`
+      : "Turn ON to auto-run `aaf run --auto` for repos with Ready tasks (+ macOS caffeinate)";
+
     const frozen = Boolean(statusData && statusData.frozen);
     $("frozenBanner").classList.toggle("hidden", !frozen);
-    $("unfreezeBtn").disabled = Boolean(meta.read_only);
+    $("unfreezeBtn").disabled = ro;
+    $("unfreezeBtn").title = ro ? RO_HINT : "Clear factory freeze";
     const runs = (statusData && statusData.recent_runs) || [];
     const runsSig = runs.map((r) => `${r.id}:${r.status}`).join("|");
     const sel = $("runSelect");
@@ -468,14 +849,21 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       ).join("");
       if (prev && runs.some((r) => r.id === prev)) sel.value = prev;
     }
+    const activeRunObj = runs.find((r) => r.id === activeRunId && r.status === "running");
+    $("stopStreamRunBtn").classList.toggle("hidden", ro || !activeRunObj);
   }
+
+  function matchesRepo(t) { return selectedRepos.size === 0 || selectedRepos.has(t.repo_name); }
 
   function renderBoard() {
     const prio = $("prioFilter").value;
     const q = $("searchBox").value.trim().toLowerCase();
-    let list = boardTasks.filter((t) => {
+    const scopedTasks = boardTasks.filter(matchesRepo);
+    const cancelledTotal = scopedTasks.filter((t) => t.state === "cancelled").length;
+    let list = scopedTasks.filter((t) => {
       if (stateFilter === "need_you") { if (!isNeedYouTask(t)) return false; }
       else if (stateFilter !== "all" && t.state !== stateFilter) return false;
+      if (stateFilter === "all" && !showCancelled && t.state === "cancelled") return false;
       if (prio && t.priority !== prio) return false;
       if (q) {
         const hay = [t.id, t.title, t.repo_name, t.fingerprint, t.blocked_detail, t.spec_description].join(" ").toLowerCase();
@@ -483,45 +871,131 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       }
       return true;
     });
-    if (stateFilter === "need_you") {
-      list = list.slice().sort((a, b) => {
+    list = list.slice().sort((a, b) => {
+      if (stateFilter === "need_you" && sortBy === "priority") {
         const aNy = /needs?\s*you/i.test(a.blocked_detail || "") ? 0 : 1;
         const bNy = /needs?\s*you/i.test(b.blocked_detail || "") ? 0 : 1;
-        return aNy - bNy;
-      });
-    }
-    $("cntBoard").textContent = String(boardTasks.length);
-    const needYouCount = boardTasks.filter(isNeedYouTask).length;
-    $("cntNeedYou").textContent = String(needYouCount);
-    const reviewCount = boardTasks.filter((t) => t.state === "review" || t.state === "blocked").length;
-    $("cntReview").textContent = String(reviewCount);
+        if (aNy !== bNy) return aNy - bNy;
+      }
+      return compareTasks(a, b);
+    });
+    const hasFilter = stateFilter !== "all" || selectedRepos.size > 0 || Boolean(prio) || Boolean(q) || sortBy !== "priority";
+    $("filterMeta").textContent = `${list.length} / ${boardTasks.length} tasks`;
+    $("filterMeta").classList.toggle("hidden", !hasFilter);
+    $("clearFiltersBtn").classList.toggle("hidden", !hasFilter);
+    $("cntBoard").textContent = String(scopedTasks.filter((t) => showCancelled || t.state !== "cancelled").length);
+    $("cntNeedYou").textContent = String(scopedTasks.filter(isNeedYouTask).length);
+    $("cntReview").textContent = String(scopedTasks.filter((t) => t.state === "review" || t.state === "blocked").length);
     syncBoardTabHighlight();
+
+    document.querySelectorAll("#viewSeg button").forEach((b) => {
+      const on = b.dataset.view === boardView;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
+
     if (!list.length && boardView === "list") {
       $("boardList").className = "task-list";
       $("boardList").innerHTML = `<div class="empty">No tasks match the current filters.</div>`;
       return;
     }
-    document.querySelectorAll("#viewSeg button").forEach((b) => b.classList.toggle("on", b.dataset.view === boardView));
     $("boardList").className = boardView === "kanban" ? "kanban" : "task-list";
+    const backlogIdsNow = new Set(boardTasks.filter((t) => t.state === "backlog").map((t) => t.id));
+    for (const id of [...selectedBacklog]) { if (!backlogIdsNow.has(id)) selectedBacklog.delete(id); }
+    const ro = Boolean(meta.read_only);
+
     if (boardView === "kanban") {
-      $("boardList").innerHTML = KANBAN_COLS.map(([key, label, states]) => {
-        const col = list.filter((t) => states.includes(t.state))
-          .sort((a, b) => String(a.priority).localeCompare(String(b.priority)) || (b.updated_at || 0) - (a.updated_at || 0));
+      const colsHtml = KANBAN_COLS.map(([key, label, states]) => {
+        if (stateFilter === "need_you" && key !== "blocked") return "";
         if (stateFilter !== "all" && stateFilter !== "need_you" && !states.includes(stateFilter)) return "";
-        const cards = col.slice(0, 100).map((t) => {
+        const col = list.filter((t) => states.includes(t.state)).sort(compareTasks);
+        const shown = col.slice(0, 100);
+        const isBacklogCol = key === "backlog";
+        const isDoneCol = key === "done";
+        const visibleBacklogIds = isBacklogCol ? col.map((t) => t.id) : [];
+        const selVisible = isBacklogCol ? visibleBacklogIds.filter((id) => selectedBacklog.has(id)) : [];
+        const allChecked = isBacklogCol && visibleBacklogIds.length > 0 && selVisible.length === visibleBacklogIds.length;
+        const colActs = isBacklogCol && !ro && col.length > 0
+          ? `<div class="kcol-acts">
+              <button type="button" data-bl-toggle="1">${allChecked ? "Clear" : "Select all"}</button>
+              <button type="button" class="btn-primary" data-bl-ready="1">${selVisible.length ? `→ Ready (${selVisible.length})` : `All → Ready`}</button>
+              ${selVisible.length ? `<button type="button" class="btn-danger" data-bl-cancel="1">Cancel (${selVisible.length})</button>` : ""}
+            </div>`
+          : (isDoneCol && cancelledTotal > 0 && stateFilter === "all"
+              ? `<div class="kcol-acts"><button type="button" data-toggle-cancelled="1">${showCancelled ? `Hide cancelled (${cancelledTotal})` : `Show cancelled (${cancelledTotal})`}</button></div>`
+              : "");
+        const cards = shown.map((t) => {
           const ny = isNeedYouTask(t);
+          const isBl = t.state === "backlog";
+          const checked = isBl && selectedBacklog.has(t.id);
           const why = t.state === "blocked" && (t.blocked_detail || t.blocked_reason) ? `<div class="kcard-why">${esc(t.blocked_detail || t.blocked_reason)}</div>` : "";
-          return `<div class="kcard ${ny ? "need" : ""}" data-id="${esc(t.id)}" tabindex="0">
-            <div class="kcard-meta"><span class="pill pill-${esc(String(t.priority || "").toLowerCase())}">${esc(t.priority || "")}</span>${t.state !== key && t.state !== "review" && t.state !== "blocked" ? `<span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>` : ""}${ny ? `<span class="pill pill-blocked">Need You</span>` : ""}${t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : ""}</div>
+          const updated = t.updated_at ? `<span>· ${esc(ago(t.updated_at))}</span>` : "";
+          const chk = isBl && !ro ? `<input type="checkbox" class="kchk" data-chk="${esc(t.id)}" aria-label="Select ${esc(t.id)}" ${checked ? "checked" : ""}>` : "";
+          const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : "";
+          const quickBtn = isBl && !ro
+            ? `<div class="kcard-acts"><button type="button" class="btn-primary" data-quick-ready="${esc(t.id)}">→ Ready</button></div>`
+            : (t.needs_plan_approval && !ro
+                ? `<div class="kcard-acts"><button type="button" class="btn-ok" data-quick-plan="${esc(t.id)}">Approve Plan</button></div>`
+                : "");
+          return `<div class="kcard ${ny ? "need" : ""} ${checked ? "checked" : ""}" data-id="${esc(t.id)}" tabindex="0" role="button">
+            <div class="kcard-meta">${chk}<span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>${t.state !== key && t.state !== "review" && t.state !== "blocked" ? `<span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>` : ""}${ny ? `<span class="pill pill-blocked">Need You</span>` : ""}${planBadge}${t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : ""}</div>
             <div class="kcard-title">${esc(t.title)}</div>
-            <div class="kcard-meta"><span class="mono">${esc(t.id)}</span>${(t.acceptance || []).length ? `<span>· ${t.acceptance.length} criteria</span>` : ""}</div>${why}
+            <div class="kcard-meta"><span class="mono">${esc(t.id)}</span>${(t.acceptance || []).length ? `<span>· ${t.acceptance.length} criteria</span>` : ""}${updated}</div>${why}${quickBtn}
           </div>`;
         }).join("");
-        return `<div class="kcol"><div class="kcol-head"><span>${esc(label)}</span><span class="count">${col.length}</span></div>${cards || `<div class="kempty">No task</div>`}</div>`;
+        const more = col.length > 100 ? `<div class="kmore">+${col.length - 100} more — filter or switch to List</div>` : "";
+        return `<div class="kcol" data-col="${esc(key)}"><div class="kcol-head"><div class="kcol-head-row"><span>${esc(label)}</span><span class="count">${col.length}</span></div>${colActs}</div>${cards || `<div class="kempty">No task</div>`}${more}</div>`;
       }).join("");
+      $("boardList").innerHTML = colsHtml || `<div class="empty">No tasks match the current filters.</div>`;
+      $("boardList").querySelectorAll(".kchk").forEach((chk) => {
+        chk.onclick = (e) => {
+          e.stopPropagation();
+          const id = chk.dataset.chk;
+          if (chk.checked) selectedBacklog.add(id); else selectedBacklog.delete(id);
+          renderBoard();
+        };
+      });
+      $("boardList").querySelectorAll("[data-quick-ready]").forEach((btn) => {
+        btn.onclick = (e) => { e.stopPropagation(); runQuickAction("ready", btn.dataset.quickReady, btn); };
+      });
+      $("boardList").querySelectorAll("[data-quick-plan]").forEach((btn) => {
+        btn.onclick = (e) => { e.stopPropagation(); runQuickAction("approve_plan", btn.dataset.quickPlan, btn); };
+      });
+      const toggleCanc = $("boardList").querySelector("[data-toggle-cancelled]");
+      if (toggleCanc) toggleCanc.onclick = () => { showCancelled = !showCancelled; renderBoard(); };
+      const blToggle = $("boardList").querySelector("[data-bl-toggle]");
+      if (blToggle) {
+        blToggle.onclick = () => {
+          const vis = list.filter((t) => t.state === "backlog").map((t) => t.id);
+          const allOn = vis.length > 0 && vis.every((id) => selectedBacklog.has(id));
+          if (allOn) vis.forEach((id) => selectedBacklog.delete(id));
+          else vis.forEach((id) => selectedBacklog.add(id));
+          renderBoard();
+        };
+      }
+      const blReady = $("boardList").querySelector("[data-bl-ready]");
+      if (blReady) {
+        blReady.onclick = () => {
+          const vis = list.filter((t) => t.state === "backlog").map((t) => t.id);
+          const chosen = vis.filter((id) => selectedBacklog.has(id));
+          const targets = chosen.length ? chosen : vis;
+          if (targets.length) promptBulkBacklog("ready", targets);
+        };
+      }
+      const blCancel = $("boardList").querySelector("[data-bl-cancel]");
+      if (blCancel) {
+        blCancel.onclick = () => {
+          const vis = list.filter((t) => t.state === "backlog").map((t) => t.id);
+          const chosen = vis.filter((id) => selectedBacklog.has(id));
+          if (chosen.length) promptBulkBacklog("cancel", chosen);
+        };
+      }
       $("boardList").querySelectorAll(".kcard").forEach((el) => {
         el.onclick = () => openTaskDrawer(el.dataset.id);
-        el.onkeydown = (e) => { if (e.key === "Enter") openTaskDrawer(el.dataset.id); };
+        el.onkeydown = (e) => {
+          if (e.target.closest("button,input,a,select,textarea")) return;
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openTaskDrawer(el.dataset.id); }
+        };
       });
       return;
     }
@@ -532,113 +1006,285 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const repoBadge = t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : "";
       const fpBadge = t.fingerprint ? `<span class="mono" style="font-size:11px;color:var(--muted)">${esc(t.fingerprint)}</span>` : "";
       const needYouBadge = isNeedYouTask(t) ? `<span class="pill pill-blocked">${/needs?\s*you/i.test(t.blocked_detail || "") ? "Need You" : "Human"}</span>` : "";
+      const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : "";
       const specBody = cleanSpec(t.spec_description || "");
-      const specPreview = specBody;
-      return `<div class="task-row" data-id="${esc(t.id)}">
+      const specPreview = specBody.length > 320 ? specBody.slice(0, 320) + "…" : specBody;
+      const updated = t.updated_at ? `<span>Updated ${esc(ago(t.updated_at))}</span>` : "";
+      const quickReady = t.state === "backlog" && !ro ? `<button type="button" class="btn-primary btn-sm" data-quick-ready="${esc(t.id)}">→ Ready</button>` : "";
+      const quickPlan = t.needs_plan_approval && !ro ? `<button type="button" class="btn-ok btn-sm" data-quick-plan="${esc(t.id)}">Approve Plan</button>` : "";
+      return `<div class="task-row" data-id="${esc(t.id)}" tabindex="0" role="button">
         <div class="task-main">
           <div class="task-head">
             <span class="mono" style="font-weight:700">${esc(t.id)}</span>
             ${repoBadge}
-            <span class="pill pill-${esc(t.priority.toLowerCase())}">${esc(t.priority)}</span>
+            <span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>
             <span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>
             ${needYouBadge}
+            ${planBadge}
             ${fpBadge}
           </div>
           <div class="task-title">${esc(t.title)}</div>
           ${specPreview ? `<div class="task-desc">${esc(specPreview)}</div>` : ""}
-          <div class="task-meta">${deps}${blk}<span>Cycles: ${esc(t.unblock_cycles ?? 0)}</span></div>
+          <div class="task-meta">${deps}${blk}<span>Cycles: ${esc(t.unblock_cycles ?? 0)}</span>${updated}</div>
         </div>
-        <button class="btn-sm">Inspect</button>
+        <div style="display:flex;gap:6px;align-items:center;flex:none">${quickReady}${quickPlan}<button class="btn-sm" tabindex="-1">Inspect</button></div>
       </div>`;
     }).join("");
+    $("boardList").querySelectorAll("[data-quick-ready]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); runQuickAction("ready", btn.dataset.quickReady, btn); };
+    });
+    $("boardList").querySelectorAll("[data-quick-plan]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); runQuickAction("approve_plan", btn.dataset.quickPlan, btn); };
+    });
     $("boardList").querySelectorAll(".task-row").forEach((el) => {
       el.onclick = () => openTaskDrawer(el.dataset.id);
+      el.onkeydown = (e) => {
+        if (e.target.closest("button,input,a,select,textarea")) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openTaskDrawer(el.dataset.id); }
+      };
     });
   }
 
-  async function openTaskDrawer(taskId) {
-    $("drawerTitle").textContent = taskId;
-    $("drawerBody").innerHTML = `<div class="muted">Loading task details…</div>`;
-    $("drawerBg").classList.add("open");
-    try {
-      const d = await api("/api/task/" + encodeURIComponent(taskId));
-      const t = d.task || d;
-      const runs = d.runs || [];
-      const events = d.events || [];
-      const deps = d.deps || [];
-      const notes = t.context_notes || [];
+  function syncDrawerTabs() {
+    $("drawerTabs").querySelectorAll(".dtab").forEach((b) => {
+      const on = b.dataset.dtab === drawerTab;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", String(on));
+    });
+  }
+
+  async function renderDrawerTab() {
+    if (!drawerTaskId || !drawerDetail) return;
+    const renderSeq = ++drawerRenderSeq;
+    const taskId = drawerTaskId;
+    const d = drawerDetail;
+    const t = d.task || d;
+    const runs = d.runs || [];
+    const events = d.events || [];
+    const deps = d.deps || [];
+    const notes = t.context_notes || [];
+    const plan = d.plan || {};
+    const ro = Boolean(meta.read_only);
+    const latestBranch = runs.length ? (runs[runs.length - 1].branch || "") : "";
+    $("drawerCopyBranch").classList.toggle("hidden", !latestBranch);
+    $("drawerCopyBranch").onclick = () => copyText(latestBranch, "branch " + latestBranch);
+
+    if (drawerTab === "overview") {
       const specText = cleanSpec(typeof t.spec === "string" ? t.spec : (t.spec && t.spec.description) || "");
       const acceptance = (t.spec && Array.isArray(t.spec.acceptance)) ? t.spec.acceptance : [];
       const blkText = formatBlockedText(t.blocked_reason);
+      const canReview = t.state === "review" || t.state === "blocked";
+      const canCancel = ["backlog", "ready", "blocked", "review"].includes(t.state);
       $("drawerBody").innerHTML = `
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <span class="pill pill-${esc((t.priority||"p2").toLowerCase())}">${esc(t.priority)}</span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>
           <span class="pill pill-${esc(t.state||"backlog")}">${esc(t.state)}</span>
           ${t.fingerprint ? `<span class="pill pill-slate mono">${esc(t.fingerprint)}</span>` : ""}
-          ${blkText ? `<span class="pill pill-blocked">${esc(blkText)}</span>` : ""}
+          ${latestBranch ? `<span class="pill pill-slate mono">${esc(latestBranch)}</span>` : ""}
+          ${t.updated_at ? `<span class="muted" style="font-size:12px">updated ${esc(ago(t.updated_at))}</span>` : ""}
         </div>
         <div style="font-weight:700;font-size:16px;word-break:break-word">${esc(t.title)}</div>
-        ${t.repo_root ? `<div class="mono" style="font-size:12px;color:var(--muted)">${esc(t.repo_root)}</div>` : ""}
+        ${t.repo_root ? `<div class="mono" style="font-size:12px;color:var(--muted);overflow-wrap:anywhere">${esc(t.repo_root)}</div>` : ""}
+        ${blkText ? `<div class="blocked-callout"><strong>Blocked:</strong> ${esc(blkText)}</div>` : ""}
+        ${plan.needs_approval ? `<div class="plan-callout"><strong>Plan waiting for approval:</strong> ${esc(plan.summary || "Inspect Plan tab to review details.")}</div>` : ""}
         ${specText ? `<div class="kv-section"><div class="kv-title">Task Content / Spec</div><div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(specText)}</div></div>` : ""}
         ${acceptance.length ? `<div class="kv-section"><div class="kv-title">Acceptance Criteria</div>${acceptance.map((a)=>`<div style="margin-bottom:4px">• ${esc(a)}</div>`).join("")}</div>` : ""}
         ${deps.length ? `<div class="kv-section"><div class="kv-title">Dependencies</div><div class="mono">${esc(deps.join(", "))}</div></div>` : ""}
-        ${notes.length ? `<div class="kv-section"><div class="kv-title">Context / Steering Notes</div>${notes.map((n)=>`<div class="mono" style="margin-bottom:4px">• ${esc(n)}</div>`).join("")}</div>` : ""}
+        ${notes.length ? `<div class="kv-section"><div class="kv-title">Context / Steering Notes</div>${notes.map((n)=>`<div class="mono" style="margin-bottom:4px;overflow-wrap:anywhere">• ${esc(n)}</div>`).join("")}</div>` : ""}
         <div class="kv-section">
           <div class="kv-title">Runs (${runs.length})</div>
-          ${runs.length ? runs.map((r) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
-            <span class="mono">${esc(r.id)} · ${esc(r.status)} (${esc(r.executor)})</span>
-            <button class="btn-sm" data-run="${esc(r.id)}">Stream</button>
-          </div>`).join("") : `<div class="muted">No runs recorded.</div>`}
+          ${runs.length ? runs.slice().reverse().map((r) => {
+            const elapsed = r.started_at && r.ended_at ? ` · ${dur(r.ended_at - r.started_at)}` : "";
+            const started = r.started_at ? ` · ${ago(r.started_at)}` : "";
+            const stopBtn = r.status === "running" && !ro ? `<button class="btn-danger btn-sm" data-stop-run="${esc(r.id)}">Stop</button>` : "";
+            return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+              <span class="mono" style="overflow-wrap:anywhere">${esc(r.id)} · ${esc(r.status)} (${esc(r.executor)})${esc(elapsed)}${esc(started)}</span>
+              <div style="display:flex;gap:5px;flex:none">${stopBtn}<button class="btn-sm" data-run="${esc(r.id)}">Stream</button></div>
+            </div>`;
+          }).join("") : `<div class="muted">No runs recorded.</div>`}
         </div>
         <div class="kv-section">
           <div class="kv-title">Recent Events (${events.length})</div>
-          ${events.map((e) => `<div class="mono" style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--border)">${esc(e.kind)} · ${esc(e.created_at)}</div>`).join("") || `<div class="muted">None</div>`}
+          ${events.map((e) => `<div class="mono" style="font-size:11.5px;padding:3px 0;border-bottom:1px solid var(--border)">${esc(String(e.kind || "").replace(/_/g, " "))} · <span class="muted">${esc(ago(e.created_at))}</span></div>`).join("") || `<div class="muted">None</div>`}
         </div>
         <div class="action-bar">
-          <button class="btn-sm" id="drawerReviewBtn">Open in Needs Review</button>
-          <button class="btn-sm" id="drawerSteerBtn" ${meta.read_only ? "disabled" : ""}>Steer</button>
-        </div>`;
+          ${t.state === "backlog" ? `<button class="btn-primary btn-sm" id="drawerReadyBtn" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>→ Move to Ready</button>` : ""}
+          ${plan.needs_approval ? `<button class="btn-ok btn-sm" id="drawerApprovePlanBtn" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Approve Plan</button>` : ""}
+          ${t.state === "blocked" ? `<button class="btn-primary btn-sm" id="drawerUnblockBtn" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Unblock</button>` : ""}
+          ${canReview ? `<button class="btn-sm" id="drawerReviewBtn">Open in Needs Review</button>` : ""}
+          <button class="btn-sm" id="drawerSteerBtn" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Steer</button>
+          ${canCancel ? `<button class="btn-danger btn-sm" id="drawerCancelBtn" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Cancel Task</button>` : ""}
+        </div>
+        ${ro ? `<div class="muted" style="font-size:12px">${esc(RO_HINT)}</div>` : ""}`;
       $("drawerBody").querySelectorAll("[data-run]").forEach((b) => {
-        b.onclick = () => {
-          $("drawerBg").classList.remove("open");
-          switchTab("stream");
-          followRun(b.dataset.run);
-        };
+        b.onclick = () => { closeDrawer(); switchTab("stream"); followRun(b.dataset.run); };
       });
-      $("drawerReviewBtn").onclick = () => {
-        $("drawerBg").classList.remove("open");
-        switchTab("review");
-        loadReviewDetail(taskId);
-      };
+      $("drawerBody").querySelectorAll("[data-stop-run]").forEach((b) => {
+        b.onclick = () => promptStopRun(b.dataset.stopRun);
+      });
+      if ($("drawerReadyBtn")) $("drawerReadyBtn").onclick = () => runQuickAction("ready", taskId, $("drawerReadyBtn"), true);
+      if ($("drawerApprovePlanBtn")) $("drawerApprovePlanBtn").onclick = () => runQuickAction("approve_plan", taskId, $("drawerApprovePlanBtn"), true);
+      if ($("drawerUnblockBtn")) $("drawerUnblockBtn").onclick = () => promptMutate("unblock", taskId);
+      if ($("drawerReviewBtn")) $("drawerReviewBtn").onclick = () => { closeDrawer(); switchTab("review"); loadReviewDetail(taskId); };
       $("drawerSteerBtn").onclick = () => promptMutate("steer", taskId);
+      if ($("drawerCancelBtn")) $("drawerCancelBtn").onclick = () => promptMutate("cancel", taskId);
+      return;
+    }
+
+    if (drawerTab === "diff") {
+      $("drawerBody").innerHTML = `<div class="muted">Loading worktree git diff…</div>`;
+      try {
+        const df = await api("/api/diff/" + encodeURIComponent(taskId));
+        if (renderSeq !== drawerRenderSeq || drawerTab !== "diff") return;
+        $("drawerBody").innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="mono muted">${esc(df.branch || df.worktree_path || "No worktree")}</span>
+            <div style="display:flex;gap:6px">
+              ${df.branch ? `<button class="btn-sm" id="diffCopyBr" type="button">Copy branch</button>` : ""}
+              <button class="btn-sm" id="diffWrapBtn" type="button">${diffWrap ? "Disable wrap" : "Wrap lines"}</button>
+            </div>
+          </div>
+          ${df.stat ? `<pre class="mono muted" style="margin:0;white-space:pre-wrap;background:var(--surface2);padding:8px 10px;border-radius:8px;border:1px solid var(--border)">${esc(df.stat)}</pre>` : ""}
+          ${df.available ? renderDiffHtml(df.diff) : `<div class="empty">${esc(df.note || "No worktree diff available.")}</div>`}
+          ${df.truncated ? `<div class="muted" style="font-size:12px">Diff truncated at 200 KiB.</div>` : ""}`;
+        if ($("diffCopyBr")) $("diffCopyBr").onclick = () => copyText(df.branch, "branch " + df.branch);
+        $("diffWrapBtn").onclick = () => {
+          diffWrap = !diffWrap;
+          const box = $("drawerBody").querySelector(".diff-box");
+          if (box) box.classList.toggle("wrap", diffWrap);
+          $("diffWrapBtn").textContent = diffWrap ? "Disable wrap" : "Wrap lines";
+        };
+      } catch (e) {
+        if (renderSeq === drawerRenderSeq) $("drawerBody").innerHTML = `<div style="color:var(--err)">${esc(e.message)}</div>`;
+      }
+      return;
+    }
+
+    if (drawerTab === "plan") {
+      if (!plan.available) {
+        $("drawerBody").innerHTML = `<div class="empty">No generated plan recorded for this task yet.</div>`;
+        return;
+      }
+      const c = plan.contract || null;
+      const files = c && Array.isArray(c.files_to_change) ? c.files_to_change : [];
+      const invariants = c && Array.isArray(c.invariants_and_edge_cases) ? c.invariants_and_edge_cases : [];
+      const tests = c && Array.isArray(c.red_green_tests) ? c.red_green_tests : [];
+      const tierReasons = c && Array.isArray(c.tier_reasons) ? c.tier_reasons : [];
+      const openQs = c && Array.isArray(c.open_questions) ? c.open_questions : [];
+      $("drawerBody").innerHTML = `
+        <div class="plan-callout">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+            <span style="font-weight:700">${plan.needs_approval ? "Waiting for Human Plan Approval" : "Recorded Plan"}</span>
+            ${c && c.tier_assessment ? `<span class="pill pill-slate">${esc(c.tier_assessment)}</span>` : ""}
+          </div>
+          <div>${esc(plan.summary || (c && c.summary) || plan.note_body || "")}</div>
+          ${tierReasons.length ? `<div class="muted" style="font-size:12px;margin-top:5px">${tierReasons.map((r) => `• ${esc(r)}`).join(" ")}</div>` : ""}
+          ${plan.hash ? `<div class="mono muted" style="margin-top:6px">hash: ${esc(plan.hash)}</div>` : ""}
+        </div>
+        ${files.length ? `<div class="kv-section"><div class="kv-title">Files To Change (${files.length})</div>${files.map((f) => `<div style="margin-bottom:6px"><span class="mono" style="font-weight:600">${esc(f.path || "")}</span>${f.responsibility ? ` — ${esc(f.responsibility)}` : ""}${f.risk ? `<div class="muted" style="font-size:12px">Risk: ${esc(f.risk)}</div>` : ""}</div>`).join("")}</div>` : ""}
+        ${invariants.length ? `<div class="kv-section"><div class="kv-title">Invariants &amp; Edge Cases (${invariants.length})</div>${invariants.map((inv) => `<div style="margin-bottom:4px">• ${esc(inv)}</div>`).join("")}</div>` : ""}
+        ${tests.length ? `<div class="kv-section"><div class="kv-title">Red / Green Tests (${tests.length})</div>${tests.map((rt) => `<div style="margin-bottom:6px"><span class="mono" style="font-weight:600">${esc(rt.test_path || rt.ac_ref || "test")}</span>${rt.red_condition ? `<div class="muted" style="font-size:12px">RED: ${esc(rt.red_condition)}</div>` : ""}${rt.green_condition ? `<div class="muted" style="font-size:12px">GREEN: ${esc(rt.green_condition)}</div>` : ""}</div>`).join("")}</div>` : ""}
+        ${openQs.length ? `<div class="kv-section"><div class="kv-title">Open Questions (${openQs.length})</div>${openQs.map((q) => `<div style="margin-bottom:4px">• ${esc(q)}</div>`).join("")}</div>` : ""}
+        ${!c && plan.note_body ? `<div class="kv-section"><div class="kv-title">Plan Details</div><div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(plan.note_body)}</div></div>` : ""}
+        ${plan.needs_approval ? `<div class="action-bar"><button class="btn-ok" id="planTabApproveBtn" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Approve Plan &amp; Move to Ready</button></div>` : ""}`;
+      if ($("planTabApproveBtn")) {
+        $("planTabApproveBtn").onclick = () => runQuickAction("approve_plan", taskId, $("planTabApproveBtn"), true);
+      }
+      return;
+    }
+
+    if (drawerTab === "proof") {
+      $("drawerBody").innerHTML = `<div class="muted">Loading device verification proof…</div>`;
+      try {
+        const pf = await api("/api/proof/" + encodeURIComponent(taskId));
+        if (renderSeq !== drawerRenderSeq || drawerTab !== "proof") return;
+        if (!pf.available) {
+          $("drawerBody").innerHTML = `<div class="empty">No signed screenshot proof recorded for this task.</div>`;
+          return;
+        }
+        const rec = pf.record || {};
+        const flows = Array.isArray(rec.flows) ? rec.flows : [];
+        const imgs = Array.isArray(pf.images) ? pf.images : [];
+        $("drawerBody").innerHTML = `
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <span class="pill pill-ok">Signed Proof</span>
+            ${rec.device_serial ? `<span class="pill pill-slate mono">${esc(rec.device_serial)}</span>` : ""}
+            ${rec.width && rec.height ? `<span class="pill pill-slate">${esc(rec.width)}×${esc(rec.height)}</span>` : ""}
+            ${rec.recorded_at ? `<span class="muted" style="font-size:12px">${esc(ago(rec.recorded_at))}</span>` : ""}
+          </div>
+          ${flows.length ? `<div class="kv-section"><div class="kv-title">Proof Flows (${flows.length})</div>${flows.map((f) => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>${esc(f.name)}</span><span class="pill ${f.passed ? "pill-ok" : "pill-err"}">${f.passed ? "PASS" : "FAIL"}</span></div>`).join("")}</div>` : ""}
+          <div id="proofImgsBox" class="proof-grid">${imgs.length ? `<div class="muted">Loading ${imgs.length} image(s)…</div>` : `<div class="muted">Image file not found on disk.</div>`}</div>`;
+        if (imgs.length) {
+          const urls = await Promise.all(imgs.map((im) => fetchImageDataUrl(im.url).then((src) => ({ name: im.name, src })).catch((e) => ({ name: im.name, err: e.message }))));
+          if (renderSeq !== drawerRenderSeq || drawerTab !== "proof") return;
+          $("proofImgsBox").innerHTML = urls.map((u) => (u.src && /^data:image\/png;base64,/i.test(u.src))
+            ? `<div><div class="mono muted" style="margin-bottom:4px">${esc(u.name)}</div><img class="proof-img" src="${esc(u.src)}" alt="${esc(u.name)}"></div>`
+            : `<div class="muted">${esc(u.name)}: ${esc(u.err || "invalid image data")}</div>`
+          ).join("");
+        }
+      } catch (e) {
+        if (renderSeq === drawerRenderSeq) $("drawerBody").innerHTML = `<div style="color:var(--err)">${esc(e.message)}</div>`;
+      }
+    }
+  }
+
+  async function openTaskDrawer(taskId, initialTab = "overview") {
+    const seq = ++drawerSeq;
+    drawerRenderSeq++;
+    drawerTaskId = taskId;
+    drawerDetail = null;
+    drawerTab = initialTab;
+    syncDrawerTabs();
+    lastFocusBeforeDrawer = document.activeElement;
+    $("drawerTitle").textContent = taskId;
+    $("drawerCopyBranch").classList.add("hidden");
+    $("drawerBody").innerHTML = `<div class="muted">Loading task details…</div>`;
+    $("drawerBg").classList.add("open");
+    document.body.style.overflow = "hidden";
+    setTimeout(() => $("drawerClose").focus(), 10);
+    try {
+      const d = await api("/api/task/" + encodeURIComponent(taskId));
+      if (seq !== drawerSeq || !$("drawerBg").classList.contains("open")) return;
+      drawerDetail = d;
+      renderDrawerTab();
     } catch (e) {
+      if (seq !== drawerSeq) return;
       $("drawerBody").innerHTML = `<div style="color:var(--err)">${esc(e.message)}</div>`;
     }
   }
 
   function renderReviewQueue() {
-    const items = boardTasks.filter((t) => t.state === "review" || t.state === "blocked");
+    const items = boardTasks.filter((t) => matchesRepo(t) && (t.state === "review" || t.state === "blocked")).sort(compareTasks);
     if (!items.length) {
       $("reviewQueue").innerHTML = `<div class="empty">Inbox zero — no review or blocked tasks.</div>`;
       return;
     }
-    $("reviewQueue").innerHTML = items.map((t) => `
-      <div class="review-item ${selectedReviewId===t.id?"selected":""}" data-id="${esc(t.id)}">
+    $("reviewQueue").innerHTML = items.map((t) => {
+      const blk = t.blocked_detail || (t.blocked_reason ? String(t.blocked_reason).replace(/_/g, " ") : "");
+      return `
+      <div class="review-item ${selectedReviewId===t.id?"selected":""}" data-id="${esc(t.id)}" tabindex="0" role="button">
         <div class="task-head">
           <span class="mono" style="font-weight:700">${esc(t.id)}</span>
           <span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>
-          <span class="pill pill-${esc(t.priority.toLowerCase())}">${esc(t.priority)}</span>
+          <span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>
+          ${t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : ""}
+          ${t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : ""}
         </div>
-        <div style="font-weight:600;font-size:13px">${esc(t.title)}</div>
-        ${t.blocked_reason ? `<div style="color:var(--err);font-size:12px;margin-top:3px">${esc(t.blocked_reason)}</div>` : ""}
-      </div>`).join("");
+        <div style="font-weight:600;font-size:13px;overflow-wrap:anywhere">${esc(t.title)}</div>
+        ${blk ? `<div style="color:var(--err);font-size:12px;margin-top:3px;overflow-wrap:anywhere">${esc(blk)}</div>` : ""}
+      </div>`;
+    }).join("");
     $("reviewQueue").querySelectorAll(".review-item").forEach((el) => {
       el.onclick = () => loadReviewDetail(el.dataset.id);
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); loadReviewDetail(el.dataset.id); } };
     });
   }
 
   async function loadReviewDetail(taskId) {
+    const seq = ++reviewSeq;
     selectedReviewId = taskId;
+    const taskInit = boardTasks.find((t) => t.id === taskId);
+    selectedReviewSig = taskInit ? `${taskInit.state}|${taskInit.updated_at || 0}|${taskInit.blocked_detail || ""}` : "";
     renderReviewQueue();
     const box = $("reviewDetail");
     box.innerHTML = `<div class="muted">Loading handover &amp; lock preview for ${esc(taskId)}…</div>`;
@@ -646,6 +1292,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       api("/api/handover/" + encodeURIComponent(taskId)),
       api("/api/approve/preview/" + encodeURIComponent(taskId)),
     ]);
+    if (seq !== reviewSeq) return;
     const ho = hoRes.status === "fulfilled" ? hoRes.value : null;
     const pv = pvRes.status === "fulfilled" ? pvRes.value : null;
     const task = boardTasks.find((t) => t.id === taskId);
@@ -656,18 +1303,23 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const ro = Boolean(meta.read_only);
     const allowApprove = !ro && Boolean(meta.allow_approve);
     const approveHint = ro
-      ? "Disabled in read-only mode. Use `aaf approve` on a TTY or restart with `aaf ui --allow-approve`."
+      ? RO_HINT
       : (!allowApprove
-          ? "Web approve is disabled by default. Restart with `aaf ui --allow-approve` or run `aaf approve` on a TTY."
+          ? "Approve is disabled on this server (start with --allow-approve on a TTY, or run `aaf approve --task " + taskId + " --reviewer <name>`)."
           : "");
+    const btnHint = (disabled, fallback) => disabled ? `title="${esc(ro ? RO_HINT : fallback)}"` : "";
 
     box.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
-        <div>
-          <div class="mono" style="font-weight:700">${esc(taskId)} <span class="pill pill-${esc(st)}">${esc(st)}</span></div>
-          <div style="font-size:16px;font-weight:700;margin-top:3px">${esc((ho && ho.title) || (task && task.title) || "")}</div>
+        <div style="min-width:0">
+          <div class="mono" style="font-weight:700;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${esc(taskId)} <span class="pill pill-${esc(st)}">${esc(st)}</span>${task && task.repo_name ? `<span class="pill pill-slate">${esc(task.repo_name)}</span>` : ""}</div>
+          <div style="font-size:16px;font-weight:700;margin-top:3px;overflow-wrap:anywhere">${esc((ho && ho.title) || (task && task.title) || "")}</div>
         </div>
-        ${ho && ho.status ? `<span class="pill ${ho.status === "XONG" ? "pill-ok" : "pill-running"}">${esc(ho.status)}</span>` : ""}
+        <div style="display:flex;gap:6px;align-items:center">
+          <button class="btn-sm" id="revOpenDiff" type="button">Diff</button>
+          <button class="btn-sm" id="revOpenProof" type="button">Proof</button>
+          ${ho && ho.status ? `<span class="pill ${ho.status === "XONG" ? "pill-ok" : "pill-running"}">${esc(ho.status)}</span>` : ""}
+        </div>
       </div>
       ${ho ? `
         <div class="score-grid">
@@ -688,18 +1340,23 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         </div>` : `<div class="kv-section muted">Handover unavailable: ${esc(hoRes.reason && hoRes.reason.message || "")}</div>`}
       <div class="kv-section">
         <div class="kv-title">Head-Lock Preview</div>
-        ${pv ? `<div class="mono" style="margin-bottom:6px">lock_fp: ${esc(lockFp || "(none)")}</div>
+        ${pv ? `<div class="mono" style="margin-bottom:6px;overflow-wrap:anywhere">lock_fp: ${esc(lockFp || "(none)")}</div>
           ${locked.length ? locked.map((c) => `<div class="mono">  ${esc(c.change)} ${esc(c.path)}</div>`).join("") : `<div class="muted">No locked files changed.</div>`}`
           : `<div class="muted">Lock preview unavailable: ${esc(pvRes.reason && pvRes.reason.message || "")}</div>`}
       </div>
       <div class="action-bar">
-        <button id="btnApprove" class="btn-ok" ${!allowApprove || !locked.length || !lockFp ? "disabled" : ""} ${approveHint ? `title="${esc(approveHint)}"` : ""}>Approve Locked Diff</button>
-        <button id="btnRework" class="btn-danger" ${ro || st !== "review" ? "disabled" : ""}>Rework</button>
-        <button id="btnUnblock" class="btn-primary" ${ro || st !== "blocked" ? "disabled" : ""}>Unblock</button>
-        <button id="btnSteer" ${ro ? "disabled" : ""}>Steer</button>
+        ${task && task.needs_plan_approval ? `<button id="btnApprovePlan" class="btn-ok" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Approve Plan</button>` : ""}
+        <button id="btnApprove" class="btn-ok" ${!allowApprove || !locked.length || !lockFp ? "disabled" : ""} ${btnHint(!allowApprove || !locked.length || !lockFp, approveHint || "No locked changes to approve")}>Approve Locked Diff</button>
+        <button id="btnRework" class="btn-danger" ${ro || st !== "review" ? "disabled" : ""} ${btnHint(ro || st !== "review", "Rework is only available for tasks in review")}>Rework</button>
+        <button id="btnUnblock" class="btn-primary" ${ro || st !== "blocked" ? "disabled" : ""} ${btnHint(ro || st !== "blocked", "Unblock is only available for blocked tasks")}>Unblock</button>
+        <button id="btnSteer" ${ro ? "disabled" : ""} ${btnHint(ro, "")}>Steer</button>
+        <button id="btnCancel" class="btn-danger" ${ro ? "disabled" : ""} ${btnHint(ro, "")}>Cancel</button>
       </div>
       ${approveHint ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(approveHint)}</div>` : ""}`;
 
+    $("revOpenDiff").onclick = () => openTaskDrawer(taskId, "diff");
+    $("revOpenProof").onclick = () => openTaskDrawer(taskId, "proof");
+    if ($("btnApprovePlan")) $("btnApprovePlan").onclick = () => runQuickAction("approve_plan", taskId, $("btnApprovePlan"));
     $("btnApprove").onclick = () => {
       if (!allowApprove) return;
       openModal({
@@ -719,38 +1376,164 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("btnRework").onclick = () => promptMutate("rework", taskId);
     $("btnUnblock").onclick = () => promptMutate("unblock", taskId);
     $("btnSteer").onclick = () => promptMutate("steer", taskId);
+    $("btnCancel").onclick = () => promptMutate("cancel", taskId);
+  }
+
+  async function refreshOpenContext() {
+    if (selectedReviewId && activeTab === "review") loadReviewDetail(selectedReviewId);
+    if ($("drawerBg").classList.contains("open") && drawerTaskId) {
+      const seq = drawerSeq;
+      const tid = drawerTaskId;
+      try {
+        const d = await api("/api/task/" + encodeURIComponent(tid));
+        if (seq === drawerSeq && drawerTaskId === tid) { drawerDetail = d; renderDrawerTab(); }
+      } catch (_) {}
+    }
+  }
+
+  async function runQuickAction(action, taskId, btnEl, closeAfter) {
+    const orig = btnEl ? btnEl.textContent : "";
+    if (btnEl) { if (btnEl.disabled) return; btnEl.disabled = true; btnEl.textContent = "…"; }
+    try {
+      await api("/api/action", { method: "POST", body: JSON.stringify({ action, task_id: taskId, note: "" }) });
+      selectedBacklog.delete(taskId);
+      toast(`${action === "ready" ? "Moved to Ready" : action === "approve_plan" ? "Plan approved" : action}: ${taskId}`);
+      if (closeAfter) closeDrawer();
+      await refreshAll();
+      await refreshOpenContext();
+    } catch (e) {
+      toast("Error: " + e.message);
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = orig; }
+    }
+  }
+
+  function promptStopRun(runId) {
+    openModal({
+      title: "Emergency Stop Run " + runId + "?",
+      desc: "Sends SIGTERM to verified agent processes executing in this run's worktree. Uncommitted work may remain in the worktree.",
+      fields: `<label style="display:flex;align-items:center;gap:8px;font-size:13px"><input type="checkbox" id="mStopConfirm"> Confirm stop active run <span class="mono">${esc(runId)}</span></label>`,
+      confirmLabel: "Stop Run",
+      onConfirm: async () => {
+        if (!$("mStopConfirm").checked) { toast("Please check the confirmation box first."); return false; }
+        const res = await api("/api/action", { method: "POST", body: JSON.stringify({ action: "stop_run", task_id: runId, note: "confirm" }) });
+        toast(`Stopped run ${runId} (${(res.signaled_pids || []).length} pid)`);
+        await refreshAll();
+        await refreshOpenContext();
+      },
+    });
+  }
+
+  function promptNewTask() {
+    const repos = Array.isArray(meta.repos) ? meta.repos : [];
+    const defaultRepo = selectedRepos.size === 1
+      ? (repos.find((r) => selectedRepos.has(r.name)) || {}).repo_root || ""
+      : (repos[0] ? repos[0].repo_root : (meta.repo_root || ""));
+    const repoField = repos.length
+      ? `<select id="ntRepo" style="width:100%">${repos.map((r) => `<option value="${esc(r.repo_root)}" ${r.repo_root === defaultRepo ? "selected" : ""}>${esc(r.name)} (${esc(r.repo_root)})</option>`).join("")}</select>`
+      : `<input id="ntRepo" class="mono" value="${esc(defaultRepo)}" placeholder="/path/to/git/repo" style="width:100%">`;
+    openModal({
+      title: "Create New AAF Task",
+      desc: "Add a task directly to the AAF board without opening a terminal.",
+      fields: `
+        <div class="form-row"><label for="ntRepo">Repository</label>${repoField}</div>
+        <div class="form-row"><label for="ntTitle">Title</label><input id="ntTitle" placeholder="Short imperative task title…" maxlength="200" style="width:100%"></div>
+        <div class="form-2">
+          <div class="form-row"><label for="ntPrio">Priority</label><select id="ntPrio"><option value="P0">P0 (Critical)</option><option value="P1">P1 (High)</option><option value="P2" selected>P2 (Normal)</option><option value="P3">P3 (Low)</option></select></div>
+          <div class="form-row"><label for="ntState">Initial Column</label><select id="ntState"><option value="ready" selected>Ready (auto-run)</option><option value="backlog">Backlog (triage first)</option></select></div>
+        </div>
+        <div class="form-row"><label for="ntSpec">Spec / What needs to be done</label><textarea id="ntSpec" rows="4" placeholder="Describe problem, root cause or goal…" style="width:100%"></textarea></div>
+        <div class="form-row"><label for="ntAccept">Acceptance Criteria (one per line)</label><textarea id="ntAccept" rows="3" placeholder="- Unit tests pass\n- UI renders cleanly" style="width:100%"></textarea></div>
+        <div class="form-row"><label for="ntScope">Scope paths (optional, comma-separated)</label><input id="ntScope" class="mono" placeholder="crates/aaf-cli/src/cmd/ui.rs" style="width:100%"></div>`,
+      confirmLabel: "Create Task",
+      onConfirm: async () => {
+        const repo_root = ($("ntRepo").value || "").trim();
+        const title = ($("ntTitle").value || "").trim();
+        const priority = $("ntPrio").value;
+        const state = $("ntState").value;
+        const spec = ($("ntSpec").value || "").trim();
+        const accept = ($("ntAccept").value || "").trim();
+        const scope = ($("ntScope").value || "").trim();
+        if (!title || !spec || !accept) { toast("Title, Spec, and Acceptance are required."); return false; }
+        const res = await api("/api/tasks", {
+          method: "POST",
+          body: JSON.stringify({ repo_root, title, priority, state, spec, accept, scope }),
+        });
+        toast(`Created ${res.task_id} (${res.state})`);
+        await refreshAll();
+      },
+    });
+  }
+
+  function promptBulkBacklog(action, taskIds) {
+    const isCancel = action === "cancel";
+    openModal({
+      title: isCancel ? `Cancel ${taskIds.length} backlog task(s)?` : `Move ${taskIds.length} backlog task(s) to Ready?`,
+      desc: isCancel
+        ? "Cancelled tasks will not be scheduled by `aaf run`."
+        : "These tasks will move from Backlog to Ready so `aaf run` can pick them up.",
+      fields: isCancel
+        ? `<textarea id="mNote" rows="2" style="width:100%" placeholder="Optional cancel reason…"></textarea>`
+        : `<div class="mono muted" style="max-height:120px;overflow:auto">${esc(taskIds.slice(0, 20).join(", "))}${taskIds.length > 20 ? ` … (+${taskIds.length - 20})` : ""}</div>`,
+      confirmLabel: isCancel ? `Cancel ${taskIds.length} task(s)` : `Move ${taskIds.length} → Ready`,
+      onConfirm: async () => {
+        const note = isCancel ? (($("mNote") && $("mNote").value) || "").trim() : "";
+        let ok = 0, fail = 0;
+        for (const id of taskIds) {
+          try {
+            await api("/api/action", { method: "POST", body: JSON.stringify({ action, task_id: id, note }) });
+            selectedBacklog.delete(id); ok++;
+          } catch (_) { fail++; }
+        }
+        toast(fail ? `${ok} succeeded, ${fail} failed` : `${isCancel ? "Cancelled" : "Moved to Ready"}: ${ok} task(s)`);
+        await refreshAll();
+      },
+    });
   }
 
   function promptMutate(action, taskId) {
     const needsNote = action === "rework" || action === "steer";
+    const optionalNote = action === "cancel";
     openModal({
       title: "Confirm " + action + (taskId ? " " + taskId : ""),
       desc: action === "unfreeze" ? "Clear factory freeze so scheduled runs can resume."
         : action === "unblock" ? "Move blocked task back to ready (and reset exhausted root budget if needed)."
+        : action === "cancel" ? "Mark this task cancelled so it will not be scheduled by `aaf run`."
         : "Enter operator note / reason for " + action + ":",
-      fields: needsNote ? `<textarea id="mNote" rows="3" style="width:100%" placeholder="Reason or steering instruction…"></textarea>` : "",
+      fields: (needsNote || optionalNote) ? `<textarea id="mNote" rows="3" style="width:100%" placeholder="${optionalNote ? "Optional cancel reason…" : "Reason or steering instruction…"}"></textarea>` : "",
       confirmLabel: "Execute " + action,
       onConfirm: async () => {
-        const note = needsNote ? ($("mNote").value || "").trim() : "";
+        const note = (needsNote || optionalNote) ? ($("mNote").value || "").trim() : "";
         if (needsNote && !note) { toast("Note/reason is required."); return false; }
         await api("/api/action", { method: "POST", body: JSON.stringify({ action, task_id: taskId || "", note }) });
         toast(action + " completed" + (taskId ? " for " + taskId : ""));
+        if (action === "cancel" && $("drawerBg").classList.contains("open")) closeDrawer();
         await refreshAll();
-        if (selectedReviewId && activeTab === "review") loadReviewDetail(selectedReviewId);
+        await refreshOpenContext();
       },
     });
   }
 
   function openModal({ title, desc, fields, confirmLabel, onConfirm }) {
+    lastFocusBeforeModal = document.activeElement;
     $("modalTitle").textContent = title;
     $("modalDesc").textContent = desc;
     $("modalFields").innerHTML = fields || "";
     $("modalConfirm").textContent = confirmLabel || "Confirm";
     modalHandler = onConfirm;
     $("modalBg").classList.add("open");
+    setTimeout(() => {
+      const firstInput = $("modalFields").querySelector("input,textarea,select");
+      (firstInput || $("modalConfirm")).focus();
+    }, 10);
   }
-
-  function closeModal() { $("modalBg").classList.remove("open"); modalHandler = null; }
+  function closeModal() {
+    $("modalBg").classList.remove("open");
+    modalHandler = null;
+    if (lastFocusBeforeModal && typeof lastFocusBeforeModal.focus === "function") {
+      try { lastFocusBeforeModal.focus(); } catch (_) {}
+    }
+    lastFocusBeforeModal = null;
+  }
 
   function renderStreamLines(runId, lines) {
     const safeLines = Array.isArray(lines) ? lines : [];
@@ -780,6 +1563,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   async function followRun(runId) {
     activeRunId = (runId || "").trim();
     $("runManual").value = activeRunId;
+    renderStatusChrome();
     if (!activeRunId) { renderStreamLines("", []); startSse(); return; }
     try {
       const d = await api("/api/streams/" + encodeURIComponent(activeRunId));
@@ -791,22 +1575,36 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     startSse();
   }
 
-  function renderMachine() {
+  function renderMachine(force = false) {
     if (!statusData) return;
     const c = statusData.counts || {};
     const r = statusData.runs || {};
+    const ro = Boolean(meta.read_only);
+    const accts = (statusData.watch_accounts && statusData.watch_accounts.entries) || statusData.accounts || [];
+    const hs = statusData.heavy_slots || {};
+    const th = statusData.throttle || {};
+    const mSig = JSON.stringify([ro, c, r, statusData.tokens_in, statusData.tokens_out, statusData.estimated_cost_usd, statusData.frozen, hs, th, accts, [...pendingAccounts]]);
+    if (!force && mSig === lastMachineSig) return;
+    lastMachineSig = mSig;
     const hasCost = statusData.estimated_cost_usd !== null && statusData.estimated_cost_usd !== undefined;
     const costHtml = hasCost
       ? `<div class="stat-val">$${esc(Number(statusData.estimated_cost_usd).toFixed(4))}</div>`
       : `<div class="stat-val" title="subscription accounts: tokens only">—</div>`;
+    const taskParts = [
+      `backlog ${c.backlog ?? 0}`,
+      `ready ${c.ready ?? 0}`,
+      `running ${(c.running ?? 0) + (c.gating ?? 0)}`,
+      `review ${c.review ?? 0}`,
+      `blocked ${c.blocked ?? 0}`,
+      `done ${c.done ?? 0}`,
+    ];
+    if (c.cancelled) taskParts.push(`cancelled ${c.cancelled}`);
     $("metricCards").innerHTML = `
-      <div class="card"><div class="stat-label">Tasks</div><div class="stat-val">${esc(c.total ?? 0)}</div><div class="stat-sub">ready ${esc(c.ready??0)} · running ${esc(c.running??0)} · review ${esc(c.review??0)} · blocked ${esc(c.blocked??0)}</div></div>
+      <div class="card"><div class="stat-label">Tasks</div><div class="stat-val">${esc(c.total ?? 0)}</div><div class="stat-sub">${esc(taskParts.join(" · "))}</div></div>
       <div class="card"><div class="stat-label">Runs</div><div class="stat-val">${esc(r.total ?? 0)}</div><div class="stat-sub">active ${esc(r.running??0)} · ok ${esc(r.succeeded??0)} · fail ${esc(r.failed??0)}</div></div>
       <div class="card"><div class="stat-label">Tokens</div><div class="stat-val">${esc((statusData.tokens_in||0).toLocaleString())}</div><div class="stat-sub">in · ${esc((statusData.tokens_out||0).toLocaleString())} out</div></div>
       <div class="card"><div class="stat-label">Est. Cost</div>${costHtml}<div class="stat-sub">frozen: ${statusData.frozen ? "YES" : "no"}</div></div>`;
 
-    const hs = statusData.heavy_slots || {};
-    const th = statusData.throttle || {};
     const slots = hs.slots || [];
     $("throttleBox").innerHTML = `
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
@@ -818,18 +1616,231 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         `<tr><td class="mono">#${esc(s.slot)}</td><td>${esc(s.state)}</td><td class="mono">${esc(s.pgid ?? "—")}</td><td>${esc(s.label ?? "—")}</td><td class="mono">${esc(s.reserved_ram_mb ?? "—")}</td></tr>`
       ).join("")}</tbody></table></div>` : `<div class="muted">No heavy slot lock records.</div>`}`;
 
-    const accts = (statusData.watch_accounts && statusData.watch_accounts.entries) || statusData.accounts || [];
-    $("accountsBox").innerHTML = accts.length ? `<table><thead><tr><th>Name</th><th>Provider</th><th>State</th><th>Cooldown</th><th>5h Tokens</th></tr></thead><tbody>${accts.map((a) => {
+    $("accountsBox").innerHTML = accts.length ? `<table><thead><tr><th>Name</th><th>Provider</th><th>State</th><th>Cooldown</th><th>5h Tokens</th>${!ro ? "<th>Controls</th>" : ""}</tr></thead><tbody>${accts.map((a) => {
       const st = a.state || a.status || "unknown";
-      return `<tr><td><strong>${esc(a.name)}</strong></td><td>${esc(a.provider)}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":"pill-running"}">${esc(st)}</span></td><td class="mono">${esc(a.cooldown_until ?? "—")}</td><td class="mono">${esc(a.tokens_5h ?? "—")}</td></tr>`;
+      const inCd = st === "cooldown" || Boolean(a.cooldown_until && Number(a.cooldown_until) > Date.now() / 1000);
+      const acctKey = a.id || a.name;
+      const busy = pendingAccounts.has(acctKey);
+      const dis = busy ? "disabled" : "";
+      const controls = !ro ? `<td><div style="display:flex;gap:4px">${
+        inCd
+          ? `<button type="button" class="btn-ok btn-sm" ${dis} data-acc-clear="${esc(acctKey)}">Clear</button>`
+          : `<button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="5">5m</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="15">15m</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="300">5h</button>`
+      }</div></td>` : "";
+      return `<tr><td><strong>${esc(a.name)}</strong></td><td>${esc(a.provider)}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":(inCd?"pill-blocked":"pill-running")}">${esc(st)}</span></td><td class="mono">${esc(untilStr(a.cooldown_until))}</td><td class="mono">${esc(a.tokens_5h ?? "—")}</td>${controls}</tr>`;
     }).join("")}</tbody></table>` : `<div class="muted">No accounts configured.</div>`;
+
+    $("accountsBox").querySelectorAll("[data-acc-clear]").forEach((btn) => {
+      btn.onclick = async () => {
+        const key = btn.dataset.accClear;
+        if (pendingAccounts.has(key)) return;
+        pendingAccounts.add(key);
+        renderMachine(true);
+        try {
+          await api("/api/action", { method: "POST", body: JSON.stringify({ action: "account_clear", task_id: key, note: "" }) });
+          toast("Cleared cooldown");
+          await refreshAll();
+        } catch (e) { toast("Error: " + e.message); }
+        finally { pendingAccounts.delete(key); renderMachine(true); }
+      };
+    });
+    $("accountsBox").querySelectorAll("[data-acc-cd]").forEach((btn) => {
+      btn.onclick = async () => {
+        const key = btn.dataset.accCd;
+        if (pendingAccounts.has(key)) return;
+        pendingAccounts.add(key);
+        renderMachine(true);
+        try {
+          await api("/api/action", { method: "POST", body: JSON.stringify({ action: "account_cooldown", task_id: key, note: btn.dataset.mins }) });
+          toast(`Cooldown set (${btn.dataset.mins}m)`);
+          await refreshAll();
+        } catch (e) { toast("Error: " + e.message); }
+        finally { pendingAccounts.delete(key); renderMachine(true); }
+      };
+    });
+  }
+
+  function meterCls(pctVal) {
+    if (pctVal <= 15) return "err";
+    if (pctVal <= 40) return "warn";
+    return "";
+  }
+
+  function renderTopAccPill() {
+    const pill = $("topAccPill");
+    const sw = accountsPanelData && accountsPanelData.switcher;
+    if (!sw || !Array.isArray(sw.profiles) || !sw.profiles.length) {
+      pill.classList.add("hidden");
+      return;
+    }
+    const active = sw.profiles.find((p) => p.isActive || p.id === sw.activeProfileId) || sw.profiles[0];
+    const rem = typeof active.remainingPct === "number" ? ` · ${active.remainingPct}% 5h` : "";
+    const label = active.shortLabel || active.id;
+    pill.innerHTML = `<span class="dot ${active.isFrozen ? "err" : "live"}"></span><span>${esc(label)}${esc(rem)}</span>`;
+    pill.classList.remove("hidden");
+  }
+
+  async function loadAccountsPanel(forceLive = false) {
+    if (!token) return;
+    if (accountsLoadInFlight) {
+      accountsLoadQueued = true;
+      accountsQueuedLive = accountsQueuedLive || forceLive;
+      return;
+    }
+    accountsLoadInFlight = true;
+    if (forceLive) {
+      $("accRefreshBtn").disabled = true;
+      $("accRefreshBtn").textContent = "Đang đồng bộ quota…";
+    }
+    try {
+      accountsPanelData = await api("/api/accounts" + (forceLive ? "?refresh=1" : ""));
+      renderTopAccPill();
+      renderAccountsPanel();
+      if (forceLive) toast("Đã cập nhật quota tài khoản");
+    } catch (e) {
+      if (activeTab === "accounts") {
+        $("ccProfilesBox").innerHTML = `<div class="empty">Không tải được dữ liệu tài khoản: ${esc(e.message)}</div>`;
+      }
+    } finally {
+      accountsLoadInFlight = false;
+      $("accRefreshBtn").disabled = false;
+      $("accRefreshBtn").textContent = "↻ Làm mới Quota (Live)";
+      if (accountsLoadQueued) {
+        const nextLive = accountsQueuedLive;
+        accountsLoadQueued = false;
+        accountsQueuedLive = false;
+        loadAccountsPanel(nextLive);
+      }
+    }
+  }
+
+  function renderAccountsPanel() {
+    const ro = Boolean(meta.read_only);
+    const data = accountsPanelData || {};
+    const sw = data.switcher || null;
+    const profiles = (sw && Array.isArray(sw.profiles)) ? sw.profiles : [];
+    const aafCount = (data.aaf_accounts || (statusData && statusData.accounts) || []).length;
+    $("cntAccounts").textContent = String(profiles.length || aafCount);
+    const hasSw = Boolean(sw && profiles.length);
+    $("ccRotateBtn").classList.toggle("hidden", ro || !hasSw);
+    $("ccUnfreezeBtn").classList.toggle("hidden", ro || !hasSw);
+    $("ccBalanceBtn").classList.toggle("hidden", ro || !hasSw);
+
+    if (sw && sw.health && sw.health.quotaFetchedAtMs) {
+      const ts = Math.round(sw.health.quotaFetchedAtMs / 1000);
+      const daemonNote = sw.health.daemon && sw.health.daemon.running ? "daemon ON" : "daemon OFF";
+      $("accMetaNote").textContent = `Quota đồng bộ ${ago(ts)} · ${daemonNote}`;
+    } else if (data.switcher_error) {
+      $("accMetaNote").textContent = "CC Switcher: " + data.switcher_error;
+    } else {
+      $("accMetaNote").textContent = hasSw ? "" : "Chế độ AAF thuần (chưa kết nối CC Switcher)";
+    }
+
+    if (hasSw) {
+      $("ccProfilesBox").innerHTML = profiles.map((p) => {
+        const isAct = Boolean(p.isActive || p.id === sw.activeProfileId);
+        const rem5 = typeof p.remainingPct === "number" ? Math.max(0, Math.min(100, p.remainingPct)) : null;
+        const rem7 = typeof p.weeklyRemainingPct === "number" ? Math.max(0, Math.min(100, p.weeklyRemainingPct)) : null;
+        const stPill = isAct
+          ? `<span class="pill pill-ok">Đang dùng</span>`
+          : (p.isFrozen ? `<span class="pill pill-blocked">${esc(p.status || "LIMIT")}</span>` : `<span class="pill pill-slate">${esc(p.status || "Sẵn sàng")}</span>`);
+        const m5 = rem5 !== null
+          ? `<div class="meter"><div class="meter-row"><span>Quota 5 giờ còn</span><b>${rem5}%${p.resetRemainHuman ? ` · mở sau ${esc(p.resetRemainHuman)}` : ""}</b></div><div class="meter-track"><div class="meter-fill ${meterCls(rem5)}" style="width:${rem5}%"></div></div></div>`
+          : `<div class="acc-sub">Quota 5h: ${esc(p.status || "chưa có dữ liệu live")}</div>`;
+        const m7 = rem7 !== null
+          ? `<div class="meter"><div class="meter-row"><span>Quota 7 ngày còn</span><b>${rem7}%${p.weeklyResetFormatted ? ` · ${esc(p.weeklyResetFormatted)}` : ""}</b></div><div class="meter-track"><div class="meter-fill ${meterCls(rem7)}" style="width:${rem7}%"></div></div></div>`
+          : "";
+        const swBtn = !ro
+          ? `<button type="button" class="${isAct ? "btn-sm" : "btn-primary btn-sm"}" data-cc-switch="${esc(p.id)}" ${isAct ? "disabled" : ""}>${isAct ? "✓ Đang dùng mặc định" : "Dùng tài khoản này"}</button>`
+          : "";
+        return `<div class="acc-card ${isAct ? "active" : ""} ${p.isFrozen ? "frozen" : ""}">
+          <div class="acc-head">
+            <div><div class="acc-name">${esc(p.shortLabel || p.id)}</div><div class="acc-sub">${esc(p.vendor || "")} · ${esc(p.assignedRepoCount ?? 0)} repo gán</div></div>
+            ${stPill}
+          </div>
+          ${m5}${m7}
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:auto;padding-top:4px">
+            <span class="mono acc-sub">${esc(p.id)}</span>
+            ${swBtn}
+          </div>
+        </div>`;
+      }).join("");
+      $("ccProfilesBox").querySelectorAll("[data-cc-switch]").forEach((btn) => {
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_switch", task_id: btn.dataset.ccSwitch, note: "" }) });
+            toast("Đã chuyển tài khoản mặc định sang " + btn.dataset.ccSwitch);
+            await loadAccountsPanel(false);
+          } catch (e) { toast("Lỗi: " + e.message); }
+          finally { btn.disabled = false; }
+        };
+      });
+    } else {
+      $("ccProfilesBox").innerHTML = "";
+    }
+
+    const claudeOpts = (sw && Array.isArray(sw.claudeAccounts) && sw.claudeAccounts.length)
+      ? sw.claudeAccounts
+      : (data.aaf_accounts || []).filter((a) => a.provider === "claude").map((a) => a.name);
+    const repos = (sw && Array.isArray(sw.repoAssignments) && sw.repoAssignments.length)
+      ? sw.repoAssignments
+      : (data.repo_assignments || []);
+    if (!repos.length) {
+      $("repoAssignBox").innerHTML = `<div class="muted">Chưa có repo nào được ghi nhận.</div>`;
+    } else {
+      $("repoAssignBox").innerHTML = `<table><thead><tr><th>Repo</th><th>Tài khoản hiện tại</th>${!ro ? "<th>Gán tài khoản Claude</th>" : ""}</tr></thead><tbody>` +
+        repos.map((rp) => {
+          const cur = rp.pinnedInFile && rp.account ? rp.account : "";
+          const isApp = rp.source === "app";
+          const badge = cur ? `<span class="pill pill-ok mono">${esc(cur)}</span>` : `<span class="pill pill-slate">Mặc định (~/.claude)</span>`;
+          const ctrl = !ro ? `<td><div style="display:flex;gap:6px;align-items:center">
+            <select data-repo-sel="${esc(rp.path)}" aria-label="Chọn tài khoản Claude cho ${esc(rp.name)}" style="min-width:150px">
+              <option value="">-- Chọn tài khoản --</option>
+              ${claudeOpts.map((id) => `<option value="${esc(id)}" ${id === cur ? "selected" : ""}>${esc(id)}</option>`).join("")}
+            </select>
+            <button type="button" class="btn-primary btn-sm" data-repo-save="${esc(rp.path)}">Lưu</button>
+            ${cur && !isApp ? `<button type="button" class="btn-sm" data-repo-rm="${esc(rp.path)}">Gỡ</button>` : ""}
+          </div></td>` : "";
+          return `<tr><td><strong>${esc(rp.name)}</strong><div class="mono muted" style="font-size:11px">${esc(rp.path)}</div></td><td>${badge}</td>${ctrl}</tr>`;
+        }).join("") + `</tbody></table>`;
+      $("repoAssignBox").querySelectorAll("[data-repo-save]").forEach((btn) => {
+        btn.onclick = async () => {
+          const repoPath = btn.dataset.repoSave;
+          const sel = $("repoAssignBox").querySelector(`select[data-repo-sel="${CSS.escape(repoPath)}"]`);
+          const acc = sel ? sel.value.trim() : "";
+          if (!acc) { toast("Hãy chọn một tài khoản Claude trước."); return; }
+          btn.disabled = true;
+          try {
+            const res = await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_assign", task_id: repoPath, note: acc }) });
+            toast(res.message || `Đã gán ${acc} cho repo`);
+            await loadAccountsPanel(false);
+          } catch (e) { toast("Lỗi: " + e.message); }
+          finally { btn.disabled = false; }
+        };
+      });
+      $("repoAssignBox").querySelectorAll("[data-repo-rm]").forEach((btn) => {
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_remove", task_id: btn.dataset.repoRm, note: "" }) });
+            toast("Đã gỡ ghim tài khoản của repo");
+            await loadAccountsPanel(false);
+          } catch (e) { toast("Lỗi: " + e.message); }
+          finally { btn.disabled = false; }
+        };
+      });
+    }
+    renderMachine(true);
   }
 
   function switchTab(tab) {
     activeTab = tab;
     syncBoardTabHighlight();
-    ["board","review","stream","machine"].forEach((t) => $("view-" + t).classList.toggle("hidden", t !== tab));
+    ["board","review","stream","accounts","machine"].forEach((t) => $("view-" + t).classList.toggle("hidden", t !== tab));
+    syncRepoFilterOptions();
     if (tab === "review") renderReviewQueue();
+    if (tab === "accounts") { renderAccountsPanel(); loadAccountsPanel(false); }
     if (tab === "machine") renderMachine();
   }
 
@@ -840,62 +1851,122 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     statusData = s;
     lastBoardSig = boardSigFromStatus(s);
     boardTasks = b.tasks || [];
+    syncRepoFilterOptions();
+    renderChips();
     renderStatusChrome();
     renderBoard();
     renderReviewQueue();
-    if (activeTab === "machine") renderMachine();
+    const aafCnt = ((s.watch_accounts && s.watch_accounts.entries) || s.accounts || []).length;
+    if (!accountsPanelData) $("cntAccounts").textContent = String(aafCnt);
+    if (activeTab === "machine" || activeTab === "accounts") renderMachine();
+    if (activeTab === "accounts") loadAccountsPanel(false);
   }
 
   async function boot() {
     initTheme();
+    initAuthChannel();
     renderChips();
-    document.querySelectorAll(".tab[data-tab]").forEach((b) => { b.onclick = () => { if (b.dataset.tab === "board" && stateFilter === "need_you") { stateFilter = "all"; renderChips(); renderBoard(); } switchTab(b.dataset.tab); }; });
+    document.querySelectorAll(".tab[data-tab]").forEach((b) => {
+      b.onclick = () => {
+        if (b.dataset.tab === "board" && (stateFilter === "need_you" || (activeTab === "board" && stateFilter !== "all"))) {
+          stateFilter = "all"; renderChips(); renderBoard();
+        }
+        switchTab(b.dataset.tab);
+      };
+    });
     $("needYouTabBtn").onclick = () => { stateFilter = "need_you"; switchTab("board"); renderChips(); renderBoard(); };
-    if (new URLSearchParams(location.search).get("view") === "needyou") { stateFilter = "need_you"; renderChips(); }
+    const viewParam = new URLSearchParams(location.search).get("view");
+    if (viewParam === "needyou") { stateFilter = "need_you"; renderChips(); syncBoardTabHighlight(); }
+    else if (viewParam === "blocked") { stateFilter = "blocked"; renderChips(); syncBoardTabHighlight(); }
+    else if (viewParam === "review") { switchTab("review"); }
+    else if (viewParam === "accounts") { switchTab("accounts"); }
+    $("topAccPill").onclick = () => switchTab("accounts");
+    $("accRefreshBtn").onclick = () => loadAccountsPanel(true);
+    $("ccRotateBtn").onclick = async () => {
+      $("ccRotateBtn").disabled = true;
+      try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_rotate", task_id: "", note: "" }) }); toast("Đã xoay tài khoản"); await loadAccountsPanel(false); }
+      catch (e) { toast("Lỗi: " + e.message); } finally { $("ccRotateBtn").disabled = false; }
+    };
+    $("ccUnfreezeBtn").onclick = async () => {
+      $("ccUnfreezeBtn").disabled = true;
+      try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_unfreeze", task_id: "", note: "" }) }); toast("Đã gỡ đóng băng tài khoản"); await loadAccountsPanel(false); }
+      catch (e) { toast("Lỗi: " + e.message); } finally { $("ccUnfreezeBtn").disabled = false; }
+    };
+    $("ccBalanceBtn").onclick = async () => {
+      $("ccBalanceBtn").disabled = true;
+      try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_balance", task_id: "", note: "even" }) }); toast("Đã chia đều tài khoản cho các repo"); await loadAccountsPanel(false); }
+      catch (e) { toast("Lỗi: " + e.message); } finally { $("ccBalanceBtn").disabled = false; }
+    };
+
+    $("sortBy").value = sortBy;
+    $("sortBy").onchange = () => { sortBy = $("sortBy").value; sSet(localStorage, SORT_KEY, sortBy); renderBoard(); renderReviewQueue(); };
     $("prioFilter").onchange = renderBoard;
-    document.querySelectorAll("#viewSeg button").forEach((b) => { b.onclick = () => { boardView = b.dataset.view; try { localStorage.setItem(VIEW_KEY, boardView); } catch (_) {} renderBoard(); }; });
+    $("clearFiltersBtn").onclick = () => {
+      stateFilter = "all"; selectedRepos.clear(); saveSelectedRepos();
+      $("prioFilter").value = ""; $("searchBox").value = "";
+      sortBy = "priority"; $("sortBy").value = sortBy; sSet(localStorage, SORT_KEY, sortBy);
+      syncRepoFilterOptions(); renderChips(); renderBoard(); renderReviewQueue();
+    };
+    document.querySelectorAll("#viewSeg button").forEach((b) => { b.onclick = () => { boardView = b.dataset.view; sSet(localStorage, VIEW_KEY, boardView); renderBoard(); }; });
     $("searchBox").oninput = renderBoard;
     $("refreshBtn").onclick = () => refreshAll().then(() => toast("Refreshed")).catch((e) => toast(e.message));
-    $("lockBtn").onclick = () => { sessionStorage.removeItem(TOKEN_KEY); token = ""; openAuth("Session locked."); };
+    $("newTaskBtn").onclick = promptNewTask;
+    $("supBtn").onclick = async () => {
+      const btn = $("supBtn");
+      if (btn.disabled) return;
+      const curOn = Boolean(statusData && statusData.supervisor && statusData.supervisor.enabled);
+      btn.disabled = true;
+      try {
+        await api("/api/action", { method: "POST", body: JSON.stringify({ action: "supervisor_toggle", task_id: "", note: curOn ? "off" : "on" }) });
+        toast(curOn ? "Auto-Run turned OFF" : "Auto-Run turned ON");
+        await refreshAll();
+      } catch (e) { toast("Error: " + e.message); }
+      finally { btn.disabled = false; }
+    };
+    $("stopStreamRunBtn").onclick = () => { if (activeRunId) promptStopRun(activeRunId); };
+
+    $("lockBtn").classList.toggle("hidden", isLoopbackHost());
+    $("lockBtn").onclick = () => { clearToken(); token = ""; openAuth("Session locked."); };
     $("unfreezeBtn").onclick = () => promptMutate("unfreeze", "");
-    $("drawerClose").onclick = () => $("drawerBg").classList.remove("open");
-    $("drawerBg").onclick = (e) => { if (e.target === $("drawerBg")) $("drawerBg").classList.remove("open"); };
+    $("drawerClose").onclick = closeDrawer;
+    $("drawerBg").onclick = (e) => { if (e.target === $("drawerBg")) closeDrawer(); };
+    $("drawerTabs").querySelectorAll(".dtab").forEach((b) => {
+      b.onclick = () => { drawerTab = b.dataset.dtab; syncDrawerTabs(); renderDrawerTab(); };
+    });
     $("modalCancel").onclick = closeModal;
+    $("modalBg").onclick = (e) => { if (e.target === $("modalBg")) closeModal(); };
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if ($("modalBg").classList.contains("open")) { e.preventDefault(); closeModal(); }
+      else if ($("drawerBg").classList.contains("open")) { e.preventDefault(); closeDrawer(); }
+    });
     $("modalConfirm").onclick = async () => {
       if (!modalHandler) return;
       $("modalConfirm").disabled = true;
       try {
         const res = await modalHandler();
         if (res !== false) closeModal();
-      } catch (e) {
-        toast("Error: " + e.message);
-      } finally {
-        $("modalConfirm").disabled = false;
-      }
+      } catch (e) { toast("Error: " + e.message); }
+      finally { $("modalConfirm").disabled = false; }
     };
-    $("watchRunBtn").onclick = () => followRun($("runManual").value || $("runSelect").value);
-    $("runSelect").onchange = () => { if ($("runSelect").value) followRun($("runSelect").value); };
+    $("watchRunBtn").onclick = () => followRun($("runManual").value.trim() || $("runSelect").value.trim());
+    $("runSelect").onchange = () => { const val = $("runSelect").value.trim(); if (val) { $("runManual").value = val; followRun(val); } };
     $("tokenSubmit").onclick = async () => {
       const val = $("tokenInput").value.trim();
       if (!val) { $("authErr").textContent = "Token is required."; return; }
-      token = val;
-      sessionStorage.setItem(TOKEN_KEY, token);
-      try {
-        await refreshAll();
-        closeAuth();
-        startSse();
-      } catch (e) {
-        $("authErr").textContent = e.message;
-      }
+      token = val; saveToken(token);
+      try { await refreshAll(); closeAuth(); startSse(); loadAccountsPanel(false); }
+      catch (e) { $("authErr").textContent = e.message; }
     };
     $("tokenInput").onkeydown = (e) => { if (e.key === "Enter") $("tokenSubmit").click(); };
 
     token = extractHashToken();
+    if (!token && authChan) {
+      authChan.postMessage({ type: "req" });
+      await new Promise((r) => setTimeout(r, 120));
+    }
     if (!token) { openAuth(""); return; }
-    try {
-      await refreshAll();
-      startSse();
-    } catch (_) {}
+    try { await refreshAll(); startSse(); loadAccountsPanel(false); } catch (_) {}
   }
   boot();
 })();

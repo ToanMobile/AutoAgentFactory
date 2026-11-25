@@ -18,14 +18,14 @@ use serde_json::{Value, json};
 
 use super::{
     APPROVE_DISABLED_MSG, HTML_CSP, RequestSecurityContext, SecurityRejection, UiBackend, UiConfig,
-    UiError, parse_query, validate_ui_config, verify_request_security, with_meta_policy, wrap_ok,
-    write_backend_result, write_http_response, write_json_error, write_json_response,
-    write_sse_event,
+    UiError, backend_error_status, parse_query, validate_ui_config, verify_request_security,
+    with_meta_policy, wrap_ok, write_backend_result, write_http_response, write_json_error,
+    write_json_response, write_sse_event,
 };
 use crate::executors::reaper::validate_run_id;
 use crate::git::worktree::validate_task_id;
 
-use super::routes::{Route, match_route};
+use super::routes::{Route, action_needs_task_id, match_route, normalize_action};
 
 pub const MAX_CONCURRENT_CONNS: usize = 32;
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -353,7 +353,10 @@ fn dispatch_request(
         query_token: req.query.get("token").map(String::as_str),
         require_auth: !matches!(route, Route::Index | Route::Studio | Route::Health),
         allow_query_token: matches!(route, Route::Events),
-        is_mutating: matches!(route, Route::ApproveCommit | Route::Action),
+        is_mutating: matches!(
+            route,
+            Route::ApproveCommit | Route::Action | Route::CreateTask
+        ),
     };
     if let Err(rej) = verify_request_security(cfg, bound_port, &sec_ctx) {
         let (code, msg) = match rej {
@@ -377,6 +380,13 @@ fn dispatch_request(
         }
         Route::Meta => write_backend_result(stream, with_meta_policy(backend.meta_json(), cfg)),
         Route::Status => write_backend_result(stream, backend.status_json()),
+        Route::Accounts => {
+            let refresh = req
+                .query
+                .get("refresh")
+                .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
+            write_backend_result(stream, backend.accounts_json(refresh));
+        }
         Route::Board => {
             let st = req
                 .query
@@ -386,6 +396,17 @@ fn dispatch_request(
             write_backend_result(stream, backend.board_json(st));
         }
         Route::TaskDetail(id) => with_task_id(stream, &id, |id| backend.task_detail_json(id)),
+        Route::TaskDiff(id) => with_task_id(stream, &id, |id| backend.task_diff_json(id)),
+        Route::TaskProof(id) => with_task_id(stream, &id, |id| backend.task_proof_json(id)),
+        Route::ProofImage(id, idx) => match validate_task_id(&id) {
+            Ok(()) => match backend.task_proof_image(&id, idx) {
+                Ok(png) => {
+                    let _ = write_http_response(stream, 200, "image/png", "", &png);
+                }
+                Err(msg) => send_err(stream, backend_error_status(&msg), &msg),
+            },
+            Err(e) => send_err(stream, 400, &format!("invalid task id: {e}")),
+        },
         Route::Handover(id) => with_task_id(stream, &id, |id| backend.handover_json(id)),
         Route::ApprovePreview(id) => {
             with_task_id(stream, &id, |id| backend.approve_preview_json(id))
@@ -406,6 +427,11 @@ fn dispatch_request(
             Err(e) => send_err(stream, 400, &format!("invalid run id: {e}")),
         },
         Route::Events => serve_sse(stream, backend, shutdown, req.query.get("run_id")),
+        Route::CreateTask => {
+            if let Some(val) = parse_json_body::<Value>(stream, &req.body) {
+                write_backend_result(stream, backend.create_task_json(&val));
+            }
+        }
         Route::ApproveCommit if !cfg.effective_allow_approve() => {
             send_err(stream, 403, APPROVE_DISABLED_MSG);
         }
@@ -484,16 +510,14 @@ fn handle_action_post(stream: &mut TcpStream, backend: &dyn UiBackend, body: &[u
     let Some(p) = parse_json_body::<ActionBody>(stream, body) else {
         return;
     };
-    let normalized = match p.action.trim().to_ascii_lowercase().as_str() {
-        "unblock" => "unblock",
-        "rework" => "rework",
-        "steer" => "steer",
-        "unfreeze" => "unfreeze",
-        "approve_plan" | "approve-plan" => "approve_plan",
-        "unblock_all" | "unblock-all" => "unblock_all",
-        _ => return send_err(stream, 400, "unsupported action"),
+    let Some(normalized) = normalize_action(&p.action) else {
+        return send_err(stream, 400, "unsupported action");
     };
-    if !matches!(normalized, "unfreeze" | "unblock_all")
+    if normalized == "stop_run" {
+        if let Err(e) = validate_run_id(p.task_id.trim()) {
+            return send_err(stream, 400, &format!("invalid run id: {e}"));
+        }
+    } else if action_needs_task_id(normalized)
         && let Err(e) = validate_task_id(&p.task_id)
     {
         return send_err(stream, 400, &format!("invalid task id: {e}"));

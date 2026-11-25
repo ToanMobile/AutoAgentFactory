@@ -11,12 +11,17 @@ pub(super) enum Route {
     Health,
     Meta,
     Status,
+    Accounts,
     Board,
     TaskDetail(String),
+    TaskDiff(String),
+    TaskProof(String),
+    ProofImage(String, usize),
     Handover(String),
     ApprovePreview(String),
     StreamTail(String),
     Events,
+    CreateTask,
     ApproveCommit,
     Action,
     MethodNotAllowed,
@@ -40,15 +45,36 @@ pub(super) fn match_route(method: &str, path: &str) -> Route {
         "/api/health" => return exact("GET", Route::Health),
         "/api/meta" => return exact("GET", Route::Meta),
         "/api/status" => return exact("GET", Route::Status),
+        "/api/accounts" => return exact("GET", Route::Accounts),
         "/api/board" => return exact("GET", Route::Board),
         "/api/events" => return exact("GET", Route::Events),
+        "/api/tasks" => return exact("POST", Route::CreateTask),
         "/api/approve" => return exact("POST", Route::ApproveCommit),
         "/api/action" => return exact("POST", Route::Action),
         _ => {}
     }
+    if let Some(rest) = path.strip_prefix("/api/proof-image/")
+        && let Some((raw_id, raw_idx)) = rest.split_once('/')
+        && !raw_id.is_empty()
+        && !raw_idx.is_empty()
+        && !raw_idx.contains('/')
+    {
+        if method != "GET" {
+            return Route::MethodNotAllowed;
+        }
+        let Some(id) = percent_decode(raw_id).filter(|s| !s.is_empty()) else {
+            return Route::BadRequest("invalid URL percent encoding");
+        };
+        let Ok(idx) = raw_idx.parse::<usize>() else {
+            return Route::BadRequest("invalid proof image index");
+        };
+        return Route::ProofImage(id, idx);
+    }
     type RouteCtor = fn(String) -> Route;
-    let prefixes: [(&str, RouteCtor); 4] = [
+    let prefixes: [(&str, RouteCtor); 6] = [
         ("/api/task/", Route::TaskDetail),
+        ("/api/diff/", Route::TaskDiff),
+        ("/api/proof/", Route::TaskProof),
         ("/api/handover/", Route::Handover),
         ("/api/approve/preview/", Route::ApprovePreview),
         ("/api/streams/", Route::StreamTail),
@@ -68,4 +94,47 @@ pub(super) fn match_route(method: &str, path: &str) -> Route {
         }
     }
     Route::NotFound
+}
+
+pub(super) fn normalize_action(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "ready" => Some("ready"),
+        "ready_all" | "ready-all" => Some("ready_all"),
+        "cancel" => Some("cancel"),
+        "unblock" => Some("unblock"),
+        "rework" => Some("rework"),
+        "steer" => Some("steer"),
+        "unfreeze" => Some("unfreeze"),
+        "approve_plan" | "approve-plan" => Some("approve_plan"),
+        "unblock_all" | "unblock-all" => Some("unblock_all"),
+        "stop_run" | "stop-run" => Some("stop_run"),
+        "supervisor_toggle" | "supervisor-toggle" => Some("supervisor_toggle"),
+        "account_cooldown" | "account-cooldown" => Some("account_cooldown"),
+        "account_clear" | "account-clear" => Some("account_clear"),
+        "cc_switch" | "cc-switch" => Some("cc_switch"),
+        "cc_rotate" | "cc-rotate" => Some("cc_rotate"),
+        "cc_unfreeze" | "cc-unfreeze" => Some("cc_unfreeze"),
+        "cc_balance" | "cc-balance" => Some("cc_balance"),
+        "cc_repo_assign" | "cc-repo-assign" => Some("cc_repo_assign"),
+        "cc_repo_remove" | "cc-repo-remove" => Some("cc_repo_remove"),
+        _ => None,
+    }
+}
+
+pub(super) fn action_needs_task_id(normalized: &str) -> bool {
+    !matches!(
+        normalized,
+        "unfreeze"
+            | "unblock_all"
+            | "ready_all"
+            | "supervisor_toggle"
+            | "account_cooldown"
+            | "account_clear"
+            | "cc_switch"
+            | "cc_rotate"
+            | "cc_unfreeze"
+            | "cc_balance"
+            | "cc_repo_assign"
+            | "cc_repo_remove"
+    )
 }

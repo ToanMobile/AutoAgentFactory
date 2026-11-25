@@ -4,22 +4,161 @@ use aaf_domain::blocked::BlockedReason;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{Clock, EventSink, TaskStore};
 use aaf_domain::task::TaskState;
-use aaf_engine::db::Db;
+use aaf_engine::db::{CancelRefusal, Db};
+use aaf_engine::gate::GateError;
 use serde_json::{Value, json};
 
 use crate::cmd::task_ops::{
-    PLAN_APPROVAL_PREFIX, PLAN_DEBATE_STALLED_PREFIX, emit_human_plan_converged,
-    format_approved_plan_note, latest_plan_info, parse_rework_reason, reset_exhausted_budget,
-    rework_task, unblock_task,
+    ApproveOpError, PLAN_APPROVAL_PREFIX, PLAN_DEBATE_STALLED_PREFIX, approve_and_regate,
+    emit_human_plan_converged, format_approved_plan_note, latest_plan_info, parse_rework_reason,
+    reset_exhausted_budget, rework_task, unblock_task,
 };
 use crate::ctx::{Ctx, SystemClock};
 
 const RECENT_RUNS_LIMIT: usize = 20;
 
+pub(super) fn do_ready(db: &Db, task_id: &str) -> Result<Value, String> {
+    let task = db.get_task(task_id).map_err(s_err)?;
+    if task.state != TaskState::Backlog {
+        return Err(format!(
+            "refused: {task_id} is {}, not backlog",
+            task.state.as_str()
+        ));
+    }
+    let now = SystemClock.now();
+    db.set_state(task_id, TaskState::Ready, None, now)
+        .map_err(s_err)?;
+    let payload = json!({
+        "from": TaskState::Backlog.as_str(),
+        "to": TaskState::Ready.as_str(),
+        "why": "aaf ui ready",
+        "by": "web-ui",
+    });
+    db.emit(
+        &FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now).for_task(task_id),
+    )
+    .map_err(s_err)?;
+    Ok(json!({ "action": "ready", "task_id": task_id, "state": "ready" }))
+}
+
+pub(super) fn do_ready_all(db: &Db, repo: Option<&str>) -> Result<Value, String> {
+    let backlog = db
+        .list_tasks(repo, Some(TaskState::Backlog))
+        .map_err(s_err)?;
+    let now = SystemClock.now();
+    let mut ids = Vec::with_capacity(backlog.len());
+    for t in &backlog {
+        db.set_state(&t.id, TaskState::Ready, None, now)
+            .map_err(s_err)?;
+        let payload = json!({
+            "from": TaskState::Backlog.as_str(),
+            "to": TaskState::Ready.as_str(),
+            "why": "aaf ui ready-all",
+            "by": "web-ui",
+        });
+        db.emit(
+            &FactoryEvent::new(EventKind::TaskStateChanged, payload.to_string(), now)
+                .for_task(&t.id),
+        )
+        .map_err(s_err)?;
+        ids.push(t.id.clone());
+    }
+    Ok(json!({ "action": "ready_all", "count": ids.len(), "task_ids": ids }))
+}
+
+pub(super) fn do_cancel(db: &Db, task_id: &str, note: &str) -> Result<Value, String> {
+    let reason = (!note.trim().is_empty()).then_some(note.trim());
+    match db
+        .cancel_task_atomic(task_id, false, reason, SystemClock.now())
+        .map_err(s_err)?
+    {
+        Ok(out) => Ok(json!({
+            "action": "cancel",
+            "task_id": out.task_id,
+            "state": "cancelled",
+            "cancelled_ids": out.cancelled_ids,
+            "affected_dependents": out.affected_dependents,
+        })),
+        Err(CancelRefusal::ActiveState { state, .. }) => Err(format!(
+            "refused: {task_id} is currently {}",
+            state.as_str()
+        )),
+        Err(CancelRefusal::AlreadyTerminal { state, .. }) => {
+            Err(format!("refused: {task_id} is already {}", state.as_str()))
+        }
+        Err(CancelRefusal::RunningRun { run_id, .. }) => {
+            Err(format!("refused: {task_id} has active run {run_id}"))
+        }
+        Err(CancelRefusal::ActiveDescendant { child_id, state }) => Err(format!(
+            "refused: child {child_id} is currently {}",
+            state.as_str()
+        )),
+        Err(CancelRefusal::RunningDescendantRun { child_id, run_id }) => {
+            Err(format!("refused: child {child_id} has active run {run_id}"))
+        }
+        Err(CancelRefusal::HasUnfinishedChildren { children }) => Err(format!(
+            "refused: {task_id} has unfinished subtasks ({}); cancel via CLI with --cascade",
+            children.join(", ")
+        )),
+    }
+}
+
 pub(super) fn do_unblock(db: &Db, task_id: &str) -> Result<Value, String> {
     unblock_task(db, task_id, "aaf ui unblock", "web-ui", SystemClock.now())
         .map_err(|e| e.to_refused_string())?;
     Ok(json!({ "action": "unblock", "task_id": task_id, "state": "ready" }))
+}
+
+pub(super) fn do_unblock_all(db: &Db, repo: Option<&str>) -> Result<Value, String> {
+    let blocked = db
+        .list_tasks(repo, Some(TaskState::Blocked))
+        .map_err(s_err)?;
+    let now = SystemClock.now();
+    let mut ids = Vec::with_capacity(blocked.len());
+    for t in &blocked {
+        unblock_task(db, &t.id, "aaf ui unblock-all", "web-ui", now)
+            .map_err(|e| e.to_refused_string())?;
+        ids.push(t.id.clone());
+    }
+    Ok(json!({ "action": "unblock_all", "count": ids.len(), "task_ids": ids }))
+}
+
+pub(super) fn do_approve_commit(
+    db: &Db,
+    ctx: &Ctx,
+    id: &str,
+    expected_fp: &str,
+    reviewer: &str,
+) -> Result<Value, String> {
+    let by: String = reviewer
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        .take(64)
+        .collect();
+    let who = if by.is_empty() { "web-ui" } else { &by };
+    match approve_and_regate(
+        db,
+        ctx,
+        id,
+        who,
+        Some(expected_fp),
+        "aaf ui approve",
+        who,
+        SystemClock.now(),
+    ) {
+        Ok(out) => Ok(json!({
+            "approved": true, "task_id": id, "reviewer": out.approval.reviewer,
+            "lock_fp": out.approval.lock_fp, "state": out.transitioned_to.map(TaskState::as_str),
+        })),
+        Err(ApproveOpError::Gate(GateError::NothingLocked)) => {
+            Err("refused: no locked file is changed; nothing approved".into())
+        }
+        Err(ApproveOpError::Gate(GateError::LockFpChanged)) => {
+            Err("lock_fp mismatch: locked diff changed since preview".into())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub(super) fn do_rework(db: &Db, ctx: &Ctx, task_id: &str, reason: &str) -> Result<Value, String> {
@@ -116,4 +255,93 @@ pub(super) fn do_approve_plan(db: &Db, task_id: &str) -> Result<Value, String> {
         "action": "approve_plan", "task_id": task_id, "state": "ready",
         "approved": true, "budget_reset": budget_reset,
     }))
+}
+
+pub(super) fn resolve_explicit_key(cli_key: Option<&str>, ctx: &Ctx) -> Option<String> {
+    let clean = |v: &str| (!v.trim().is_empty()).then(|| v.trim().to_string());
+    let env_val = ctx
+        .aaf_env
+        .iter()
+        .find(|(k, _)| k == "AAF_UI_TOKEN")
+        .map(|(_, v)| v.as_str());
+    cli_key
+        .and_then(clean)
+        .or_else(|| env_val.and_then(clean))
+        .or_else(|| std::env::var("AAF_UI_TOKEN").ok().and_then(|v| clean(&v)))
+}
+
+pub(super) fn build_handover_json(db: &Db, ctx: &Ctx, task_id: &str) -> Result<Value, String> {
+    let task = db.get_task(task_id).map_err(s_err)?;
+    let repo_cfg =
+        crate::cmd::handover::load_repo_config(ctx, std::path::Path::new(&task.repo_root));
+    let data = aaf_engine::handover::load_handover(db, &ctx.data_dir, task_id, &repo_cfg)
+        .map_err(s_err)?;
+    let mut val = serde_json::to_value(&data).map_err(s_err)?;
+    if let Value::Object(ref mut map) = val {
+        map.insert(
+            "markdown".into(),
+            json!(aaf_engine::handover::render_markdown(&data)),
+        );
+    }
+    Ok(val)
+}
+
+pub(super) fn build_approve_preview_json(
+    db: Db,
+    ctx: &Ctx,
+    task_id: &str,
+) -> Result<Value, String> {
+    let (_, report) = crate::cmd::task_ops::eval_task_head_lock(db, task_id, ctx)
+        .map_err(|e| e.message().to_string())?;
+    let changes: Vec<Value> = report
+        .locked_changes
+        .iter()
+        .map(|ch| json!({ "change": ch.change.letter(), "path": ch.path }))
+        .collect();
+    Ok(json!({
+        "task_id": task_id,
+        "lock_fp": report.lock_fp,
+        "can_approve": !changes.is_empty(),
+        "locked_changes": changes,
+    }))
+}
+
+pub(super) fn build_board_json(
+    db: Option<&Db>,
+    scope: &str,
+    repo: Option<&str>,
+    state: Option<&str>,
+) -> Result<Value, String> {
+    let parsed = state
+        .map(|s| {
+            TaskState::parse(&s.to_ascii_lowercase()).ok_or_else(|| format!("invalid state: {s}"))
+        })
+        .transpose()?;
+    let Some(db) = db else {
+        return Ok(json!({ "scope": scope, "frozen": false, "tasks": [] }));
+    };
+    let tasks = db.list_tasks(repo, parsed).map_err(|e| e.to_string())?;
+    let mut enrichment = db.board_enrichment(repo).map_err(|e| e.to_string())?;
+    let items: Vec<Value> = tasks
+        .into_iter()
+        .map(|t| {
+            let deps = enrichment.deps_by_task.remove(&t.id).unwrap_or_default();
+            let latest_run_id = enrichment.latest_run_by_task.remove(&t.id);
+            let repo_name = std::path::Path::new(&t.repo_root)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let blocked_detail = t.blocked_reason.as_ref().map(format_blocked_detail);
+            let needs_plan = super::extras::task_needs_plan_approval(&t);
+            json!({
+                "id": t.id, "title": t.title, "state": t.state.as_str(), "priority": t.priority.as_str(),
+                "blocked_reason": t.blocked_reason.as_ref().map(|b| b.kind()), "blocked_detail": blocked_detail,
+                "needs_plan_approval": needs_plan, "spec_description": t.spec.description,
+                "acceptance": t.spec.acceptance, "fingerprint": t.fingerprint, "repo_name": repo_name,
+                "unblock_cycles": t.unblock_cycles, "deps": deps, "repo_root": t.repo_root,
+                "created_at": t.created_at, "updated_at": t.updated_at, "latest_run_id": latest_run_id,
+            })
+        })
+        .collect();
+    Ok(json!({ "scope": scope, "frozen": enrichment.frozen, "tasks": items }))
 }

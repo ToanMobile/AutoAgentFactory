@@ -2,8 +2,13 @@
 //! Human-only (refuses `AAF_RUN_ID`), enforces `--key`/`AAF_UI_TOKEN` on LAN
 //! binds, re-verifies `lock_fp` on disk before signing, and honors `--read-only`.
 
-pub(crate) mod actions;
+pub(crate) mod accounts_panel;
+mod actions;
+mod extras;
+mod proof_stop;
+mod service;
 mod studio;
+mod supervisor;
 
 use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -13,12 +18,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
-use aaf_domain::task::TaskState;
 use aaf_engine::db::Db;
 use aaf_engine::executors::stream_log::read_tail_lines;
 use aaf_engine::factory::{snapshots::steer_task, unfreeze};
-use aaf_engine::gate::GateError;
-use aaf_engine::handover::{load_handover, render_markdown};
 use aaf_engine::telemetry::{
     RunCounts, StatusQuery, TaskCounts, collect_status_from_db_with_throttle, scan_throttle,
 };
@@ -26,18 +28,17 @@ use aaf_engine::throttle::{LoadProbe, Pressure, SystemProbe};
 use aaf_engine::watch::{WatchQuery, collect_watch_overlay_with_scan};
 use aaf_engine::web_ui::qr::display_host_for_pairing;
 use aaf_engine::web_ui::{
-    APPROVE_DISABLED_MSG, DEFAULT_HOST, DEFAULT_PORT, UiBackend, UiConfig, UiError, pairing_url,
-    render_pairing_card, start_server,
+    APPROVE_DISABLED_MSG, DEFAULT_HOST, DEFAULT_PORT, UiBackend, UiConfig, UiError,
+    is_loopback_host, pairing_url, render_pairing_card, start_server,
 };
 use serde_json::{Value, json};
 
 use self::actions::{
-    collect_recent_runs, do_approve_plan, do_rework, do_unblock, format_blocked_detail, s_err,
+    collect_recent_runs, do_approve_commit, do_approve_plan, do_cancel, do_ready, do_ready_all,
+    do_rework, do_unblock, do_unblock_all, resolve_explicit_key, s_err,
 };
 use super::board::store::{SharedRoDb, open_db, refuse_inside_agent_run};
-use super::handover::load_repo_config;
 use super::scope::resolve_scope;
-use super::task_ops::{ApproveOpError, approve_and_regate, eval_task_head_lock, unblock_task};
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
@@ -75,21 +76,69 @@ pub struct UiArgs {
     /// Scope cockpit data to a specific repository path.
     #[arg(long)]
     pub repo: Option<PathBuf>,
+    /// Run as an always-on read-only loopback service with a persistent token in config_dir/ui-service.token.
+    #[arg(
+        long,
+        conflicts_with_all = ["install_service", "uninstall_service", "service_url", "allow_approve", "key", "qr", "open"]
+    )]
+    pub service: bool,
+    /// Install/restart the macOS launchd agent (`com.autoagentfactory.ui`) for the read-only Cockpit service.
+    #[arg(
+        long,
+        conflicts_with_all = ["service", "uninstall_service", "service_url", "allow_approve", "key", "qr", "open"]
+    )]
+    pub install_service: bool,
+    /// Unload and remove the macOS launchd agent (`com.autoagentfactory.ui`).
+    #[arg(long, conflicts_with_all = ["service", "install_service", "service_url"])]
+    pub uninstall_service: bool,
+    /// Print the fixed bookmark URL of the read-only Cockpit service and exit.
+    #[arg(long, conflicts_with_all = ["service", "install_service", "uninstall_service"])]
+    pub service_url: bool,
+    /// Opt in to board actions (ready, cancel, unblock, rework, steer, unfreeze) in `--service` / `--install-service` mode (approve remains locked).
+    #[arg(long, conflicts_with_all = ["read_only", "allow_approve"])]
+    pub allow_actions: bool,
 }
 
 pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
     if let Some(refused) = refuse_inside_agent_run(ctx, "aaf ui") {
         return Ok(refused);
     }
+    if args.uninstall_service {
+        return service::run_uninstall(ctx);
+    }
+    if args.service_url {
+        return service::run_service_url(ctx, args.port);
+    }
+    if args.install_service {
+        return service::run_install(ctx, args.allow_actions);
+    }
+    if args.service && !is_loopback_host(&args.host) {
+        return Ok(CmdOutput::policy(
+            "refused",
+            format!(
+                "aaf ui --service must bind to loopback (127.0.0.1 / localhost / ::1), got '{}'",
+                args.host
+            ),
+        ));
+    }
     if args.key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
         eprintln!(
             "warning: --key exposes the bearer token in process argv (ps); prefer AAF_UI_TOKEN env var"
         );
     }
-    let (scope, repo_root, config_base) = resolve_scope(args.repo.as_deref(), args.all, ctx)?;
-    let explicit_key = resolve_explicit_key(args.key.as_deref(), ctx);
-    let allow_approve = args.allow_approve && !args.read_only;
-    let cfg = match UiConfig::resolve(args.host.clone(), args.port, explicit_key, !args.read_only) {
+    let scope_all = args.all || (args.service && args.repo.is_none());
+    let (scope, repo_root, config_base) = resolve_scope(args.repo.as_deref(), scope_all, ctx)?;
+    let read_only = args.read_only || (args.service && !args.allow_actions);
+    let allow_approve = args.allow_approve && !read_only && !args.service;
+    let explicit_key = if args.service {
+        Some(
+            service::load_or_create_token(&ctx.config_dir)
+                .map_err(|e| CmdError::new(format!("service token: {e}")))?,
+        )
+    } else {
+        resolve_explicit_key(args.key.as_deref(), ctx)
+    };
+    let cfg = match UiConfig::resolve(args.host.clone(), args.port, explicit_key, !read_only) {
         Ok(c) => c.with_allow_approve(allow_approve),
         Err(err @ UiError::InsecureLanBind { .. }) => {
             return Ok(CmdOutput::policy("refused", err.to_string()));
@@ -97,32 +146,62 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
         Err(err) => return Err(CmdError::new(err.to_string())),
     };
     let effective_allow_approve = cfg.effective_allow_approve();
+    let supervisor = supervisor::UiSupervisor::new(ctx.clone(), repo_root.clone(), !read_only);
+    let sup_shutdown = Arc::clone(&supervisor);
     let backend: Arc<dyn UiBackend> = Arc::new(CliUiBackend {
         ro_db: SharedRoDb::for_ctx(ctx),
         ctx: ctx.clone(),
         scope: scope.clone(),
         repo_root,
         config_base,
-        read_only: args.read_only,
+        read_only,
         allow_approve: effective_allow_approve,
+        supervisor,
         status_cache: Mutex::new(StatusCache::default()),
         status_refresh: Mutex::new(()),
         pressure_cache: Mutex::new(None),
     });
-    let handle = start_server(cfg.clone(), backend).map_err(|e| CmdError::new(e.to_string()))?;
+    let handle = match start_server(cfg.clone(), backend) {
+        Ok(h) => h,
+        Err(UiError::Io(e)) if e.kind() == ErrorKind::AddrInUse => {
+            sup_shutdown.shutdown();
+            let msg = service::port_in_use_message(args.port, args.service, &ctx.config_dir);
+            return Err(CmdError::new(msg));
+        }
+        Err(e) => {
+            sup_shutdown.shutdown();
+            return Err(CmdError::new(e.to_string()));
+        }
+    };
     let bound = handle.addr();
     let pairing_host = display_host_for_pairing(&cfg.host);
     let url = pairing_url(&pairing_host, bound.port(), &cfg.token);
-    let card = render_pairing_card(&url, args.read_only, cfg.lan_mode, args.qr);
-    let studio = studio::studio_url(&url);
-    eprintln!("{card}\nStudio (statistics only): {studio}");
-    eprintln!("Listening on http://{bound} (press q + Enter or Ctrl-C to stop)");
+    if args.service {
+        service::trim_log_if_large(&ctx.home);
+        let mode = if read_only {
+            "read-only"
+        } else {
+            "actions enabled; approve locked"
+        };
+        let tok_path = service::token_path(&ctx.config_dir);
+        eprintln!(
+            "AAF Cockpit service ({mode}) listening on http://{bound} (scope: {scope}; token file: {})",
+            tok_path.display()
+        );
+    } else {
+        let card = render_pairing_card(&url, read_only, cfg.lan_mode, args.qr);
+        eprintln!(
+            "{card}\nStudio (statistics only): {}",
+            studio::studio_url(&url)
+        );
+        eprintln!("Listening on http://{bound} (press q + Enter or Ctrl-C to stop)");
+    }
     #[cfg(target_os = "macos")]
-    if args.open && ctx.stdin_is_tty {
+    if args.open && ctx.stdin_is_tty && !args.service {
         let _ = std::process::Command::new("open").arg(&url).spawn();
     }
-    let quit = Arc::new(AtomicBool::new(false));
-    if ctx.stdin_is_tty {
+    if ctx.stdin_is_tty && !args.service {
+        let quit = Arc::new(AtomicBool::new(false));
         let q = Arc::clone(&quit);
         let _ = thread::Builder::new()
             .name("aaf-ui-stdin".into())
@@ -135,29 +214,21 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
                 }
                 q.store(true, Ordering::Relaxed);
             });
-    }
-    while !quit.load(Ordering::Relaxed) {
-        thread::sleep(POLL_TICK);
+        while !quit.load(Ordering::Relaxed) {
+            thread::sleep(POLL_TICK);
+        }
+    } else {
+        loop {
+            thread::park();
+        }
     }
     handle.join();
+    sup_shutdown.shutdown();
     Ok(CmdOutput::ok("ok", "web cockpit stopped")
         .field("scope", json!(scope))
         .field("addr", json!(bound.to_string()))
-        .field("read_only", json!(args.read_only))
+        .field("read_only", json!(read_only))
         .field("allow_approve", json!(effective_allow_approve)))
-}
-
-fn resolve_explicit_key(cli_key: Option<&str>, ctx: &Ctx) -> Option<String> {
-    let clean = |v: &str| (!v.trim().is_empty()).then(|| v.trim().to_string());
-    let env_val = ctx
-        .aaf_env
-        .iter()
-        .find(|(k, _)| k == "AAF_UI_TOKEN")
-        .map(|(_, v)| v.as_str());
-    cli_key
-        .and_then(clean)
-        .or_else(|| env_val.and_then(clean))
-        .or_else(|| std::env::var("AAF_UI_TOKEN").ok().and_then(|v| clean(&v)))
 }
 
 #[derive(Default)]
@@ -174,6 +245,7 @@ struct CliUiBackend {
     config_base: PathBuf,
     read_only: bool,
     allow_approve: bool,
+    supervisor: Arc<supervisor::UiSupervisor>,
     status_cache: Mutex<StatusCache>,
     status_refresh: Mutex<()>,
     pressure_cache: Mutex<Option<(Instant, Option<Pressure>)>>,
@@ -253,10 +325,12 @@ impl UiBackend for CliUiBackend {
             .and_then(Path::file_name)
             .and_then(|s| s.to_str())
             .unwrap_or(&self.scope);
+        let db = self.ro_db.get().ok().flatten();
+        let repos = extras::known_repos(db.as_ref(), self.repo_root.as_deref());
         Ok(json!({
             "repo_name": name, "scope": self.scope, "repo_root": repo,
             "read_only": self.read_only, "allow_approve": self.allow_approve,
-            "version": env!("CARGO_PKG_VERSION"),
+            "repos": repos, "version": env!("CARGO_PKG_VERSION"),
         }))
     }
 
@@ -347,78 +421,71 @@ impl UiBackend for CliUiBackend {
                 json!(watch.as_ref().and_then(|w| w.receipt.as_ref())),
             );
             map.insert("recent_runs".into(), json!(runs));
+            map.insert("supervisor".into(), self.supervisor.status_json());
         }
         self.store_status_if_current(start_gen, &out);
         Ok(out)
     }
 
     fn board_json(&self, state: Option<&str>) -> Result<Value, String> {
-        let parsed = state
-            .map(|s| {
-                TaskState::parse(&s.to_ascii_lowercase())
-                    .ok_or_else(|| format!("invalid state: {s}"))
-            })
-            .transpose()?;
-        let Some(db) = self.ro_db.get().map_err(|e| e.message)? else {
-            return Ok(json!({ "scope": self.scope, "frozen": false, "tasks": [] }));
-        };
+        let db = self.ro_db.get().map_err(|e| e.message)?;
         let repo = self.repo_root.as_deref().and_then(Path::to_str);
-        let tasks = db.list_tasks(repo, parsed).map_err(|e| e.to_string())?;
-        let mut enrichment = db.board_enrichment(repo).map_err(|e| e.to_string())?;
-        let items: Vec<Value> = tasks
-            .into_iter()
-            .map(|t| {
-                let deps = enrichment.deps_by_task.remove(&t.id).unwrap_or_default();
-                let latest_run_id = enrichment.latest_run_by_task.remove(&t.id);
-                let repo_name = Path::new(&t.repo_root).file_name().and_then(|s| s.to_str()).unwrap_or("");
-                let blocked_detail = t.blocked_reason.as_ref().map(format_blocked_detail);
-                json!({
-                    "id": t.id, "title": t.title, "state": t.state.as_str(), "priority": t.priority.as_str(),
-                    "blocked_reason": t.blocked_reason.as_ref().map(|b| b.kind()), "blocked_detail": blocked_detail,
-                    "spec_description": t.spec.description, "acceptance": t.spec.acceptance,
-                    "fingerprint": t.fingerprint, "repo_name": repo_name, "unblock_cycles": t.unblock_cycles,
-                    "deps": deps, "repo_root": t.repo_root, "created_at": t.created_at,
-                    "updated_at": t.updated_at, "latest_run_id": latest_run_id,
-                })
-            })
-            .collect();
-        Ok(json!({ "scope": self.scope, "frozen": enrichment.frozen, "tasks": items }))
+        actions::build_board_json(db.as_ref(), &self.scope, repo, state)
     }
 
     fn task_detail_json(&self, task_id: &str) -> Result<Value, String> {
         let db = self.require_db_ro()?;
+        let task = db.get_task(task_id).map_err(s_err)?;
+        let plan = extras::plan_detail_json(&db, &task);
         Ok(json!({
-            "task": db.get_task(task_id).map_err(s_err)?,
+            "task": task,
+            "plan": plan,
             "deps": db.deps_of(task_id).map_err(s_err)?,
             "runs": db.runs_for_task(task_id).map_err(s_err)?,
             "events": db.events_for_task(task_id, DETAIL_EVENTS_LIMIT).map_err(s_err)?,
         }))
     }
 
-    fn handover_json(&self, task_id: &str) -> Result<Value, String> {
-        let db = self.require_db_ro()?;
-        let task = db.get_task(task_id).map_err(s_err)?;
-        let repo_cfg = load_repo_config(&self.ctx, Path::new(&task.repo_root));
-        let data = load_handover(&db, &self.ctx.data_dir, task_id, &repo_cfg).map_err(s_err)?;
-        let mut val = serde_json::to_value(&data).map_err(s_err)?;
-        if let Value::Object(ref mut map) = val {
-            map.insert("markdown".into(), json!(render_markdown(&data)));
+    fn task_diff_json(&self, task_id: &str) -> Result<Value, String> {
+        extras::read_task_diff(&self.require_db_ro()?, &self.ctx, task_id)
+    }
+
+    fn task_proof_json(&self, task_id: &str) -> Result<Value, String> {
+        proof_stop::read_task_proof(&self.require_db_ro()?, &self.ctx, task_id)
+    }
+
+    fn task_proof_image(&self, task_id: &str, idx: usize) -> Result<Vec<u8>, String> {
+        proof_stop::read_task_proof_image(&self.require_db_ro()?, &self.ctx, task_id, idx)
+    }
+
+    fn create_task_json(&self, body: &Value) -> Result<Value, String> {
+        if self.read_only {
+            return Err("refused: server is running in read-only mode".into());
         }
-        Ok(val)
+        let res = extras::do_create_task(&self.ctx, self.repo_root.as_deref(), body)?;
+        self.invalidate_status_cache();
+        Ok(res)
+    }
+
+    fn accounts_json(&self, refresh: bool) -> Result<Value, String> {
+        let db = self.ro_db.get().map_err(|e| e.message)?;
+        let scoped = self.repo_root.as_deref();
+        accounts_panel::read_accounts_panel(
+            db.as_ref(),
+            &self.ctx,
+            &self.config_base,
+            scoped,
+            self.read_only,
+            refresh,
+        )
+    }
+
+    fn handover_json(&self, task_id: &str) -> Result<Value, String> {
+        actions::build_handover_json(&self.require_db_ro()?, &self.ctx, task_id)
     }
 
     fn approve_preview_json(&self, task_id: &str) -> Result<Value, String> {
-        let (_, report) = eval_task_head_lock(self.require_db_ro()?, task_id, &self.ctx)
-            .map_err(|e| e.message().to_string())?;
-        let changes: Vec<Value> = report
-            .locked_changes
-            .iter()
-            .map(|ch| json!({ "change": ch.change.letter(), "path": ch.path }))
-            .collect();
-        Ok(json!({
-            "task_id": task_id, "lock_fp": report.lock_fp,
-            "can_approve": !changes.is_empty(), "locked_changes": changes,
-        }))
+        actions::build_approve_preview_json(self.require_db_ro()?, &self.ctx, task_id)
     }
 
     fn approve_commit(&self, id: &str, expected_fp: &str, reviewer: &str) -> Result<Value, String> {
@@ -426,58 +493,48 @@ impl UiBackend for CliUiBackend {
             return Err(format!("refused: {APPROVE_DISABLED_MSG}"));
         }
         let db = open_db(&self.ctx).map_err(|e| e.message)?;
-        let by: String = reviewer
-            .trim()
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
-            .take(64)
-            .collect();
-        let who = if by.is_empty() { "web-ui" } else { &by };
-        match approve_and_regate(
-            &db,
-            &self.ctx,
-            id,
-            who,
-            Some(expected_fp),
-            "aaf ui approve",
-            who,
-            SystemClock.now(),
-        ) {
-            Ok(out) => {
-                self.invalidate_status_cache();
-                Ok(json!({
-                    "approved": true, "task_id": id, "reviewer": out.approval.reviewer,
-                    "lock_fp": out.approval.lock_fp, "state": out.transitioned_to.map(TaskState::as_str),
-                }))
-            }
-            Err(ApproveOpError::Gate(GateError::NothingLocked)) => {
-                Err("refused: no locked file is changed; nothing approved".into())
-            }
-            Err(ApproveOpError::Gate(GateError::LockFpChanged)) => {
-                Err("lock_fp mismatch: locked diff changed since preview".into())
-            }
-            Err(e) => Err(e.to_string()),
-        }
+        let res = do_approve_commit(&db, &self.ctx, id, expected_fp, reviewer)?;
+        self.invalidate_status_cache();
+        Ok(res)
     }
 
     fn mutate_task(&self, action: &str, task_id: &str, note: &str) -> Result<Value, String> {
-        let db = open_db(&self.ctx).map_err(|e| e.message)?;
-        let res = match action {
-            "unblock" => do_unblock(&db, task_id),
-            "unblock_all" | "unblock-all" => {
-                let repo = self.repo_root.as_deref().and_then(Path::to_str);
-                let blocked = db
-                    .list_tasks(repo, Some(TaskState::Blocked))
-                    .map_err(s_err)?;
-                let now = SystemClock.now();
-                let mut ids = Vec::with_capacity(blocked.len());
-                for t in &blocked {
-                    unblock_task(&db, &t.id, "aaf ui unblock-all", "web-ui", now)
-                        .map_err(|e| e.to_refused_string())?;
-                    ids.push(t.id.clone());
-                }
-                Ok(json!({ "action": "unblock_all", "count": ids.len(), "task_ids": ids }))
+        if self.read_only {
+            return Err("refused: server is running in read-only mode".into());
+        }
+        if action == "supervisor_toggle" {
+            let enable = match note.trim().to_ascii_lowercase().as_str() {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" => false,
+                _ => return Err("invalid supervisor_toggle: expected 'on' or 'off'".into()),
+            };
+            let res = self.supervisor.set_enabled(enable);
+            if res.is_ok() {
+                self.invalidate_status_cache();
             }
+            return res;
+        }
+        if action.starts_with("cc_") {
+            let res = accounts_panel::dispatch_cc_action(
+                &self.ctx,
+                self.repo_root.as_deref(),
+                action,
+                task_id,
+                note,
+            );
+            if res.is_ok() {
+                self.invalidate_status_cache();
+            }
+            return res;
+        }
+        let db = open_db(&self.ctx).map_err(|e| e.message)?;
+        let repo = self.repo_root.as_deref().and_then(Path::to_str);
+        let res = match action {
+            "ready" => do_ready(&db, task_id),
+            "ready_all" | "ready-all" => do_ready_all(&db, repo),
+            "cancel" => do_cancel(&db, task_id, note),
+            "unblock" => do_unblock(&db, task_id),
+            "unblock_all" | "unblock-all" => do_unblock_all(&db, repo),
             "approve_plan" | "approve-plan" => do_approve_plan(&db, task_id),
             "rework" => do_rework(&db, &self.ctx, task_id, note),
             "steer" => {
@@ -487,6 +544,13 @@ impl UiBackend for CliUiBackend {
             "unfreeze" => {
                 unfreeze(&db, &SystemClock).map_err(s_err)?;
                 Ok(json!({ "action": "unfreeze", "frozen": false }))
+            }
+            "stop_run" => proof_stop::do_stop_run(&db, &self.ctx, task_id),
+            "account_cooldown" => {
+                extras::do_account_cooldown(&db, &self.ctx, &self.config_base, task_id, note, false)
+            }
+            "account_clear" => {
+                extras::do_account_cooldown(&db, &self.ctx, &self.config_base, task_id, "", true)
             }
             other => Err(format!("invalid action: {other}")),
         };
@@ -506,68 +570,4 @@ impl UiBackend for CliUiBackend {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    fn test_backend(tmp: &Path) -> CliUiBackend {
-        let ctx = Ctx {
-            cwd: tmp.to_path_buf(),
-            home: tmp.join("home"),
-            data_dir: tmp.join("data"),
-            config_dir: tmp.join("config"),
-            worktrees_dir: tmp.join("worktrees"),
-            path_var: std::ffi::OsString::new(),
-            run_id: None,
-            stdin_is_tty: false,
-            aaf_env: Vec::new(),
-        };
-        CliUiBackend {
-            ro_db: SharedRoDb::for_ctx(&ctx),
-            ctx,
-            scope: "all".into(),
-            repo_root: None,
-            config_base: tmp.to_path_buf(),
-            read_only: false,
-            allow_approve: false,
-            status_cache: Mutex::new(StatusCache::default()),
-            status_refresh: Mutex::new(()),
-            pressure_cache: Mutex::new(None),
-        }
-    }
-
-    #[test]
-    fn status_cache_returns_cached_value_until_invalidated() {
-        let tmp = tempfile::tempdir().unwrap();
-        let backend = test_backend(tmp.path());
-        let first = backend.status_json().unwrap();
-        assert_eq!(first["scope"], json!("all"));
-        assert!(backend.status_cache.lock().unwrap().entry.is_some());
-        assert!(backend.pressure_cache.lock().unwrap().is_some());
-        *backend.pressure_cache.lock().unwrap() = Some((Instant::now(), Some(Pressure::Warn)));
-        assert_eq!(backend.cached_pressure(), Some(Pressure::Warn));
-        let sentinel = Some((Instant::now(), json!({ "sentinel": 1 })));
-        backend.status_cache.lock().unwrap().entry = sentinel;
-        assert_eq!(backend.status_json().unwrap()["sentinel"], json!(1));
-        backend.invalidate_status_cache();
-        assert!(backend.status_cache.lock().unwrap().entry.is_none());
-        let refreshed = backend.status_json().unwrap();
-        assert_eq!(refreshed["scope"], json!("all"));
-        assert!(refreshed.get("sentinel").is_none());
-        assert_eq!(refreshed["heavy_slots"]["memory_pressure"], json!("warn"));
-    }
-
-    #[test]
-    fn invalidation_during_inflight_refresh_skips_stale_cache_write() {
-        let tmp = tempfile::tempdir().unwrap();
-        let backend = test_backend(tmp.path());
-        let start_gen = backend.cached_or_generation().unwrap_err();
-        backend.invalidate_status_cache();
-        backend.store_status_if_current(start_gen, &json!({ "stale": true }));
-        assert!(backend.read_cached_status().is_none());
-        let cur_gen = backend.cached_or_generation().unwrap_err();
-        assert_ne!(cur_gen, start_gen);
-        backend.store_status_if_current(cur_gen, &json!({ "fresh": true }));
-        assert_eq!(backend.read_cached_status(), Some(json!({ "fresh": true })));
-    }
-}
+mod tests;

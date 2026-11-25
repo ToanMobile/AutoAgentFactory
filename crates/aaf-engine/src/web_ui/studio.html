@@ -1,274 +1,364 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AAF Studio</title>
 <style>
 :root{
-  --bg:#F7F5F1;--surface:#FFFFFF;--surface2:#F1EDE6;--ink:#1A1814;--ink2:#3A362F;--muted:#5C564C;
-  --border:#E2DCD2;--accent:#B45309;--accent-ink:#FFFFFF;
-  --ok:#0B6B5F;--ok-bg:#E3F7EF;--warn:#92400E;--warn-bg:#FDEFC7;--err:#A61B1B;--err-bg:#FDE3E3;--info:#3730A3;--info-bg:#E8ECFE;
-  --bar:#C2620C;--bar2:#EBCFA6;
-  --shadow:0 1px 2px rgba(26,24,20,.05),0 6px 18px rgba(26,24,20,.06);
-  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
-  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --bg:#F4F6F9;--surface:#FFFFFF;--surface2:#EBF0F6;--ink:#0F172A;--ink2:#334155;--muted:#5B6B82;
+  --border:#DCE3EE;--accent:#2563EB;--accent-ink:#FFFFFF;
+  --ok:#059669;--ok-bg:#ECFDF5;--warn:#D97706;--warn-bg:#FFFBEB;--err:#DC2626;--err-bg:#FEF2F2;--info:#2563EB;--info-bg:#EFF6FF;
+  --bar:#2563EB;--bar2:#BFDBFE;
+  --shadow:0 1px 2px rgba(15,23,42,.05),0 6px 20px rgba(15,23,42,.05);
+  --mono:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  --sans:"SF Pro Text",-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
 }
 [data-theme="dark"]{
-  --bg:#12110F;--surface:#1C1A17;--surface2:#272420;--ink:#F5F2EC;--ink2:#DDD7CC;--muted:#B5AC9F;
-  --border:#38332C;--accent:#F59E0B;--accent-ink:#1A1206;
-  --ok:#4ADEC4;--ok-bg:#0F2E29;--warn:#FCD34D;--warn-bg:#3A2A0F;--err:#FCA5A5;--err-bg:#3D1717;--info:#B4BEFE;--info-bg:#1E2146;
-  --bar:#F59E0B;--bar2:#5E4824;
-  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.4);
+  --bg:#0B0E14;--surface:#121721;--surface2:#0E131C;--ink:#F1F5F9;--ink2:#CBD5E1;--muted:#8B9BB4;
+  --border:#222B3A;--accent:#3B82F6;--accent-ink:#FFFFFF;
+  --ok:#34D399;--ok-bg:rgba(16,185,129,.14);--warn:#FBBF24;--warn-bg:rgba(245,158,11,.14);--err:#F87171;--err-bg:rgba(239,68,68,.15);--info:#60A5FA;--info-bg:rgba(59,130,246,.15);
+  --bar:#3B82F6;--bar2:#1E3A5F;
+  --shadow:0 2px 8px rgba(0,0,0,.4),0 12px 32px rgba(0,0,0,.45);
 }
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14.5px;line-height:1.5;-webkit-font-smoothing:antialiased}
 button,input,select{font:inherit;color:inherit}
 button{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:9px;padding:7px 12px;font-weight:500}
-button:hover{background:var(--surface2)}
-button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:hover:not(:disabled){background:var(--surface2)}
+button:disabled{opacity:.45;cursor:not-allowed}
+input,select{border:1px solid var(--border);background:var(--surface);border-radius:9px;padding:6px 10px;font-size:13.5px}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,[tabindex="0"]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 a{color:var(--accent);font-weight:500}
 h1,h2,h3{margin:0}
 header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--surface);border-bottom:1px solid var(--border)}
-.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}
 .brand h1{font-size:18px;font-weight:700;white-space:nowrap}
-.brand .scope{color:var(--muted);font-size:14px;overflow-wrap:anywhere}
+.brand .scope{color:var(--muted);font-size:13.5px;overflow-wrap:anywhere}
 .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .seg{display:inline-flex;border:1px solid var(--border);border-radius:9px;overflow:hidden}
 .seg button{border:0;border-radius:0;padding:7px 11px}
-.seg button.on{background:var(--ink);color:var(--bg)}
-a.needbtn,a.btnlink{display:inline-flex;align-items:center;text-decoration:none;border:1px solid var(--border);background:var(--surface);color:var(--ink);border-radius:9px;padding:7px 12px}
+.seg button.on,.seg button.on:hover{background:var(--ink);color:var(--bg)}
+a.needbtn,a.btnlink{display:inline-flex;align-items:center;text-decoration:none;border:1px solid var(--border);background:var(--surface);color:var(--ink);border-radius:9px;padding:7px 12px;transition:background .12s}
+a.btnlink:hover,a.needbtn:hover{background:var(--surface2)}
 .needbtn{display:inline-flex;align-items:center;gap:8px;font-weight:600}
-.needbtn.hot{background:var(--err-bg);border-color:transparent;color:var(--err)}
-.badge{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 7px;border-radius:999px;font-size:13px;font-weight:700;background:var(--surface2);color:var(--ink)}
+.needbtn.hot,.needbtn.hot:hover{background:var(--err-bg);border-color:transparent;color:var(--err)}
+.badge{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 7px;border-radius:999px;font-size:12.5px;font-weight:700;background:var(--surface2);color:var(--ink)}
 .hot .badge{background:var(--err);color:var(--surface)}
-main{max-width:1240px;margin:0 auto;padding:20px 24px 64px;display:grid;gap:18px}
+main{max-width:1360px;margin:0 auto;padding:20px 24px 64px;display:grid;gap:18px}
 .banner{display:none;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 16px;border-radius:12px;background:var(--err-bg);color:var(--err);font-weight:600}
-.banner button{background:var(--surface);color:var(--ink)}
 .grid{display:grid;gap:12px;grid-template-columns:repeat(6,minmax(0,1fr))}
 @media (max-width:1100px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media (max-width:560px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-.two{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(min(420px,100%),1fr))}
+.two{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(min(440px,100%),1fr));align-items:start}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
 .card>h2,.head h2{font-size:16px;font-weight:650;color:var(--ink)}
 .card>h2{margin-bottom:12px}
-.card>.sub,.head .sub{color:var(--muted);font-size:13.5px;margin:-8px 0 12px}
+.card>.sub,.head .sub{color:var(--muted);font-size:13px;margin:-8px 0 12px;line-height:1.45}
 .head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
-.head .sub{margin:2px 0 0}
+.head .sub{margin:3px 0 0}
 .kpi{display:flex;flex-direction:column;gap:2px;text-align:left;width:100%;font-weight:400}
-.kpi .l{color:var(--muted);font-size:13.5px;font-weight:600}
-.kpi .v{font-size:28px;font-weight:750;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.kpi .s{color:var(--muted);font-size:13.5px;overflow-wrap:anywhere}
+.kpi .l{color:var(--muted);font-size:13px;font-weight:600}
+.kpi .v{font-size:26px;font-weight:750;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.kpi .s{color:var(--muted);font-size:12.5px;overflow-wrap:anywhere}
 button.kpi{border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);background:var(--surface)}
 button.kpi.hot{border-color:var(--err);background:var(--err-bg)}
 button.kpi.hot .v,button.kpi.hot .l{color:var(--err)}
 button.kpi .s::after{content:" →"}
+.table-wrap{overflow-x:auto;max-width:100%}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--border);vertical-align:top}
 tr:last-child td{border-bottom:0}
-th{font-size:13px;color:var(--muted);font-weight:600;white-space:nowrap}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:650;white-space:nowrap}
 td.n,th.n{text-align:right;white-space:nowrap}
 td.wrap{overflow-wrap:anywhere}
-.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600;background:var(--surface2);color:var(--ink2);white-space:nowrap}
+tr[data-task]{cursor:pointer}
+tr[data-task]:hover{background:var(--surface2)}
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;background:var(--surface2);color:var(--ink2);white-space:nowrap}
 .ok{background:var(--ok-bg);color:var(--ok)}.warn{background:var(--warn-bg);color:var(--warn)}
 .err{background:var(--err-bg);color:var(--err)}.info{background:var(--info-bg);color:var(--info)}
 .muted{color:var(--muted)}
-.mono{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+.mono{font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere}
 .bar{position:relative;height:14px;background:var(--surface2);border-radius:7px;overflow:hidden;min-width:70px}
 .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--bar2);border-radius:7px}
 .bar b{position:absolute;left:0;top:0;bottom:0;background:var(--bar);border-radius:7px}
-.legend{display:flex;gap:16px;font-size:13px;color:var(--muted);margin-top:10px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:10px}
 .legend span::before{content:"";display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px;background:var(--bar)}
 .legend span.p90::before{background:var(--bar2)}
+.explain-box{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:9px 12px;font-size:12.5px;color:var(--ink2);margin-bottom:12px;line-height:1.5}
+.tb-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.tb-filters input{flex:1;min-width:210px}
+.tb-summary{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:13px;color:var(--ink2)}
+.tb-why{font-size:12.5px;color:var(--err);line-height:1.4;max-width:340px;overflow-wrap:anywhere}
+.tb-sub{font-size:11.5px;color:var(--muted);margin-top:2px}
 .empty{color:var(--muted);padding:12px 0}
-.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.chips button{border-radius:999px;padding:5px 12px;font-size:14px}
-.chips button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
-.chips button .c{opacity:.75;margin-left:4px;font-variant-numeric:tabular-nums}
-.search{flex:1 1 200px;max-width:300px;padding:7px 12px;border:1px solid var(--border);border-radius:9px;background:var(--bg)}
-.tasks{display:grid;gap:0}
-.trow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 14px;align-items:start;padding:12px 6px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:8px}
-.trow:last-child{border-bottom:0}
-.trow:hover{background:var(--surface2)}
-.trow .t{font-weight:600;color:var(--ink);overflow-wrap:anywhere}
-.trow .meta{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:13.5px;margin-top:3px}
-.trow .why{grid-column:1/-1;font-size:14px;color:var(--err);background:var(--err-bg);padding:6px 10px;border-radius:8px;overflow-wrap:anywhere}
-.trow .side{display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-size:13.5px;color:var(--muted);white-space:nowrap}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;align-items:center}
-.kv dt{color:var(--muted);font-size:14px}.kv dd{margin:0;text-align:right;font-weight:600}
+.kv dt{color:var(--muted);font-size:13.5px}.kv dd{margin:0;text-align:right;font-weight:600}
 .sect{margin-top:16px;font-size:14px;font-weight:650;color:var(--ink2)}
 .cmd{display:flex;align-items:center;gap:8px;margin-top:8px;background:var(--surface2);border-radius:9px;padding:6px 6px 6px 12px}
-.cmd code{flex:1;font-family:var(--mono);font-size:13.5px;overflow-wrap:anywhere}
-.cmd button{padding:4px 10px;font-size:13px}
+.cmd code{flex:1;font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+.cmd button{padding:4px 10px;font-size:12.5px}
 #drawer{position:fixed;inset:0;z-index:30;display:none}
 #drawer.open{display:block}
 #drawer .scrim{position:absolute;inset:0;background:rgba(10,9,8,.5)}
-#drawer .panel{position:absolute;top:0;right:0;bottom:0;width:min(560px,100%);background:var(--bg);border-left:1px solid var(--border);box-shadow:var(--shadow);display:flex;flex-direction:column}
+#drawer .panel{position:absolute;top:0;right:0;bottom:0;width:min(620px,100%);background:var(--bg);border-left:1px solid var(--border);box-shadow:var(--shadow);display:flex;flex-direction:column}
 #drawer .ph{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border);background:var(--surface)}
-#drawer .ph h2{font-size:18px;overflow-wrap:anywhere}
+#drawer .ph h2{font-size:17px;overflow-wrap:anywhere}
 #drawer .pb{overflow-y:auto;padding:16px 20px 40px;display:grid;gap:14px;align-content:start}
 .need{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
 .need .t{font-weight:650;overflow-wrap:anywhere}
-.need .r{margin-top:6px;font-size:14px;color:var(--ink2);overflow-wrap:anywhere}
-.need .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.need .r{margin-top:6px;font-size:13.5px;color:var(--ink2);overflow-wrap:anywhere}
 ul.ac{margin:6px 0 0;padding-left:20px}
 ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 .tl{list-style:none;margin:0;padding:0}
-.tl li{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:14px}
+.tl li{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13.5px}
 .tl li:last-child{border-bottom:0}
 .tl time{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
 #auth{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:40;padding:16px}
 #auth .card{max-width:440px;width:100%}
 #auth input{width:100%;padding:9px;border:1px solid var(--border);border-radius:9px;background:var(--bg);margin:10px 0}
+#authErr{color:var(--err);font-size:13px;margin-bottom:8px;min-height:18px}
 #err{display:none}
-#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:9px;font-size:14px;display:none;z-index:50}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:9px;font-size:13.5px;display:none;z-index:50}
+.hidden{display:none!important}
 @media (max-width:640px){
   header,main{padding-left:16px;padding-right:16px}
   .hide-sm{display:none}
-  .kpi .v{font-size:24px}
-  .search{max-width:none}
+  .kpi .v{font-size:22px}
 }
 </style>
 </head>
 <body>
 <header>
-  <div class="brand"><h1>AAF Studio</h1><span class="scope" id="scope"></span><span class="pill" id="factory">…</span></div>
+  <div class="brand">
+    <h1>AAF Studio</h1>
+    <span class="pill hidden" id="roPill">READ-ONLY</span>
+    <span class="scope" id="scope"></span>
+    <span class="pill" id="factory">…</span>
+  </div>
   <div class="controls">
-    <a id="needBtn" class="needbtn" href="/?view=needyou" title="Open the Need You list in the Cockpit">Needs you <span class="badge" id="needCount">0</span></a>
-    <div class="seg" id="period" aria-label="Period">
-      <button data-h="24">24h</button><button data-h="168" class="on">7 days</button><button data-h="720">30 days</button><button data-h="">All</button>
+    <a id="needBtn" class="needbtn" href="/?view=review" title="Mở danh sách cần duyệt &amp; bị chặn trên Cockpit">Cần bạn xử lý <span class="badge" id="needCount">0</span></a>
+    <div class="seg" id="period" aria-label="Khoảng thời gian">
+      <button data-h="24">24h</button><button data-h="168" class="on">7 ngày</button><button data-h="720">30 ngày</button><button data-h="">Tất cả</button>
     </div>
-    <button id="refresh" title="Refresh now">↻<span class="hide-sm"> Refresh</span></button>
-    <button id="theme" title="Toggle light / dark">◐<span class="hide-sm"> Theme</span></button>
-    <a href="/" title="Board, approvals and live logs">Cockpit →</a>
+    <button id="refresh" title="Làm mới">↻<span class="hide-sm"> Làm mới</span></button>
+    <button id="theme" title="Đổi Sáng / Tối">◐<span class="hide-sm"> Theme</span></button>
+    <a class="btnlink" href="/?view=accounts" title="Quản lý Tài khoản &amp; Quota">Tài khoản</a>
+    <a class="btnlink" href="/" title="Về bảng Kanban Cockpit">Cockpit →</a>
   </div>
 </header>
 <main>
   <div class="card err" id="err"></div>
-  <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/?view=needyou">Open in Cockpit →</a></div>
+  <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/?view=review">Mở trên Cockpit →</a></div>
   <section class="grid" id="kpis"></section>
-  <section class="two">
-    <div class="card"><h2>Time per stage</h2><div class="sub">How long tasks stay in each stage (p50 = typical, p90 = slow)</div><div id="stages"></div>
-      <div class="legend"><span>p50</span><span class="p90">p90</span></div></div>
-    <div class="card"><h2>Agents and cost</h2><div class="sub">Runs, tokens and estimated cost per agent CLI</div><div id="executors"></div></div>
-  </section>
-  <section class="two">
-    <div class="card"><h2>Why tasks are blocked</h2><div id="blocked"></div></div>
-    <div class="card"><h2>Live factory</h2><div id="live"></div></div>
-  </section>
+
   <section class="card">
-    <div class="head"><div><h2>Machine and repo health</h2><div class="sub">Runs <span class="mono">aaf doctor</span> on this machine</div></div><button id="runDoctor">Run checks</button></div>
-    <div id="doctor" class="empty">Press “Run checks” to run aaf doctor here.</div>
+    <div class="head">
+      <div>
+        <h2>Thống kê chi tiết từng task</h2>
+        <div class="sub">Thời gian agent chạy, số lượt chạy, lượng token tiêu thụ, tài khoản sử dụng và nguyên nhân bị chặn (blocked) của từng task. Bấm vào 1 dòng để xem chi tiết mọi lượt chạy.</div>
+      </div>
+    </div>
+    <div class="tb-filters">
+      <input id="tbSearch" type="search" placeholder="Tìm theo ID, tên task, repo, nguyên nhân blocked…">
+      <select id="tbRepo" aria-label="Lọc theo repo"><option value="">Tất cả repo</option></select>
+      <select id="tbState" aria-label="Lọc theo trạng thái">
+        <option value="">Tất cả trạng thái</option>
+        <option value="blocked">Đang bị Blocked</option>
+        <option value="running">Đang chạy (Running/Gating)</option>
+        <option value="review">Chờ Review</option>
+        <option value="done">Hoàn thành (Done)</option>
+        <option value="ready">Sẵn sàng (Ready)</option>
+        <option value="backlog">Backlog</option>
+        <option value="cancelled">Đã huỷ (Cancelled)</option>
+      </select>
+      <select id="tbSort" aria-label="Sắp xếp">
+        <option value="tokens_desc">Sắp xếp: Token nhiều nhất</option>
+        <option value="dur_desc">Sắp xếp: Chạy lâu nhất</option>
+        <option value="blocked_first">Sắp xếp: Blocked lên đầu</option>
+        <option value="updated_desc">Sắp xếp: Mới cập nhật nhất</option>
+        <option value="runs_desc">Sắp xếp: Nhiều lượt chạy nhất</option>
+      </select>
+    </div>
+    <div id="tbSummary" class="tb-summary"></div>
+    <div id="taskBreakdown" class="table-wrap"><div class="empty">Đang tải thống kê từng task…</div></div>
+  </section>
+
+  <section class="two">
+    <div class="card">
+      <h2>Thời gian trung bình ở mỗi giai đoạn</h2>
+      <div class="explain-box">
+        <strong>Giải thích chỉ số:</strong>
+        <b>Trung vị (p50)</b> = một nửa (50%) số task đi qua giai đoạn này nhanh hơn mức này (thời gian điển hình).
+        <b>Ngưỡng chậm (p90)</b> = 90% số task xong trong mức này, chỉ 10% task phức tạp/kẹt kéo dài lâu hơn.
+      </div>
+      <div id="stages"></div>
+      <div class="legend"><span>Trung vị — 50% task xong dưới mức này (p50)</span><span class="p90">Ngưỡng chậm — 90% task xong dưới mức này (p90)</span></div>
+    </div>
+    <div class="card">
+      <h2>Agent &amp; tiêu thụ Token / Chi phí</h2>
+      <div class="sub">Tổng lượt chạy, lượt lỗi, thời gian chạy và lượng token theo từng CLI agent</div>
+      <div id="executors"></div>
+    </div>
+  </section>
+
+  <section class="two">
+    <div class="card"><h2>Nguyên nhân các task bị Blocked</h2><div id="blocked"></div></div>
+    <div class="card"><h2>Trạng thái xưởng hiện tại</h2><div id="live"></div></div>
+  </section>
+
+  <section class="card">
+    <div class="head"><div><h2>Kiểm tra sức khoẻ máy &amp; repo</h2><div class="sub">Chạy lệnh <span class="mono">aaf doctor</span> trên máy này</div></div><button id="runDoctor">Chạy kiểm tra</button></div>
+    <div id="doctor" class="empty">Bấm “Chạy kiểm tra” để chạy aaf doctor.</div>
   </section>
   <p class="muted" id="foot"></p>
 </main>
 <div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
   <div class="scrim" id="scrim"></div>
   <div class="panel">
-    <div class="ph"><div><h2 id="drawerTitle"></h2><div class="muted" id="drawerSub"></div></div><button id="drawerClose" aria-label="Close">✕</button></div>
+    <div class="ph"><div><h2 id="drawerTitle"></h2><div class="muted" id="drawerSub"></div></div><button id="drawerClose" aria-label="Đóng">✕</button></div>
     <div class="pb" id="drawerBody"></div>
   </div>
 </div>
-<div id="auth"><div class="card">
-  <h2>Session token</h2>
-  <p class="muted">Open the Studio link that <span class="mono">aaf ui</span> prints, or paste its token.</p>
+<div id="auth" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="card">
+  <h2 id="authTitle">Session token</h2>
+  <p class="muted">Dán token từ lệnh <span class="mono">aaf ui --service-url</span> hoặc mở link bookmark Cockpit.</p>
   <input id="tok" type="password" placeholder="Bearer token…">
-  <button id="tokOk">Unlock</button>
+  <div id="authErr"></div>
+  <button id="tokOk">Mở khoá</button>
 </div></div>
-<div id="toast" role="status"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script>
 (() => {
   const TOKEN_KEY = "aaf_ui_token", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period";
   const STATE_CLASS = { done:"ok", running:"info", gating:"info", review:"warn", blocked:"err", ready:"", backlog:"", cancelled:"" };
-  const STATE_LABEL = { queued:"Queued", done:"Done", running:"Running", gating:"Checking", review:"Review", blocked:"Blocked", ready:"Ready", backlog:"Backlog", cancelled:"Cancelled" };
+  const STATE_LABEL = { queued:"Chờ hàng đợi", done:"Hoàn thành", running:"Đang chạy", gating:"Đang chạy Gate", review:"Chờ Review", blocked:"Bị Blocked", ready:"Sẵn sàng", backlog:"Backlog", cancelled:"Đã huỷ" };
   const REASON_LABEL = {
-    gate_failed:"Gate failed", needs_human:"Needs a human", dependency:"Waiting on another task", merge_conflict:"Merge conflict",
-    flaky_test:"Flaky test", stuck:"Agent stuck", budget_exceeded:"Budget used up", infra:"Infrastructure problem", quota:"Account quota used up",
+    gate_failed:"Gate kiểm thử thất bại", needs_human:"Cần người can thiệp", dependency:"Đang chờ task khác xong", merge_conflict:"Xung đột Git merge",
+    flaky_test:"Test chập chờn (Flaky)", stuck:"Agent bị kẹt/lặp", budget_exceeded:"Hết ngân sách lượt chạy", infra:"Lỗi hạ tầng / môi trường", quota:"Hết quota tài khoản (429)",
   };
-  const FILTERS = [
-    ["need", "Needs you", (t) => t.state === "blocked" || t.state === "review"],
-    ["active", "In progress", (t) => t.state === "running" || t.state === "gating" || t.state === "ready"],
-    ["done", "Done", (t) => t.state === "done"],
-    ["all", "All", () => true],
-  ];
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-  let token = "", hours = "168", timer = null, tasks = [], filter = "need", query = "", lastStatus = null;
+  let token = "", hours = "168", timer = null, tasks = [], breakdown = [], lastStatus = null, isReadOnly = false, drawerSeq = 0, lastFocus = null, authChan = null;
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
 
+  function cleanSpec(raw) {
+    let s = String(raw || "");
+    s = s.replace(/\[The block below is untrusted data[^\]]*\]\s*/gi, "");
+    s = s.replace(/<<<UNTRUSTED_DATA_BEGIN[^>]*>>>\s*/g, "").replace(/\s*<<<UNTRUSTED_DATA_END[^>]*>>>/g, "");
+    return s.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
   function dur(s) {
-    s = Number(s) || 0;
+    s = Math.max(0, Math.round(Number(s) || 0));
     if (s < 60) return s + "s";
-    if (s < 3600) return Math.floor(s / 60) + "m";
+    if (s < 3600) return Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s";
     if (s < 86400) return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
     return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
   }
   function ago(ts) {
     if (!ts) return "";
     const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
-    return s < 45 ? "just now" : dur(s) + " ago";
+    return s < 45 ? "vừa xong" : dur(s) + " trước";
   }
-  const pct = (v) => v == null ? "n/a" : Number(v).toFixed(0) + "%";
-  // null = no API-billed account in scope: subscription accounts show tokens only.
-  const usd = (v) => (v == null ? "—" : "$" + (Number(v) || 0).toFixed(2));
+  const pct = (v) => v == null ? "—" : Number(v).toFixed(0) + "%";
+  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
   const num = (v) => (Number(v) || 0).toLocaleString();
   function compact(v) {
     v = Number(v) || 0;
-    if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + "M";
-    if (v >= 1e4) return Math.round(v / 1e3) + "k";
+    if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 1 : 2) + "M";
+    if (v >= 1e3) return (v / 1e3).toFixed(v >= 1e5 ? 0 : 1) + "k";
     return v.toLocaleString();
   }
   const reasonLabel = (k) => REASON_LABEL[k] || String(k || "").replace(/_/g, " ");
   const stateLabel = (s) => STATE_LABEL[s] || s;
   const pill = (s) => `<span class="pill ${STATE_CLASS[s] || ""}">${esc(stateLabel(s))}</span>`;
 
+  function showAuth(msg) {
+    $("authErr").textContent = msg || "";
+    $("auth").style.display = "flex";
+    setTimeout(() => $("tok").focus(), 20);
+  }
+  function hideAuth() { $("auth").style.display = "none"; $("authErr").textContent = ""; }
+
+  function initAuthChannel() {
+    if (typeof BroadcastChannel === "undefined") return;
+    try {
+      authChan = new BroadcastChannel("aaf_ui_auth");
+      authChan.onmessage = (ev) => {
+        const msg = ev.data || {};
+        if (msg.type === "req" && token) {
+          authChan.postMessage({ type: "tok", token });
+        } else if (msg.type === "tok" && msg.token && !token) {
+          token = String(msg.token).trim();
+          saveTok(token);
+          hideAuth();
+          refresh().catch(() => {});
+        }
+      };
+    } catch (_) { authChan = null; }
+  }
+
+  function isLoopbackHost() {
+    return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
+  }
+  function saveTok(t) {
+    store(sessionStorage, TOKEN_KEY, t);
+    if (isLoopbackHost()) store(localStorage, TOKEN_KEY, t);
+  }
   function hashToken() {
     const m = (location.hash || "").match(/(?:^#|&)token=([^&]+)/);
     if (m && m[1]) {
-      store(sessionStorage, TOKEN_KEY, decodeURIComponent(m[1]).trim());
+      saveTok(decodeURIComponent(m[1]).trim());
       history.replaceState(null, "", location.pathname + location.search);
     }
-    return load(sessionStorage, TOKEN_KEY) || "";
+    return load(sessionStorage, TOKEN_KEY) || (isLoopbackHost() ? (load(localStorage, TOKEN_KEY) || "") : "");
   }
 
   async function api(path) {
     const res = await fetch(path, { headers: { "Authorization": "Bearer " + token } });
     let data = {};
     try { data = await res.json(); } catch (_) {}
-    if (res.status === 401) { $("auth").style.display = "flex"; throw new Error("token rejected"); }
+    if (res.status === 401) {
+      token = "";
+      showAuth("Token bị từ chối (401). Vui lòng nhập lại token.");
+      throw new Error("token rejected");
+    }
     if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
     return data;
   }
 
   function toast(msg) {
     const t = $("toast"); t.textContent = msg; t.style.display = "block";
-    clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.display = "none"; }, 1600);
+    clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.display = "none"; }, 1800);
   }
   async function copy(text) {
-    try { await navigator.clipboard.writeText(text); toast("Copied"); }
+    try { await navigator.clipboard.writeText(text); toast("Đã copy"); }
     catch (_) {
-      const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); toast("Copied"); } catch (_) { toast("Copy failed"); }
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+      document.body.appendChild(ta); ta.select();
+      try { toast(document.execCommand("copy") ? "Đã copy" : "Copy thất bại"); } catch (_) { toast("Copy thất bại"); }
       ta.remove();
     }
   }
   const cmd = (c) => `<div class="cmd"><code>${esc(c)}</code><button data-copy="${esc(c)}">Copy</button></div>`;
 
-  // ---------- Needs you ----------
-  const needs = () => tasks.filter(FILTERS[0][2]).sort((a, b) =>
+  const needs = () => tasks.filter((t) => t.state === "blocked" || t.state === "review").sort((a, b) =>
     (a.state === "blocked" ? 0 : 1) - (b.state === "blocked" ? 0 : 1) || String(a.priority).localeCompare(String(b.priority)) || (b.updated_at || 0) - (a.updated_at || 0));
 
   function nextSteps(t) {
-    if (t.state === "review") return { text: "The gate passed. Review the pull request, then merge it.", cmds: [`aaf board show ${t.id}`] };
+    if (t.state === "review") return { text: "Gate đã đạt. Kiểm tra diff/PR rồi merge.", cmds: [`aaf board show ${t.id}`] };
     if (t.state !== "blocked") return { text: "", cmds: [] };
-    const k = t.blocked_reason, d = String(t.blocked_detail || "");
+    const k = t.blocked_reason || t.blocked_kind, d = String(t.blocked_detail || "");
     if (k === "needs_human" && /lock|approv/i.test(d))
-      return { text: "A protected file changed. Check the change, then sign the approval in a terminal: the task is checked again by itself.", cmds: [`aaf board show ${t.id}`, `aaf approve --task ${t.id} --reviewer <your-name>`] };
-    if (k === "dependency") return { text: "It starts by itself once the task it waits on is done.", cmds: [`aaf board show ${t.id}`] };
-    if (k === "quota") return { text: "It retries when the account quota resets.", cmds: [`aaf accounts`] };
-    return { text: "Read why it stopped, fix the cause, then put it back in the queue.", cmds: [`aaf board show ${t.id}`, `aaf board unblock ${t.id}`] };
+      return { text: "Có file được bảo vệ thay đổi. Xem diff rồi ký duyệt trên terminal.", cmds: [`aaf board show ${t.id}`, `aaf approve --task ${t.id} --reviewer <ten-ban>`] };
+    if (k === "dependency") return { text: "Task sẽ tự chạy khi task phụ thuộc hoàn thành.", cmds: [`aaf board show ${t.id}`] };
+    if (k === "quota") return { text: "Đợi quota tài khoản mở lại hoặc đổi tài khoản ở tab Tài khoản.", cmds: [`aaf accounts list`] };
+    return { text: "Xem nguyên nhân dừng bên trên, xử lý rồi bấm Unblock trên Cockpit.", cmds: [`aaf board show ${t.id}`, `aaf board unblock ${t.id}`] };
   }
 
   function renderNeedBadge() {
@@ -278,42 +368,74 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     $("banner").style.display = n ? "flex" : "none";
     if (n) {
       const parts = [];
-      if (blocked) parts.push(`${blocked} blocked`);
-      if (n - blocked) parts.push(`${n - blocked} waiting for review`);
-      $("bannerText").textContent = `${n} task${n > 1 ? "s" : ""} need${n > 1 ? "" : "s"} you: ${parts.join(", ")}`;
+      if (blocked) parts.push(`${blocked} đang bị blocked`);
+      if (n - blocked) parts.push(`${n - blocked} đang chờ review`);
+      $("bannerText").textContent = `${n} task cần bạn xử lý: ${parts.join(", ")}`;
     }
   }
 
-  // ---------- Drawer ----------
   function openDrawer(title, sub, html) {
+    lastFocus = document.activeElement;
     $("drawerTitle").textContent = title; $("drawerSub").textContent = sub || "";
     $("drawerBody").innerHTML = html; $("drawer").classList.add("open");
     document.body.style.overflow = "hidden"; $("drawerClose").focus();
   }
-  function closeDrawer() { $("drawer").classList.remove("open"); document.body.style.overflow = ""; }
+  function closeDrawer() {
+    drawerSeq++;
+    $("drawer").classList.remove("open");
+    document.body.style.overflow = "";
+    if (lastFocus && typeof lastFocus.focus === "function") {
+      try { lastFocus.focus(); } catch (_) {}
+    }
+    lastFocus = null;
+  }
 
   async function openTask(id) {
-    const t = tasks.find((x) => x.id === id);
+    const t = tasks.find((x) => x.id === id) || breakdown.find((x) => x.id === id);
     if (!t) return;
+    const tb = breakdown.find((x) => x.id === id) || null;
+    const seq = ++drawerSeq;
     const step = nextSteps(t);
     const ac = t.acceptance || [];
-    let html = `<div>${pill(t.state)} <span class="pill">${esc(t.priority || "")}</span> <span class="muted" style="font-size:14px">updated ${esc(ago(t.updated_at))}</span></div>`;
-    if (t.state === "blocked") html += `<div class="need" style="border-color:var(--err)"><div class="t" style="color:var(--err)">${esc(reasonLabel(t.blocked_reason))}</div>${t.blocked_detail ? `<div class="r">${esc(t.blocked_detail)}</div>` : ""}</div>`;
-    if (step.text || step.cmds.length) html += `<div><div class="sect" style="margin-top:0">What to do next</div>${step.text ? `<div class="muted" style="font-size:14px">${esc(step.text)}</div>` : ""}${step.cmds.map(cmd).join("")}</div>`;
-    if (t.spec_description) html += `<div><div class="sect" style="margin-top:0">Spec</div><div style="font-size:14.5px;overflow-wrap:anywhere;white-space:pre-wrap">${esc(t.spec_description)}</div></div>`;
-    if (ac.length) html += `<div><div class="sect" style="margin-top:0">Acceptance criteria (${ac.length})</div><ul class="ac">${ac.map((c) => `<li>${t.state === "done" ? "✓ " : ""}${esc(c)}</li>`).join("")}</ul></div>`;
-    html += `<div id="taskMore" class="muted">Loading runs…</div>`;
-    openDrawer(t.title, t.id, html);
+    const specText = cleanSpec(t.spec_description || "");
+    const blkKind = t.blocked_reason || (tb && tb.blocked_kind) || "";
+    const blkDetail = t.blocked_detail || (tb && tb.blocked_detail) || "";
+    let html = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">${pill(t.state)} <span class="pill">${esc(t.priority || "")}</span>${t.repo_name ? ` <span class="pill">${esc(t.repo_name)}</span>` : ""} <span class="muted" style="font-size:13px">cập nhật ${esc(ago(t.updated_at))}</span></div>`;
+    if (tb) {
+      html += `<div class="need" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+        <div><div class="muted" style="font-size:12px">Thời gian agent chạy</div><div style="font-weight:700;font-size:16px">${tb.run_duration_secs ? dur(tb.run_duration_secs) : "—"}</div><div class="tb-sub">Lead time: ${dur(tb.lead_time_secs)}</div></div>
+        <div><div class="muted" style="font-size:12px">Tổng Token</div><div style="font-weight:700;font-size:16px">${tb.tokens_total ? compact(tb.tokens_total) : "0"}</div><div class="tb-sub">${compact(tb.tokens_in)} in · ${compact(tb.tokens_out)} out</div></div>
+        <div><div class="muted" style="font-size:12px">Số lượt chạy</div><div style="font-weight:700;font-size:16px">${num(tb.runs_total)}</div><div class="tb-sub">${num(tb.runs_succeeded)} đạt · ${num(tb.runs_failed)} lỗi</div></div>
+      </div>`;
+    }
+    if (t.state === "blocked" || blkDetail) {
+      html += `<div class="need" style="border-color:var(--err)"><div class="t" style="color:var(--err)">Nguyên nhân Blocked: ${esc(reasonLabel(blkKind || "blocked"))}</div>${blkDetail ? `<div class="r">${esc(blkDetail)}</div>` : ""}</div>`;
+    }
+    if (step.text || step.cmds.length) html += `<div><div class="sect" style="margin-top:0">Hướng xử lý tiếp theo</div>${step.text ? `<div class="muted" style="font-size:13.5px">${esc(step.text)}</div>` : ""}${step.cmds.map(cmd).join("")}</div>`;
+    if (specText) html += `<div><div class="sect" style="margin-top:0">Nội dung / Spec</div><div style="font-size:14px;overflow-wrap:anywhere;white-space:pre-wrap">${esc(specText)}</div></div>`;
+    if (ac.length) html += `<div><div class="sect" style="margin-top:0">Tiêu chí nghiệm thu (${ac.length})</div><ul class="ac">${ac.map((c) => `<li>${t.state === "done" ? "✓ " : ""}${esc(c)}</li>`).join("")}</ul></div>`;
+    html += `<div id="taskMore" class="muted">Đang tải chi tiết từng lượt chạy…</div>`;
+    openDrawer(t.title, t.id + (t.repo_name ? " · " + t.repo_name : ""), html);
     try {
       const d = await api("/api/task/" + encodeURIComponent(id));
-      const runs = (d.runs || []).slice(-8).reverse(), ev = (d.events || []).slice(0, 12);
+      if (seq !== drawerSeq || !$("drawer").classList.contains("open")) return;
+      const runs = (d.runs || []).slice().reverse(), ev = (d.events || []).slice(0, 15);
       let more = "";
-      if (runs.length) more += `<div class="sect" style="margin-top:0">Agent runs</div><table>` + runs.map((r) =>
-        `<tr><td>${esc(r.executor || "")}</td><td>${runPill(r.status)}</td><td class="n muted">${r.started_at && r.ended_at ? dur(r.ended_at - r.started_at) : (r.started_at ? "running" : "")}</td><td class="n muted">${esc(ago(r.started_at))}</td></tr>`).join("") + `</table>`;
-      if (ev.length) more += `<div class="sect">History</div><ul class="tl">` + ev.map((e) =>
+      if (runs.length) {
+        more += `<div class="sect" style="margin-top:0">Chi tiết từng lượt chạy (${runs.length})</div><div class="table-wrap"><table><thead><tr><th>Agent / TK</th><th>Trạng thái</th><th class="n">Thời gian</th><th class="n">Token (in/out)</th><th class="n">Bắt đầu</th></tr></thead><tbody>` +
+          runs.map((r) => {
+            const dSec = r.started_at && r.ended_at ? dur(r.ended_at - r.started_at) : (r.started_at ? "đang chạy" : "—");
+            const tokStr = (r.tokens_in || r.tokens_out) ? `${compact(r.tokens_in)} / ${compact(r.tokens_out)}` : "—";
+            return `<tr><td><b>${esc(r.executor || "")}</b>${r.account_id ? `<div class="tb-sub mono">${esc(r.account_id)}</div>` : ""}${r.branch ? `<div class="tb-sub mono">${esc(r.branch)}</div>` : ""}</td><td>${runPill(r.status)}${r.exit_code != null ? `<div class="tb-sub">exit ${esc(r.exit_code)}</div>` : ""}</td><td class="n">${esc(dSec)}</td><td class="n" title="${num(r.tokens_in)} in / ${num(r.tokens_out)} out">${esc(tokStr)}</td><td class="n muted">${esc(ago(r.started_at))}</td></tr>`;
+          }).join("") + `</tbody></table></div>`;
+      }
+      if (ev.length) more += `<div class="sect">Lịch sử sự kiện</div><ul class="tl">` + ev.map((e) =>
         `<li><time>${esc(ago(e.created_at))}</time><span style="overflow-wrap:anywhere"><b>${esc(String(e.kind || "").replace(/_/g, " "))}</b>${eventDetail(e.payload_json)}</span></li>`).join("") + `</ul>`;
-      const box = $("taskMore"); if (box) { box.className = ""; box.innerHTML = more || `<div class="empty">No run yet.</div>`; }
-    } catch (e) { const box = $("taskMore"); if (box) box.textContent = "Could not load runs: " + e.message; }
+      const box = $("taskMore"); if (box) { box.className = ""; box.innerHTML = more || `<div class="empty">Chưa có lượt chạy nào.</div>`; }
+    } catch (e) {
+      if (seq !== drawerSeq) return;
+      const box = $("taskMore"); if (box) box.textContent = "Không tải được danh sách lượt chạy: " + e.message;
+    }
   }
   function eventDetail(raw) {
     if (!raw) return "";
@@ -329,11 +451,10 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     return text ? ` <span class="muted">· ${esc(text)}</span>` : "";
   }
   function runPill(s) {
-    const cls = s === "succeeded" ? "ok" : s === "running" ? "info" : (s === "failed" || s === "crashed") ? "err" : "";
+    const cls = s === "succeeded" ? "ok" : s === "running" ? "info" : (s === "failed" || s === "crashed" || s === "timed_out" || s === "limit_hit" || s === "killed") ? "err" : "";
     return `<span class="pill ${cls}">${esc(s || "")}</span>`;
   }
 
-  // ---------- Sections ----------
   function kpi(label, value, sub, opts) {
     opts = opts || {};
     const tag = opts.action ? "button" : "div";
@@ -345,105 +466,212 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const c = r.counts || {}, a = r.autonomy || {}, lt = r.lead_time || {};
     const n = needs().length;
     $("kpis").innerHTML = [
-      kpi("Needs you", num(n), n ? "open in Cockpit" : "nothing waiting", { action: "needs", hot: n > 0 }),
-      kpi("Tasks done", num(r.tasks_done), `${num(c.total)} tasks touched`),
-      kpi("Autonomy", pct(a.autonomy_rate_pct), `${num(a.done_without_human)} of ${num(a.done_tasks)} done without you`),
-      kpi("Gate first pass", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `gate takes ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : "share passing first try"),
-      kpi("Lead time", lt.samples ? dur(lt.p50_secs) : "n/a", lt.samples ? `typical · slow ${dur(lt.p90_secs)}` : "created → done"),
-      kpi("Cost", usd(r.estimated_cost_usd), `${compact(r.total_tokens_in)} in · ${compact(r.total_tokens_out)} out tokens`),
+      kpi("Cần bạn xử lý", num(n), n ? "mở trên Cockpit" : "không có việc chờ", { action: "needs", hot: n > 0 }),
+      kpi("Task hoàn thành", num(r.tasks_done), `${num(c.total)} task trong kỳ`),
+      kpi("Tỷ lệ tự động", pct(a.autonomy_rate_pct), `${num(a.done_without_human)}/${num(a.done_tasks)} tự xong không cần can thiệp`),
+      kpi("Gate đạt lần đầu", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `Gate mất ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : "tỷ lệ pass lượt 1"),
+      kpi("Thời gian hoàn thành", lt.samples ? dur(lt.p50_secs) : "—", lt.samples ? `trung vị · 90% dưới ${dur(lt.p90_secs)}` : "từ lúc tạo → xong"),
+      kpi("Token & Chi phí", usd(r.estimated_cost_usd), `${compact(r.total_tokens_in)} in · ${compact(r.total_tokens_out)} out`),
     ].join("");
   }
 
+  function syncBreakdownRepoSelect() {
+    const sel = $("tbRepo");
+    const prev = sel.value;
+    const repos = [...new Set(breakdown.map((t) => t.repo_name).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    sel.innerHTML = `<option value="">Tất cả repo (${repos.length})</option>` + repos.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
+    if (prev && repos.includes(prev)) sel.value = prev;
+  }
+
+  function renderTaskBreakdown() {
+    const q = $("tbSearch").value.trim().toLowerCase();
+    const repo = $("tbRepo").value;
+    const st = $("tbState").value;
+    const sortBy = $("tbSort").value;
+    let list = breakdown.filter((t) => {
+      if (repo && t.repo_name !== repo) return false;
+      if (st === "running") { if (t.state !== "running" && t.state !== "gating") return false; }
+      else if (st && t.state !== st) return false;
+      if (q) {
+        const hay = [t.id, t.title, t.repo_name, t.blocked_kind, t.blocked_detail, t.last_executor, t.last_account].join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    list = list.slice().sort((a, b) => {
+      switch (sortBy) {
+        case "dur_desc": return (b.run_duration_secs - a.run_duration_secs) || (b.tokens_total - a.tokens_total);
+        case "blocked_first": return ((a.state === "blocked" ? 0 : 1) - (b.state === "blocked" ? 0 : 1)) || (b.updated_at - a.updated_at);
+        case "updated_desc": return (b.updated_at - a.updated_at);
+        case "runs_desc": return (b.runs_total - a.runs_total) || (b.run_duration_secs - a.run_duration_secs);
+        default: return (b.tokens_total - a.tokens_total) || (b.run_duration_secs - a.run_duration_secs) || (b.updated_at - a.updated_at);
+      }
+    });
+    const sumDur = list.reduce((acc, t) => acc + (Number(t.run_duration_secs) || 0), 0);
+    const sumIn = list.reduce((acc, t) => acc + (Number(t.tokens_in) || 0), 0);
+    const sumOut = list.reduce((acc, t) => acc + (Number(t.tokens_out) || 0), 0);
+    const cntBlk = list.filter((t) => t.state === "blocked").length;
+    $("tbSummary").innerHTML = `
+      <span class="pill">${num(list.length)} task</span>
+      <span class="pill info">Tổng thời gian chạy: ${dur(sumDur)}</span>
+      <span class="pill">Tổng token: ${compact(sumIn + sumOut)} (${compact(sumIn)} in / ${compact(sumOut)} out)</span>
+      ${cntBlk ? `<span class="pill err">${num(cntBlk)} bị Blocked</span>` : `<span class="pill ok">0 bị Blocked</span>`}`;
+
+    if (!list.length) {
+      $("taskBreakdown").innerHTML = `<div class="empty">Không có task nào khớp bộ lọc.</div>`;
+      return;
+    }
+    const shown = list.slice(0, 150);
+    $("taskBreakdown").innerHTML = `<table><thead><tr>
+      <th>Task</th><th>Trạng thái</th><th class="n">Thời gian chạy</th><th class="n">Lượt chạy</th><th class="n">Token tiêu thụ</th><th>Agent / Tài khoản</th><th>Nguyên nhân Blocked / Lỗi</th>
+    </tr></thead><tbody>` + shown.map((t) => {
+      const blkKind = t.blocked_kind ? reasonLabel(t.blocked_kind) : "";
+      const whyHtml = t.state === "blocked"
+        ? `<div class="tb-why"><b>${esc(blkKind || "Bị chặn")}</b>${t.blocked_detail ? `: ${esc(t.blocked_detail)}` : ""}</div>`
+        : (t.last_run_status && t.last_run_status !== "succeeded" && t.last_run_status !== "running"
+            ? `<div class="tb-sub">Lượt gần nhất: <span class="pill err">${esc(t.last_run_status)}</span></div>`
+            : `<span class="muted">—</span>`);
+      return `<tr data-task="${esc(t.id)}" tabindex="0" role="button">
+        <td class="wrap" style="min-width:240px">
+          <div style="font-weight:600">${esc(t.title)}</div>
+          <div class="tb-sub"><span class="mono">${esc(t.id)}</span>${t.repo_name ? ` · <span class="pill" style="font-size:11px;padding:1px 7px">${esc(t.repo_name)}</span>` : ""} · ${esc(t.priority || "")}</div>
+        </td>
+        <td>${pill(t.state)}</td>
+        <td class="n">
+          <div><b>${t.run_duration_secs ? dur(t.run_duration_secs) : "—"}</b></div>
+          <div class="tb-sub" title="Tổng thời gian từ lúc tạo task">tổng ${dur(t.lead_time_secs)}</div>
+        </td>
+        <td class="n">
+          <div><b>${num(t.runs_total)}</b></div>
+          <div class="tb-sub">${num(t.runs_succeeded)} đạt${t.runs_failed ? ` · <span style="color:var(--err)">${num(t.runs_failed)} lỗi</span>` : ""}</div>
+        </td>
+        <td class="n" title="${num(t.tokens_in)} vào / ${num(t.tokens_out)} ra">
+          <div><b>${t.tokens_total ? compact(t.tokens_total) : "0"}</b></div>
+          <div class="tb-sub">${compact(t.tokens_in)} in · ${compact(t.tokens_out)} out</div>
+        </td>
+        <td>
+          <div>${esc(t.last_executor || "—")}</div>
+          ${t.last_account ? `<div class="tb-sub mono">${esc(t.last_account)}</div>` : ""}
+        </td>
+        <td>${whyHtml}</td>
+      </tr>`;
+    }).join("") + `</tbody></table>` + (list.length > 150 ? `<div class="muted" style="padding:8px 4px;font-size:12.5px">Đang hiện 150 / ${num(list.length)} task — dùng ô tìm kiếm hoặc lọc theo repo/trạng thái để thu hẹp.</div>` : "");
+  }
+
   function renderStages(stages) {
-    if (!stages || !stages.length) { $("stages").innerHTML = `<div class="empty">No stage data in this period yet.</div>`; return; }
+    if (!stages || !stages.length) { $("stages").innerHTML = `<div class="empty">Chưa có dữ liệu giai đoạn trong khoảng thời gian này.</div>`; return; }
     const max = Math.max(1, ...stages.map((s) => s.durations.p90_secs || 0));
-    $("stages").innerHTML = `<table><tr><th>Stage</th><th style="width:40%"></th><th class="n">p50</th><th class="n">p90</th><th class="n">Now</th></tr>` +
+    $("stages").innerHTML = `<table><tr><th>Giai đoạn</th><th style="width:36%"></th><th class="n" title="50% số task xong nhanh hơn mức này">Trung vị (p50)</th><th class="n" title="90% số task xong dưới mức này">90% dưới mức (p90)</th><th class="n">Đang mở</th></tr>` +
       stages.map((s) => {
         const d = s.durations;
         const w50 = (100 * (d.p50_secs || 0) / max).toFixed(1), w90 = (100 * (d.p90_secs || 0) / max).toFixed(1);
-        return `<tr><td>${esc(stateLabel(s.stage))}</td><td><div class="bar" title="p50 ${dur(d.p50_secs)}, p90 ${dur(d.p90_secs)}, max ${dur(d.max_secs)}, ${num(d.samples)} stays"><i style="width:${w90}%"></i><b style="width:${w50}%"></b></div></td>` +
+        return `<tr><td>${esc(stateLabel(s.stage))}</td><td><div class="bar" title="Trung vị (p50): ${dur(d.p50_secs)} | 90% dưới mức (p90): ${dur(d.p90_secs)} | Lâu nhất: ${dur(d.max_secs)} | ${num(d.samples)} mẫu"><i style="width:${w90}%"></i><b style="width:${w50}%"></b></div></td>` +
           `<td class="n">${d.samples ? dur(d.p50_secs) : "—"}</td><td class="n">${d.samples ? dur(d.p90_secs) : "—"}</td><td class="n">${num(s.open_now)}</td></tr>`;
       }).join("") + `</table>`;
   }
 
   function renderExecutors(list, total) {
-    if (!list || !list.length) { $("executors").innerHTML = `<div class="empty">No agent run in this period yet.</div>`; return; }
-    $("executors").innerHTML = `<table><tr><th>Agent</th><th class="n">Runs</th><th class="n hide-sm">Failed</th><th class="n">Time</th><th class="n hide-sm">Tokens</th><th class="n">Cost</th></tr>` +
+    if (!list || !list.length) { $("executors").innerHTML = `<div class="empty">Chưa có lượt chạy agent nào trong kỳ này.</div>`; return; }
+    $("executors").innerHTML = `<table><tr><th>Agent</th><th class="n">Lượt chạy</th><th class="n hide-sm">Lỗi</th><th class="n">Thời gian</th><th class="n hide-sm">Token (in/out)</th><th class="n">Chi phí</th></tr>` +
       list.map((e) => `<tr><td><b>${esc(e.executor)}</b>${e.running ? ` <span class="pill info">${num(e.running)} live</span>` : ""}</td><td class="n">${num(e.runs)}</td>` +
         `<td class="n hide-sm">${e.failed ? `<span class="pill err">${num(e.failed)}</span>` : "0"}</td><td class="n">${dur(e.wall_secs)}</td>` +
         `<td class="n hide-sm" title="${num(e.tokens_in)} in / ${num(e.tokens_out)} out">${compact(e.tokens_in)} / ${compact(e.tokens_out)}</td><td class="n">${usd(e.estimated_cost_usd)}</td></tr>`).join("") +
-      `<tr><td><b>Total</b></td><td></td><td class="hide-sm"></td><td></td><td class="hide-sm"></td><td class="n"><b>${usd(total)}</b></td></tr></table>`;
+      `<tr><td><b>Tổng</b></td><td></td><td class="hide-sm"></td><td></td><td class="hide-sm"></td><td class="n"><b>${usd(total)}</b></td></tr></table>`;
   }
 
   function renderBlocked(top) {
-    if (!top || !top.length) { $("blocked").innerHTML = `<div class="empty">Nothing is blocked. 🎉</div>`; return; }
+    if (!top || !top.length) { $("blocked").innerHTML = `<div class="empty">Không có task nào bị chặn. 🎉</div>`; return; }
     const max = Math.max(1, ...top.map((t) => t[1]));
     $("blocked").innerHTML = `<table>` + top.map(([kind, n]) =>
       `<tr><td>${esc(reasonLabel(kind))}</td><td style="width:45%"><div class="bar"><b style="width:${(100 * n / max).toFixed(1)}%"></b></div></td><td class="n">${num(n)}</td></tr>`).join("") +
-      `</table><div style="margin-top:10px"><a class="btnlink" href="/?view=needyou">See blocked tasks in Cockpit →</a></div>`;
+      `</table><div style="margin-top:10px"><a class="btnlink" href="/?view=blocked">Xem các task bị blocked trên Cockpit →</a></div>`;
   }
 
   function renderLive(st) {
-    if (!st) { $("live").innerHTML = `<div class="empty">No status yet.</div>`; return; }
-    const titleOf = (id) => (tasks.find((t) => t.id === id) || {}).title || id || "";
+    if (!st) { $("live").innerHTML = `<div class="empty">Chưa có trạng thái.</div>`; return; }
+    const taskOf = (id) => tasks.find((t) => t.id === id) || null;
     const runs = (st.recent_runs || []).slice(0, 6);
     const accounts = st.accounts || [];
     const t = st.throttle || {};
-    let html = `<dl class="kv"><dt>Heavy build slots in use</dt><dd>${num(t.throttle_slots)}</dd>` +
-      `<dt>Drain lock</dt><dd>${t.drain_lock_present ? `<span class="pill warn">held</span>` : "free"}</dd></dl>`;
+    let html = `<dl class="kv"><dt>Slot build nặng đang dùng</dt><dd>${num(t.throttle_slots)}</dd>` +
+      `<dt>Khoá Drain</dt><dd>${t.drain_lock_present ? `<span class="pill warn">đang giữ</span>` : "trống"}</dd></dl>`;
     if (accounts.length) {
-      html += `<div class="sect">Accounts</div><table>` + accounts.map((a) =>
+      html += `<div class="sect">Tài khoản AAF</div><table>` + accounts.map((a) =>
         `<tr><td class="wrap">${esc(a.name)}</td><td class="muted">${esc(a.provider)}</td><td class="n"><span class="pill ${a.status === "available" || a.status === "ready" ? "ok" : "warn"}">${esc(a.status)}</span></td></tr>`).join("") + `</table>`;
     }
     if (runs.length) {
-      html += `<div class="sect">Recent runs</div><table>` + runs.map((r) =>
-        `<tr data-task="${esc(r.task_id || "")}" style="cursor:pointer"><td class="wrap">${esc(titleOf(r.task_id))}</td><td class="muted">${esc(r.executor || "")}</td><td class="n">${runPill(r.status)}</td></tr>`).join("") + `</table>`;
+      html += `<div class="sect">Lượt chạy gần nhất</div><table>` + runs.map((r) => {
+        const tk = taskOf(r.task_id);
+        const title = (tk && tk.title) || r.task_id || "";
+        const repo = tk && tk.repo_name ? ` <span class="pill" style="font-size:11px">${esc(tk.repo_name)}</span>` : "";
+        return `<tr data-task="${esc(r.task_id || "")}" tabindex="0" role="button"><td class="wrap">${esc(title)}${repo}</td><td class="muted">${esc(r.executor || "")}</td><td class="n">${runPill(r.status)}</td></tr>`;
+      }).join("") + `</table>`;
     }
     $("live").innerHTML = html;
   }
 
   async function runDoctor() {
-    $("doctor").className = "empty"; $("doctor").textContent = "Running checks…";
+    const btn = $("runDoctor");
+    btn.disabled = true;
+    $("doctor").className = "empty"; $("doctor").textContent = "Đang kiểm tra…";
     try {
       const d = await api("/api/doctor");
       const checks = (d.checks || []).filter((c) => c.applicable !== false);
       const bad = checks.filter((c) => !c.ok);
       $("doctor").className = "";
-      $("doctor").innerHTML = `<p style="margin-top:0">${bad.length ? `<span class="pill err">${bad.length} problem${bad.length > 1 ? "s" : ""}</span>` : `<span class="pill ok">All checks pass</span>`}</p><table>` +
+      $("doctor").innerHTML = `<p style="margin-top:0">${bad.length ? `<span class="pill err">${bad.length} vấn đề</span>` : `<span class="pill ok">Tất cả kiểm tra đều đạt</span>`}</p><table>` +
         checks.sort((a, b) => Number(a.ok) - Number(b.ok)).map((c) =>
-          `<tr><td style="width:1%">${c.ok ? `<span class="pill ok">ok</span>` : `<span class="pill ${c.required ? "err" : "warn"}">${c.required ? "fail" : "advice"}</span>`}</td><td style="white-space:nowrap"><b>${esc(c.name)}</b></td><td class="wrap muted" style="font-size:14px">${esc(c.detail)}</td></tr>`).join("") + `</table>`;
-    } catch (e) { $("doctor").textContent = "Checks failed: " + e.message; }
+          `<tr><td style="width:1%">${c.ok ? `<span class="pill ok">ok</span>` : `<span class="pill ${c.required ? "err" : "warn"}">${c.required ? "lỗi" : "lưu ý"}</span>`}</td><td style="white-space:nowrap"><b>${esc(c.name)}</b></td><td class="wrap muted" style="font-size:13.5px">${esc(c.detail)}</td></tr>`).join("") + `</table>`;
+    } catch (e) { $("doctor").textContent = "Kiểm tra thất bại: " + e.message; }
+    finally { btn.disabled = false; }
   }
 
   async function refresh() {
-    if (!token) { $("auth").style.display = "flex"; return; }
+    if (!token) { showAuth(""); return; }
     const q = hours ? "?since=" + encodeURIComponent(hours) : "";
     const [rep, st, meta, board] = await Promise.allSettled([api("/api/report" + q), api("/api/status"), api("/api/meta"), api("/api/board")]);
     const errors = [rep, st, meta, board].filter((p) => p.status === "rejected").map((p) => p.reason.message);
     $("err").style.display = errors.length ? "block" : "none";
-    $("err").textContent = errors.length ? "Some data could not load: " + [...new Set(errors)].join("; ") : "";
+    $("err").textContent = errors.length ? "Một số dữ liệu chưa tải được: " + [...new Set(errors)].join("; ") : "";
     lastStatus = st.status === "fulfilled" ? st.value : null;
     if (board.status === "fulfilled") tasks = board.value.tasks || [];
-    if (meta.status === "fulfilled") $("scope").textContent = `${meta.value.repo_name || meta.value.scope || ""} · v${meta.value.version || "?"}`;
+    if (meta.status === "fulfilled") {
+      isReadOnly = Boolean(meta.value.read_only);
+      $("roPill").classList.toggle("hidden", !isReadOnly);
+      $("scope").textContent = `${meta.value.repo_name || meta.value.scope || ""} · v${meta.value.version || "?"}`;
+    }
     const frozen = (lastStatus && lastStatus.frozen) || (board.status === "fulfilled" && board.value.frozen);
     $("factory").className = "pill " + (frozen ? "err" : "ok");
-    $("factory").textContent = frozen ? "Frozen" : "Running";
-    $("factory").title = frozen ? "Run aaf board unfreeze, or unfreeze from the Cockpit" : "The factory accepts work";
+    $("factory").textContent = frozen ? "Đang đóng băng" : "Đang hoạt động";
+    $("factory").title = frozen
+      ? (isReadOnly ? "Chạy aaf board unfreeze trên terminal" : "Chạy aaf board unfreeze hoặc gỡ đóng băng trên Cockpit")
+      : "Xưởng sẵn sàng nhận việc";
     renderNeedBadge();
     if (rep.status === "fulfilled") {
       const r = rep.value.report || {};
+      breakdown = Array.isArray(rep.value.task_breakdown) ? rep.value.task_breakdown : [];
+      syncBreakdownRepoSelect();
       renderKpis(r);
+      renderTaskBreakdown();
       renderStages(r.stages);
       renderExecutors(r.executors, r.estimated_cost_usd);
       renderBlocked(r.top_blocked);
     }
     renderLive(lastStatus);
-    $("foot").textContent = "Updated " + new Date().toLocaleTimeString() + " · refreshes every 15 s";
+    $("foot").textContent = "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây";
   }
 
-  function schedule() { clearInterval(timer); timer = setInterval(() => { if (!document.hidden && !$("drawer").classList.contains("open")) refresh(); }, 15000); }
+  function schedule() {
+    clearInterval(timer);
+    timer = setInterval(() => {
+      if (!document.hidden && !$("drawer").classList.contains("open") && $("auth").style.display !== "flex" && token) {
+        refresh();
+      }
+    }, 15000);
+  }
 
-  function init() {
+  async function init() {
+    initAuthChannel();
     const theme = load(localStorage, THEME_KEY);
     if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
     else if (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.dataset.theme = "dark";
@@ -461,26 +689,40 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
         refresh();
       };
     });
+    $("tbSearch").oninput = renderTaskBreakdown;
+    $("tbRepo").onchange = renderTaskBreakdown;
+    $("tbState").onchange = renderTaskBreakdown;
+    $("tbSort").onchange = renderTaskBreakdown;
     $("refresh").onclick = refresh;
     $("runDoctor").onclick = runDoctor;
     $("drawerClose").onclick = closeDrawer;
     $("scrim").onclick = closeDrawer;
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closeDrawer();
-      if ((e.key === "Enter" || e.key === " ") && e.target.classList && e.target.classList.contains("trow")) { e.preventDefault(); openTask(e.target.dataset.task); }
+      if ((e.key === "Enter" || e.key === " ") && e.target && e.target.dataset && e.target.dataset.task) {
+        e.preventDefault();
+        openTask(e.target.dataset.task);
+      }
     });
     document.addEventListener("click", (e) => {
-      const el = e.target.closest("[data-copy],[data-filter],[data-action],[data-task]");
+      const el = e.target.closest("[data-copy],[data-action],[data-task]");
       if (!el) return;
       if (el.dataset.copy != null) return copy(el.dataset.copy);
-      if (el.dataset.action === "needs") { location.href = "/?view=needyou"; return; }
+      if (el.dataset.action === "needs") { location.href = "/?view=review"; return; }
       if (el.dataset.task) { if ($("drawer").classList.contains("open")) closeDrawer(); return openTask(el.dataset.task); }
     });
-    $("tokOk").onclick = () => {
-      const t = $("tok").value.trim(); if (!t) return;
-      token = t; store(sessionStorage, TOKEN_KEY, t); $("auth").style.display = "none"; refresh();
+    const submitTok = () => {
+      const t = $("tok").value.trim();
+      if (!t) { $("authErr").textContent = "Cần nhập token."; return; }
+      token = t; saveTok(t); hideAuth(); refresh();
     };
+    $("tokOk").onclick = submitTok;
+    $("tok").onkeydown = (e) => { if (e.key === "Enter") submitTok(); };
     token = hashToken();
+    if (!token && authChan) {
+      authChan.postMessage({ type: "req" });
+      await new Promise((r) => setTimeout(r, 120));
+    }
     refresh().catch(() => {});
     schedule();
   }
