@@ -96,6 +96,20 @@ fn build_png(width: u32, height: u32, min_total_bytes: usize) -> Vec<u8> {
     out
 }
 
+/// What a gate fingerprint can see: status (ignored too), staged modes and
+/// every file below the work tree with its mode and size.
+fn tree_snapshot(repo: &Path) -> String {
+    let status = git(repo, &["status", "--porcelain=v1", "-uall", "--ignored"]);
+    let stage = git(repo, &["ls-files", "--stage"]);
+    let find = Command::new("find")
+        .arg(repo)
+        .args(["-path", "*/.git", "-prune", "-o", "-ls"])
+        .output()
+        .unwrap();
+    let files = String::from_utf8_lossy(&find.stdout);
+    format!("--- status\n{status}\n--- stage\n{stage}\n--- files\n{files}")
+}
+
 fn calm_machine() -> MachineConfig {
     MachineConfig {
         max_load_percent: 0,
@@ -148,13 +162,16 @@ fn proof_triggered_respects_required_and_trigger_globs() {
 
     let clock = FixedClock(100);
     let machine = calm_machine();
+    let before = tree_snapshot(&repo);
     let backend_receipt =
         run_gate_with(&data, &repo, &repo_cfg, GateMode::Scoped, &clock, &machine).unwrap();
     assert_eq!(
         backend_receipt.status,
         GateStatus::Clear,
-        "{:?}",
-        backend_receipt.reasons
+        "{:?}\n=== receipt\n{:#?}\n=== before gate\n{before}\n=== after gate\n{}",
+        backend_receipt.reasons,
+        backend_receipt,
+        tree_snapshot(&repo)
     );
 
     // Touching a UI file now requires proof and blocks when no capture_cmd is configured.
