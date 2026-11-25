@@ -603,6 +603,7 @@ How `[cross_audit]` merges:
 | **`v3.5`** `aaf sop` | Declarative TOML SOP workflows (list, show, init, validate, runs, run/resume, approve, send-back) | `list`, `show`, `init`, `validate`, `runs`, `run`, `approve`, `send-back` |
 | **`v3.5`** `aaf executors` | 10-CLI inventory, fallback resolution preview, reusable role profiles, and read-only `.mcp.json` secret audit | `list`, `resolve`, `roles`, `mcp` |
 | **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing, plus the `/studio` metrics page (default `http://127.0.0.1:4317/studio`) (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
+| `aaf setup` | One-step setup: detect installed agents, register hooks, write config (kept if present), sync skills, run doctor; safe to re-run | `--hook-host <hosts>`, `--no-skills` |
 | `aaf report` | Period report: tasks done, lead time, time per lifecycle stage (p50/p90), cost per executor, blocked reasons, autonomy | `--since <hours>`, `--all` |
 | **`v3.5`** `aaf upgrade` / `completions` | SHA-256 verified self-updater (**human only**) and shell completions (`bash`, `zsh`, `fish`, `powershell`) | `upgrade`: `--check`, `--version`, `--dry-run`; `completions <shell>` |
 

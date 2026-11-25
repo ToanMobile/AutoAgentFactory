@@ -52,13 +52,15 @@ download() {
     fi
 }
 
+# Prints the latest release tag, or nothing when the repository has no
+# published release yet (the caller then falls back to a source build).
 resolve_latest_version() {
     api_url="https://api.github.com/repos/${REPO}/releases/latest"
     tmp_json="$1"
-    download "$api_url" "$tmp_json"
-    tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp_json" | head -n 1)"
-    [ -n "$tag" ] || die "could not determine latest release tag from ${api_url}"
-    printf '%s\n' "$tag"
+    if ! (download "$api_url" "$tmp_json") 2>/dev/null; then
+        return 0
+    fi
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp_json" | head -n 1
 }
 
 validate_version() {
@@ -217,14 +219,20 @@ done
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aaf-install.XXXXXX")"
 trap 'rm -rf "${TMP_DIR}"' EXIT INT TERM
 
+if [ "$FROM_SOURCE" -eq 0 ] && [ -z "$VERSION" ]; then
+    VERSION="$(resolve_latest_version "${TMP_DIR}/latest.json")"
+    if [ -z "$VERSION" ]; then
+        command -v cargo >/dev/null 2>&1 || die "no prebuilt release of ${REPO} is published yet and cargo is not installed; install Rust from https://rustup.rs and run this script again"
+        printf 'No prebuilt release of %s yet: building from source with cargo.\n' "$REPO"
+        FROM_SOURCE=1
+    fi
+fi
+
 if [ "$FROM_SOURCE" -eq 1 ]; then
     install_from_source
 else
     need_cmd tar
     TARGET="$(detect_target)"
-    if [ -z "$VERSION" ]; then
-        VERSION="$(resolve_latest_version "${TMP_DIR}/latest.json")"
-    fi
     validate_version "$VERSION"
 
     ARCHIVE="aaf-${VERSION}-${TARGET}.tar.gz"
@@ -265,3 +273,7 @@ case ":${PATH:-}:" in
         printf '  export PATH="%s:$PATH"\n' "$INSTALL_DIR"
         ;;
 esac
+
+printf '\nNext, inside the git repository the factory should work on:\n'
+printf '  aaf setup    # detects your agents, registers the hook, checks everything\n'
+printf '  aaf ui       # then open http://127.0.0.1:4317/studio from the link it prints\n'

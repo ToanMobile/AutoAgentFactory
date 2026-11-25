@@ -21,6 +21,7 @@ pub mod report;
 pub mod repro;
 pub mod run;
 pub(crate) mod scope;
+pub mod setup;
 pub mod skills;
 pub mod slot;
 pub mod sop;
