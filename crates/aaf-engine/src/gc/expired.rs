@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
-use super::{GcOptions, GcReport};
+use super::{GcOptions, GcReport, record_removed_file};
+use crate::process::process_alive;
 use crate::telemetry::is_exclusively_locked;
 
 const MAX_SOP_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
@@ -26,7 +27,7 @@ fn remove_and_record(path: &Path, is_dir: bool, dry_run: bool, report: &mut GcRe
             return;
         }
     }
-    report.removed_files.push(path.display().to_string());
+    record_removed_file(report, path);
 }
 
 pub(super) fn clean_expired_artifacts(
@@ -107,9 +108,7 @@ pub(super) fn clean_expired_artifacts(
         }
         // A live owner pid (`<id>-pr<N>-<pid>-<seq>`) means in use even when
         // its companion lock is not (or no longer) held.
-        if scratch_owner_pid(&path)
-            .is_some_and(|pid| crate::executors::reaper::is_alive(pid).unwrap_or(true))
-        {
+        if scratch_owner_pid(&path).is_some_and(process_alive) {
             continue;
         }
         let has_lock = fs::symlink_metadata(&lock_path).is_ok_and(|m| m.is_file());

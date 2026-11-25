@@ -248,6 +248,53 @@ pub fn remove_orphan_batch_worktrees_with(
     force: bool,
     cwd: Option<&Path>,
 ) -> Result<OrphanSweep, GitError> {
+    remove_orphan_batch_worktrees_inner(
+        repo_root,
+        worktrees_root,
+        repo_id,
+        active_task_ids,
+        dry_run,
+        force,
+        force,
+        cwd,
+    )
+}
+
+/// Offline startup-sweep variant: uses `force = true` **only** for dead
+/// PID-tagged batches (`batch-<dead_pid>-<8hex>`), keeping `force = false` for
+/// legacy non-PID `batch-*` worktrees so dirty/uninspected legacy trees are
+/// never forcibly discarded at startup.
+pub fn remove_orphan_batch_worktrees_dead_pid_force(
+    repo_root: &Path,
+    worktrees_root: &Path,
+    repo_id: &str,
+    active_task_ids: &HashSet<String>,
+    dry_run: bool,
+    cwd: Option<&Path>,
+) -> Result<OrphanSweep, GitError> {
+    remove_orphan_batch_worktrees_inner(
+        repo_root,
+        worktrees_root,
+        repo_id,
+        active_task_ids,
+        dry_run,
+        false,
+        true,
+        cwd,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remove_orphan_batch_worktrees_inner(
+    repo_root: &Path,
+    worktrees_root: &Path,
+    repo_id: &str,
+    active_task_ids: &HashSet<String>,
+    dry_run: bool,
+    force_all: bool,
+    force_dead_pid: bool,
+    cwd: Option<&Path>,
+) -> Result<OrphanSweep, GitError> {
     let repo_wt_dir = worktrees_root.join(repo_id);
     let registered = list(repo_root)?;
     let active_ops = active_in_progress_branches(repo_root)?;
@@ -258,11 +305,13 @@ pub fn remove_orphan_batch_worktrees_with(
 
     let mut sweep = OrphanSweep::default();
     for id in candidates {
-        if let Some(pid) = parse_batch_pid(&id)
+        let batch_pid = parse_batch_pid(&id);
+        if let Some(pid) = batch_pid
             && (pid == own_pid || process_alive(pid))
         {
             continue;
         }
+        let force = force_all || (force_dead_pid && batch_pid.is_some());
         let branch = format!("{BRANCH_PREFIX}{id}");
         if active_ops.contains(&branch) {
             sweep

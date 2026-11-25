@@ -1,7 +1,8 @@
 //! Worktree lookup, merged/squash-merged cleanup, and squash PR verification
 //! helpers for [`super::RealGit`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use aaf_domain::ports::PortResult;
 
@@ -81,5 +82,25 @@ impl RealGit {
         let _admin = self.admin();
         worktree::cleanup_verified_merged_task(&self.repo_root, &self.worktrees_dir, task_id)
             .map_err(err)
+    }
+
+    pub(super) fn sweep_offline_done_impl(
+        &self,
+        done_task_ids: &[String],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        let _admin = self.admin();
+        let data_dir = self.locks_dir.parent().unwrap_or(&self.locks_dir);
+        let effective_cwd = cwd.or(self.cwd.as_deref());
+        let report = crate::gc::clean_repo_offline_unlocked(
+            &self.repo_root,
+            data_dir,
+            &self.worktrees_dir,
+            done_task_ids,
+            active_ids,
+            effective_cwd,
+        );
+        Ok(report.warnings)
     }
 }

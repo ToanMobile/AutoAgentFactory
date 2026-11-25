@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use aaf_engine::gc::{DEFAULT_OLDER_THAN_DAYS, GcOptions, GcReport, run_gc};
+use aaf_engine::git::main_work_tree;
 use serde_json::Value;
 
 use super::board::store::{err, refuse_inside_agent_run};
@@ -50,12 +51,14 @@ fn resolve_repo(args: &GcArgs, ctx: &Ctx) -> Result<Option<PathBuf>, CmdError> {
             )));
         }
         let root = aaf_fp::repo_root(&candidate).unwrap_or(candidate);
-        let canonical = fs::canonicalize(&root).unwrap_or(root);
+        let main = main_work_tree(&root);
+        let canonical = fs::canonicalize(&main).unwrap_or(main);
         return Ok(Some(canonical));
     }
     let root = aaf_fp::repo_root(&ctx.cwd)
         .map_err(|_| CmdError::new("not inside a git repository: pass --repo <path> or --all"))?;
-    let canonical = fs::canonicalize(&root).unwrap_or(root);
+    let main = main_work_tree(&root);
+    let canonical = fs::canonicalize(&main).unwrap_or(main);
     Ok(Some(canonical))
 }
 
@@ -98,6 +101,7 @@ pub fn run(args: &GcArgs, ctx: &Ctx) -> CmdResult {
         include_cancelled: args.include_cancelled,
         force: args.force,
         older_than_days: args.older_than_days,
+        cwd: Some(ctx.cwd.clone()),
     };
     let report = run_gc(&ctx.data_dir, &ctx.worktrees_dir, &opts).map_err(|e| err("gc", e))?;
     let mut out = CmdOutput::ok("ok", format_report(&report));

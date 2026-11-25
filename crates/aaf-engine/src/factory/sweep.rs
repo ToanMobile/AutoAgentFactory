@@ -73,26 +73,46 @@ pub fn recover(deps: &Deps, reap: &dyn Fn(&str) -> PortResult<()>) -> PortResult
     Ok(gating.into_iter().map(|task| task.id).collect())
 }
 
-/// Cleans orphaned `aaf/batch-*` integration worktrees/branches and prunes
-/// stale git worktree entries at scheduler startup. Non-fatal warnings are
-/// returned rather than aborting startup.
+/// Cleans orphaned `aaf/batch-*` integration worktrees/branches, clean `Done`
+/// task leftovers, dead-PID scratch worktrees/refs, and prunes stale git
+/// worktree entries at scheduler startup without network, DB writes, or
+/// `.run.lock`. Non-fatal warnings are returned rather than aborting startup.
 pub(super) fn startup_sweep(deps: &Deps) -> Vec<String> {
     let mut warnings = Vec::new();
+    let mut seen_raw = HashSet::new();
     let repo = Some(deps.settings.repo_root.as_str());
-    let active_ids: HashSet<String> = match deps.store.list_tasks(repo, None) {
-        Ok(tasks) => tasks.into_iter().map(|task| task.id).collect(),
+    let tasks = match deps.store.list_tasks(repo, None) {
+        Ok(tasks) => tasks,
         Err(err) => {
             warnings.push(format!("startup_sweep list_tasks: {err}"));
             return warnings;
         }
     };
+    let active_ids: HashSet<String> = tasks.iter().map(|task| task.id.clone()).collect();
+    let done_ids: Vec<String> = tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Done)
+        .map(|task| task.id.clone())
+        .collect();
     match deps.git.sweep_orphan_batches(&active_ids) {
-        Ok(refused) => warnings.extend(
-            refused
-                .into_iter()
-                .map(|w| format!("startup_sweep orphan batches: {w}")),
-        ),
+        Ok(refused) => {
+            for w in refused {
+                if seen_raw.insert(w.clone()) {
+                    warnings.push(format!("startup_sweep orphan batches: {w}"));
+                }
+            }
+        }
         Err(err) => warnings.push(format!("startup_sweep orphan batches: {err}")),
+    }
+    match deps.git.sweep_offline_done(&done_ids, &active_ids, None) {
+        Ok(offline_warnings) => {
+            for w in offline_warnings {
+                if seen_raw.insert(w.clone()) {
+                    warnings.push(format!("startup_sweep offline: {w}"));
+                }
+            }
+        }
+        Err(err) => warnings.push(format!("startup_sweep offline: {err}")),
     }
     if let Err(err) = deps.git.prune_worktrees() {
         warnings.push(format!("startup_sweep prune worktrees: {err}"));
