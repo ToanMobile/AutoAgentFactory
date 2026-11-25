@@ -130,6 +130,7 @@ impl RepoFixture {
             subject: None,
             body_file: None,
             ci_wait_secs,
+            require_checks: false,
             lock_timeout: Duration::from_secs(10),
             dry_run: false,
             machine: MachineConfig::default(),
