@@ -12,12 +12,27 @@ use rusqlite::{OptionalExtension, Row, params};
 
 use super::{Db, corrupt, sql_err, to_u64};
 
+/// Summary of runs for a task shown directly on `/api/board` cards.
+#[derive(Debug, Clone, Default)]
+pub struct BoardRunSummary {
+    pub id: String,
+    pub status: String,
+    pub executor: String,
+    pub account: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub run_count: u32,
+    pub total_duration_secs: i64,
+}
+
 /// Batched board metadata loaded in a single read closure for `aaf ui` `/api/board`.
 #[derive(Debug, Clone, Default)]
 pub struct BoardEnrichment {
     pub frozen: bool,
     pub deps_by_task: HashMap<String, Vec<String>>,
     pub latest_run_by_task: HashMap<String, String>,
+    pub run_summary_by_task: HashMap<String, BoardRunSummary>,
+    pub latest_event_by_task: HashMap<String, (String, i64)>,
 }
 
 /// One `runs` row, columns in table order (shared with `stores.rs`).
@@ -123,7 +138,21 @@ impl Db {
             };
 
             let mut deps_by_task: HashMap<String, Vec<String>> = HashMap::new();
-            let mut best_run: HashMap<String, (i64, String)> = HashMap::new();
+            let mut run_summary_by_task: HashMap<String, BoardRunSummary> = HashMap::new();
+            let mut latest_event_by_task: HashMap<String, (String, i64)> = HashMap::new();
+
+            let mut account_names: HashMap<String, String> = HashMap::new();
+            if let Ok(mut acc_stmt) = conn.prepare_cached("SELECT id, name FROM accounts")
+                && let Ok(mut acc_rows) = acc_stmt.query([])
+            {
+                while let Ok(Some(row)) = acc_rows.next() {
+                    if let (Ok(id), Ok(name)) = (row.get::<_, String>(0), row.get::<_, String>(1))
+                        && !name.trim().is_empty()
+                    {
+                        account_names.insert(id, name);
+                    }
+                }
+            }
 
             if let Some(root) = repo_root {
                 let mut dep_stmt = conn
@@ -142,14 +171,31 @@ impl Db {
 
                 let mut run_stmt = conn
                     .prepare_cached(
-                        "SELECT r.task_id, r.started_at, r.id FROM runs r \
+                        "SELECT r.task_id, r.started_at, r.id, r.status, r.executor, \
+                         r.account_id, r.ended_at FROM runs r \
                          INNER JOIN tasks t ON t.id = r.task_id \
                          WHERE t.repo_root = ?1",
                     )
                     .map_err(sql_err)?;
                 let mut run_rows = run_stmt.query(params![&root]).map_err(sql_err)?;
                 while let Some(row) = run_rows.next().map_err(sql_err)? {
-                    record_latest_run(&mut best_run, row)?;
+                    record_run_summary(&mut run_summary_by_task, &account_names, row)?;
+                }
+
+                let mut ev_stmt = conn
+                    .prepare_cached(
+                        "SELECT e.task_id, e.kind, e.created_at FROM events e \
+                         INNER JOIN tasks t ON t.id = e.task_id \
+                         WHERE t.repo_root = ?1 AND t.state IN ('running', 'gating') \
+                         AND e.id = (SELECT MAX(e2.id) FROM events e2 WHERE e2.task_id = e.task_id)",
+                    )
+                    .map_err(sql_err)?;
+                let mut ev_rows = ev_stmt.query(params![&root]).map_err(sql_err)?;
+                while let Some(row) = ev_rows.next().map_err(sql_err)? {
+                    let tid: String = row.get(0).map_err(sql_err)?;
+                    let kind: String = row.get(1).map_err(sql_err)?;
+                    let ts: i64 = row.get(2).map_err(sql_err)?;
+                    latest_event_by_task.insert(tid, (kind, ts));
                 }
             } else {
                 let mut dep_stmt = conn
@@ -163,23 +209,44 @@ impl Db {
                 }
 
                 let mut run_stmt = conn
-                    .prepare_cached("SELECT task_id, started_at, id FROM runs")
+                    .prepare_cached(
+                        "SELECT task_id, started_at, id, status, executor, account_id, ended_at \
+                         FROM runs",
+                    )
                     .map_err(sql_err)?;
                 let mut run_rows = run_stmt.query([]).map_err(sql_err)?;
                 while let Some(row) = run_rows.next().map_err(sql_err)? {
-                    record_latest_run(&mut best_run, row)?;
+                    record_run_summary(&mut run_summary_by_task, &account_names, row)?;
+                }
+
+                let mut ev_stmt = conn
+                    .prepare_cached(
+                        "SELECT e.task_id, e.kind, e.created_at FROM events e \
+                         INNER JOIN tasks t ON t.id = e.task_id \
+                         WHERE t.state IN ('running', 'gating') \
+                         AND e.id = (SELECT MAX(e2.id) FROM events e2 WHERE e2.task_id = e.task_id)",
+                    )
+                    .map_err(sql_err)?;
+                let mut ev_rows = ev_stmt.query([]).map_err(sql_err)?;
+                while let Some(row) = ev_rows.next().map_err(sql_err)? {
+                    let tid: String = row.get(0).map_err(sql_err)?;
+                    let kind: String = row.get(1).map_err(sql_err)?;
+                    let ts: i64 = row.get(2).map_err(sql_err)?;
+                    latest_event_by_task.insert(tid, (kind, ts));
                 }
             }
 
-            let latest_run_by_task = best_run
-                .into_iter()
-                .map(|(task_id, (_, run_id))| (task_id, run_id))
+            let latest_run_by_task = run_summary_by_task
+                .iter()
+                .map(|(task_id, summary)| (task_id.clone(), summary.id.clone()))
                 .collect();
 
             Ok(BoardEnrichment {
                 frozen,
                 deps_by_task,
                 latest_run_by_task,
+                run_summary_by_task,
+                latest_event_by_task,
             })
         })
     }
@@ -408,16 +475,49 @@ fn is_cross_audit_fail_payload(payload_json: &str) -> bool {
         })
 }
 
-fn record_latest_run(best: &mut HashMap<String, (i64, String)>, row: &Row<'_>) -> PortResult<()> {
+fn record_run_summary(
+    summaries: &mut HashMap<String, BoardRunSummary>,
+    account_names: &HashMap<String, String>,
+    row: &Row<'_>,
+) -> PortResult<()> {
     let task_id: String = row.get(0).map_err(sql_err)?;
     let started_at: i64 = row.get(1).map_err(sql_err)?;
     let run_id: String = row.get(2).map_err(sql_err)?;
-    let replace = match best.get(&task_id) {
-        None => true,
-        Some((prev_ts, prev_id)) => (started_at, run_id.as_str()) >= (*prev_ts, prev_id.as_str()),
-    };
-    if replace {
-        best.insert(task_id, (started_at, run_id));
+    let status: String = row.get(3).map_err(sql_err)?;
+    let executor: String = row.get(4).map_err(sql_err)?;
+    let account_id: Option<String> = row.get(5).map_err(sql_err)?;
+    let ended_at: Option<i64> = row.get(6).map_err(sql_err)?;
+    let account = account_id.map(|id| account_names.get(&id).cloned().unwrap_or(id));
+    let elapsed = ended_at.map(|end| (end - started_at).max(0)).unwrap_or(0);
+
+    match summaries.get_mut(&task_id) {
+        None => {
+            summaries.insert(
+                task_id,
+                BoardRunSummary {
+                    id: run_id,
+                    status,
+                    executor,
+                    account,
+                    started_at,
+                    ended_at,
+                    run_count: 1,
+                    total_duration_secs: elapsed,
+                },
+            );
+        }
+        Some(entry) => {
+            entry.run_count = entry.run_count.saturating_add(1);
+            entry.total_duration_secs = entry.total_duration_secs.saturating_add(elapsed);
+            if (started_at, run_id.as_str()) >= (entry.started_at, entry.id.as_str()) {
+                entry.id = run_id;
+                entry.status = status;
+                entry.executor = executor;
+                entry.account = account;
+                entry.started_at = started_at;
+                entry.ended_at = ended_at;
+            }
+        }
     }
     Ok(())
 }
@@ -518,6 +618,11 @@ mod tests {
             scoped.latest_run_by_task.get("t1").map(String::as_str),
             Some("r-z")
         );
+        let t1_sum = scoped.run_summary_by_task.get("t1").unwrap();
+        assert_eq!(t1_sum.id, "r-z");
+        assert_eq!(t1_sum.run_count, 2);
+        assert_eq!(t1_sum.executor, "claude");
+        assert_eq!(t1_sum.started_at, 200);
         assert!(!scoped.latest_run_by_task.contains_key("tb"));
 
         let all = db.board_enrichment(None).unwrap();
@@ -525,6 +630,7 @@ mod tests {
             all.latest_run_by_task.get("tb").map(String::as_str),
             Some("r-b")
         );
+        assert_eq!(all.run_summary_by_task.get("tb").unwrap().run_count, 1);
     }
 
     #[test]

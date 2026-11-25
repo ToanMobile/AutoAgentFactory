@@ -419,6 +419,76 @@ fn service_new_endpoints_create_task_diff_proof_and_supervisor() {
     let off_val: Value = serde_json::from_str(&off_body).unwrap();
     assert_eq!(off_val["enabled"], json!(false));
 
+    // 3b. Supervisor allowed_repos selection persists and reflects in /api/status
+    let repo_canon = std::fs::canonicalize(&sb.repo)
+        .unwrap_or_else(|_| sb.repo.clone())
+        .to_string_lossy()
+        .to_string();
+    let sup_pick = json!({
+        "action": "supervisor_repos",
+        "task_id": "",
+        "note": json!({ "repos": [sb.repo.to_string_lossy()] }).to_string(),
+    })
+    .to_string();
+    let (st_pick, pick_body) = raw_http(
+        port,
+        &format!(
+            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_pick}",
+            sup_pick.len()
+        ),
+    );
+    assert_eq!(st_pick, 200, "{pick_body}");
+    let pick_val: Value = serde_json::from_str(&pick_body).unwrap();
+    assert_eq!(pick_val["allowed_repos"], json!([repo_canon]));
+
+    let (st_status2, status_body2) = raw_http(
+        port,
+        &format!(
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert_eq!(st_status2, 200, "{status_body2}");
+    let status_val2: Value = serde_json::from_str(&status_body2).unwrap();
+    assert_eq!(
+        status_val2["supervisor"]["allowed_repos"],
+        json!([repo_canon])
+    );
+    assert!(status_val2["supervisor"]["known_repos"].is_array());
+
+    let sup_none = json!({
+        "action": "supervisor_repos",
+        "task_id": "",
+        "note": json!({ "repos": [] }).to_string(),
+    })
+    .to_string();
+    let (st_none, none_body) = raw_http(
+        port,
+        &format!(
+            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_none}",
+            sup_none.len()
+        ),
+    );
+    assert_eq!(st_none, 200, "{none_body}");
+    let none_val: Value = serde_json::from_str(&none_body).unwrap();
+    assert_eq!(none_val["allowed_repos"], json!([]));
+
+    let sup_all = json!({
+        "action": "supervisor_repos",
+        "task_id": "",
+        "note": json!({ "all": true }).to_string(),
+    })
+    .to_string();
+    let (st_all, all_body) = raw_http(
+        port,
+        &format!(
+            "POST /api/action HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{sup_all}",
+            sup_all.len()
+        ),
+    );
+    assert_eq!(st_all, 200, "{all_body}");
+    let all_val: Value = serde_json::from_str(&all_body).unwrap();
+    assert!(all_val["allowed_repos"].is_null());
+
     // 4. GET /api/accounts requires auth & returns native repo_assignments + aaf_accounts
     let (st_acc_unauth, _) = raw_http(
         port,

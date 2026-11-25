@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AutoAgentFactory Dashboard</title>
 <link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="icon" type="image/png" href="/apple-touch-icon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -69,6 +70,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .sup-btn{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--border);background:var(--surface)}
 .sup-btn.on{border-color:color-mix(in srgb,var(--ok) 45%,transparent);background:var(--ok-bg);color:var(--ok)}
 .sup-btn.on .dot{background:var(--ok);animation:pulse 1.8s infinite}
+.icon-btn{padding:4px 8px;min-width:30px;font-size:13px;line-height:1.1;display:inline-flex;align-items:center;justify-content:center}
+.repo-auto-tag{font-size:10.5px;font-weight:700;color:var(--ok);margin-left:2px}
+.repo-backoff-tag{font-size:10.5px;font-weight:700;color:var(--warn);margin-left:2px;font-variant-numeric:tabular-nums}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 45%,transparent)}50%{box-shadow:0 0 0 4px transparent}}
 @media(prefers-reduced-motion:reduce){.sup-btn.on .dot{animation:none}}
 .pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid transparent;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -132,6 +136,16 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .kcard-why-sub{margin-top:2px;font-size:11.5px;color:var(--ink2);font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .kcard-acts{display:flex;justify-content:flex-end;gap:5px;margin-top:6px;padding-top:5px;border-top:1px solid color-mix(in srgb,var(--border) 60%,transparent)}
 .kcard-acts button{padding:3px 8px;font-size:11.5px;border-radius:6px}
+.kcard-live{margin:5px 0 6px;padding:6px 8px;border-radius:7px;border:1px solid color-mix(in srgb,var(--warn) 34%,var(--border));border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 9%,var(--surface));display:flex;flex-direction:column;gap:3px;font-size:11.5px}
+.kcard-live.gating{border-color:color-mix(in srgb,var(--info) 36%,var(--border));border-left-color:var(--info);background:color-mix(in srgb,var(--info) 9%,var(--surface))}
+.kcard-live-top{display:flex;align-items:center;justify-content:space-between;gap:6px;font-weight:650;color:var(--ink)}
+.kcard-live-stage{display:inline-flex;align-items:center;gap:5px;min-width:0}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--warn);flex:none;animation:pulse 1.6s infinite}
+.kcard-live.gating .live-dot{background:var(--info)}
+.kcard-live-clock{font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--warn);white-space:nowrap;font-variant-numeric:tabular-nums}
+.kcard-live.gating .kcard-live-clock{color:var(--info)}
+.kcard-live-sub{display:flex;flex-wrap:wrap;gap:5px;align-items:center;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.kcard-dur{font-family:var(--mono);font-size:11px;color:var(--muted)}
 .kempty{color:var(--muted);font-size:12px;text-align:center;padding:16px 4px}
 .kmore{color:var(--muted);font-size:12px;text-align:center;padding:8px 6px;border-top:1px dashed var(--border)}
 .task-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:11px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface);cursor:pointer;box-shadow:var(--shadow-card);transition:border-color .12s,transform .08s}
@@ -256,54 +270,54 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       <div class="top-actions">
         <span class="sse-pill"><span id="sseDot" class="dot"></span><span id="sseLabel">Idle</span></span>
         <button id="topAccPill" class="acc-top-pill hidden" type="button" title="Tài khoản đang hoạt động — bấm để mở tab Accounts"></button>
-        <button id="supBtn" class="sup-btn hidden" type="button" aria-pressed="false" title="Toggle multi-repo auto-runner (aaf run + caffeinate)"><span class="dot"></span><span id="supLabel">Auto-Run: OFF</span></button>
-        <button id="newTaskBtn" class="btn-primary btn-sm hidden" type="button">+ New Task</button>
+        <button id="supBtn" class="sup-btn hidden" type="button" aria-pressed="false" title="Bật Auto-Run cho repo đang chọn (hoặc All)"><span class="dot"></span><span id="supLabel">Auto-Run: OFF</span></button>
+        <button id="newTaskBtn" class="btn-primary btn-sm hidden" type="button">+ Task mới</button>
         <a href="/studio" class="btn-link" title="Thống kê chi tiết từng task, thời gian &amp; token">Studio</a>
-        <button id="refreshBtn" class="btn-sm" title="Refresh now">Refresh</button>
-        <button id="themeBtn" class="btn-sm" title="Toggle light/dark">Theme</button>
-        <button id="copyTokBtn" class="btn-sm hidden" type="button" title="Copy session token">Copy Token</button>
-        <button id="lockBtn" class="btn-sm hidden" title="Clear session token">Lock</button>
+        <button id="refreshBtn" class="btn-sm icon-btn" type="button" title="Làm mới dữ liệu" aria-label="Làm mới dữ liệu">↻</button>
+        <button id="themeBtn" class="btn-sm icon-btn" type="button" title="Đổi giao diện Sáng / Tối" aria-label="Đổi giao diện Sáng / Tối">◐</button>
+        <button id="copyTokBtn" class="btn-sm icon-btn hidden" type="button" title="Copy session token" aria-label="Copy session token">⧉</button>
+        <button id="lockBtn" class="btn-sm icon-btn hidden" type="button" title="Khoá phiên &amp; xoá token" aria-label="Khoá phiên">🔒</button>
       </div>
     </div>
   </header>
 
   <div id="frozenBanner" class="banner hidden">
-    <div><strong>Factory is FROZEN.</strong> New agent runs are paused until an operator unfreezes the factory.</div>
-    <button id="unfreezeBtn" class="btn-danger btn-sm">Unfreeze Factory</button>
+    <div><strong>Xưởng đang TẠM DỪNG (FROZEN).</strong> Các lượt chạy mới bị tạm dừng cho đến khi bạn mở khoá.</div>
+    <button id="unfreezeBtn" class="btn-danger btn-sm">Mở khoá xưởng</button>
   </div>
 
   <nav class="tabs" role="tablist" aria-label="Dashboard sections">
     <button class="tab active" role="tab" aria-selected="true" data-tab="board">Board <span id="cntBoard" class="count">0</span></button>
-    <button class="tab need-you-tab" role="tab" aria-selected="false" id="needYouTabBtn" type="button">Need You <span id="cntNeedYou" class="count">0</span></button>
+    <button class="tab need-you-tab hidden" role="tab" aria-selected="false" id="needYouTabBtn" type="button">Need You <span id="cntNeedYou" class="count">0</span></button>
     <button class="tab" role="tab" aria-selected="false" data-tab="review">Needs Review <span id="cntReview" class="count">0</span></button>
     <button class="tab" role="tab" aria-selected="false" data-tab="stream">Live Stream</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="accounts">Accounts <span id="cntAccounts" class="count">0</span></button>
     <button class="tab" role="tab" aria-selected="false" data-tab="machine">Machine</button>
   </nav>
 
-  <div id="repoBar" class="repo-bar hidden" role="group" aria-label="Filter by repositories (multi-select)"></div>
+  <div id="repoBar" class="repo-bar hidden" role="group" aria-label="Lọc &amp; chọn repo chạy Auto-Run"></div>
 
   <section id="view-board">
     <div class="filters">
       <div class="chips" id="stateChips"></div>
-      <select id="prioFilter" aria-label="Priority filter">
-        <option value="">All priorities</option>
+      <select id="prioFilter" aria-label="Lọc theo độ ưu tiên">
+        <option value="">Tất cả ưu tiên</option>
         <option value="P0">P0</option><option value="P1">P1</option>
         <option value="P2">P2</option><option value="P3">P3</option>
       </select>
-      <select id="sortBy" aria-label="Sort tasks">
-        <option value="priority">Sort: Priority (P0→P3)</option>
-        <option value="updated_desc">Sort: Updated (Newest)</option>
-        <option value="updated_asc">Sort: Updated (Oldest)</option>
-        <option value="created_desc">Sort: Created (Newest)</option>
-        <option value="created_asc">Sort: Created (Oldest)</option>
-        <option value="title_asc">Sort: Title (A→Z)</option>
-        <option value="repo_asc">Sort: Repo (A→Z)</option>
+      <select id="sortBy" aria-label="Sắp xếp task">
+        <option value="priority">Sắp xếp: Ưu tiên (P0→P3)</option>
+        <option value="updated_desc">Sắp xếp: Cập nhật mới nhất</option>
+        <option value="updated_asc">Sắp xếp: Cập nhật cũ nhất</option>
+        <option value="created_desc">Sắp xếp: Tạo mới nhất</option>
+        <option value="created_asc">Sắp xếp: Tạo cũ nhất</option>
+        <option value="title_asc">Sắp xếp: Tiêu đề (A→Z)</option>
+        <option value="repo_asc">Sắp xếp: Repo (A→Z)</option>
       </select>
-      <input id="searchBox" type="search" placeholder="Filter tasks by ID, title, or repo…" style="flex:1;min-width:180px">
+      <input id="searchBox" type="search" placeholder="Tìm theo ID, tiêu đề, repo…" style="flex:1;min-width:180px">
       <span id="filterMeta" class="filter-meta hidden"></span>
-      <button id="clearFiltersBtn" class="btn-sm hidden" type="button" title="Reset all filters and sort">Reset</button>
-      <div class="viewseg" id="viewSeg" role="group" aria-label="Board layout"><button data-view="kanban" aria-pressed="true">Kanban</button><button data-view="list" aria-pressed="false">List</button></div>
+      <button id="clearFiltersBtn" class="btn-sm hidden" type="button" title="Xoá bộ lọc tìm kiếm / ưu tiên / sắp xếp">Xoá lọc</button>
+      <div class="viewseg" id="viewSeg" role="group" aria-label="Chế độ xem Board"><button data-view="kanban" aria-pressed="true">Kanban</button><button data-view="list" aria-pressed="false">List</button></div>
     </div>
     <div id="boardList" class="task-list"></div>
   </section>
@@ -452,10 +466,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   const VIEW_KEY = "aaf_ui_board_view";
   const SORT_KEY = "aaf_ui_sort";
   const REPOS_KEY = "aaf_ui_repos";
+  const STATE_KEY = "aaf_ui_state_filter";
+  const PRIO_KEY = "aaf_ui_prio_filter";
   const VALID_SORTS = new Set(["priority","updated_desc","updated_asc","created_desc","created_asc","title_asc","repo_asc"]);
+  const VALID_PRIOS = new Set(["","P0","P1","P2","P3"]);
   const PRIO_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
   const RO_HINT = "Read-only mode: run `aaf ui --install-service --allow-actions` or use CLI commands in a terminal.";
   const STATES = ["all","backlog","ready","running","gating","review","blocked","done"];
+  const VALID_SAVED_STATES = new Set(STATES.concat(["cancelled"]));
   const STATE_LABELS = { need_you: "Need You" };
   const KANBAN_COLS = [
     ["backlog", "Backlog", ["backlog"]],
@@ -470,10 +488,13 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let meta = { read_only: true, allow_approve: false, scope: "", version: "", repos: [] };
   let statusData = null;
   let boardTasks = [];
+  let boardLoaded = false;
   let activeTab = "board";
   let stateFilter = "all";
   let showCancelled = false;
   let selectedRepos = new Set();
+  let hasSavedReposPref = sGet(localStorage, REPOS_KEY) !== null;
+  let savedPrioFilter = "";
   let selectedBacklog = new Set();
   let sortBy = "priority";
   let selectedReviewId = null;
@@ -519,13 +540,23 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   {
     const savedSort = sGet(localStorage, SORT_KEY);
     if (savedSort && VALID_SORTS.has(savedSort)) sortBy = savedSort;
+    const savedState = sGet(localStorage, STATE_KEY);
+    if (savedState && VALID_SAVED_STATES.has(savedState)) stateFilter = savedState;
+    const sp = sGet(localStorage, PRIO_KEY);
+    if (sp && VALID_PRIOS.has(sp)) savedPrioFilter = sp;
     try {
       const savedRepos = JSON.parse(sGet(localStorage, REPOS_KEY) || "[]");
       if (Array.isArray(savedRepos)) selectedRepos = new Set(savedRepos.filter((x) => typeof x === "string" && x));
     } catch (_) {}
   }
 
-  function saveSelectedRepos() { sSet(localStorage, REPOS_KEY, JSON.stringify([...selectedRepos])); }
+  function saveSelectedRepos() {
+    hasSavedReposPref = true;
+    sSet(localStorage, REPOS_KEY, JSON.stringify([...selectedRepos]));
+  }
+  function saveStateFilter() {
+    if (VALID_SAVED_STATES.has(stateFilter)) sSet(localStorage, STATE_KEY, stateFilter);
+  }
 
   function compareTasks(a, b) {
     const pA = PRIO_RANK[String(a.priority || "").toUpperCase()] ?? 9;
@@ -546,18 +577,104 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   }
 
   function dur(s) {
-    s = Number(s) || 0;
+    s = Math.max(0, Math.floor(Number(s) || 0));
     if (s < 60) return s + "s";
     if (s < 3600) return Math.floor(s / 60) + "m";
     if (s < 86400) return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
     return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+  }
+  function durLive(s) {
+    s = Math.max(0, Math.floor(Number(s) || 0));
+    if (s < 60) return s + "s";
+    if (s < 3600) return String(Math.floor(s / 60)).padStart(2, "0") + "m " + String(s % 60).padStart(2, "0") + "s";
+    if (s < 86400) return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+    return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+  }
+  function fmtClock(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    const d = new Date(n * 1000);
+    const now = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    if (sameDay) return `${hh}:${mm}`;
+    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")} ${hh}:${mm}`;
+  }
+  function tickLiveClocks() {
+    if (document.visibilityState === "hidden") return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    document.querySelectorAll("[data-live-since]").forEach((el) => {
+      const start = Number(el.dataset.liveSince);
+      if (Number.isFinite(start) && start > 0) {
+        el.textContent = durLive(Math.max(0, nowSec - start));
+      }
+    });
+  }
+  function formatLiveStage(t) {
+    const ev = (t.latest_event && t.latest_event.kind) || "";
+    switch (ev) {
+      case "plan_generated":
+      case "plan_debate_turn":
+      case "plan_converged":
+        return "Đang lập kế hoạch";
+      case "gate_result":
+        return "Đang chạy Gate / Test";
+      case "cross_audit":
+      case "dual_review_turn":
+        return "Đang Cross-Audit";
+      case "proof_recorded":
+        return "Đang kiểm tra Proof";
+      case "merge_result":
+      case "pr_opened":
+        return "Đang merge / tạo PR";
+      case "implementer_escalated":
+        return "Đang nâng cấp xử lý";
+      case "unblock_step":
+        return "Đang tự gỡ chặn";
+      default:
+        return t.state === "gating" ? "Đang chạy Gate / QA" : "Agent đang code";
+    }
+  }
+  function renderLiveRunBox(t, ro) {
+    if (t.state !== "running" && t.state !== "gating") return "";
+    const run = t.latest_run || null;
+    const startTs = (run && Number(run.started_at)) || Number(t.updated_at) || 0;
+    const elapsedText = startTs ? durLive(Math.max(0, Math.floor(Date.now() / 1000) - startTs)) : "—";
+    const startClock = startTs ? fmtClock(startTs) : "";
+    const stage = formatLiveStage(t);
+    const execPart = run && run.executor
+      ? (run.account ? `${run.executor} · ${run.account}` : run.executor)
+      : "";
+    const runNo = (Number(t.run_count) || 0) > 1 ? `Run #${t.run_count}` : "";
+    const runId = (run && run.id) || t.latest_run_id || "";
+    const isGating = t.state === "gating";
+    const canStop = !ro && run && run.status === "running" && runId;
+    const acts = runId
+      ? `<div style="display:flex;gap:5px;margin-top:3px">
+          <button type="button" class="btn-sm" style="padding:2px 7px;font-size:11px" data-quick-stream="${esc(runId)}">Live Stream</button>
+          ${canStop ? `<button type="button" class="btn-danger btn-sm" style="padding:2px 7px;font-size:11px" data-quick-stop="${esc(runId)}">Dừng</button>` : ""}
+        </div>`
+      : "";
+    return `<div class="kcard-live ${isGating ? "gating" : ""}">
+      <div class="kcard-live-top">
+        <span class="kcard-live-stage"><span class="live-dot"></span><span>${esc(stage)}</span></span>
+        ${startTs ? `<span class="kcard-live-clock" data-live-since="${esc(startTs)}" title="Thời gian đã chạy">${esc(elapsedText)}</span>` : ""}
+      </div>
+      <div class="kcard-live-sub">
+        ${startClock ? `<span>Bắt đầu ${esc(startClock)}</span>` : ""}
+        ${execPart ? `<span>· <span class="mono">${esc(execPart)}</span></span>` : ""}
+        ${runNo ? `<span>· ${esc(runNo)}</span>` : ""}
+      </div>
+      ${acts}
+    </div>`;
   }
   function ago(ts) {
     if (!ts) return "";
     const n = Number(ts);
     if (!Number.isFinite(n) || n <= 0) return String(ts);
     const s = Math.max(0, Math.round(Date.now() / 1000 - n));
-    return s < 45 ? "just now" : dur(s) + " ago";
+    return s < 45 ? "vừa xong" : dur(s) + " trước";
   }
   function untilStr(ts) {
     if (!ts) return "—";
@@ -789,6 +906,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     try {
       const b = await api("/api/board");
       boardTasks = b.tasks || [];
+      boardLoaded = true;
       syncRepoFilterOptions();
       renderBoard();
       renderReviewQueue();
@@ -898,18 +1016,87 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     }).join("") + `</div>`;
   }
 
+  function getSupervisorKnownRepos() {
+    const sup = (statusData && statusData.supervisor) || {};
+    const byPath = new Map();
+    for (const r of (sup.known_repos || [])) {
+      if (r && r.path) byPath.set(r.path, { path: r.path, name: r.name || r.path, ready: Number(r.ready) || 0, active: Number(r.active) || 0 });
+    }
+    for (const t of boardTasks) {
+      const p = t.repo_root || t.repo_name;
+      if (!p) continue;
+      if (!byPath.has(p)) {
+        byPath.set(p, { path: p, name: t.repo_name || p, ready: 0, active: 0 });
+      }
+      if (!sup.known_repos || !sup.known_repos.length) {
+        const entry = byPath.get(p);
+        if (t.state !== "done" && t.state !== "cancelled") entry.active++;
+        if (t.state === "ready") entry.ready++;
+      }
+    }
+    return [...byPath.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  }
+
+  function isSupervisorRepoAllowed(repoName, repoPath) {
+    const sup = (statusData && statusData.supervisor) || {};
+    if (!Array.isArray(sup.allowed_repos)) return true;
+    return sup.allowed_repos.includes(repoPath) || sup.allowed_repos.includes(repoName);
+  }
+
+  function getRepoPathMap() {
+    const pathByName = new Map();
+    for (const kr of getSupervisorKnownRepos()) {
+      if (kr.name && kr.path && !pathByName.has(kr.name)) pathByName.set(kr.name, kr.path);
+    }
+    for (const t of boardTasks) {
+      if (t.repo_name && t.repo_root && !pathByName.has(t.repo_name)) pathByName.set(t.repo_name, t.repo_root);
+    }
+    return pathByName;
+  }
+
+  function buildSelectedSupervisorPayload() {
+    if (selectedRepos.size === 0) return { all: true };
+    const pathByName = getRepoPathMap();
+    const repos = [...selectedRepos].map((name) => pathByName.get(name) || name);
+    return { repos };
+  }
+
+  function selectedMatchesSupervisorAllowed(sup, allRepoNames, pathByName) {
+    const allowed = sup && sup.allowed_repos;
+    if (!Array.isArray(allowed)) return selectedRepos.size === 0;
+    if (selectedRepos.size === 0) return false;
+    const allowedNames = allRepoNames.filter((name) => isSupervisorRepoAllowed(name, pathByName.get(name) || name));
+    if (allowedNames.length !== selectedRepos.size) return false;
+    return allowedNames.every((name) => selectedRepos.has(name));
+  }
+
   function syncRepoFilterOptions() {
+    const bar = $("repoBar");
+    if (!boardLoaded) {
+      bar.classList.add("hidden");
+      return;
+    }
     const counts = new Map();
+    const pathByName = getRepoPathMap();
+    for (const kr of getSupervisorKnownRepos()) {
+      if (kr.name && !counts.has(kr.name)) counts.set(kr.name, 0);
+    }
     for (const t of boardTasks) {
       if (!t.repo_name) continue;
       counts.set(t.repo_name, (counts.get(t.repo_name) || 0) + 1);
     }
     const repos = [...counts.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-    const bar = $("repoBar");
     if (repos.length <= 1) {
       bar.classList.add("hidden");
       if (selectedRepos.size) { selectedRepos.clear(); saveSelectedRepos(); }
       return;
+    }
+    const sup = (statusData && statusData.supervisor) || {};
+    if (!hasSavedReposPref && Array.isArray(sup.allowed_repos) && sup.allowed_repos.length > 0) {
+      for (const r of repos) {
+        if (isSupervisorRepoAllowed(r, pathByName.get(r) || r)) selectedRepos.add(r);
+      }
+      hasSavedReposPref = true;
     }
     let pruned = false;
     for (const r of [...selectedRepos]) {
@@ -917,14 +1104,27 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     }
     if (pruned) saveSelectedRepos();
 
+    const supOn = Boolean(sup.enabled);
+    const supRestricted = Array.isArray(sup.allowed_repos);
+    const backoffMap = (sup && sup.backoff) || {};
+    const ro = Boolean(meta.read_only);
     const allOn = selectedRepos.size === 0;
     const repoChips = repos.map((r) => {
       const on = selectedRepos.has(r);
-      return `<button type="button" class="chip ${on ? "repo-on" : ""}" data-repo="${esc(r)}" aria-pressed="${on}">${on ? "✓ " : ""}${esc(r)} <span class="c">${counts.get(r)}</span></button>`;
+      const p = pathByName.get(r) || r;
+      const autoOn = supOn && supRestricted && isSupervisorRepoAllowed(r, p);
+      const autoTag = autoOn ? `<span class="repo-auto-tag" title="Repo này đang được Auto-Run chạy">⚡</span>` : "";
+      const bkSecs = Number(backoffMap[p] || backoffMap[r] || 0);
+      const bkTag = bkSecs > 0 ? `<span class="repo-backoff-tag" title="Đang chờ thử lại sau lỗi (${bkSecs}s)">⏳${esc(dur(bkSecs))}</span>` : "";
+      return `<button type="button" class="chip ${on ? "repo-on" : ""}" data-repo="${esc(r)}" aria-pressed="${on}">${on ? "✓ " : ""}${esc(r)} <span class="c">${counts.get(r)}</span>${autoTag}${bkTag}</button>`;
     }).join("");
+    const needSyncWhileOn = !ro && supOn && !selectedMatchesSupervisorAllowed(sup, repos, pathByName);
+    const applyAutoBtn = needSyncWhileOn
+      ? `<button type="button" class="btn-sm btn-primary" id="repoApplyAutoBtn" title="Cập nhật Auto-Run đang chạy theo lựa chọn repo này">⚡ Cập nhật Auto-Run</button>`
+      : "";
     const selNote = selectedRepos.size > 0
-      ? `<span class="filter-meta" style="margin-left:auto">${selectedRepos.size} selected</span><button type="button" class="btn-sm" id="repoClearBtn">All repos</button>`
-      : `<span class="filter-meta" style="margin-left:auto">Click multiple repos to combine</span>`;
+      ? `<span class="filter-meta" style="margin-left:auto">Đã chọn ${selectedRepos.size}</span>${applyAutoBtn}<button type="button" class="btn-sm" id="repoClearBtn">Tất cả repo</button>`
+      : `${applyAutoBtn ? `<span style="margin-left:auto">${applyAutoBtn}</span>` : `<span class="filter-meta" style="margin-left:auto">Chọn repo rồi bấm Auto-Run (hoặc All để chạy tất cả)</span>`}`;
     bar.innerHTML = `<span class="repo-bar-label">Repos</span><button type="button" class="chip ${allOn ? "active" : ""}" data-repo="" aria-pressed="${allOn}">All <span class="c">${boardTasks.length}</span></button>${repoChips}${selNote}`;
     bar.classList.toggle("hidden", activeTab === "stream" || activeTab === "machine" || activeTab === "accounts");
     bar.querySelectorAll("[data-repo]").forEach((btn) => {
@@ -939,6 +1139,22 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         renderReviewQueue();
       };
     });
+    if ($("repoApplyAutoBtn")) {
+      $("repoApplyAutoBtn").onclick = async () => {
+        const btn = $("repoApplyAutoBtn");
+        btn.disabled = true;
+        try {
+          const payload = buildSelectedSupervisorPayload();
+          await api("/api/action", {
+            method: "POST",
+            body: JSON.stringify({ action: "supervisor_repos", task_id: "", note: JSON.stringify(payload) }),
+          });
+          toast(payload.all ? "Auto-Run: chuyển sang chạy tất cả repo" : `Auto-Run: chỉ chạy ${[...selectedRepos].join(", ")}`);
+          await refreshAll();
+        } catch (e) { toast("Error: " + e.message); }
+        finally { btn.disabled = false; }
+      };
+    }
     if ($("repoClearBtn")) {
       $("repoClearBtn").onclick = () => {
         selectedRepos.clear(); saveSelectedRepos(); syncRepoFilterOptions(); renderBoard(); renderReviewQueue();
@@ -952,7 +1168,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       `<button class="chip ${stateFilter===s?"active":""}" data-st="${s}">${esc(STATE_LABELS[s] || s)}</button>`
     ).join("");
     $("stateChips").querySelectorAll(".chip").forEach((b) => {
-      b.onclick = () => { stateFilter = b.dataset.st; syncBoardTabHighlight(); renderChips(); renderBoard(); };
+      b.onclick = () => { stateFilter = b.dataset.st; saveStateFilter(); syncBoardTabHighlight(); renderChips(); renderBoard(); };
     });
   }
 
@@ -972,22 +1188,51 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     if ($("mnavAccounts")) $("mnavAccounts").classList.toggle("active", activeTab === "accounts");
   }
 
+  let lastSupAllowedSig = null;
+
   function renderStatusChrome() {
     $("scopeLine").textContent = (meta.repo_name || meta.scope || "AAF") + (meta.version ? " · v" + meta.version : "");
     const ro = Boolean(meta.read_only);
     $("roBadge").classList.toggle("hidden", !ro);
     $("newTaskBtn").classList.toggle("hidden", ro);
     $("supBtn").classList.toggle("hidden", ro);
-    const sup = (statusData && statusData.supervisor) || { enabled: false, active_repos: [], caffeinate: false };
+    const sup = (statusData && statusData.supervisor) || { enabled: false, active_repos: [], allowed_repos: null, known_repos: [], backoff: {}, caffeinate: false };
+    const supSig = JSON.stringify([Boolean(sup.enabled), sup.allowed_repos ?? null, sup.backoff || {}]);
+    if (lastSupAllowedSig !== null && supSig !== lastSupAllowedSig) {
+      lastSupAllowedSig = supSig;
+      syncRepoFilterOptions();
+    } else {
+      lastSupAllowedSig = supSig;
+    }
+    const knownRepos = getSupervisorKnownRepos();
     const supOn = Boolean(sup.enabled);
     $("supBtn").classList.toggle("on", supOn);
     $("supBtn").setAttribute("aria-pressed", String(supOn));
     const activeN = (sup.active_repos || []).length;
+    const backoffEntries = Object.entries(sup.backoff || {}).filter(([, s]) => Number(s) > 0);
     const caff = sup.caffeinate ? " · awake" : "";
-    $("supLabel").textContent = supOn ? `Auto-Run: ON${activeN ? ` (${activeN})` : ""}${caff}` : "Auto-Run: OFF";
+    const restricted = Array.isArray(sup.allowed_repos);
+    const allowedNames = restricted
+      ? knownRepos.filter((r) => sup.allowed_repos.includes(r.path) || sup.allowed_repos.includes(r.name)).map((r) => r.name)
+      : [];
+    let scopeTag = "";
+    if (supOn) {
+      if (restricted) {
+        scopeTag = allowedNames.length === 1 ? ` · ${allowedNames[0]}` : ` · ${allowedNames.length} repo`;
+      } else if (activeN > 0) {
+        scopeTag = ` (${activeN})`;
+      }
+    }
+    $("supLabel").textContent = supOn ? `Auto-Run: ON${scopeTag}${caff}` : "Auto-Run: OFF";
+    const allowedNote = restricted
+      ? `Repo đang chọn chạy: ${allowedNames.join(", ") || "chưa chọn"}`
+      : "Chạy tất cả repo (All)";
+    const backoffNote = backoffEntries.length
+      ? ` | Backoff: ${backoffEntries.map(([k, s]) => `${String(k).split("/").pop()} (${dur(s)})`).join(", ")}`
+      : "";
     $("supBtn").title = supOn
-      ? `Active repos: ${(sup.active_repos || []).join(", ") || "idle (watching for Ready tasks)"}`
-      : "Turn ON to auto-run `aaf run --auto` for repos with Ready tasks (+ macOS caffeinate)";
+      ? `${allowedNote} | Đang chạy: ${(sup.active_repos || []).join(", ") || "idle (đang chờ Ready task)"}${backoffNote}`
+      : `Chọn repo trên thanh Repos rồi bấm để bật Auto-Run (hoặc All để chạy tất cả)`;
 
     const frozen = Boolean(statusData && statusData.frozen);
     $("frozenBanner").classList.toggle("hidden", !frozen);
@@ -1086,13 +1331,15 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       }
       return compareTasks(a, b);
     });
-    const hasFilter = stateFilter !== "all" || selectedRepos.size > 0 || Boolean(prio) || Boolean(q) || sortBy !== "priority";
-    $("filterMeta").textContent = `${list.length} / ${boardTasks.length} tasks`;
+    const hasFilter = stateFilter !== "all" || Boolean(prio) || Boolean(q) || sortBy !== "priority";
+    $("filterMeta").textContent = `${list.length} / ${scopedTasks.length} task`;
     $("filterMeta").classList.toggle("hidden", !hasFilter);
     $("clearFiltersBtn").classList.toggle("hidden", !hasFilter);
+    $("stateChips").classList.toggle("hidden", boardView === "kanban" && stateFilter === "all");
     $("cntBoard").textContent = String(scopedTasks.filter((t) => showCancelled || t.state !== "cancelled").length);
     const needYouCount = scopedTasks.filter(isNeedYouTask).length;
     $("cntNeedYou").textContent = String(needYouCount);
+    $("needYouTabBtn").classList.toggle("hidden", needYouCount === 0 && stateFilter !== "need_you");
     if ($("mnavNeedCnt")) {
       $("mnavNeedCnt").textContent = String(needYouCount);
       $("mnavNeedCnt").classList.toggle("hot", needYouCount > 0);
@@ -1108,7 +1355,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
     if (!list.length && boardView === "list") {
       $("boardList").className = "task-list";
-      $("boardList").innerHTML = `<div class="empty">No tasks match the current filters.</div>`;
+      $("boardList").innerHTML = `<div class="empty">Không có task nào khớp bộ lọc hiện tại.</div>`;
       return;
     }
     $("boardList").className = boardView === "kanban" ? "kanban" : "task-list";
@@ -1123,45 +1370,55 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         const col = list.filter((t) => states.includes(t.state)).sort(compareTasks);
         const shown = col.slice(0, 100);
         const isBacklogCol = key === "backlog";
+        const isBlockedCol = key === "blocked";
         const isDoneCol = key === "done";
         const visibleBacklogIds = isBacklogCol ? col.map((t) => t.id) : [];
         const selVisible = isBacklogCol ? visibleBacklogIds.filter((id) => selectedBacklog.has(id)) : [];
         const allChecked = isBacklogCol && visibleBacklogIds.length > 0 && selVisible.length === visibleBacklogIds.length;
         const colActs = isBacklogCol && !ro && col.length > 0
           ? `<div class="kcol-acts">
-              <button type="button" data-bl-toggle="1">${allChecked ? "Clear" : "Select all"}</button>
-              <button type="button" class="btn-primary" data-bl-ready="1">${selVisible.length ? `→ Ready (${selVisible.length})` : `All → Ready`}</button>
-              ${selVisible.length ? `<button type="button" class="btn-danger" data-bl-cancel="1">Cancel (${selVisible.length})</button>` : ""}
+              <button type="button" data-bl-toggle="1">${allChecked ? "Bỏ chọn" : "Chọn hết"}</button>
+              <button type="button" class="btn-primary" data-bl-ready="1">${selVisible.length ? `→ Ready (${selVisible.length})` : `Tất cả → Ready`}</button>
+              ${selVisible.length ? `<button type="button" class="btn-danger" data-bl-cancel="1">Huỷ (${selVisible.length})</button>` : ""}
             </div>`
-          : (isDoneCol && cancelledTotal > 0 && stateFilter === "all"
-              ? `<div class="kcol-acts"><button type="button" data-toggle-cancelled="1">${showCancelled ? `Hide cancelled (${cancelledTotal})` : `Show cancelled (${cancelledTotal})`}</button></div>`
-              : "");
+          : (isBlockedCol && !ro && col.length > 0
+              ? `<div class="kcol-acts"><button type="button" class="btn-primary" data-blk-unblock-all="1">Unblock tất cả (${col.length})</button></div>`
+              : (isDoneCol && cancelledTotal > 0 && stateFilter === "all"
+                  ? `<div class="kcol-acts"><button type="button" data-toggle-cancelled="1">${showCancelled ? `Ẩn đã huỷ (${cancelledTotal})` : `Hiện đã huỷ (${cancelledTotal})`}</button></div>`
+                  : ""));
         const cards = shown.map((t) => {
           const ny = isNeedYouTask(t);
           const isBl = t.state === "backlog";
+          const isRunning = t.state === "running" || t.state === "gating";
           const checked = isBl && selectedBacklog.has(t.id);
+          const liveBox = isRunning ? renderLiveRunBox(t, ro) : "";
           const whyInfo = t.state === "blocked" ? formatBlockedReason(t) : null;
           const why = whyInfo
             ? `<div class="kcard-why" title="${esc(whyInfo.raw)}"><div class="kcard-why-head">${esc(whyInfo.head)}</div>${whyInfo.sub ? `<div class="kcard-why-sub">${esc(whyInfo.sub)}</div>` : ""}</div>`
             : "";
-          const updated = t.updated_at ? `<span>· ${esc(ago(t.updated_at))}</span>` : "";
-          const chk = isBl && !ro ? `<input type="checkbox" class="kchk" data-chk="${esc(t.id)}" aria-label="Select ${esc(t.id)}" ${checked ? "checked" : ""}>` : "";
+          const totalDur = (!isRunning && (t.state === "done" || t.state === "review") && Number(t.total_duration_secs) > 0)
+            ? `<span class="kcard-dur" title="Tổng thời gian chạy">· ⏱ ${esc(dur(t.total_duration_secs))}${(Number(t.run_count) || 0) > 1 ? ` (${t.run_count} lượt)` : ""}</span>`
+            : "";
+          const updated = !isRunning && t.updated_at ? `<span>· ${esc(ago(t.updated_at))}</span>` : "";
+          const chk = isBl && !ro ? `<input type="checkbox" class="kchk" data-chk="${esc(t.id)}" aria-label="Chọn ${esc(t.id)}" ${checked ? "checked" : ""}>` : "";
           const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : "";
           const quickBtn = isBl && !ro
             ? `<div class="kcard-acts"><button type="button" class="btn-primary" data-quick-ready="${esc(t.id)}">→ Ready</button></div>`
             : (t.needs_plan_approval && !ro
-                ? `<div class="kcard-acts"><button type="button" class="btn-ok" data-quick-plan="${esc(t.id)}">Approve Plan</button></div>`
-                : "");
+                ? `<div class="kcard-acts"><button type="button" class="btn-ok" data-quick-plan="${esc(t.id)}">Duyệt Plan</button></div>`
+                : (t.state === "blocked" && !ro
+                    ? `<div class="kcard-acts"><button type="button" class="btn-primary" data-quick-unblock="${esc(t.id)}">Unblock</button></div>`
+                    : ""));
           return `<div class="kcard ${ny ? "need" : ""} ${checked ? "checked" : ""}" data-id="${esc(t.id)}" tabindex="0" role="button">
             <div class="kcard-meta">${chk}<span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>${t.state !== key && t.state !== "review" && t.state !== "blocked" ? `<span class="pill pill-${esc(t.state)}">${esc(t.state)}</span>` : ""}${ny ? `<span class="pill pill-blocked">Need You</span>` : ""}${planBadge}${t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : ""}</div>
-            <div class="kcard-title">${esc(t.title)}</div>${why}
-            <div class="kcard-meta"><span class="mono">${esc(t.id)}</span>${(t.acceptance || []).length ? `<span>· ${t.acceptance.length} criteria</span>` : ""}${updated}</div>${quickBtn}
+            <div class="kcard-title">${esc(t.title)}</div>${liveBox}${why}
+            <div class="kcard-meta"><span class="mono">${esc(t.id)}</span>${(t.acceptance || []).length ? `<span>· ${t.acceptance.length} tiêu chí</span>` : ""}${totalDur}${updated}</div>${quickBtn}
           </div>`;
         }).join("");
-        const more = col.length > 100 ? `<div class="kmore">+${col.length - 100} more — filter or switch to List</div>` : "";
-        return `<div class="kcol" data-col="${esc(key)}"><div class="kcol-head"><div class="kcol-head-row"><span>${esc(label)}</span><span class="count">${col.length}</span></div>${colActs}</div>${cards || `<div class="kempty">No task</div>`}${more}</div>`;
+        const more = col.length > 100 ? `<div class="kmore">+${col.length - 100} task nữa — hãy lọc hoặc chuyển sang List</div>` : "";
+        return `<div class="kcol" data-col="${esc(key)}"><div class="kcol-head"><div class="kcol-head-row"><span>${esc(label)}</span><span class="count">${col.length}</span></div>${colActs}</div>${cards || `<div class="kempty">Trống</div>`}${more}</div>`;
       }).join("");
-      $("boardList").innerHTML = colsHtml || `<div class="empty">No tasks match the current filters.</div>`;
+      $("boardList").innerHTML = colsHtml || `<div class="empty">Không có task nào khớp bộ lọc hiện tại.</div>`;
       $("boardList").querySelectorAll(".kchk").forEach((chk) => {
         chk.onclick = (e) => {
           e.stopPropagation();
@@ -1176,6 +1433,22 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       $("boardList").querySelectorAll("[data-quick-plan]").forEach((btn) => {
         btn.onclick = (e) => { e.stopPropagation(); runQuickAction("approve_plan", btn.dataset.quickPlan, btn); };
       });
+      $("boardList").querySelectorAll("[data-quick-unblock]").forEach((btn) => {
+        btn.onclick = (e) => { e.stopPropagation(); runQuickAction("unblock", btn.dataset.quickUnblock, btn); };
+      });
+      $("boardList").querySelectorAll("[data-quick-stream]").forEach((btn) => {
+        btn.onclick = (e) => { e.stopPropagation(); switchTab("stream"); followRun(btn.dataset.quickStream); };
+      });
+      $("boardList").querySelectorAll("[data-quick-stop]").forEach((btn) => {
+        btn.onclick = (e) => { e.stopPropagation(); promptStopRun(btn.dataset.quickStop); };
+      });
+      const blkUnblockAll = $("boardList").querySelector("[data-blk-unblock-all]");
+      if (blkUnblockAll) {
+        blkUnblockAll.onclick = () => {
+          const targets = list.filter((t) => t.state === "blocked").map((t) => t.id);
+          if (targets.length) promptBulkUnblock(targets);
+        };
+      }
       const toggleCanc = $("boardList").querySelector("[data-toggle-cancelled]");
       if (toggleCanc) toggleCanc.onclick = () => { showCancelled = !showCancelled; renderBoard(); };
       const blToggle = $("boardList").querySelector("[data-bl-toggle]");
@@ -1215,18 +1488,24 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       return;
     }
     $("boardList").innerHTML = list.map((t) => {
-      const deps = (t.deps || []).length ? `<span>Deps: <span class="mono">${esc(t.deps.join(", "))}</span></span>` : "";
+      const isRunning = t.state === "running" || t.state === "gating";
+      const deps = (t.deps || []).length ? `<span>Phụ thuộc: <span class="mono">${esc(t.deps.join(", "))}</span></span>` : "";
       const blkInfo = t.state === "blocked" ? formatBlockedReason(t) : null;
       const blk = blkInfo ? `<span style="color:var(--err);font-weight:600" title="${esc(blkInfo.raw)}">${esc(blkInfo.head)}${blkInfo.sub ? ` — ${esc(blkInfo.sub)}` : ""}</span>` : "";
+      const liveBox = isRunning ? renderLiveRunBox(t, ro) : "";
       const repoBadge = t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : "";
       const fpBadge = t.fingerprint ? `<span class="mono" style="font-size:11px;color:var(--muted)">${esc(t.fingerprint)}</span>` : "";
-      const needYouBadge = isNeedYouTask(t) ? `<span class="pill pill-blocked">${/needs?\s*you/i.test(t.blocked_detail || "") ? "Need You" : "Human"}</span>` : "";
+      const needYouBadge = isNeedYouTask(t) ? `<span class="pill pill-blocked">${/needs?\s*you/i.test(t.blocked_detail || "") ? "Need You" : "Cần người"}</span>` : "";
       const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : "";
       const specBody = cleanSpec(t.spec_description || "");
       const specPreview = specBody.length > 320 ? specBody.slice(0, 320) + "…" : specBody;
-      const updated = t.updated_at ? `<span>Updated ${esc(ago(t.updated_at))}</span>` : "";
+      const totalDur = (!isRunning && (t.state === "done" || t.state === "review") && Number(t.total_duration_secs) > 0)
+        ? `<span>⏱ ${esc(dur(t.total_duration_secs))}${(Number(t.run_count) || 0) > 1 ? ` (${t.run_count} lượt)` : ""}</span>`
+        : "";
+      const updated = t.updated_at ? `<span>Cập nhật ${esc(ago(t.updated_at))}</span>` : "";
       const quickReady = t.state === "backlog" && !ro ? `<button type="button" class="btn-primary btn-sm" data-quick-ready="${esc(t.id)}">→ Ready</button>` : "";
-      const quickPlan = t.needs_plan_approval && !ro ? `<button type="button" class="btn-ok btn-sm" data-quick-plan="${esc(t.id)}">Approve Plan</button>` : "";
+      const quickPlan = t.needs_plan_approval && !ro ? `<button type="button" class="btn-ok btn-sm" data-quick-plan="${esc(t.id)}">Duyệt Plan</button>` : "";
+      const quickUnblock = t.state === "blocked" && !t.needs_plan_approval && !ro ? `<button type="button" class="btn-primary btn-sm" data-quick-unblock="${esc(t.id)}">Unblock</button>` : "";
       return `<div class="task-row" data-id="${esc(t.id)}" tabindex="0" role="button">
         <div class="task-main">
           <div class="task-head">
@@ -1239,10 +1518,11 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             ${fpBadge}
           </div>
           <div class="task-title">${esc(t.title)}</div>
+          ${liveBox}
           ${specPreview ? `<div class="task-desc">${esc(specPreview)}</div>` : ""}
-          <div class="task-meta">${deps}${blk}<span>Cycles: ${esc(t.unblock_cycles ?? 0)}</span>${updated}</div>
+          <div class="task-meta">${deps}${blk}${totalDur}<span>Lượt gỡ: ${esc(t.unblock_cycles ?? 0)}</span>${updated}</div>
         </div>
-        <div style="display:flex;gap:6px;align-items:center;flex:none">${quickReady}${quickPlan}<button class="btn-sm" tabindex="-1">Inspect</button></div>
+        <div style="display:flex;gap:6px;align-items:center;flex:none">${quickReady}${quickPlan}${quickUnblock}<button class="btn-sm" tabindex="-1">Chi tiết</button></div>
       </div>`;
     }).join("");
     $("boardList").querySelectorAll("[data-quick-ready]").forEach((btn) => {
@@ -1250,6 +1530,15 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     });
     $("boardList").querySelectorAll("[data-quick-plan]").forEach((btn) => {
       btn.onclick = (e) => { e.stopPropagation(); runQuickAction("approve_plan", btn.dataset.quickPlan, btn); };
+    });
+    $("boardList").querySelectorAll("[data-quick-unblock]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); runQuickAction("unblock", btn.dataset.quickUnblock, btn); };
+    });
+    $("boardList").querySelectorAll("[data-quick-stream]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); switchTab("stream"); followRun(btn.dataset.quickStream); };
+    });
+    $("boardList").querySelectorAll("[data-quick-stop]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); promptStopRun(btn.dataset.quickStop); };
     });
     $("boardList").querySelectorAll(".task-row").forEach((el) => {
       el.onclick = () => openTaskDrawer(el.dataset.id);
@@ -1316,14 +1605,17 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <div class="kv-section">
           <div class="kv-title">Runs (${runs.length})</div>
           ${runs.length ? runs.slice().reverse().map((r) => {
-            const elapsed = r.started_at && r.ended_at ? ` · ${dur(r.ended_at - r.started_at)}` : "";
-            const started = r.started_at ? ` · ${ago(r.started_at)}` : "";
-            const stopBtn = r.status === "running" && !ro ? `<button class="btn-danger btn-sm" data-stop-run="${esc(r.id)}">Stop</button>` : "";
+            const isLiveRun = r.status === "running" && !r.ended_at && r.started_at;
+            const elapsedHtml = isLiveRun
+              ? ` · <span style="color:var(--warn);font-weight:700" data-live-since="${esc(r.started_at)}">${esc(durLive(Math.max(0, Math.floor(Date.now() / 1000) - Number(r.started_at))))}</span>`
+              : (r.started_at && r.ended_at ? ` · ${esc(durLive(r.ended_at - r.started_at))}` : "");
+            const started = r.started_at ? ` · bắt đầu ${esc(fmtClock(r.started_at))}` : "";
+            const stopBtn = r.status === "running" && !ro ? `<button class="btn-danger btn-sm" data-stop-run="${esc(r.id)}">Dừng</button>` : "";
             return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
-              <span class="mono" style="overflow-wrap:anywhere">${esc(r.id)} · ${esc(r.status)} (${esc(r.executor)})${esc(elapsed)}${esc(started)}</span>
+              <span class="mono" style="overflow-wrap:anywhere">${esc(r.id)} · ${esc(r.status)} (${esc(r.executor)})${elapsedHtml}${started}</span>
               <div style="display:flex;gap:5px;flex:none">${stopBtn}<button class="btn-sm" data-run="${esc(r.id)}">Stream</button></div>
             </div>`;
-          }).join("") : `<div class="muted">No runs recorded.</div>`}
+          }).join("") : `<div class="muted">Chưa có lượt chạy nào.</div>`}
         </div>
         <div class="kv-section">
           <div class="kv-title">Recent Events (${events.length})</div>
@@ -1629,26 +1921,25 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           <p style="margin:4px 0"><strong>Unverified:</strong> ${esc(ho.unverified)}</p>
           ${(ho.missing && ho.missing.length) ? `<p style="margin:4px 0;color:var(--err)"><strong>Missing:</strong> ${esc(ho.missing.join("; "))}</p>` : ""}
         </div>` : `<div class="kv-section muted">Handover unavailable: ${esc(hoRes.reason && hoRes.reason.message || "")}</div>`}
-      <div class="kv-section">
-        <div class="kv-title">Head-Lock Preview</div>
-        ${pv ? `<div class="mono" style="margin-bottom:6px;overflow-wrap:anywhere">lock_fp: ${esc(lockFp || "(none)")}</div>
-          ${locked.length ? locked.map((c) => `<div class="mono">  ${esc(c.change)} ${esc(c.path)}</div>`).join("") : `<div class="muted">No locked files changed.</div>`}`
-          : `<div class="muted">Lock preview unavailable: ${esc(pvRes.reason && pvRes.reason.message || "")}</div>`}
-      </div>
+      ${locked.length > 0 ? `<div class="kv-section">
+        <div class="kv-title">Head-Lock Preview (${locked.length})</div>
+        <div class="mono" style="margin-bottom:6px;overflow-wrap:anywhere">lock_fp: ${esc(lockFp || "(none)")}</div>
+        ${locked.map((c) => `<div class="mono">  ${esc(c.change)} ${esc(c.path)}</div>`).join("")}
+      </div>` : ""}
       <div class="action-bar">
-        ${task && task.needs_plan_approval ? `<button id="btnApprovePlan" class="btn-ok" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Approve Plan</button>` : ""}
-        <button id="btnApprove" class="btn-ok" ${!allowApprove || !locked.length || !lockFp ? "disabled" : ""} ${btnHint(!allowApprove || !locked.length || !lockFp, approveHint || "No locked changes to approve")}>Approve Locked Diff</button>
-        <button id="btnRework" class="btn-danger" ${ro || st !== "review" ? "disabled" : ""} ${btnHint(ro || st !== "review", "Rework is only available for tasks in review")}>Rework</button>
-        <button id="btnUnblock" class="btn-primary" ${ro || st !== "blocked" ? "disabled" : ""} ${btnHint(ro || st !== "blocked", "Unblock is only available for blocked tasks")}>Unblock</button>
+        ${task && task.needs_plan_approval ? `<button id="btnApprovePlan" class="btn-ok" ${ro ? `disabled title="${esc(RO_HINT)}"` : ""}>Duyệt Plan</button>` : ""}
+        ${locked.length > 0 ? `<button id="btnApprove" class="btn-ok" ${!allowApprove || !lockFp ? "disabled" : ""} ${btnHint(!allowApprove || !lockFp, approveHint)}>Approve Locked Diff</button>` : ""}
+        <button id="btnRework" class="btn-danger" ${ro || st !== "review" ? "disabled" : ""} ${btnHint(ro || st !== "review", "Rework chỉ dùng cho task ở trạng thái Review")}>Rework</button>
+        <button id="btnUnblock" class="btn-primary" ${ro || st !== "blocked" ? "disabled" : ""} ${btnHint(ro || st !== "blocked", "Unblock chỉ dùng cho task đang Blocked")}>Unblock</button>
         <button id="btnSteer" ${ro ? "disabled" : ""} ${btnHint(ro, "")}>Steer</button>
-        <button id="btnCancel" class="btn-danger" ${ro ? "disabled" : ""} ${btnHint(ro, "")}>Cancel</button>
+        <button id="btnCancel" class="btn-danger" ${ro ? "disabled" : ""} ${btnHint(ro, "")}>Huỷ task</button>
       </div>
-      ${approveHint ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(approveHint)}</div>` : ""}`;
+      ${locked.length > 0 && approveHint ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(approveHint)}</div>` : ""}`;
 
     $("revOpenDiff").onclick = () => openTaskDrawer(taskId, "diff");
     $("revOpenProof").onclick = () => openTaskDrawer(taskId, "proof");
     if ($("btnApprovePlan")) $("btnApprovePlan").onclick = () => runQuickAction("approve_plan", taskId, $("btnApprovePlan"));
-    $("btnApprove").onclick = () => {
+    if ($("btnApprove")) $("btnApprove").onclick = () => {
       if (!allowApprove) return;
       openModal({
         title: "Confirm Approve " + taskId,
@@ -1750,6 +2041,26 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           body: JSON.stringify({ repo_root, title, priority, state, spec, accept, scope }),
         });
         toast(`Created ${res.task_id} (${res.state})`);
+        await refreshAll();
+      },
+    });
+  }
+
+  function promptBulkUnblock(taskIds) {
+    openModal({
+      title: `Unblock ${taskIds.length} task đang bị chặn?`,
+      desc: "Các task này sẽ được chuyển về Ready (và reset ngân sách nếu đã hết) để Auto-Run tiếp tục chạy.",
+      fields: `<div class="mono muted" style="max-height:120px;overflow:auto">${esc(taskIds.slice(0, 20).join(", "))}${taskIds.length > 20 ? ` … (+${taskIds.length - 20})` : ""}</div>`,
+      confirmLabel: `Unblock ${taskIds.length} task`,
+      onConfirm: async () => {
+        let ok = 0, fail = 0;
+        for (const id of taskIds) {
+          try {
+            await api("/api/action", { method: "POST", body: JSON.stringify({ action: "unblock", task_id: id, note: "" }) });
+            ok++;
+          } catch (_) { fail++; }
+        }
+        toast(fail ? `Unblock xong ${ok}, lỗi ${fail}` : `Đã Unblock ${ok} task về Ready`);
         await refreshAll();
       },
     });
@@ -2232,8 +2543,17 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     }
   }
 
+  function clearViewParamFromUrl() {
+    const params = new URLSearchParams(location.search);
+    if (!params.has("view")) return;
+    params.delete("view");
+    const qs = params.toString();
+    history.replaceState(null, "", location.pathname + (qs ? "?" + qs : "") + location.hash);
+  }
+
   function switchTab(tab) {
     activeTab = tab;
+    if (tab === "board" && stateFilter === "all") clearViewParamFromUrl();
     syncBoardTabHighlight();
     ["board","review","stream","accounts","machine"].forEach((t) => $("view-" + t).classList.toggle("hidden", t !== tab));
     syncRepoFilterOptions();
@@ -2249,6 +2569,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     statusData = s;
     lastBoardSig = boardSigFromStatus(s);
     boardTasks = b.tasks || [];
+    boardLoaded = true;
     syncRepoFilterOptions();
     renderChips();
     renderStatusChrome();
@@ -2268,7 +2589,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     document.querySelectorAll(".tab[data-tab]").forEach((b) => {
       b.onclick = () => {
         if (b.dataset.tab === "board" && (stateFilter === "need_you" || (activeTab === "board" && stateFilter !== "all"))) {
-          stateFilter = "all"; renderChips(); renderBoard();
+          stateFilter = "all"; saveStateFilter(); renderChips(); renderBoard();
         }
         switchTab(b.dataset.tab);
       };
@@ -2277,7 +2598,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     if ($("mnavNeedYou")) $("mnavNeedYou").onclick = () => { stateFilter = "need_you"; switchTab("board"); renderChips(); renderBoard(); window.scrollTo({ top: 0, behavior: "smooth" }); };
     if ($("mnavBoard")) $("mnavBoard").onclick = () => {
       if (stateFilter === "need_you" || (activeTab === "board" && stateFilter !== "all")) {
-        stateFilter = "all"; renderChips(); renderBoard();
+        stateFilter = "all"; saveStateFilter(); renderChips(); renderBoard();
       }
       switchTab("board");
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -2287,10 +2608,11 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const viewParam = qsParams.get("view");
     const taskParam = qsParams.get("task");
     pendingTaskParam = taskParam ? taskParam.trim() : "";
-    if (viewParam === "needyou") { stateFilter = "need_you"; renderChips(); syncBoardTabHighlight(); }
-    else if (viewParam === "blocked") { stateFilter = "blocked"; renderChips(); syncBoardTabHighlight(); }
-    else if (viewParam === "review") { switchTab("review"); }
-    else if (viewParam === "accounts") { switchTab("accounts"); }
+    if (viewParam === "needyou") { stateFilter = "need_you"; switchTab("board"); renderChips(); clearViewParamFromUrl(); }
+    else if (viewParam === "blocked") { stateFilter = "blocked"; switchTab("board"); renderChips(); clearViewParamFromUrl(); }
+    else if (viewParam === "review") { switchTab("review"); clearViewParamFromUrl(); }
+    else if (viewParam === "accounts") { switchTab("accounts"); clearViewParamFromUrl(); }
+    else { switchTab("board"); }
     $("topAccPill").onclick = () => switchTab("accounts");
     $("accRefreshBtn").onclick = () => loadAccountsPanel(true);
     $("ccRotateBtn").onclick = async () => {
@@ -2311,13 +2633,16 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
     $("sortBy").value = sortBy;
     $("sortBy").onchange = () => { sortBy = $("sortBy").value; sSet(localStorage, SORT_KEY, sortBy); renderBoard(); renderReviewQueue(); };
-    $("prioFilter").onchange = renderBoard;
+    $("prioFilter").value = savedPrioFilter;
+    $("prioFilter").onchange = () => { sSet(localStorage, PRIO_KEY, $("prioFilter").value); renderBoard(); };
     $("clearFiltersBtn").onclick = () => {
-      stateFilter = "all"; selectedRepos.clear(); saveSelectedRepos();
-      $("prioFilter").value = ""; $("searchBox").value = "";
+      stateFilter = "all"; saveStateFilter();
+      $("prioFilter").value = ""; sSet(localStorage, PRIO_KEY, "");
+      $("searchBox").value = "";
       sortBy = "priority"; $("sortBy").value = sortBy; sSet(localStorage, SORT_KEY, sortBy);
-      syncRepoFilterOptions(); renderChips(); renderBoard(); renderReviewQueue();
+      renderChips(); renderBoard(); renderReviewQueue();
     };
+    setInterval(tickLiveClocks, 1000);
     document.querySelectorAll("#viewSeg button").forEach((b) => { b.onclick = () => { boardView = b.dataset.view; sSet(localStorage, VIEW_KEY, boardView); renderBoard(); }; });
     $("searchBox").oninput = renderBoard;
     $("refreshBtn").onclick = () => refreshAll().then(() => toast("Refreshed")).catch((e) => toast(e.message));
@@ -2325,11 +2650,19 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("supBtn").onclick = async () => {
       const btn = $("supBtn");
       if (btn.disabled) return;
-      const curOn = Boolean(statusData && statusData.supervisor && statusData.supervisor.enabled);
+      const sup = (statusData && statusData.supervisor) || {};
+      const curOn = Boolean(sup.enabled);
       btn.disabled = true;
       try {
-        await api("/api/action", { method: "POST", body: JSON.stringify({ action: "supervisor_toggle", task_id: "", note: curOn ? "off" : "on" }) });
-        toast(curOn ? "Auto-Run turned OFF" : "Auto-Run turned ON");
+        if (!curOn) {
+          const payload = buildSelectedSupervisorPayload();
+          await api("/api/action", { method: "POST", body: JSON.stringify({ action: "supervisor_repos", task_id: "", note: JSON.stringify(payload) }) });
+          await api("/api/action", { method: "POST", body: JSON.stringify({ action: "supervisor_toggle", task_id: "", note: "on" }) });
+          toast(payload.all ? "Auto-Run: ON (tất cả repo)" : `Auto-Run: ON (${[...selectedRepos].join(", ")})`);
+        } else {
+          await api("/api/action", { method: "POST", body: JSON.stringify({ action: "supervisor_toggle", task_id: "", note: "off" }) });
+          toast("Auto-Run: OFF");
+        }
         await refreshAll();
       } catch (e) { toast("Error: " + e.message); }
       finally { btn.disabled = false; }

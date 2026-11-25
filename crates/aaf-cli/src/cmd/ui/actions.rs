@@ -413,12 +413,27 @@ pub(super) fn build_board_json(
         .map(|t| {
             let deps = enrichment.deps_by_task.remove(&t.id).unwrap_or_default();
             let latest_run_id = enrichment.latest_run_by_task.remove(&t.id);
+            let run_summary = enrichment.run_summary_by_task.remove(&t.id);
+            let latest_event = enrichment.latest_event_by_task.remove(&t.id);
             let repo_name = std::path::Path::new(&t.repo_root)
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
             let blocked_detail = t.blocked_reason.as_ref().map(format_blocked_detail);
             let needs_plan = super::extras::task_needs_plan_approval(&t);
+            let latest_run_json = run_summary.as_ref().map(|r| {
+                json!({
+                    "id": r.id,
+                    "status": r.status,
+                    "executor": r.executor,
+                    "account": r.account,
+                    "started_at": r.started_at,
+                    "ended_at": r.ended_at,
+                })
+            });
+            let latest_event_json = latest_event
+                .as_ref()
+                .map(|(kind, at)| json!({ "kind": kind, "at": at }));
             json!({
                 "id": t.id, "title": t.title, "state": t.state.as_str(), "priority": t.priority.as_str(),
                 "blocked_reason": t.blocked_reason.as_ref().map(|b| b.kind()), "blocked_detail": blocked_detail,
@@ -426,6 +441,10 @@ pub(super) fn build_board_json(
                 "acceptance": t.spec.acceptance, "fingerprint": t.fingerprint, "repo_name": repo_name,
                 "unblock_cycles": t.unblock_cycles, "deps": deps, "repo_root": t.repo_root,
                 "created_at": t.created_at, "updated_at": t.updated_at, "latest_run_id": latest_run_id,
+                "latest_run": latest_run_json,
+                "run_count": run_summary.as_ref().map_or(0, |r| r.run_count),
+                "total_duration_secs": run_summary.as_ref().map_or(0, |r| r.total_duration_secs),
+                "latest_event": latest_event_json,
             })
         })
         .collect();

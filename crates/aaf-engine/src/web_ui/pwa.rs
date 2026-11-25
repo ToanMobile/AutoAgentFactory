@@ -13,28 +13,42 @@ pub const DIFF_UI_JS: &str = include_str!("diff_ui.js");
 /// Embedded zero-CDN SVG pipeline DAG, SOP runs, and Studio score JS module.
 pub const PIPELINE_UI_JS: &str = include_str!("pipeline_ui.js");
 
-/// Vector app icon matching the 3D hexagonal core emblem.
+/// Tactile 3D ceramic Agent Bot Pod icon (white chassis + glossy black visor + cyan pill eyes) legible down to 16px.
 pub const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#090F1F"/>
-      <stop offset="100%" stop-color="#1E3A8A"/>
+      <stop offset="0%" stop-color="#F5F7FA"/>
+      <stop offset="100%" stop-color="#D7DFE9"/>
     </linearGradient>
-    <linearGradient id="hex" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#E2E8F0"/>
-      <stop offset="50%" stop-color="#64748B"/>
-      <stop offset="100%" stop-color="#6366F1"/>
+    <linearGradient id="body" x1="20%" y1="5%" x2="80%" y2="95%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="62%" stop-color="#F1F4F8"/>
+      <stop offset="100%" stop-color="#CBD4E1"/>
     </linearGradient>
-    <radialGradient id="core" cx="45%" cy="40%" r="55%">
-      <stop offset="0%" stop-color="#A7F3D0"/>
-      <stop offset="55%" stop-color="#38BDF8"/>
-      <stop offset="100%" stop-color="#0284C7"/>
-    </radialGradient>
+    <linearGradient id="visor" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#1E2430"/>
+      <stop offset="28%" stop-color="#05070B"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="eye" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#5CEEFF"/>
+      <stop offset="55%" stop-color="#00D4FF"/>
+      <stop offset="100%" stop-color="#00A8E8"/>
+    </linearGradient>
   </defs>
-  <rect width="180" height="180" rx="38" fill="url(#bg)"/>
-  <polygon points="90,26 145,58 145,122 90,154 35,122 35,58" fill="none" stroke="url(#hex)" stroke-width="14" stroke-linejoin="round"/>
-  <ellipse cx="90" cy="90" rx="42" ry="18" transform="rotate(-32 90 90)" fill="none" stroke="#CBD5E1" stroke-width="6" stroke-opacity="0.85"/>
-  <polygon points="90,66 111,78 111,102 90,114 69,102 69,78" fill="url(#core)"/>
+  <rect width="180" height="180" rx="40" fill="url(#bg)"/>
+  <rect x="24" y="29" width="132" height="128" rx="40" fill="#64748B" opacity="0.22"/>
+  <rect x="24" y="24" width="132" height="132" rx="40" fill="url(#body)"/>
+  <rect x="44" y="45" width="92" height="90" rx="28" fill="url(#visor)"/>
+  <path d="M56 54 Q90 46 124 54 Q120 66 90 66 Q60 66 56 54 Z" fill="url(#gloss)"/>
+  <rect x="66" y="73" width="14" height="34" rx="7" fill="#00D4FF" opacity="0.35" transform="scale(1.12)" transform-origin="73 90"/>
+  <rect x="100" y="73" width="14" height="34" rx="7" fill="#00D4FF" opacity="0.35" transform="scale(1.12)" transform-origin="107 90"/>
+  <rect x="67" y="74" width="12" height="32" rx="6" fill="url(#eye)"/>
+  <rect x="101" y="74" width="12" height="32" rx="6" fill="url(#eye)"/>
 </svg>
 "##;
 

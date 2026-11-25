@@ -34,6 +34,10 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedState {
     enabled: bool,
+    /// When `Some(list)`, Auto-Run only spawns runners for repos matching `list`
+    /// (canonical path or folder name). `None` means all repositories with Ready tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allowed_repos: Option<Vec<String>>,
 }
 
 struct WorkerSlot {
@@ -43,6 +47,7 @@ struct WorkerSlot {
 
 struct Inner {
     enabled: bool,
+    allowed_repos: Option<BTreeSet<String>>,
     workers: BTreeMap<String, WorkerSlot>,
     failures: BTreeMap<String, u32>,
     backoff_until: BTreeMap<String, Instant>,
@@ -60,14 +65,54 @@ pub(super) struct UiSupervisor {
     inner: Mutex<Inner>,
 }
 
+fn normalize_repo_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let p = Path::new(trimmed);
+    if p.is_absolute() {
+        fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_repo_allowed(allowed: &Option<BTreeSet<String>>, repo_root: &str) -> bool {
+    let Some(set) = allowed else {
+        return true;
+    };
+    if set.contains(repo_root) {
+        return true;
+    }
+    let canon = normalize_repo_key(repo_root);
+    if set.contains(&canon) {
+        return true;
+    }
+    Path::new(repo_root)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| set.contains(name))
+}
+
 impl UiSupervisor {
     pub(super) fn new(ctx: Ctx, scoped_repo: Option<PathBuf>, allow_auto_start: bool) -> Arc<Self> {
         let state_path = ctx.data_dir.join(STATE_FILE);
+        let persisted = read_persisted(&state_path);
         let initial_enabled = if allow_auto_start {
-            read_persisted(&state_path).enabled
+            persisted.enabled
         } else {
             false
         };
+        let initial_allowed = persisted.allowed_repos.map(|list| {
+            list.into_iter()
+                .map(|r| normalize_repo_key(&r))
+                .filter(|r| !r.is_empty())
+                .collect::<BTreeSet<String>>()
+        });
         let scoped = scoped_repo.map(|p| {
             fs::canonicalize(&p)
                 .unwrap_or(p)
@@ -83,6 +128,7 @@ impl UiSupervisor {
             persist_lock: Mutex::new(()),
             inner: Mutex::new(Inner {
                 enabled: initial_enabled,
+                allowed_repos: initial_allowed,
                 workers: BTreeMap::new(),
                 failures: BTreeMap::new(),
                 backoff_until: BTreeMap::new(),
@@ -97,6 +143,7 @@ impl UiSupervisor {
     }
 
     pub(super) fn status_json(&self) -> Value {
+        let known_repos = self.collect_known_repos();
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         reap_finished(&mut guard);
         let active: Vec<String> = guard
@@ -104,6 +151,11 @@ impl UiSupervisor {
             .values()
             .map(|w| w.repo_name.clone())
             .collect();
+        let active_paths: Vec<String> = guard.workers.keys().cloned().collect();
+        let allowed_list: Option<Vec<String>> = guard
+            .allowed_repos
+            .as_ref()
+            .map(|s| s.iter().cloned().collect());
         let now = Instant::now();
         let backoff: BTreeMap<String, u64> = guard
             .backoff_until
@@ -122,14 +174,78 @@ impl UiSupervisor {
         json!({
             "enabled": guard.enabled,
             "active_repos": active,
+            "active_repo_paths": active_paths,
+            "allowed_repos": allowed_list,
+            "known_repos": known_repos,
             "backoff": backoff,
             "caffeinate": guard.caffeinate.is_some(),
         })
     }
 
+    fn collect_known_repos(&self) -> Vec<Value> {
+        let Ok(Some(db)) = self.ro_db.get() else {
+            return Vec::new();
+        };
+        let tasks = db
+            .list_tasks(self.scoped_repo.as_deref(), None)
+            .unwrap_or_default();
+        let mut by_path: BTreeMap<String, (String, usize, usize)> = BTreeMap::new();
+        for t in tasks {
+            if t.repo_root.trim().is_empty() {
+                continue;
+            }
+            let name = Path::new(&t.repo_root)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&t.repo_root)
+                .to_string();
+            let entry = by_path
+                .entry(t.repo_root.clone())
+                .or_insert_with(|| (name, 0, 0));
+            if !t.state.is_terminal() {
+                entry.1 += 1;
+            }
+            if t.state == TaskState::Ready {
+                entry.2 += 1;
+            }
+        }
+        let mut rows: Vec<(String, String, usize, usize)> = by_path
+            .into_iter()
+            .map(|(path, (name, active, ready))| (path, name, active, ready))
+            .collect();
+        rows.sort_by(|a, b| {
+            a.1.to_lowercase()
+                .cmp(&b.1.to_lowercase())
+                .then(a.0.cmp(&b.0))
+        });
+        rows.into_iter()
+            .map(|(path, name, active, ready)| {
+                json!({
+                    "path": path,
+                    "name": name,
+                    "active": active,
+                    "ready": ready,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn set_enabled(self: &Arc<Self>, enabled: bool) -> Result<Value, String> {
         let _persist_guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
-        write_persisted(&self.state_path, enabled)?;
+        let allowed_vec = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .allowed_repos
+                .as_ref()
+                .map(|s| s.iter().cloned().collect::<Vec<String>>())
+        };
+        write_persisted(
+            &self.state_path,
+            &PersistedState {
+                enabled,
+                allowed_repos: allowed_vec,
+            },
+        )?;
         let to_stop = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.enabled = enabled;
@@ -143,6 +259,58 @@ impl UiSupervisor {
             stop_children_unlocked(workers, caffeinate);
         }
         if enabled {
+            Self::ensure_thread(self);
+        }
+        Ok(self.status_json())
+    }
+
+    pub(super) fn set_allowed_repos(
+        self: &Arc<Self>,
+        repos: Option<Vec<String>>,
+    ) -> Result<Value, String> {
+        let _persist_guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let normalized_set = repos.map(|list| {
+            list.into_iter()
+                .map(|r| normalize_repo_key(&r))
+                .filter(|r| !r.is_empty())
+                .collect::<BTreeSet<String>>()
+        });
+        let persisted_vec = normalized_set
+            .as_ref()
+            .map(|s| s.iter().cloned().collect::<Vec<String>>());
+        let current_enabled = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.enabled
+        };
+        write_persisted(
+            &self.state_path,
+            &PersistedState {
+                enabled: current_enabled,
+                allowed_repos: persisted_vec,
+            },
+        )?;
+        let removed_workers = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.allowed_repos = normalized_set;
+            let disallowed_keys: Vec<String> = guard
+                .workers
+                .keys()
+                .filter(|repo| !is_repo_allowed(&guard.allowed_repos, repo))
+                .cloned()
+                .collect();
+            let mut stopped = BTreeMap::new();
+            for key in disallowed_keys {
+                if let Some(slot) = guard.workers.remove(&key) {
+                    stopped.insert(key, slot);
+                }
+            }
+            sync_caffeinate(&mut guard);
+            stopped
+        };
+        if !removed_workers.is_empty() {
+            stop_children_unlocked(removed_workers, None);
+        }
+        if current_enabled {
             Self::ensure_thread(self);
         }
         Ok(self.status_json())
@@ -244,6 +412,9 @@ fn tick(sup: &UiSupervisor) {
         return;
     }
     for repo in ready_repos {
+        if !is_repo_allowed(&guard.allowed_repos, &repo) {
+            continue;
+        }
         if guard.workers.contains_key(&repo) || running_repos.contains(&repo) {
             continue;
         }
@@ -432,11 +603,11 @@ fn read_persisted(path: &Path) -> PersistedState {
         .unwrap_or_default()
 }
 
-fn write_persisted(path: &Path, enabled: bool) -> Result<(), String> {
+fn write_persisted(path: &Path, state: &PersistedState) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let body = serde_json::to_vec(&PersistedState { enabled }).map_err(|e| e.to_string())?;
+    let body = serde_json::to_vec(state).map_err(|e| e.to_string())?;
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp-{}-{seq}", std::process::id()));
     let mut f = OpenOptions::new()
@@ -457,4 +628,28 @@ fn write_persisted(path: &Path, enabled: bool) -> Result<(), String> {
         return Err(e.to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_repo_allowed_handles_all_empty_and_scoped_sets() {
+        assert!(is_repo_allowed(&None, "/Volumes/Data/Toan/OfficeReader"));
+
+        let empty = Some(BTreeSet::new());
+        assert!(!is_repo_allowed(&empty, "/Volumes/Data/Toan/OfficeReader"));
+
+        let scoped = Some(BTreeSet::from([
+            "/Volumes/Data/Toan/OfficeReader".to_string(),
+            "GeelyEx2".to_string(),
+        ]));
+        assert!(is_repo_allowed(&scoped, "/Volumes/Data/Toan/OfficeReader"));
+        assert!(is_repo_allowed(&scoped, "/Volumes/Data/Toan/GeelyEx2"));
+        assert!(!is_repo_allowed(
+            &scoped,
+            "/Volumes/Data/Toan/Idle-Plaza-3D"
+        ));
+    }
 }

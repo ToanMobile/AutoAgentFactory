@@ -536,6 +536,48 @@ impl UiBackend for CliUiBackend {
             }
             return res;
         }
+        if action == "supervisor_repos" {
+            let raw = note.trim();
+            let parsed_repos: Option<Vec<String>> = if raw.eq_ignore_ascii_case("all") || raw == "*"
+            {
+                None
+            } else if raw.is_empty() {
+                Some(Vec::new())
+            } else if raw.starts_with('{') || raw.starts_with('[') {
+                let v: Value = serde_json::from_str(raw)
+                    .map_err(|e| format!("invalid supervisor_repos JSON: {e}"))?;
+                if v.get("all").and_then(Value::as_bool) == Some(true) {
+                    None
+                } else if let Some(arr) = v
+                    .as_array()
+                    .or_else(|| v.get("repos").and_then(Value::as_array))
+                {
+                    Some(
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
+                } else {
+                    return Err(
+                            "invalid supervisor_repos payload: expected {\"all\":true} or {\"repos\":[...]}"
+                                .into(),
+                        );
+                }
+            } else {
+                Some(
+                    raw.split([',', '\n'])
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                )
+            };
+            let res = self.supervisor.set_allowed_repos(parsed_repos);
+            if res.is_ok() {
+                self.invalidate_status_cache();
+            }
+            return res;
+        }
         if action.starts_with("cc_") {
             let res = accounts_panel::dispatch_cc_action(
                 &self.ctx,
