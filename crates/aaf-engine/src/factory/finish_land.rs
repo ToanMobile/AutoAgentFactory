@@ -219,7 +219,10 @@ pub(super) fn land_pr_merge(
             let why = format!("merged pull request #{pr_number} ({url})");
             deps.move_to(&task.id, TaskState::Done, None, &why)?;
             let fetch_error = warn_err(deps.git.fetch_base(), "post-merge fetch");
-            let leftover = warn_err(deps.git.cleanup(&task.id), "post-merge cleanup");
+            let leftover = warn_err(
+                deps.git.cleanup_verified_merged(&task.id),
+                "post-merge cleanup",
+            );
             deps.emit(
                 EventKind::MergeResult,
                 &task.id,
@@ -245,7 +248,10 @@ pub(super) fn land_pr_merge(
             let why = format!("pull request #{pr_number} already merged ({merged_url})");
             deps.move_to(&task.id, TaskState::Done, None, &why)?;
             let _ = warn_err(deps.git.fetch_base(), "post-merge fetch");
-            let _ = warn_err(deps.git.cleanup(&task.id), "post-merge cleanup");
+            let _ = warn_err(
+                deps.git.cleanup_verified_merged(&task.id),
+                "post-merge cleanup",
+            );
             close(deps, task)?;
             unblock::root_succeeded(deps, task)?;
             Ok(Resolution::Settled(TaskState::Done))

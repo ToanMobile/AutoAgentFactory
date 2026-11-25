@@ -30,7 +30,7 @@ use expired::clean_expired_artifacts;
 #[cfg(test)]
 use expired::orphan_scratch_lock_removable;
 use refs::RepoRefs;
-pub(crate) use squash::verify_squash_merges;
+pub(crate) use squash::verify_squash_merges_with_warnings;
 
 pub use archive::{GcArchiveStats, archive_old_terminal_events};
 pub use periodic::{DEFAULT_MIN_FREE_DISK_BYTES, check_free_disk_bytes, lightweight_sweep};
