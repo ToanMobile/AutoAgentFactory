@@ -133,19 +133,27 @@ fn ref_mtime_older_than(
 
 /// Sweeps repo-scoped dead-PID merge-scratch worktrees, detached
 /// `aaf-oracle-wt-*` worktrees, and stale `refs/aaf-merge/*` refs.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn clean_repo_scratch(
     repo: &Path,
     data_dir: &Path,
     registered: &[WorktreeEntry],
+    merge_refs: &[String],
     cwd: Option<&Path>,
     dry_run: bool,
     now: SystemTime,
     report: &mut GcReport,
 ) {
-    let common_id = crate::gate::stats_repo_id(repo);
-    clean_repo_merge_scratch(repo, data_dir, &common_id, registered, cwd, dry_run, report);
     clean_repo_oracle_wt(repo, registered, cwd, dry_run, report);
-    clean_repo_merge_refs(repo, data_dir, &common_id, dry_run, now, report);
+    let has_merge_scratch = data_dir.join("merge-scratch").is_dir();
+    if !has_merge_scratch && merge_refs.is_empty() {
+        return;
+    }
+    let common_id = crate::gate::stats_repo_id(repo);
+    if has_merge_scratch {
+        clean_repo_merge_scratch(repo, data_dir, &common_id, registered, cwd, dry_run, report);
+    }
+    clean_repo_merge_refs(repo, data_dir, &common_id, merge_refs, dry_run, now, report);
 }
 
 fn clean_repo_merge_scratch(
@@ -302,22 +310,12 @@ fn clean_repo_merge_refs(
     repo: &Path,
     data_dir: &Path,
     common_id: &str,
+    merge_refs: &[String],
     dry_run: bool,
     now: SystemTime,
     report: &mut GcReport,
 ) {
-    let Ok(listed) = git(
-        repo,
-        &["for-each-ref", "--format=%(refname)", "refs/aaf-merge/"],
-    ) else {
-        return;
-    };
-    let refs: Vec<&str> = listed
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    if refs.is_empty() {
+    if merge_refs.is_empty() {
         return;
     }
     let common_dir = git(
@@ -330,7 +328,7 @@ fn clean_repo_merge_refs(
         .join("locks")
         .join(format!("{common_id}.merge.lock"));
 
-    for refname in refs {
+    for refname in merge_refs {
         let removable = match classify_merge_ref(refname) {
             MergeRefKind::PidTagged(pid) => !process_alive(pid),
             MergeRefKind::Legacy => {

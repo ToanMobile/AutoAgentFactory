@@ -88,18 +88,29 @@ const IN_PROGRESS_MARKERS: [&str; 5] = [
 /// and `<gitdir>/rebase-apply/head-name`. Fails closed if an existing
 /// worktree's gitdir cannot be inspected while a branch is checked out there.
 pub fn active_in_progress_branches(repo_root: &Path) -> Result<HashSet<String>, GitError> {
+    let entries = list(repo_root)?;
+    Ok(active_in_progress_branches_for(&entries))
+}
+
+/// Like [`active_in_progress_branches`], reusing an already-fetched worktree list.
+pub fn active_in_progress_branches_for(entries: &[WorktreeEntry]) -> HashSet<String> {
     let mut active = HashSet::new();
-    for entry in list(repo_root)? {
+    for entry in entries {
         if !entry.path.exists() {
             continue;
         }
-        let Ok(git_dir_raw) = git(&entry.path, &["rev-parse", "--absolute-git-dir"]) else {
-            if let Some(branch) = entry.branch {
-                active.insert(branch);
-            }
-            continue;
+        let dot_git = entry.path.join(".git");
+        let git_dir = if dot_git.is_dir() {
+            dot_git
+        } else {
+            let Ok(git_dir_raw) = git(&entry.path, &["rev-parse", "--absolute-git-dir"]) else {
+                if let Some(branch) = &entry.branch {
+                    active.insert(branch.clone());
+                }
+                continue;
+            };
+            PathBuf::from(git_dir_raw.trim())
         };
-        let git_dir = PathBuf::from(git_dir_raw.trim());
         for rebase_dir in ["rebase-merge", "rebase-apply"] {
             let head_name = git_dir.join(rebase_dir).join("head-name");
             if let Ok(raw) = fs::read_to_string(&head_name) {
@@ -113,9 +124,9 @@ pub fn active_in_progress_branches(repo_root: &Path) -> Result<HashSet<String>, 
         let has_marker = IN_PROGRESS_MARKERS
             .iter()
             .any(|marker| git_dir.join(marker).exists());
-        if has_marker && let Some(branch) = entry.branch {
-            active.insert(branch);
+        if has_marker && let Some(branch) = &entry.branch {
+            active.insert(branch.clone());
         }
     }
-    Ok(active)
+    active
 }

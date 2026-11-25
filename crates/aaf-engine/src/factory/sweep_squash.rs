@@ -100,6 +100,7 @@ impl Scheduler<'_> {
                 "merged": true,
                 "kind": "squash_pr",
                 "head_oid": expected_oid,
+                "head_sha": expected_oid,
             });
             // Atomic CAS `Review -> Done` BEFORE removing any worktree so a
             // concurrent rework (`Review -> Gating`) never loses its worktree.

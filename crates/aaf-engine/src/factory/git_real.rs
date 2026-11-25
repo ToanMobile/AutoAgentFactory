@@ -479,6 +479,15 @@ impl GitOps for RealGit {
         self.sweep_offline_done_impl(done_task_ids, active_ids, cwd)
     }
 
+    fn sweep_offline_done_with_heads(
+        &self,
+        done_tasks: &[(String, Option<String>)],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        self.sweep_offline_done_with_heads_impl(done_tasks, active_ids, cwd)
+    }
+
     fn verified_squash_merges(
         &self,
         candidates: &[(String, String)],

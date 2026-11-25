@@ -217,6 +217,18 @@ pub trait GitOps: Send + Sync {
     ) -> PortResult<Vec<String>> {
         Ok(Vec::new())
     }
+    /// Like [`GitOps::sweep_offline_done`], passing each `Done` task's
+    /// verified `MergeResult.head_sha` when available so squash-merged tasks
+    /// can be cleaned fail-closed without accepting unmerged commits.
+    fn sweep_offline_done_with_heads(
+        &self,
+        done_tasks: &[(String, Option<String>)],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        let ids: Vec<String> = done_tasks.iter().map(|(id, _)| id.clone()).collect();
+        self.sweep_offline_done(&ids, active_ids, cwd)
+    }
     /// Checks `(task_id, local_head_oid)` candidates against merged GitHub PRs
     /// and local git ancestry. Returns verified `task_id -> expected_head_oid`.
     fn verified_squash_merges(

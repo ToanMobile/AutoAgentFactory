@@ -148,10 +148,9 @@ pub(crate) fn sweep_merged_branches_with_runner(
             }
         };
 
-        let branch_ref = format!("refs/heads/{branch}");
         let is_ancestor = git_raw(
             &main_repo,
-            &["merge-base", "--is-ancestor", &branch_ref, &base_oid],
+            &["merge-base", "--is-ancestor", &oid, &base_oid],
         )
         .is_ok_and(|out| out.code == Some(0));
         let candidate = Candidate {
@@ -491,24 +490,21 @@ fn apply_cleanup(main_repo: &Path, candidate: &Candidate, dry_run: bool, report:
         return push_warn(report, format!("prune for `{branch}` ({e}); branch kept"));
     }
     let branch_ref = format!("refs/heads/{branch}");
-    let tip = match git_raw(
+    match git_raw(
         main_repo,
-        &["rev-parse", "--verify", "--quiet", &branch_ref],
+        &["update-ref", "-d", &branch_ref, &candidate.oid],
     ) {
-        Ok(out) if out.success() => out.stdout.trim().to_string(),
-        Ok(_) => return,
-        Err(e) => return push_warn(report, format!("re-verify `{branch}` ({e}); skipped")),
-    };
-    if !tip.eq_ignore_ascii_case(&candidate.oid) {
-        let old = &candidate.oid;
-        return push_warn(
-            report,
-            format!("`{branch}` moved ({old} -> {tip}); skipped"),
-        );
-    }
-    match git_raw(main_repo, &["branch", "-D", branch]) {
         Ok(out) if out.success() => report.merged_branches_deleted.push(branch.clone()),
-        Ok(out) => push_warn(report, format!("delete `{branch}`: {}", out.stderr.trim())),
+        Ok(out) => {
+            let still_exists = git_raw(
+                main_repo,
+                &["rev-parse", "--verify", "--quiet", &branch_ref],
+            )
+            .is_ok_and(|rev| rev.success());
+            if still_exists {
+                push_warn(report, format!("delete `{branch}`: {}", out.stderr.trim()));
+            }
+        }
         Err(e) => push_warn(report, format!("delete `{branch}`: {e}")),
     }
 }

@@ -90,14 +90,25 @@ impl RealGit {
         active_ids: &HashSet<String>,
         cwd: Option<&Path>,
     ) -> PortResult<Vec<String>> {
+        let done_tasks: Vec<(String, Option<String>)> =
+            done_task_ids.iter().map(|id| (id.clone(), None)).collect();
+        self.sweep_offline_done_with_heads_impl(&done_tasks, active_ids, cwd)
+    }
+
+    pub(super) fn sweep_offline_done_with_heads_impl(
+        &self,
+        done_tasks: &[(String, Option<String>)],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
         let _admin = self.admin();
         let data_dir = self.locks_dir.parent().unwrap_or(&self.locks_dir);
         let effective_cwd = cwd.or(self.cwd.as_deref());
-        let report = crate::gc::clean_repo_offline_unlocked(
+        let report = crate::gc::clean_repo_offline_unlocked_with_heads(
             &self.repo_root,
             data_dir,
             &self.worktrees_dir,
-            done_task_ids,
+            done_tasks,
             active_ids,
             effective_cwd,
         );

@@ -25,7 +25,8 @@ use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use aaf_domain::ports::{PortError, TaskStore};
+use aaf_domain::event::EventKind;
+use aaf_domain::ports::{EventSink, PortError, TaskStore};
 use aaf_domain::task::{Task, TaskState};
 use serde::{Deserialize, Serialize};
 
@@ -38,15 +39,16 @@ use expired::clean_expired_artifacts;
 use expired::orphan_scratch_lock_removable;
 use refs::RepoRefs;
 pub(crate) use squash::verify_squash_merges_with_warnings;
+pub(crate) use task_clean::verified_merged_head_from_events;
 use task_clean::{
-    TaskCleanOpts, canonical_main_repo, check_cwd_blocks, clean_task_artifacts_by_id,
-    record_removed_file, resolved_path,
+    ResolvedBase, TaskCleanOpts, canonical_main_repo, canonical_or_owned, check_cwd_blocks,
+    clean_task_artifacts_by_id, record_removed_file, resolve_repo_base, resolved_path,
 };
 
 pub use archive::{GcArchiveStats, archive_old_terminal_events};
 pub use periodic::{
     DEFAULT_MIN_FREE_DISK_BYTES, OfflineSweepReport, check_free_disk_bytes,
-    clean_repo_offline_unlocked, lightweight_sweep,
+    clean_repo_offline_unlocked, clean_repo_offline_unlocked_with_heads, lightweight_sweep,
 };
 pub use proofs::{GcProofStats, clean_expired_proofs, collect_protected_tree_fps};
 
@@ -186,6 +188,48 @@ fn collect_db_state(data_dir: &Path) -> Result<DbState, GcError> {
     Ok((tasks, running_runs, active_tree_fps))
 }
 
+fn collect_repo_lock_ids(repo: &Path, all_tasks: &[Task]) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    ids.insert(aaf_fp::repo_id(repo));
+    if let Ok(entries) = worktree::list(repo) {
+        for entry in entries {
+            let canon = canonical_or_owned(&entry.path);
+            ids.insert(aaf_fp::repo_id(&canon));
+        }
+    }
+    for task in all_tasks {
+        if task.repo_root.trim().is_empty() {
+            continue;
+        }
+        let task_root = Path::new(&task.repo_root);
+        if canonical_main_repo(task_root) == repo {
+            let canon = canonical_or_owned(task_root);
+            ids.insert(aaf_fp::repo_id(&canon));
+        }
+    }
+    ids
+}
+
+fn try_lock_repo_set(
+    data_dir: &Path,
+    lock_ids: &BTreeSet<String>,
+    dry_run: bool,
+) -> Result<Option<Vec<RepoLockGuard>>, GcError> {
+    let mut guards = Vec::with_capacity(lock_ids.len());
+    for id in lock_ids {
+        match try_lock_repo(data_dir, id, dry_run) {
+            Ok(Some(guard)) => guards.push(guard),
+            Ok(None) => {}
+            Err(GcError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                drop(guards);
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(Some(guards))
+}
+
 fn resolve_target_repos(opts: &GcOptions, tasks: &[Task]) -> Vec<PathBuf> {
     let mut set = BTreeSet::new();
     if let Some(repo) = &opts.repo_root {
@@ -229,29 +273,28 @@ pub fn run_gc(
             continue;
         }
         let repo_id = aaf_fp::repo_id(&repo);
-        let _lock = match try_lock_repo(data_dir, &repo_id, opts.dry_run) {
-            Ok(guard) => guard,
-            Err(GcError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                report.skipped_busy.push(repo_label);
-                continue;
-            }
-            Err(err) => return Err(err),
+        let lock_ids = collect_repo_lock_ids(&repo, &all_tasks);
+        let Some(_locks) = try_lock_repo_set(data_dir, &lock_ids, opts.dry_run)? else {
+            report.skipped_busy.push(repo_label);
+            continue;
         };
-        report.repos_scanned.push(repo_label.clone());
         // Re-read tasks after acquiring `.run.lock` so state transitions that
-        // happened before lock acquisition are observed accurately.
+        // happened before lock acquisition are observed accurately. Fail closed
+        // if the re-read fails rather than acting on a stale pre-lock snapshot.
         let fresh_tasks = match collect_db_state(data_dir) {
             Ok((tasks, _, _)) => tasks,
             Err(err) => {
                 report
                     .warnings
-                    .push(format!("{repo_label}: db re-read: {err}"));
-                all_tasks.clone()
+                    .push(format!("{repo_label}: db re-read failed (skipped): {err}"));
+                continue;
             }
         };
+        report.repos_scanned.push(repo_label);
         clean_repo(
             &repo,
             &repo_id,
+            &lock_ids,
             data_dir,
             worktrees_dir,
             &fresh_tasks,
@@ -324,6 +367,7 @@ pub fn run_gc(
 fn clean_repo(
     repo: &Path,
     repo_id: &str,
+    lock_ids: &BTreeSet<String>,
     data_dir: &Path,
     worktrees_dir: &Path,
     all_tasks: &[Task],
@@ -331,31 +375,12 @@ fn clean_repo(
     now: SystemTime,
     report: &mut GcReport,
 ) {
-    let canonical_repo = canonical_main_repo(repo);
     let repo_tasks: Vec<&Task> = all_tasks
         .iter()
-        .filter(|t| canonical_main_repo(Path::new(&t.repo_root)) == canonical_repo)
+        .filter(|t| canonical_main_repo(Path::new(&t.repo_root)) == repo)
         .collect();
     let active_ids: HashSet<String> = repo_tasks.iter().map(|t| t.id.clone()).collect();
     let all_task_ids: HashSet<String> = all_tasks.iter().map(|t| t.id.clone()).collect();
-
-    match worktree::remove_orphan_batch_worktrees_with(
-        repo,
-        worktrees_dir,
-        repo_id,
-        &active_ids,
-        opts.dry_run,
-        opts.force,
-        opts.cwd.as_deref(),
-    ) {
-        Ok(sweep) => {
-            report.removed_orphan_batches.extend(sweep.removed);
-            report.warnings.extend(sweep.warnings);
-        }
-        Err(err) => report
-            .warnings
-            .push(format!("{}: orphan batch sweep: {err}", repo.display())),
-    }
 
     let registered = worktree::list(repo)
         .map_err(|err| {
@@ -371,20 +396,65 @@ fn clean_repo(
                 .push(format!("{}: list refs: {err}", repo.display()));
         })
         .ok();
-    let active_ops = worktree::active_in_progress_branches(repo).unwrap_or_else(|err| {
-        report
-            .warnings
-            .push(format!("{}: active ops: {err}", repo.display()));
-        HashSet::new()
-    });
+    let active_ops = registered
+        .as_deref()
+        .map(worktree::active_in_progress_branches_for)
+        .unwrap_or_default();
+
+    let mut batch_repo_ids = vec![repo_id];
+    for id in lock_ids {
+        if id != repo_id && worktrees_dir.join(id).is_dir() {
+            batch_repo_ids.push(id.as_str());
+        }
+    }
+    let pre_batch_branches = refs.as_ref().map(RepoRefs::batch_short_branches);
+    for sweep_repo_id in batch_repo_ids {
+        let res = match registered.as_deref() {
+            Some(reg) => worktree::remove_orphan_batch_worktrees_prepared(
+                repo,
+                worktrees_dir,
+                sweep_repo_id,
+                reg,
+                &active_ops,
+                pre_batch_branches.as_deref(),
+                &active_ids,
+                opts.dry_run,
+                opts.force,
+                opts.force,
+                opts.cwd.as_deref(),
+            ),
+            None => worktree::remove_orphan_batch_worktrees_with(
+                repo,
+                worktrees_dir,
+                sweep_repo_id,
+                &active_ids,
+                opts.dry_run,
+                opts.force,
+                opts.cwd.as_deref(),
+            ),
+        };
+        match res {
+            Ok(sweep) => {
+                for name in sweep.removed {
+                    if !report.removed_orphan_batches.contains(&name) {
+                        report.removed_orphan_batches.push(name);
+                    }
+                }
+                for w in sweep.warnings {
+                    if !report.warnings.contains(&w) {
+                        report.warnings.push(w);
+                    }
+                }
+            }
+            Err(err) => report
+                .warnings
+                .push(format!("{}: orphan batch sweep: {err}", repo.display())),
+        }
+    }
 
     if let (Some(registered), Some(refs)) = (registered.as_deref(), refs.as_ref()) {
-        let task_opts = TaskCleanOpts {
-            dry_run: opts.dry_run,
-            force: opts.force,
-            cwd: opts.cwd.as_deref(),
-            expected_head: None,
-        };
+        let mut ro_db: Option<Option<Db>> = None;
+        let mut cached_base: Option<Result<ResolvedBase, String>> = None;
         for task in &repo_tasks {
             let eligible = match task.state {
                 TaskState::Done => true,
@@ -400,6 +470,46 @@ fn clean_repo(
                     .push(format!("skipped invalid task id {:?}", task.id));
                 continue;
             }
+            let require_verified_merge = task.state == TaskState::Done && !opts.force;
+            let branch = format!("{}{}", worktree::BRANCH_PREFIX, task.id);
+            let branch_ref = format!("refs/heads/{branch}");
+            let has_artifacts = refs.has_branch(&branch_ref)
+                || registered
+                    .iter()
+                    .any(|e| e.branch.as_deref() == Some(branch.as_str()))
+                || worktree::worktree_path(repo, worktrees_dir, &task.id).is_ok_and(|p| p.exists());
+            let expected_head = if require_verified_merge && has_artifacts {
+                let db_opt = ro_db.get_or_insert_with(|| {
+                    let db_path = data_dir.join("aaf.db");
+                    db_path
+                        .is_file()
+                        .then(|| Db::open_read_only(&db_path).ok())
+                        .flatten()
+                });
+                db_opt.as_ref().and_then(|db| {
+                    db.events_for_task_by_kinds(&task.id, &[EventKind::MergeResult], 10)
+                        .ok()
+                        .and_then(|events| verified_merged_head_from_events(&events))
+                })
+            } else {
+                None
+            };
+            let base = if require_verified_merge && has_artifacts && expected_head.is_none() {
+                cached_base
+                    .get_or_insert_with(|| resolve_repo_base(repo))
+                    .as_ref()
+                    .ok()
+            } else {
+                None
+            };
+            let task_opts = TaskCleanOpts {
+                dry_run: opts.dry_run,
+                force: opts.force,
+                require_verified_merge,
+                base,
+                cwd: opts.cwd.as_deref(),
+                expected_head: expected_head.as_deref(),
+            };
             if let Err(err) = clean_task_artifacts_by_id(
                 repo,
                 worktrees_dir,
@@ -423,6 +533,7 @@ fn clean_repo(
             registered,
             refs,
             &active_ops,
+            cached_base.as_ref(),
             opts,
             now,
             report,
@@ -432,6 +543,7 @@ fn clean_repo(
             repo,
             data_dir,
             registered,
+            refs.merge_refs(),
             opts.cwd.as_deref(),
             opts.dry_run,
             now,

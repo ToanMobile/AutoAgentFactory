@@ -17,7 +17,7 @@ use super::cleanup::{
     delete_branch_ignore_missing, delete_snapshot_refs, is_operation_in_progress,
 };
 use super::{
-    BATCH_PREFIX, BRANCH_PREFIX, WorktreeEntry, active_in_progress_branches, foreign_checkout,
+    BATCH_PREFIX, BRANCH_PREFIX, WorktreeEntry, active_in_progress_branches_for, foreign_checkout,
     list, prune, removal_refusal, resolved, validate_task_id,
 };
 
@@ -151,6 +151,7 @@ fn collect_batch_candidates(
     repo_wt_dir: &Path,
     registered: &[WorktreeEntry],
     active_task_ids: &HashSet<String>,
+    batch_short_branches: Option<&[String]>,
 ) -> Result<BTreeSet<String>, GitError> {
     let mut candidates = BTreeSet::new();
     if let Ok(entries) = fs::read_dir(repo_wt_dir) {
@@ -165,15 +166,27 @@ fn collect_batch_candidates(
             }
         }
     }
-    let branch_refs = git(
-        repo_root,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads/aaf/batch-*",
-        ],
-    )?;
-    for short in branch_refs.lines().filter(|l| !l.is_empty()) {
+    let listed_branches: Vec<String>;
+    let short_branches: &[String] = match batch_short_branches {
+        Some(pre) => pre,
+        None => {
+            let raw = git(
+                repo_root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads/aaf/batch-*",
+                ],
+            )?;
+            listed_branches = raw
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
+            &listed_branches
+        }
+    };
+    for short in short_branches {
         if let Some(id) = short.strip_prefix(BRANCH_PREFIX)
             && id.starts_with(BATCH_PREFIX)
             && validate_task_id(id).is_ok()
@@ -295,11 +308,45 @@ fn remove_orphan_batch_worktrees_inner(
     force_dead_pid: bool,
     cwd: Option<&Path>,
 ) -> Result<OrphanSweep, GitError> {
-    let repo_wt_dir = worktrees_root.join(repo_id);
     let registered = list(repo_root)?;
-    let active_ops = active_in_progress_branches(repo_root)?;
-    let candidates =
-        collect_batch_candidates(repo_root, &repo_wt_dir, &registered, active_task_ids)?;
+    let active_ops = active_in_progress_branches_for(&registered);
+    remove_orphan_batch_worktrees_prepared(
+        repo_root,
+        worktrees_root,
+        repo_id,
+        &registered,
+        &active_ops,
+        None,
+        active_task_ids,
+        dry_run,
+        force_all,
+        force_dead_pid,
+        cwd,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remove_orphan_batch_worktrees_prepared(
+    repo_root: &Path,
+    worktrees_root: &Path,
+    repo_id: &str,
+    registered: &[WorktreeEntry],
+    active_ops: &HashSet<String>,
+    batch_short_branches: Option<&[String]>,
+    active_task_ids: &HashSet<String>,
+    dry_run: bool,
+    force_all: bool,
+    force_dead_pid: bool,
+    cwd: Option<&Path>,
+) -> Result<OrphanSweep, GitError> {
+    let repo_wt_dir = worktrees_root.join(repo_id);
+    let candidates = collect_batch_candidates(
+        repo_root,
+        &repo_wt_dir,
+        registered,
+        active_task_ids,
+        batch_short_branches,
+    )?;
     let cwd_guard = CwdGuard::from_option(cwd);
     let own_pid = std::process::id();
 
@@ -325,7 +372,7 @@ fn remove_orphan_batch_worktrees_inner(
             .iter()
             .find(|e| e.branch.as_deref() == Some(branch.as_str()));
         if let Some(entry) = branch_entry
-            && let Some(warning) = foreign_checkout(&id, entry, &registered, &expected_path)
+            && let Some(warning) = foreign_checkout(&id, entry, registered, &expected_path)
         {
             sweep.warnings.push(warning);
             continue;
@@ -340,7 +387,7 @@ fn remove_orphan_batch_worktrees_inner(
                 repo_root,
                 &id,
                 entry,
-                &registered,
+                registered,
                 &expected_path,
                 &cwd_guard,
                 dry_run,

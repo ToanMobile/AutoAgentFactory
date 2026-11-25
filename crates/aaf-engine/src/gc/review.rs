@@ -17,10 +17,9 @@ use serde_json::json;
 
 use super::refs::RepoRefs;
 use super::squash::verify_squash_merges_with_warnings;
+use super::task_clean::{ResolvedBase, resolve_repo_base};
 use super::{GcOptions, GcReport, TaskCleanOpts, clean_task_artifacts_by_id};
-use crate::config::{self, ConfigInputs, ConfigOverlay};
 use crate::db::{Db, complete_review_task};
-use crate::factory::resolve_base;
 use crate::git::cmd::{git, git_raw};
 use crate::git::worktree::{self, BRANCH_PREFIX, WorktreeEntry};
 use crate::process::SystemRunner;
@@ -40,18 +39,6 @@ struct VerifiedMerge {
     head_oid: String,
     is_orphan: bool,
     is_squash: bool,
-}
-
-fn repo_base_ref(repo: &Path) -> String {
-    let no_env = |_: &str| None;
-    config::load(&ConfigInputs {
-        global_config: None,
-        repo_root: repo.to_path_buf(),
-        env: &no_env,
-        cli: ConfigOverlay::default(),
-    })
-    .map(|eff| eff.repo.gate.base_ref)
-    .unwrap_or_else(|_| "auto".to_string())
 }
 
 fn fetch_remote_base(repo: &Path, remote: &str, branch: &str) -> Result<(), crate::git::GitError> {
@@ -80,6 +67,7 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
     registered: &[WorktreeEntry],
     refs: &RepoRefs,
     active_ops: &HashSet<String>,
+    cached_base: Option<&Result<ResolvedBase, String>>,
     opts: &GcOptions,
     now: SystemTime,
     report: &mut GcReport,
@@ -95,7 +83,10 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
         if !refs.has_branch(&branch_ref) {
             continue;
         }
-        if let Some(head_oid) = resolve_branch_oid(repo, &branch_ref)
+        if let Some(head_oid) = refs
+            .branch_oid(&branch_ref)
+            .map(str::to_string)
+            .or_else(|| resolve_branch_oid(repo, &branch_ref))
             && seen_ids.insert(task.id.clone())
         {
             candidates.push(Candidate {
@@ -119,7 +110,10 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
         {
             continue;
         }
-        if let Some(head_oid) = resolve_branch_oid(repo, branch_ref)
+        if let Some(head_oid) = refs
+            .branch_oid(branch_ref)
+            .map(str::to_string)
+            .or_else(|| resolve_branch_oid(repo, branch_ref))
             && seen_ids.insert(id.to_string())
         {
             candidates.push(Candidate {
@@ -134,42 +128,62 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
         return;
     }
 
-    let base_ref = repo_base_ref(repo);
-    let base = match resolve_base(repo, &base_ref) {
-        Ok(base) => base,
-        Err(err) => {
-            report.warnings.push(format!(
-                "{}: review sweep skipped: resolve_base: {err}",
-                repo.display()
-            ));
+    let owned_base;
+    let resolved = match cached_base {
+        Some(Ok(resolved)) => resolved,
+        Some(Err(err)) => {
+            report
+                .warnings
+                .push(format!("{}: review sweep skipped: {err}", repo.display()));
             return;
         }
+        None => match resolve_repo_base(repo) {
+            Ok(resolved) => {
+                owned_base = resolved;
+                &owned_base
+            }
+            Err(err) => {
+                report
+                    .warnings
+                    .push(format!("{}: review sweep skipped: {err}", repo.display()));
+                return;
+            }
+        },
     };
+    let base = &resolved.base;
+    let base_start = &resolved.start;
 
-    if !opts.dry_run
+    let fetched_oid;
+    let base_oid = if !opts.dry_run
         && let Some(remote) = base.remote.as_deref()
-        && let Err(err) = fetch_remote_base(repo, remote, &base.branch)
     {
-        report.warnings.push(format!(
-            "{}: review sweep fetch {remote}/{}: {err}",
-            repo.display(),
-            base.branch
-        ));
-    }
-
-    let base_start = base.start_point();
-    let base_oid = match git(
-        repo,
-        &["rev-parse", "--verify", &format!("{base_start}^{{commit}}")],
-    ) {
-        Ok(oid) => oid,
-        Err(err) => {
+        if let Err(err) = fetch_remote_base(repo, remote, &base.branch) {
             report.warnings.push(format!(
-                "{}: review sweep skipped: base {base_start}: {err}",
-                repo.display()
+                "{}: review sweep fetch {remote}/{}: {err}",
+                repo.display(),
+                base.branch
             ));
-            return;
+            resolved.oid.as_str()
+        } else {
+            match git(
+                repo,
+                &["rev-parse", "--verify", &format!("{base_start}^{{commit}}")],
+            ) {
+                Ok(oid) => {
+                    fetched_oid = oid;
+                    fetched_oid.as_str()
+                }
+                Err(err) => {
+                    report.warnings.push(format!(
+                        "{}: review sweep skipped: base {base_start}: {err}",
+                        repo.display()
+                    ));
+                    return;
+                }
+            }
         }
+    } else {
+        resolved.oid.as_str()
     };
 
     let mut verified: Vec<VerifiedMerge> = Vec::new();
@@ -177,12 +191,12 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
     let mut by_id: HashMap<String, Candidate> = HashMap::new();
 
     for cand in candidates {
-        let branch_ref = format!("refs/heads/{BRANCH_PREFIX}{}", cand.id);
-        let is_ancestor = git_raw(
-            repo,
-            &["merge-base", "--is-ancestor", &branch_ref, &base_start],
-        )
-        .is_ok_and(|o| o.code == Some(0));
+        let is_ancestor = cand.head_oid.eq_ignore_ascii_case(base_oid)
+            || git_raw(
+                repo,
+                &["merge-base", "--is-ancestor", &cand.head_oid, base_start],
+            )
+            .is_ok_and(|o| o.code == Some(0));
         // 0-commit guard for orphan `aaf/*` branches outside DB: a fresh branch
         // sitting on `base_oid` is trivially an ancestor, so require a merged PR.
         if is_ancestor && !(cand.is_orphan && cand.head_oid == base_oid) {
@@ -215,7 +229,7 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
         let matched = verify_squash_merges_with_warnings(
             repo,
             &base.branch,
-            &base_start,
+            base_start,
             &squash_candidates,
             &fetch_fn,
             &runner,
@@ -290,11 +304,20 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
                             "merged": true,
                             "kind": "squash_pr",
                             "head_oid": item.head_oid,
+                            "head_sha": item.head_oid,
                             "by": "aaf_gc",
                         })),
                     )
                 } else {
-                    ("branch is merged into the base", None)
+                    (
+                        "branch is merged into the base",
+                        Some(json!({
+                            "merged": true,
+                            "kind": "ancestry",
+                            "head_sha": item.head_oid,
+                            "by": "aaf_gc",
+                        })),
+                    )
                 };
                 match complete_review_task(db, &item.id, why, merge_payload.as_ref(), now_epoch) {
                     Ok(true) => report.completed_review_tasks.push(item.id.clone()),
@@ -320,6 +343,8 @@ pub(super) fn clean_merged_review_and_orphan_tasks(
         let clean_opts = TaskCleanOpts {
             dry_run: opts.dry_run,
             force: false,
+            require_verified_merge: true,
+            base: Some(resolved),
             cwd: opts.cwd.as_deref(),
             expected_head: Some(item.head_oid.as_str()),
         };

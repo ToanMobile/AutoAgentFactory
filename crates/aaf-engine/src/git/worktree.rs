@@ -10,6 +10,7 @@ mod batch;
 mod cleanup;
 mod submodules;
 
+pub(crate) use batch::remove_orphan_batch_worktrees_prepared;
 pub use batch::{
     OrphanBatchSweep, OrphanSweep, parse_batch_pid, process_alive, remove_orphan_batch_worktrees,
     remove_orphan_batch_worktrees_dead_pid_force, remove_orphan_batch_worktrees_with,
@@ -331,5 +332,6 @@ pub(super) fn resolved(path: &Path) -> PathBuf {
 }
 
 pub use super::worktree_inspect::{
-    active_in_progress_branches, list, prune, prune_with_expire, removal_refusal,
+    active_in_progress_branches, active_in_progress_branches_for, list, prune, prune_with_expire,
+    removal_refusal,
 };
