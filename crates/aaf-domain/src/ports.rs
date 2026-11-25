@@ -50,6 +50,25 @@ pub trait TaskStore: Send + Sync {
         blocked: Option<&BlockedReason>,
         now: i64,
     ) -> PortResult<()>;
+    /// Atomically transitions `id` from `expected` to `next`, rejecting illegal
+    /// moves via [`TaskState::can_transition_to`].
+    ///
+    /// Returns `Ok(true)` when the task was in `expected` and moved to `next`,
+    /// or `Ok(false)` when its current state differed from `expected`.
+    fn compare_and_set_state(
+        &self,
+        id: &str,
+        expected: TaskState,
+        next: TaskState,
+        blocked_reason: Option<&BlockedReason>,
+        now: i64,
+    ) -> PortResult<bool> {
+        if self.get_task(id)?.state != expected {
+            return Ok(false);
+        }
+        self.set_state(id, next, blocked_reason, now)?;
+        Ok(true)
+    }
     fn append_context_note(&self, id: &str, note: &str, now: i64) -> PortResult<()>;
     /// Returns the new cycle count.
     fn increment_unblock_cycles(&self, id: &str, now: i64) -> PortResult<u32>;

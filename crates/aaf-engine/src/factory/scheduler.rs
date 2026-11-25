@@ -11,7 +11,6 @@ mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::Scope;
@@ -24,7 +23,7 @@ use super::audit_backend::AuditBackend;
 use super::dual_audit::DualReviewCoord;
 use super::finish::Resolution;
 pub(super) use super::finish::{GateStats, judge_round};
-use super::ports::{AccountPool, Grant};
+use super::ports::Grant;
 use super::schedule_order;
 pub use super::schedule_order::{
     MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, transient_backoff_secs,
@@ -65,7 +64,18 @@ pub fn run_with_audit(
     mode: Mode,
     hooks: &Hooks<'_>,
 ) -> PortResult<RunSummary> {
-    run_with_router(deps, audit, None, mode, hooks)
+    run_with_audit_and_stop(deps, audit, mode, hooks, &|| false)
+}
+
+/// [`run_with_audit`] with a cooperative stop predicate checked between turns and gates.
+pub fn run_with_audit_and_stop(
+    deps: &Deps,
+    audit: Option<&AuditBackend>,
+    mode: Mode,
+    hooks: &Hooks<'_>,
+    should_stop: &(dyn Fn() -> bool + Sync),
+) -> PortResult<RunSummary> {
+    run_with_router_and_stop(deps, audit, None, mode, hooks, should_stop)
 }
 
 /// [`run`] with an optional [`AuditBackend`] and per-stage [`StageRouter`].
@@ -75,6 +85,18 @@ pub fn run_with_router(
     router: Option<&StageRouter>,
     mode: Mode,
     hooks: &Hooks<'_>,
+) -> PortResult<RunSummary> {
+    run_with_router_and_stop(deps, audit, router, mode, hooks, &|| false)
+}
+
+/// [`run_with_router`] with a cooperative stop predicate checked between turns and gates.
+pub fn run_with_router_and_stop(
+    deps: &Deps,
+    audit: Option<&AuditBackend>,
+    router: Option<&StageRouter>,
+    mode: Mode,
+    hooks: &Hooks<'_>,
+    should_stop: &(dyn Fn() -> bool + Sync),
 ) -> PortResult<RunSummary> {
     let mut summary = RunSummary::default();
     if is_frozen(&*deps.store)? {
@@ -94,6 +116,8 @@ pub fn run_with_router(
             audit,
             router,
             mode,
+            should_stop,
+            stopping: false,
             msg_tx,
             msg_rx,
             gate_tx,
@@ -150,9 +174,11 @@ fn next_runnable(board: &TickBoard) -> Option<usize> {
 
 pub(super) struct Scheduler<'a> {
     pub(super) deps: &'a Deps,
-    audit: Option<&'a AuditBackend>,
+    pub(super) audit: Option<&'a AuditBackend>,
     pub(super) router: Option<&'a StageRouter>,
     pub(super) mode: Mode,
+    should_stop: &'a (dyn Fn() -> bool + Sync),
+    stopping: bool,
     msg_tx: Sender<Msg>,
     msg_rx: Receiver<Msg>,
     /// One message is one set of jobs the gate thread takes together.
@@ -164,6 +190,13 @@ pub(super) struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
+    pub(super) fn is_stopping(&mut self) -> bool {
+        if !self.stopping && (self.should_stop)() {
+            self.stopping = true;
+        }
+        self.stopping
+    }
+
     fn drive<'scope>(
         &mut self,
         scope: &'scope Scope<'scope, '_>,
@@ -177,7 +210,9 @@ impl<'a> Scheduler<'a> {
         self.sweep_review(fresh)?;
         self.state.last_review_sweep = Some(Instant::now());
         self.state.last_review_sweep_now = Some(self.deps.now());
-        self.queue_gating_tasks(resumed)?;
+        if !self.is_stopping() {
+            self.queue_gating_tasks(resumed)?;
+        }
         let closed = || PortError::Io("factory message channel closed".to_string());
         loop {
             // A deadline can pass while the loop waits for any message, not
@@ -185,7 +220,8 @@ impl<'a> Scheduler<'a> {
             self.expire_waits();
             let frozen = is_frozen(&*self.deps.store)?;
             let halted = self.summary.halted.is_some();
-            if !frozen && !halted {
+            let stopping = self.is_stopping();
+            if !frozen && !halted && !stopping {
                 if matches!(self.mode, Mode::Auto | Mode::Drain) {
                     self.poll_gating()?;
                 }
@@ -193,16 +229,20 @@ impl<'a> Scheduler<'a> {
             }
             let limit = self.deps.settings.max_parallel.max(1) as usize;
             if self.state.active > 0 || self.state.in_gate > 0 {
-                let msg =
-                    if self.mode == Mode::Auto && !frozen && !halted && self.state.active < limit {
-                        match self.msg_rx.recv_timeout(self.next_wake_duration()) {
-                            Ok(msg) => Some(msg),
-                            Err(mpsc::RecvTimeoutError::Timeout) => None,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(closed()),
-                        }
-                    } else {
-                        Some(self.msg_rx.recv().map_err(|_| closed())?)
-                    };
+                let msg = if self.mode == Mode::Auto
+                    && !frozen
+                    && !halted
+                    && !stopping
+                    && self.state.active < limit
+                {
+                    match self.msg_rx.recv_timeout(self.next_wake_duration()) {
+                        Ok(msg) => Some(msg),
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Err(closed()),
+                    }
+                } else {
+                    Some(self.msg_rx.recv().map_err(|_| closed())?)
+                };
                 match msg {
                     Some(Msg::Worker(outcome)) => {
                         if matches!(
@@ -230,6 +270,7 @@ impl<'a> Scheduler<'a> {
                 }
                 continue;
             }
+            let stopping = self.is_stopping();
             self.summary.frozen = frozen;
             let board = self.load_tick_board()?;
             let capped = !board.candidates.is_empty()
@@ -243,10 +284,14 @@ impl<'a> Scheduler<'a> {
                 .count();
             let waiting =
                 self.state.jobs.len() + parked + if capped { 0 } else { board.candidates.len() };
-            if !halted {
+            if !halted && !stopping {
                 self.summary.waiting_for_account = u32::try_from(waiting).unwrap_or(u32::MAX);
             }
-            if frozen || halted || matches!(self.mode, Mode::Once | Mode::Drain) || !(hooks.idle)()
+            if frozen
+                || halted
+                || stopping
+                || matches!(self.mode, Mode::Once | Mode::Drain)
+                || !(hooks.idle)()
             {
                 return Ok(());
             }
@@ -315,8 +360,9 @@ impl<'a> Scheduler<'a> {
     fn load_tick_board(&mut self) -> PortResult<TickBoard> {
         self.expire_waits();
         let now = self.deps.now();
+        let stopping = self.is_stopping();
         let store = &*self.deps.store;
-        let can_settle = self.summary.halted.is_none() && !is_frozen(store)?;
+        let can_settle = self.summary.halted.is_none() && !stopping && !is_frozen(store)?;
         let repo = Some(self.deps.settings.repo_root.as_str());
         loop {
             let all_tasks = store.list_tasks(repo, None)?;
@@ -378,44 +424,6 @@ impl<'a> Scheduler<'a> {
                     has_review_dep_waiter,
                 });
             }
-        }
-    }
-
-    pub(super) fn provider_key_for(&self, is_audit: bool) -> ProviderKey {
-        if is_audit {
-            self.audit
-                .map(|a| ProviderKey::from_executor(&a.provider))
-                .unwrap_or_else(|| {
-                    ProviderKey::from_executor(&self.deps.settings.repo.run.executor)
-                })
-        } else {
-            self.router
-                .map(StageRouter::default_provider_key)
-                .unwrap_or_else(|| {
-                    ProviderKey::from_executor(&self.deps.settings.repo.run.executor)
-                })
-        }
-    }
-
-    pub(super) fn pool_for_provider(
-        &self,
-        provider: &ProviderKey,
-        is_audit: bool,
-    ) -> Arc<dyn AccountPool> {
-        if is_audit
-            && let Some(backend) = self.audit
-            && ProviderKey::from_executor(&backend.provider) == *provider
-        {
-            return Arc::clone(&backend.accounts);
-        }
-        if let Some(router) = self.router
-            && let Some(pool) = router.pool_for(provider)
-        {
-            return pool;
-        }
-        match (is_audit, self.audit) {
-            (true, Some(backend)) => Arc::clone(&backend.accounts),
-            _ => Arc::clone(&self.deps.accounts),
         }
     }
 

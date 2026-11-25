@@ -18,14 +18,52 @@ use serde_json::json;
 
 use super::{GateStats, MAX_GATE_RETRIES, Msg, Scheduler, TickBoard, judge_round};
 use crate::factory::finish::Resolution;
-use crate::factory::ports::Purpose;
-use crate::factory::stage_router::ProviderKey;
+use crate::factory::ports::{AccountPool, Purpose};
+use crate::factory::stage_router::{ProviderKey, StageRouter};
 use crate::factory::worker::{self, GateJob, Job, Next, Outcome};
 use crate::factory::{Deps, plan_job, schedule_order, unblock};
 use crate::plan_debate::PLAN_DEBATE_STALLED_PREFIX;
 use crate::plan_debate::state::{DebateNext, DebateRole};
 
 impl Scheduler<'_> {
+    pub(in crate::factory) fn provider_key_for(&self, is_audit: bool) -> ProviderKey {
+        if is_audit {
+            self.audit
+                .map(|a| ProviderKey::from_executor(&a.provider))
+                .unwrap_or_else(|| {
+                    ProviderKey::from_executor(&self.deps.settings.repo.run.executor)
+                })
+        } else {
+            self.router
+                .map(StageRouter::default_provider_key)
+                .unwrap_or_else(|| {
+                    ProviderKey::from_executor(&self.deps.settings.repo.run.executor)
+                })
+        }
+    }
+
+    pub(in crate::factory) fn pool_for_provider(
+        &self,
+        provider: &ProviderKey,
+        is_audit: bool,
+    ) -> Arc<dyn AccountPool> {
+        if is_audit
+            && let Some(backend) = self.audit
+            && ProviderKey::from_executor(&backend.provider) == *provider
+        {
+            return Arc::clone(&backend.accounts);
+        }
+        if let Some(router) = self.router
+            && let Some(pool) = router.pool_for(provider)
+        {
+            return pool;
+        }
+        match (is_audit, self.audit) {
+            (true, Some(backend)) => Arc::clone(&backend.accounts),
+            _ => Arc::clone(&self.deps.accounts),
+        }
+    }
+
     pub(super) fn clear_gating(&mut self, task_id: &str) {
         self.gating_in_flight.remove(task_id);
         self.state.gate_retries.remove(task_id);
@@ -55,38 +93,76 @@ impl Scheduler<'_> {
         if !matches!(outcome.next, Next::GateAudited(..) | Next::SwitchJob(_)) {
             self.state.pre_audits.remove(&outcome.task_id);
         }
+        let stopping = self.is_stopping();
         match outcome.next {
             Next::Gate(job) => {
                 self.state.transient_retries.remove(&outcome.task_id);
-                self.queue_gate(job)?;
+                if stopping {
+                    self.clear_gating(&outcome.task_id);
+                } else {
+                    self.queue_gate(job)?;
+                }
             }
             Next::GateAudited(job, pre) => {
-                self.state.pre_audits.insert(outcome.task_id.clone(), pre);
                 self.state.transient_retries.remove(&outcome.task_id);
-                self.queue_gate(job)?;
+                if stopping {
+                    self.clear_gating(&outcome.task_id);
+                } else {
+                    self.state.pre_audits.insert(outcome.task_id.clone(), pre);
+                    self.queue_gate(job)?;
+                }
             }
             Next::Unblock {
                 task_id,
                 worktree,
                 signal,
-            } => self.state.jobs.push_back(Job::Unblock {
-                job: GateJob {
-                    task_id,
-                    worktree,
-                    audited: false,
-                    cached_receipt: None,
-                },
-                signal,
-            }),
+            } => {
+                if stopping {
+                    self.clear_gating(&task_id);
+                } else {
+                    self.state.jobs.push_back(Job::Unblock {
+                        job: GateJob {
+                            task_id,
+                            worktree,
+                            audited: false,
+                            cached_receipt: None,
+                        },
+                        signal,
+                    });
+                }
+            }
             Next::Ready => {
                 self.state.transient_retries.remove(&outcome.task_id);
                 self.summary.requeued.push(outcome.task_id);
             }
-            Next::Switch => self.handle_switch(outcome.task_id, outcome.provider)?,
-            Next::SwitchJob(job) => {
-                self.handle_switch_job(outcome.task_id, outcome.provider, *job)?;
+            Next::Switch => {
+                if stopping {
+                    let state = self.deps.store.get_task(&outcome.task_id)?.state;
+                    if state == TaskState::Gating {
+                        self.clear_gating(&outcome.task_id);
+                    } else {
+                        self.requeue_if_ready(outcome.task_id, state);
+                    }
+                } else {
+                    self.handle_switch(outcome.task_id, outcome.provider)?;
+                }
             }
-            Next::RetryAudit(job) => self.state.jobs.push_back(*job),
+            Next::SwitchJob(job) => {
+                if stopping {
+                    let state = self.deps.store.get_task(&outcome.task_id)?.state;
+                    self.clear_gating(&outcome.task_id);
+                    self.requeue_if_ready(outcome.task_id, state);
+                } else {
+                    self.handle_switch_job(outcome.task_id, outcome.provider, *job)?;
+                }
+            }
+            Next::RetryAudit(job) => {
+                if stopping {
+                    self.clear_gating(&outcome.task_id);
+                } else {
+                    self.state.jobs.push_back(*job);
+                }
+            }
             Next::Wait { until } => self.handle_wait(outcome.task_id, outcome.provider, until)?,
             Next::RetryAfter {
                 until,
@@ -115,6 +191,7 @@ impl Scheduler<'_> {
         resolution: Result<Resolution, String>,
     ) -> PortResult<()> {
         self.state.in_gate -= 1;
+        let stopping = self.is_stopping();
         match resolution {
             Ok(Resolution::Settled(state)) => {
                 self.clear_gating(&job.task_id);
@@ -127,11 +204,17 @@ impl Scheduler<'_> {
             }
             Ok(Resolution::NeedsAudit { lock_fp }) => {
                 self.state.pre_audits.remove(&job.task_id);
-                self.state.jobs.push_back(Job::Audit { job, lock_fp });
+                if stopping {
+                    self.clear_gating(&job.task_id);
+                } else {
+                    self.state.jobs.push_back(Job::Audit { job, lock_fp });
+                }
             }
             Ok(Resolution::NeedsPostAudit { receipt }) => {
                 let pre_audit = self.state.pre_audits.remove(&job.task_id);
-                if self.deps.settings.repo.cross_audit.dual_review {
+                if stopping {
+                    self.clear_gating(&job.task_id);
+                } else if self.deps.settings.repo.cross_audit.dual_review {
                     // §D.4.1: PreGateAudit never bypasses Dual-Review.
                     self.start_dual_review(job, receipt)?;
                 } else {
@@ -144,23 +227,31 @@ impl Scheduler<'_> {
             }
             Ok(Resolution::Failed(signal)) => {
                 self.state.pre_audits.remove(&job.task_id);
-                self.state.jobs.push_back(Job::Unblock { job, signal });
+                if stopping {
+                    self.clear_gating(&job.task_id);
+                } else {
+                    self.state.jobs.push_back(Job::Unblock { job, signal });
+                }
             }
             Ok(Resolution::Retry) => {
-                let count = self
-                    .state
-                    .gate_retries
-                    .entry(job.task_id.clone())
-                    .or_default();
-                *count += 1;
-                if *count > MAX_GATE_RETRIES {
+                if stopping {
                     self.clear_gating(&job.task_id);
-                    let why =
-                        format!("gate/merge retried {MAX_GATE_RETRIES} times without landing");
-                    unblock::block_untried(self.deps, &job.task_id, &why)?;
-                    self.summary.blocked.push(job.task_id);
                 } else {
-                    self.queue_gate(job)?;
+                    let count = self
+                        .state
+                        .gate_retries
+                        .entry(job.task_id.clone())
+                        .or_default();
+                    *count += 1;
+                    if *count > MAX_GATE_RETRIES {
+                        self.clear_gating(&job.task_id);
+                        let why =
+                            format!("gate/merge retried {MAX_GATE_RETRIES} times without landing");
+                        unblock::block_untried(self.deps, &job.task_id, &why)?;
+                        self.summary.blocked.push(job.task_id);
+                    } else {
+                        self.queue_gate(job)?;
+                    }
                 }
             }
             Err(error) => {

@@ -56,6 +56,67 @@ pub struct Integration {
     pub conflicted: Vec<String>,
 }
 
+/// RAII guard for an [`Integration`] worktree: calls [`GitOps::discard`] on
+/// drop unless consumed via [`IntegrationGuard::into_inner`] or
+/// [`IntegrationGuard::discard`].
+pub struct IntegrationGuard<'a> {
+    git: &'a dyn GitOps,
+    integration: Option<Integration>,
+}
+
+impl<'a> IntegrationGuard<'a> {
+    pub fn acquire(git: &'a dyn GitOps, task_ids: &[String]) -> PortResult<Self> {
+        let integration = git.integrate(task_ids)?;
+        Ok(Self {
+            git,
+            integration: Some(integration),
+        })
+    }
+
+    pub fn from_existing(git: &'a dyn GitOps, integration: Integration) -> Self {
+        Self {
+            git,
+            integration: Some(integration),
+        }
+    }
+
+    pub fn integration(&self) -> &Integration {
+        match &self.integration {
+            Some(integration) => integration,
+            None => unreachable!("IntegrationGuard holds an Integration until consumed"),
+        }
+    }
+
+    pub fn integration_mut(&mut self) -> &mut Integration {
+        match &mut self.integration {
+            Some(integration) => integration,
+            None => unreachable!("IntegrationGuard holds an Integration until consumed"),
+        }
+    }
+
+    pub fn into_inner(mut self) -> Integration {
+        match self.integration.take() {
+            Some(integration) => integration,
+            None => unreachable!("IntegrationGuard holds an Integration until consumed"),
+        }
+    }
+
+    pub fn discard(mut self) -> PortResult<()> {
+        match self.integration.take() {
+            Some(integration) => self.git.discard(&integration),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for IntegrationGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(integration) = self.integration.take() {
+            let _ = self.git.discard(&integration);
+        }
+    }
+}
+
 pub trait GitOps: Send + Sync {
     /// The task's worktree on `aaf/<task_id>`: created from the base on
     /// first use, returned as it is afterwards.
@@ -120,6 +181,13 @@ pub trait GitOps: Send + Sync {
     /// Removes the worktree and branch of a task that is done. Never
     /// discards work: a dirty worktree or an unmerged branch is an error.
     fn cleanup(&self, task_id: &str) -> PortResult<()>;
+    /// Removes the worktree, branch, and snapshots of a task whose PR was
+    /// already verified as merged (merge, squash, or rebase) at `expected_head`.
+    /// Refuses dirty, locked, mid-operation, or HEAD-mismatched trees, without
+    /// requiring git ancestry.
+    fn cleanup_verified_merged(&self, task_id: &str, _expected_head: &str) -> PortResult<()> {
+        self.cleanup(task_id)
+    }
     /// Existing worktree and its `HEAD` oid (without creating a worktree).
     fn existing_worktree_head(
         &self,
@@ -138,6 +206,29 @@ pub trait GitOps: Send + Sync {
     /// Drops stale git worktree registrations whose directories are gone.
     fn prune_worktrees(&self) -> Result<(), GitError> {
         Ok(())
+    }
+    /// Offline startup cleanup of clean `Done` tasks, dead-PID batch/scratch
+    /// worktrees, stale merge refs, and stale fingerprint temp files. Must
+    /// never acquire `.run.lock`, call the network, or open `aaf.db`.
+    fn sweep_offline_done(
+        &self,
+        _done_task_ids: &[String],
+        _active_ids: &HashSet<String>,
+        _cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+    /// Like [`GitOps::sweep_offline_done`], passing each `Done` task's
+    /// verified `MergeResult.head_sha` when available so squash-merged tasks
+    /// can be cleaned fail-closed without accepting unmerged commits.
+    fn sweep_offline_done_with_heads(
+        &self,
+        done_tasks: &[(String, Option<String>)],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        let ids: Vec<String> = done_tasks.iter().map(|(id, _)| id.clone()).collect();
+        self.sweep_offline_done(&ids, active_ids, cwd)
     }
     /// Checks `(task_id, local_head_oid)` candidates against merged GitHub PRs
     /// and local git ancestry. Returns verified `task_id -> expected_head_oid`.

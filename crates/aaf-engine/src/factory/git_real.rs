@@ -14,14 +14,15 @@ use super::commit_lock::{self, CommitLock};
 use super::git_real_base::{
     NO_HOOKS, abort_rebase, git_no_hooks, merge_pr_real, refuse_nested_repositories,
 };
-use super::ports::{GitOps, Integration};
+use super::ports::{GitOps, Integration, IntegrationGuard};
 use crate::git::cmd::{failure, git, git_raw, git_timed};
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef, fetch_pr_feedback};
 use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree};
-use crate::process::{CommandRunner, SystemRunner};
+use crate::process::SystemRunner;
 
+mod cleanup;
 #[allow(dead_code)]
 mod commit;
 mod pr_note;
@@ -57,6 +58,8 @@ pub struct RealGit {
     worktrees_dir: PathBuf,
     /// `<data dir>/locks`.
     locks_dir: PathBuf,
+    /// Optional caller working directory protected from startup worktree cleanup.
+    cwd: Option<PathBuf>,
     base: BaseRef,
     /// Serialises git commands that write or enumerate worktree entries.
     admin: Mutex<()>,
@@ -81,6 +84,7 @@ impl RealGit {
             repo_root,
             worktrees_dir,
             locks_dir,
+            cwd: None,
             base,
             admin: Mutex::new(()),
             commit: Mutex::new(()),
@@ -89,6 +93,13 @@ impl RealGit {
             merge_lock_timeout: MERGE_LOCK_TIMEOUT,
             last_squash_poll: Mutex::new(None),
         }
+    }
+
+    /// Sets the caller's working directory so offline sweeps never delete a
+    /// worktree containing `cwd`.
+    pub fn with_cwd(mut self, cwd: PathBuf) -> RealGit {
+        self.cwd = Some(cwd);
+        self
     }
 
     #[cfg(test)]
@@ -113,26 +124,6 @@ impl RealGit {
         &self.base
     }
 
-    /// Runs squash-merge PR verification using `runner` (injectable in tests).
-    pub fn verify_squash_merges_with(
-        &self,
-        candidates: &[(String, String)],
-        runner: &dyn CommandRunner,
-    ) -> Result<HashMap<String, String>, GitError> {
-        let fetch = || {
-            self.fetch_base()
-                .map_err(|e| GitError::Invalid(e.to_string()))
-        };
-        crate::gc::verify_squash_merges(
-            &self.repo_root,
-            &self.base.branch,
-            &self.start(),
-            candidates,
-            &fetch,
-            runner,
-        )
-    }
-
     fn admin(&self) -> MutexGuard<'_, ()> {
         self.admin.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -143,25 +134,6 @@ impl RealGit {
 
     fn remote(&self) -> &str {
         self.base.remote.as_deref().unwrap_or(DEFAULT_REMOTE)
-    }
-
-    /// The task's worktree when git has it registered on the task's branch.
-    fn existing(&self, task_id: &str) -> PortResult<Option<TaskWorktree>> {
-        let path =
-            worktree::worktree_path(&self.repo_root, &self.worktrees_dir, task_id).map_err(err)?;
-        let branch = format!("{BRANCH_PREFIX}{task_id}");
-        // Git lists resolved paths; the configured directory may be a link.
-        let Ok(resolved) = std::fs::canonicalize(&path) else {
-            return Ok(None);
-        };
-        let registered = worktree::list(&self.repo_root)
-            .map_err(err)?
-            .into_iter()
-            .any(|entry| {
-                entry.branch.as_deref() == Some(branch.as_str())
-                    && std::fs::canonicalize(&entry.path).is_ok_and(|p| p == resolved)
-            });
-        Ok(registered.then_some(TaskWorktree { path, branch }))
     }
 }
 
@@ -182,12 +154,11 @@ impl GitOps for RealGit {
     }
 
     fn cleanup(&self, task_id: &str) -> PortResult<()> {
-        let _admin = self.admin();
-        match self.existing(task_id)? {
-            // Not forced: refuses a dirty tree and an unmerged branch.
-            Some(tree) => worktree::remove(&self.repo_root, &tree, true, false).map_err(err),
-            None => Ok(()),
-        }
+        self.cleanup_impl(task_id)
+    }
+
+    fn cleanup_verified_merged(&self, task_id: &str, expected_head: &str) -> PortResult<()> {
+        self.cleanup_verified_merged_impl(task_id, expected_head)
     }
 
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()> {
@@ -255,19 +226,29 @@ impl GitOps for RealGit {
     }
 
     fn integrate(&self, task_ids: &[String]) -> PortResult<Integration> {
-        // A task-shaped name, so the worktree layer creates and removes the
-        // integration tree like any other and it shows up in its listings.
-        let name = format!("batch-{}", &super::unblock::unique_id()[..12]);
+        // PID-tagged task-shaped name (`batch-<pid>-<8hex>`), so live batch
+        // trees (including `aaf board split`, which holds no `.run.lock`) are
+        // protected from concurrent sweeps while still showing up in worktree listings.
+        let name = format!(
+            "batch-{}-{}",
+            std::process::id(),
+            &super::unblock::unique_id()[..8]
+        );
         let tree = {
             let _admin = self.admin();
             worktree::create(&self.repo_root, &self.worktrees_dir, &name, &self.start())
                 .map_err(err)?
         };
-        let mut integration = Integration {
-            tree,
-            merged: Vec::new(),
-            conflicted: Vec::new(),
-        };
+        // Construct the guard ONLY AFTER `_admin` is released so a drop/unwind
+        // calling `self.discard()` (which acquires `self.admin()`) cannot deadlock.
+        let mut guard = IntegrationGuard::from_existing(
+            self,
+            Integration {
+                tree,
+                merged: Vec::new(),
+                conflicted: Vec::new(),
+            },
+        );
         for task_id in task_ids {
             worktree::validate_task_id(task_id).map_err(err)?;
             let branch = format!("{BRANCH_PREFIX}{task_id}");
@@ -275,8 +256,9 @@ impl GitOps for RealGit {
             // Full ref name, as in `is_merged`: a tag `aaf/<id>` must not
             // stand in for the task branch.
             let branch_ref = format!("refs/heads/{branch}");
+            let tree_path = guard.integration().tree.path.clone();
             let merge = git_no_hooks(
-                &integration.tree.path,
+                &tree_path,
                 &[
                     "-c",
                     "commit.gpgsign=false",
@@ -293,23 +275,23 @@ impl GitOps for RealGit {
             if !merge.success() {
                 // Fails when the merge never started (nothing to abort); the
                 // status check below is what guards the tree.
-                let _ = git_no_hooks(&integration.tree.path, &["merge", "--abort"]);
+                let _ = git_no_hooks(&tree_path, &["merge", "--abort"]);
             }
-            let dirty = git(&integration.tree.path, &["status", "--porcelain"]).map_err(err)?;
+            let dirty = git(&tree_path, &["status", "--porcelain"]).map_err(err)?;
             if !dirty.is_empty() {
-                let cleanup = self.discard(&integration);
+                let cleanup = guard.discard();
                 return Err(PortError::Io(format!(
                     "integration tree is dirty after the merge of {branch} \
                      (cleanup: {cleanup:?})"
                 )));
             }
             if merge.success() {
-                integration.merged.push(task_id.clone());
+                guard.integration_mut().merged.push(task_id.clone());
             } else {
-                integration.conflicted.push(task_id.clone());
+                guard.integration_mut().conflicted.push(task_id.clone());
             }
         }
-        Ok(integration)
+        Ok(guard.into_inner())
     }
 
     fn discard(&self, integration: &Integration) -> PortResult<()> {
@@ -485,7 +467,25 @@ impl GitOps for RealGit {
 
     fn prune_worktrees(&self) -> Result<(), GitError> {
         let _admin = self.admin();
-        worktree::prune(&self.repo_root)
+        worktree::prune_with_expire(&self.repo_root, "5.minutes.ago")
+    }
+
+    fn sweep_offline_done(
+        &self,
+        done_task_ids: &[String],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        self.sweep_offline_done_impl(done_task_ids, active_ids, cwd)
+    }
+
+    fn sweep_offline_done_with_heads(
+        &self,
+        done_tasks: &[(String, Option<String>)],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        self.sweep_offline_done_with_heads_impl(done_tasks, active_ids, cwd)
     }
 
     fn verified_squash_merges(

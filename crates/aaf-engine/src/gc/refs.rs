@@ -2,19 +2,22 @@
 //! repository: gc looks a Done task's leftovers up here instead of asking git
 //! twice for every task ever recorded.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::git::GitError;
 use crate::git::cmd::git;
 use crate::git::worktree::{BRANCH_PREFIX, SNAPSHOT_REF_PREFIX};
 
-/// The task branches (`refs/heads/aaf/*`) and the number of snapshot refs
-/// per task id (`refs/aaf/snapshots/<id>/*`) git listed.
+const MERGE_REF_PREFIX: &str = "refs/aaf-merge/";
+
+/// The task branches (`refs/heads/aaf/*` -> tip OID), snapshot ref counts per
+/// task id (`refs/aaf/snapshots/<id>/*`), and temporary `refs/aaf-merge/*` refs.
 #[derive(Debug, Default)]
 pub(super) struct RepoRefs {
-    branches: HashSet<String>,
+    branches: HashMap<String, String>,
     snapshots: HashMap<String, usize>,
+    merge_refs: Vec<String>,
 }
 
 impl RepoRefs {
@@ -24,9 +27,10 @@ impl RepoRefs {
             repo,
             &[
                 "for-each-ref",
-                "--format=%(refname)",
+                "--format=%(refname)%09%(objectname)",
                 &branches,
                 SNAPSHOT_REF_PREFIX,
+                MERGE_REF_PREFIX,
             ],
         )?;
         Ok(Self::parse(&listed))
@@ -34,7 +38,8 @@ impl RepoRefs {
 
     fn parse(listed: &str) -> Self {
         let mut refs = Self::default();
-        for name in listed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        for line in listed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let (name, oid) = line.split_once('\t').unwrap_or((line, ""));
             if let Some(rest) = name.strip_prefix(SNAPSHOT_REF_PREFIX) {
                 // Only refs under `<id>/`, as a per-task listing matched.
                 if let Some((id, tail)) = rest.split_once('/')
@@ -43,8 +48,11 @@ impl RepoRefs {
                 {
                     *refs.snapshots.entry(id.to_string()).or_default() += 1;
                 }
+            } else if name.starts_with(MERGE_REF_PREFIX) {
+                refs.merge_refs.push(name.to_string());
             } else if name.starts_with("refs/heads/") {
-                refs.branches.insert(name.to_string());
+                refs.branches
+                    .insert(name.to_string(), oid.trim().to_string());
             }
         }
         refs
@@ -52,7 +60,37 @@ impl RepoRefs {
 
     /// Whether git listed the full ref `branch_ref` (`refs/heads/aaf/<id>`).
     pub(super) fn has_branch(&self, branch_ref: &str) -> bool {
-        self.branches.contains(branch_ref)
+        self.branches.contains_key(branch_ref)
+    }
+
+    /// The OID recorded for `branch_ref` during [`RepoRefs::list`], if non-empty.
+    pub(super) fn branch_oid(&self, branch_ref: &str) -> Option<&str> {
+        self.branches
+            .get(branch_ref)
+            .map(String::as_str)
+            .filter(|oid| !oid.is_empty())
+    }
+
+    /// All listed `refs/heads/aaf/<id>` full branch refs in deterministic order.
+    pub(super) fn branch_refs(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.branches.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Short names (`aaf/batch-*`) of all listed batch branches.
+    pub(super) fn batch_short_branches(&self) -> Vec<String> {
+        let prefix = format!("refs/heads/{BRANCH_PREFIX}batch-");
+        self.branches
+            .keys()
+            .filter(|full| full.starts_with(&prefix))
+            .filter_map(|full| full.strip_prefix("refs/heads/").map(str::to_string))
+            .collect()
+    }
+
+    /// Listed `refs/aaf-merge/*` full ref names.
+    pub(super) fn merge_refs(&self) -> &[String] {
+        &self.merge_refs
     }
 
     /// How many snapshot refs git listed under `task_id/`.

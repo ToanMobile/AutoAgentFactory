@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{GitError, path_str};
 use crate::process::run_with_timeout;
@@ -30,7 +30,13 @@ impl MergeStrategy {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MergeCommitRef {
+    #[serde(default)]
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrInfo {
     pub number: u64,
@@ -46,6 +52,10 @@ pub struct PrInfo {
     pub title: String,
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub is_cross_repository: bool,
+    #[serde(default)]
+    pub merge_commit: Option<MergeCommitRef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,7 +119,7 @@ impl GhClient for SystemGh {
                 "view",
                 &pr,
                 "--json",
-                "number,state,headRefOid,headRefName,baseRefName,mergeable,isDraft,title,url",
+                "number,state,headRefOid,headRefName,baseRefName,mergeable,isDraft,title,url,isCrossRepository,mergeCommit",
             ],
         )?;
         serde_json::from_str(&out)
@@ -160,7 +170,6 @@ impl GhClient for SystemGh {
             "merge".into(),
             pr,
             strategy.gh_flag().into(),
-            "--delete-branch".into(),
             "--match-head-commit".into(),
             expect_head.into(),
         ];

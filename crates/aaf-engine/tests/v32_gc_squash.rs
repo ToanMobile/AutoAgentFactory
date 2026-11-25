@@ -9,7 +9,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use aaf_domain::ports::{RunStore, TaskStore};
+use aaf_domain::event::{EventKind, FactoryEvent};
+use aaf_domain::ports::{EventSink, RunStore, TaskStore};
 use aaf_domain::run::{RunRecord, RunStatus};
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 use aaf_engine::db::{Db, private};
@@ -355,6 +356,15 @@ fn gc_dry_run_and_full_cleanup_respect_cancelled_dirty_symlinks_running_and_prot
 
     let wt_done = worktree::create(&fx.repo, &fx.worktrees, "t-done", "main").unwrap();
     let done_head = commit_file(&wt_done.path, "d.txt", "d\n", "done");
+    db.emit(
+        &FactoryEvent::new(
+            EventKind::MergeResult,
+            json!({ "merged": true, "kind": "squash_pr", "head_sha": done_head }).to_string(),
+            1_700_000_001,
+        )
+        .for_task("t-done"),
+    )
+    .unwrap();
     git(
         &fx.repo,
         &["update-ref", "refs/aaf/snapshots/t-done/s1", &done_head],

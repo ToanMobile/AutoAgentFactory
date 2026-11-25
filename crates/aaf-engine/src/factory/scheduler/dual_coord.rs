@@ -369,7 +369,7 @@ impl Scheduler<'_> {
                     Some(DeferredSiblingOutcome::Blocked)
                 }
                 Ok(count) => {
-                    if !aborted_before && count > 0 {
+                    if !aborted_before && !self.is_stopping() && count > 0 {
                         let restarts = self
                             .state
                             .restarts
@@ -450,7 +450,11 @@ impl Scheduler<'_> {
         let Some(task) = self.try_dual(&task_id, self.deps.store.get_task(&task_id)) else {
             return Ok(());
         };
-        if coord.aborted || self.summary.halted.is_some() || task.state != TaskState::Gating {
+        if coord.aborted
+            || self.summary.halted.is_some()
+            || self.is_stopping()
+            || task.state != TaskState::Gating
+        {
             self.clear_gating(&task_id);
             if let Some(deferred) = coord.deferred_outcome {
                 self.apply_deferred_sibling_outcome(task_id, deferred);

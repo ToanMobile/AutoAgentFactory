@@ -39,6 +39,7 @@ mod select_pool;
 pub mod snapshots;
 pub mod stage_router;
 mod sweep;
+mod sweep_squash;
 mod unblock;
 mod worker;
 
@@ -67,11 +68,13 @@ pub use audit_backend::{
 pub use base_ref::{BaseRef, resolve_base};
 pub use git_real::RealGit;
 pub(crate) use infra_retry::INFRA_RETRY_MAX;
-pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
+pub use ports::{
+    AccountPool, GateRunner, GitOps, Grant, Integration, IntegrationGuard, Notifier, Purpose,
+};
 pub use post_audit::is_large_diff;
 pub use scheduler::{
-    Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit, run_with_router,
-    transient_backoff_secs,
+    Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit,
+    run_with_audit_and_stop, run_with_router, run_with_router_and_stop, transient_backoff_secs,
 };
 pub use select_pool::{BindingView, SelectingPool};
 pub use stage_router::{
@@ -127,6 +130,52 @@ pub trait Store:
         self.append_context_note(parent_id, parent_note, now)
     }
 
+    /// Atomically transitions a `Review` task to `Done`, emitting
+    /// `TaskStateChanged` (and optional `MergeResult`), recording any closed
+    /// fingerprint, and resetting `consecutive_root_fails` for root tasks.
+    ///
+    /// [`crate::db::Db`] runs all steps inside a single `BEGIN IMMEDIATE`
+    /// SQLite transaction; in-memory stores fall back to `compare_and_set_state`
+    /// followed by sequential port calls.
+    fn complete_review_task(
+        &self,
+        task_id: &str,
+        why: &str,
+        merge_payload: Option<&serde_json::Value>,
+        now: i64,
+    ) -> PortResult<bool> {
+        if !self.compare_and_set_state(task_id, TaskState::Review, TaskState::Done, None, now)? {
+            return Ok(false);
+        }
+        let task = self.get_task(task_id)?;
+        self.emit(
+            &FactoryEvent::new(
+                EventKind::TaskStateChanged,
+                serde_json::json!({ "to": TaskState::Done.as_str(), "why": why }).to_string(),
+                now,
+            )
+            .for_task(task_id),
+        )?;
+        if let Some(payload) = merge_payload {
+            self.emit(
+                &FactoryEvent::new(EventKind::MergeResult, payload.to_string(), now)
+                    .for_task(task_id),
+            )?;
+        }
+        if let Some(fp) = &task.fingerprint {
+            self.record_closed(&aaf_domain::ports::ClosedFingerprint {
+                fingerprint: fp.clone(),
+                repo_root: task.repo_root.clone(),
+                task_id: task.id.clone(),
+                closed_at: now,
+            })?;
+        }
+        if task.id == task.root_id {
+            self.set_meta(aaf_domain::ports::META_CONSECUTIVE_ROOT_FAILS, "0")?;
+        }
+        Ok(true)
+    }
+
     /// Returns `true` when any recorded run in `repo_root` covers timestamp `at`
     /// (`started_at <= at <= ended_at.unwrap_or(now)`).
     fn has_overlapping_run(&self, repo_root: &str, at: i64, now: i64) -> PortResult<bool> {
@@ -175,6 +224,16 @@ impl Store for crate::db::Db {
             parent_note,
             now,
         )
+    }
+
+    fn complete_review_task(
+        &self,
+        task_id: &str,
+        why: &str,
+        merge_payload: Option<&serde_json::Value>,
+        now: i64,
+    ) -> PortResult<bool> {
+        crate::db::Db::complete_review_task(self, task_id, why, merge_payload, now)
     }
 
     fn has_overlapping_run(&self, repo_root: &str, at: i64, now: i64) -> PortResult<bool> {

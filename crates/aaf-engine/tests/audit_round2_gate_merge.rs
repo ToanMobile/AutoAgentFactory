@@ -342,6 +342,7 @@ fn pr_merge_catches_force_added_gitignored_secret_and_validates_remote() {
             is_draft: false,
             title: "test".to_string(),
             url: "https://example.invalid/pr/77".to_string(),
+            ..Default::default()
         },
         merged: AtomicUsize::new(0),
     };

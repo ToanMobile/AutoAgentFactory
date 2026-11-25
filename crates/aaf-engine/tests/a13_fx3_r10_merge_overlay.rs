@@ -146,6 +146,7 @@ fn run_merge(work: &Path, data: &Path, head: &str) -> (PrMergeOutcome, usize) {
             is_draft: false,
             title: "PR #7".to_string(),
             url: "https://github.com/org/repo/pull/7".to_string(),
+            ..Default::default()
         },
         merged_calls: AtomicUsize::new(0),
     };

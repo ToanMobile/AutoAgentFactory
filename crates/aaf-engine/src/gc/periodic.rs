@@ -7,9 +7,223 @@ use std::time::{Duration, SystemTime};
 
 use crate::git::worktree;
 
+use super::refs::RepoRefs;
+use super::scratch;
+use super::task_clean::{ResolvedBase, resolve_repo_base};
 use super::{
-    GcError, GcOptions, GcReport, canonical_or_owned, clean_expired_artifacts, collect_db_state,
+    GcError, GcOptions, GcReport, TaskCleanOpts, canonical_main_repo, clean_expired_artifacts,
+    clean_task_artifacts_by_id, collect_db_state,
 };
+
+/// Result of [`clean_repo_offline_unlocked`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OfflineSweepReport {
+    pub removed_orphan_batches: Vec<String>,
+    pub removed_worktrees: Vec<String>,
+    pub removed_branches: Vec<String>,
+    pub removed_snapshot_refs: usize,
+    pub removed_files: Vec<String>,
+    pub removed_merge_refs: usize,
+    pub removed_stale_fp: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Offline, lock-free per-repo cleanup safe to invoke from `aaf run` startup
+/// while `.run.lock` is already held by the caller.
+///
+/// - Never acquires `.run.lock`.
+/// - Never runs network commands (`gh` / `git fetch`).
+/// - Never opens or writes `aaf.db` (uses `done_task_ids` and `active_ids`
+///   supplied by the caller).
+/// - Fail-closed for `Done` tasks: cleans only clean, unlocked, non-`cwd`,
+///   non-in-progress worktrees whose branch/HEAD is verified merged into the
+///   base ref. Use [`clean_repo_offline_unlocked_with_heads`] to supply
+///   `MergeResult.head_sha` for squash-merged `Done` tasks.
+/// - Uses `force = true` **only** for dead-PID batch/scratch artifacts.
+pub fn clean_repo_offline_unlocked(
+    repo_root: &Path,
+    data_dir: &Path,
+    worktrees_dir: &Path,
+    done_task_ids: &[String],
+    active_ids: &HashSet<String>,
+    cwd: Option<&Path>,
+) -> OfflineSweepReport {
+    let done_tasks: Vec<(String, Option<String>)> =
+        done_task_ids.iter().map(|id| (id.clone(), None)).collect();
+    clean_repo_offline_unlocked_with_heads(
+        repo_root,
+        data_dir,
+        worktrees_dir,
+        &done_tasks,
+        active_ids,
+        cwd,
+    )
+}
+
+/// Like [`clean_repo_offline_unlocked`], taking `(task_id, expected_head_sha)`
+/// pairs for `Done` tasks (from `MergeResult` events).
+///
+/// A `Done` task's worktree and branch are removed only when either:
+/// - `expected_head == Some(oid)` and both worktree `HEAD` and branch tip equal
+///   `oid`, or
+/// - `expected_head == None` and the branch/HEAD is an ancestor of the repo's
+///   resolved base ref.
+pub fn clean_repo_offline_unlocked_with_heads(
+    repo_root: &Path,
+    data_dir: &Path,
+    worktrees_dir: &Path,
+    done_tasks: &[(String, Option<String>)],
+    active_ids: &HashSet<String>,
+    cwd: Option<&Path>,
+) -> OfflineSweepReport {
+    let mut gc_report = GcReport::default();
+    let repo = canonical_main_repo(repo_root);
+    if !repo.is_dir() || aaf_fp::repo_root(&repo).is_err() {
+        return OfflineSweepReport::default();
+    }
+    let repo_id = aaf_fp::repo_id(&repo);
+
+    let registered = match worktree::list(&repo) {
+        Ok(list) => Some(list),
+        Err(err) => {
+            gc_report
+                .warnings
+                .push(format!("{}: worktree list: {err}", repo.display()));
+            None
+        }
+    };
+    let refs = match RepoRefs::list(&repo) {
+        Ok(refs) => Some(refs),
+        Err(err) => {
+            gc_report
+                .warnings
+                .push(format!("{}: list refs: {err}", repo.display()));
+            None
+        }
+    };
+    let active_ops = registered
+        .as_deref()
+        .map(worktree::active_in_progress_branches_for)
+        .unwrap_or_default();
+
+    let batch_sweep = match (registered.as_deref(), refs.as_ref()) {
+        (Some(reg), Some(r)) => {
+            let batch_branches = r.batch_short_branches();
+            worktree::remove_orphan_batch_worktrees_prepared(
+                &repo,
+                worktrees_dir,
+                &repo_id,
+                reg,
+                &active_ops,
+                Some(&batch_branches),
+                active_ids,
+                false,
+                false,
+                true,
+                cwd,
+            )
+        }
+        _ => worktree::remove_orphan_batch_worktrees_dead_pid_force(
+            &repo,
+            worktrees_dir,
+            &repo_id,
+            active_ids,
+            false,
+            cwd,
+        ),
+    };
+    match batch_sweep {
+        Ok(sweep) => {
+            gc_report.removed_orphan_batches.extend(sweep.removed);
+            gc_report.warnings.extend(sweep.warnings);
+        }
+        Err(err) => gc_report
+            .warnings
+            .push(format!("{}: orphan batch sweep: {err}", repo.display())),
+    }
+
+    if let (Some(registered), Some(refs)) = (registered.as_deref(), refs.as_ref()) {
+        let mut cached_base: Option<Result<ResolvedBase, String>> = None;
+        for (task_id, expected_head) in done_tasks {
+            if worktree::validate_task_id(task_id).is_err() {
+                gc_report
+                    .warnings
+                    .push(format!("skipped invalid task id {task_id:?}"));
+                continue;
+            }
+            let branch_ref = format!("refs/heads/{}{task_id}", worktree::BRANCH_PREFIX);
+            let needs_base = expected_head.is_none()
+                && (refs.has_branch(&branch_ref)
+                    || worktree::worktree_path(&repo, worktrees_dir, task_id)
+                        .is_ok_and(|p| p.exists())
+                    || registered.iter().any(|e| {
+                        e.branch
+                            .as_deref()
+                            .is_some_and(|b| b == format!("{}{task_id}", worktree::BRANCH_PREFIX))
+                    }));
+            let base = if needs_base {
+                let res = cached_base.get_or_insert_with(|| resolve_repo_base(&repo));
+                res.as_ref().ok()
+            } else {
+                None
+            };
+            let clean_opts = TaskCleanOpts {
+                dry_run: false,
+                force: false,
+                require_verified_merge: true,
+                base,
+                cwd,
+                expected_head: expected_head.as_deref(),
+            };
+            if let Err(err) = clean_task_artifacts_by_id(
+                &repo,
+                worktrees_dir,
+                task_id,
+                registered,
+                refs,
+                &active_ops,
+                &clean_opts,
+                &mut gc_report,
+            ) {
+                gc_report.warnings.push(format!("{task_id}: {err}"));
+            }
+        }
+
+        scratch::clean_repo_scratch(
+            &repo,
+            data_dir,
+            registered,
+            refs.merge_refs(),
+            cwd,
+            false,
+            SystemTime::now(),
+            &mut gc_report,
+        );
+    }
+
+    if let Err(err) = worktree::prune_with_expire(&repo, "5.minutes.ago") {
+        gc_report
+            .warnings
+            .push(format!("{}: worktree prune: {err}", repo.display()));
+    }
+    match aaf_fp::sweep_stale(&repo) {
+        Ok(n) => gc_report.removed_stale_fp += n,
+        Err(err) => gc_report
+            .warnings
+            .push(format!("{}: sweep_stale: {err}", repo.display())),
+    }
+
+    OfflineSweepReport {
+        removed_orphan_batches: gc_report.removed_orphan_batches,
+        removed_worktrees: gc_report.removed_worktrees,
+        removed_branches: gc_report.removed_branches,
+        removed_snapshot_refs: gc_report.removed_snapshot_refs,
+        removed_files: gc_report.removed_files,
+        removed_merge_refs: gc_report.removed_merge_refs,
+        removed_stale_fp: gc_report.removed_stale_fp,
+        warnings: gc_report.warnings,
+    }
+}
 
 /// Default minimum free disk space checked during lightweight sweeps (1 GiB).
 pub const DEFAULT_MIN_FREE_DISK_BYTES: u64 = 1024 * 1024 * 1024;
@@ -84,7 +298,7 @@ pub fn lightweight_sweep(
 
         let mut busy_repos = HashSet::new();
         busy_repos.insert(repo_root.display().to_string());
-        let canonical_repo = canonical_or_owned(repo_root);
+        let canonical_repo = canonical_main_repo(repo_root);
         busy_repos.insert(canonical_repo.display().to_string());
         let protected_audits = crate::gc_audits::collect_protected_audit_ids_with_locks(
             all_tasks,
@@ -109,7 +323,7 @@ pub fn lightweight_sweep(
     }
 
     if repo_root.is_dir() && aaf_fp::repo_root(repo_root).is_ok() {
-        let canonical_repo = canonical_or_owned(repo_root);
+        let canonical_repo = canonical_main_repo(repo_root);
         report
             .repos_scanned
             .push(canonical_repo.display().to_string());
@@ -118,7 +332,7 @@ pub fn lightweight_sweep(
         if let Some((ref all_tasks, _, _)) = db_state {
             let active_ids: HashSet<String> = all_tasks
                 .iter()
-                .filter(|t| canonical_or_owned(Path::new(&t.repo_root)) == canonical_repo)
+                .filter(|t| canonical_main_repo(Path::new(&t.repo_root)) == canonical_repo)
                 .map(|t| t.id.clone())
                 .collect();
 
@@ -140,7 +354,7 @@ pub fn lightweight_sweep(
             }
         }
 
-        match worktree::prune(&canonical_repo) {
+        match worktree::prune_with_expire(&canonical_repo, "5.minutes.ago") {
             Ok(()) => report.pruned_repos += 1,
             Err(err) => report.warnings.push(format!(
                 "{}: worktree prune: {err}",
