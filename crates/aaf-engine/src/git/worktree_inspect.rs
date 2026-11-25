@@ -64,6 +64,14 @@ pub fn prune(repo_root: &Path) -> Result<(), GitError> {
     git(repo_root, &["worktree", "prune"]).map(|_| ())
 }
 
+/// Drops the records of worktrees whose directory has been missing longer than
+/// `expire` (e.g. `"5.minutes.ago"`), avoiding races with concurrent
+/// `git worktree add` calls.
+pub fn prune_with_expire(repo_root: &Path, expire: &str) -> Result<(), GitError> {
+    let flag = format!("--expire={expire}");
+    git(repo_root, &["worktree", "prune", &flag]).map(|_| ())
+}
+
 const IN_PROGRESS_MARKERS: [&str; 5] = [
     "rebase-merge",
     "rebase-apply",

@@ -55,6 +55,13 @@ impl RepoRefs {
         self.branches.contains(branch_ref)
     }
 
+    /// All listed `refs/heads/aaf/<id>` full branch refs in deterministic order.
+    pub(super) fn branch_refs(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.branches.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
     /// How many snapshot refs git listed under `task_id/`.
     pub(super) fn snapshot_count(&self, task_id: &str) -> usize {
         self.snapshots.get(task_id).copied().unwrap_or(0)

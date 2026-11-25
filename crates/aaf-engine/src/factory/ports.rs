@@ -206,6 +206,17 @@ pub trait GitOps: Send + Sync {
     fn prune_worktrees(&self) -> Result<(), GitError> {
         Ok(())
     }
+    /// Offline startup cleanup of clean `Done` tasks, dead-PID batch/scratch
+    /// worktrees, stale merge refs, and stale fingerprint temp files. Must
+    /// never acquire `.run.lock`, call the network, or open `aaf.db`.
+    fn sweep_offline_done(
+        &self,
+        _done_task_ids: &[String],
+        _active_ids: &HashSet<String>,
+        _cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// Checks `(task_id, local_head_oid)` candidates against merged GitHub PRs
     /// and local git ancestry. Returns verified `task_id -> expected_head_oid`.
     fn verified_squash_merges(

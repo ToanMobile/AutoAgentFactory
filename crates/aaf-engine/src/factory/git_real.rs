@@ -58,6 +58,8 @@ pub struct RealGit {
     worktrees_dir: PathBuf,
     /// `<data dir>/locks`.
     locks_dir: PathBuf,
+    /// Optional caller working directory protected from startup worktree cleanup.
+    cwd: Option<PathBuf>,
     base: BaseRef,
     /// Serialises git commands that write or enumerate worktree entries.
     admin: Mutex<()>,
@@ -82,6 +84,7 @@ impl RealGit {
             repo_root,
             worktrees_dir,
             locks_dir,
+            cwd: None,
             base,
             admin: Mutex::new(()),
             commit: Mutex::new(()),
@@ -90,6 +93,13 @@ impl RealGit {
             merge_lock_timeout: MERGE_LOCK_TIMEOUT,
             last_squash_poll: Mutex::new(None),
         }
+    }
+
+    /// Sets the caller's working directory so offline sweeps never delete a
+    /// worktree containing `cwd`.
+    pub fn with_cwd(mut self, cwd: PathBuf) -> RealGit {
+        self.cwd = Some(cwd);
+        self
     }
 
     #[cfg(test)]
@@ -457,7 +467,16 @@ impl GitOps for RealGit {
 
     fn prune_worktrees(&self) -> Result<(), GitError> {
         let _admin = self.admin();
-        worktree::prune(&self.repo_root)
+        worktree::prune_with_expire(&self.repo_root, "5.minutes.ago")
+    }
+
+    fn sweep_offline_done(
+        &self,
+        done_task_ids: &[String],
+        active_ids: &HashSet<String>,
+        cwd: Option<&Path>,
+    ) -> PortResult<Vec<String>> {
+        self.sweep_offline_done_impl(done_task_ids, active_ids, cwd)
     }
 
     fn verified_squash_merges(
