@@ -368,6 +368,7 @@ mod poll_resilience_tests {
             enabled: true,
             bot_token_env: "AAF_TELEGRAM_BOT_TOKEN".into(),
             allowed_chat_ids: vec![1001],
+            allowed_user_ids: Vec::new(),
             poll_timeout_secs: 0,
             confirm_ttl_secs: 60,
             allow_approve: false,
@@ -382,7 +383,8 @@ mod poll_resilience_tests {
             message: Some(Message {
                 message_id: id,
                 from: Some(User {
-                    id: 42,
+                    id: 1001,
+                    is_bot: false,
                     username: None,
                     first_name: None,
                 }),

@@ -17,9 +17,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::{
-    HTML_CSP, RequestSecurityContext, SecurityRejection, UiBackend, UiConfig, UiError, parse_query,
-    percent_decode, validate_ui_config, verify_request_security, wrap_ok, write_backend_result,
-    write_http_response, write_json_error, write_json_response, write_sse_event,
+    APPROVE_DISABLED_MSG, HTML_CSP, RequestSecurityContext, SecurityRejection, UiBackend, UiConfig,
+    UiError, parse_query, percent_decode, validate_ui_config, verify_request_security,
+    with_meta_policy, wrap_ok, write_backend_result, write_http_response, write_json_error,
+    write_json_response, write_sse_event,
 };
 use crate::executors::reaper::validate_run_id;
 use crate::git::worktree::validate_task_id;
@@ -430,7 +431,7 @@ fn dispatch_request(
         Route::Health => {
             let _ = write_json_response(stream, 200, &json!({ "ok": true }));
         }
-        Route::Meta => write_backend_result(stream, backend.meta_json()),
+        Route::Meta => write_backend_result(stream, with_meta_policy(backend.meta_json(), cfg)),
         Route::Status => write_backend_result(stream, backend.status_json()),
         Route::Board => {
             let st = req
@@ -461,6 +462,9 @@ fn dispatch_request(
             Err(e) => send_err(stream, 400, &format!("invalid run id: {e}")),
         },
         Route::Events => serve_sse(stream, backend, shutdown, req.query.get("run_id")),
+        Route::ApproveCommit if !cfg.effective_allow_approve() => {
+            send_err(stream, 403, APPROVE_DISABLED_MSG);
+        }
         Route::ApproveCommit => handle_approve_post(stream, backend, &req.body),
         Route::Action => handle_action_post(stream, backend, &req.body),
         Route::BadRequest(msg) => send_err(stream, 400, msg),

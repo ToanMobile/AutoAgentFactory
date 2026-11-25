@@ -69,13 +69,15 @@ fn format_report(report: &GcReport) -> String {
     )];
     lines.push(format!(
         "removed: {} orphan batch(es), {} worktree(s), {} branch(es), {} snapshot ref(s), \
-         {} stale fp entr(y/ies), {} expired file(s); pruned {} repo(s)",
+         {} stale fp entr(y/ies), {} expired file(s) ({} proof file(s)); archived {} event(s); pruned {} repo(s)",
         report.removed_orphan_batches.len(),
         report.removed_worktrees.len(),
         report.removed_branches.len(),
         report.removed_snapshot_refs,
         report.removed_stale_fp,
         report.removed_files.len(),
+        report.proofs_removed,
+        report.events_archived,
         report.pruned_repos
     ));
     if !report.warnings.is_empty() {

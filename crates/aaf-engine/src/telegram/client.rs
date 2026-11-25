@@ -83,6 +83,8 @@ pub struct Message {
 pub struct User {
     pub id: i64,
     #[serde(default)]
+    pub is_bot: bool,
+    #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub first_name: Option<String>,

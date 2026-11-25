@@ -118,6 +118,13 @@ pub trait GroupControl: Send + Sync {
     fn signal_members(&self, _signal: &str, _members: &[ProcId]) -> usize {
         0
     }
+    /// Sends `SIGCONT` to every member in `members` that a fresh process table
+    /// read confirms still has `pid > 1`, exact `lstart`, and stopped (`T`)
+    /// state. Returns `Err(Unreadable)` without signalling anything when the
+    /// process table cannot be read.
+    fn resume_stopped_members(&self, _members: &[ProcId]) -> Result<usize, Unreadable> {
+        Ok(0)
+    }
     /// Gradle and Kotlin daemons running now.
     fn build_daemons(&self) -> Vec<BuildDaemon> {
         Vec::new()
@@ -190,11 +197,38 @@ pub(crate) fn signal_verified(
     pids.len()
 }
 
-/// `/bin/kill <signal> <pids>`.
+/// [`SystemGroup::resume_stopped_members`] with the process table (`read`)
+/// and `kill` (`send`) passed in.
+///
+/// Unlike [`signal_verified`], this never falls back to raw PIDs when the
+/// process table is unreadable: it returns `Err(Unreadable)` without sending
+/// any signal.
+pub fn resume_stopped_members_verified(
+    read: &dyn Fn() -> Option<String>,
+    send: &dyn Fn(&str, &[String]),
+    members: &[ProcId],
+) -> Result<usize, Unreadable> {
+    if members.is_empty() {
+        return Ok(0);
+    }
+    let listing = read().ok_or(Unreadable)?;
+    let pids: Vec<String> = probe::stopped_member_pids(&listing, members)
+        .into_iter()
+        .map(|pid| pid.to_string())
+        .collect();
+    if pids.is_empty() {
+        return Ok(0);
+    }
+    send("-CONT", &pids);
+    Ok(pids.len())
+}
+
+/// `/bin/kill <signal> -- <pids>`.
 fn send_signal(signal: &str, pids: &[String]) {
     let mut command = Command::new("/bin/kill");
     command
         .arg(signal)
+        .arg("--")
         .args(pids)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -232,6 +266,14 @@ impl GroupControl for SystemGroup {
 
     fn signal_members(&self, signal: &str, members: &[ProcId]) -> usize {
         signal_verified(&tree_rows, &send_signal, signal, members)
+    }
+
+    fn resume_stopped_members(&self, members: &[ProcId]) -> Result<usize, Unreadable> {
+        resume_stopped_members_verified(
+            &|| probe::tool_output(PS, &["-A", "-o", probe::PS_MEMBER_STATE_COLUMNS]),
+            &send_signal,
+            members,
+        )
     }
 
     fn stop(&self, pgid: u32) -> bool {
@@ -338,7 +380,13 @@ impl<'a> Watchdog<'a> {
             .control
             .group_state(pgid)
             .and_then(|state| state.leader_started);
-        let record = orphans::record_pause(self.data_dir, pgid, started.as_deref()).ok();
+        let record = orphans::record_pause_with_members(
+            self.data_dir,
+            pgid,
+            started.as_deref(),
+            &self.tracked,
+        )
+        .ok();
         let stopped = self.control.stop(pgid);
         if stopped && !self.tracked.is_empty() {
             // Also pause helpers in separate process groups (e.g. GradleDaemon / Unity workers).

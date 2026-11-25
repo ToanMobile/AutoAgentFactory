@@ -301,6 +301,9 @@ pub struct ProofConfig {
     /// Optional globs scoping `proof.required` to matching diff paths.
     #[serde(default)]
     pub trigger_globs: Vec<String>,
+    /// Capture script/asset globs enforced as `LockTier::Hard` from `base_sha`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_lock_globs: Vec<String>,
 }
 
 impl Default for ProofConfig {
@@ -314,6 +317,7 @@ impl Default for ProofConfig {
             allowed_tools: vec!["mobile-mcp:mobile_save_screenshot".to_string()],
             capture_cmd: String::new(),
             trigger_globs: Vec::new(),
+            capture_lock_globs: Vec::new(),
         }
     }
 }
@@ -559,22 +563,14 @@ pub struct CrossAuditConfig {
     pub model: String,
     /// Optional reasoning effort override for the cross-audit run.
     pub effort: String,
-    /// Fail closed instead of falling back to `same_account = true` when no
-    /// auditor from a different provider is configured.
+    /// Fail closed instead of falling back to `same_account = true` when no other provider exists.
     pub require_different_provider: bool,
-    /// Scope of cross-audit (`head_lock`, `large`, `always`).
     pub audit_scope: AuditScope,
-    /// Require 7 Golden Standards (`G1..G7`) + `MechanicalScore` thresholds to pass.
     pub score_gate: bool,
-    /// Minimum required `min(mechanical_score, llm_avg)` in `0..=100` (default 95).
     pub min_average_score: u8,
-    /// Minimum required score per golden criterion `G1..G7` in `0..=100` (default 90).
     pub min_criterion_score: u8,
-    /// Enable Blind Parallel Dual-Review across `reviewers`.
     pub dual_review: bool,
-    /// Allow one cross-adjudication turn when exactly one reviewer reports P0/P1 findings.
     pub cross_adjudicate: bool,
-    /// Explicit reviewer pool for Dual-Review (`[[cross_audit.reviewers]]`).
     pub reviewers: Vec<ReviewerConfig>,
 }
 

@@ -144,12 +144,20 @@ fn send_raw(addr: SocketAddr, request: &str) -> RawResp {
 }
 
 fn start_test_server(allow_mutating: bool) -> (super::UiServerHandle, Arc<FakeBackend>) {
+    start_test_server_opts(allow_mutating, false)
+}
+
+fn start_test_server_opts(
+    allow_mutating: bool,
+    allow_approve: bool,
+) -> (super::UiServerHandle, Arc<FakeBackend>) {
     let backend = Arc::new(FakeBackend::default());
     let cfg = UiConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
         token: TEST_TOKEN.to_string(),
         allow_mutating,
+        allow_approve,
         lan_mode: false,
     };
     let handle = start_server(cfg, backend.clone()).unwrap();
@@ -177,6 +185,7 @@ fn non_loopback_host_without_strong_key_is_refused() {
         port: 4319,
         token: String::new(),
         allow_mutating: false,
+        allow_approve: false,
         lan_mode: true,
     };
     assert!(matches!(
@@ -195,10 +204,12 @@ fn non_loopback_host_with_strong_key_and_loopback_autogen_are_accepted() {
     )
     .unwrap();
     assert!(lan.lan_mode);
+    assert!(!lan.allow_approve);
     assert_eq!(lan.token, "strong-lan-secret-token-1234");
 
     let local = UiConfig::resolve("127.0.0.1", 4319, None, true).unwrap();
     assert!(!local.lan_mode);
+    assert!(!local.allow_approve);
     assert_eq!(local.token.len(), 32);
     assert!(local.token.bytes().all(|b| b.is_ascii_hexdigit()));
 
@@ -342,51 +353,36 @@ fn csrf_origin_and_dns_rebinding_host_headers_are_blocked() {
 
 #[test]
 fn approve_post_verifies_lock_fp_and_respects_read_only_mode() {
-    let (handle, backend) = start_test_server(true);
-    let addr = handle.addr();
-
     let good_body = r#"{"task_id":"t-1","lock_fp":"fp-expected-123","reviewer":"alice"}"#;
-    let ok = send_raw(
-        addr,
-        &format!(
-            "POST /api/approve HTTP/1.1\r\n\
-             Host: {addr}\r\n\
-             Authorization: Bearer {TEST_TOKEN}\r\n\
-             Content-Length: {}\r\n\r\n{good_body}",
-            good_body.len()
-        ),
-    );
-    assert_eq!(ok.status, 200);
-    assert_eq!(backend.approved.lock().unwrap().len(), 1);
+    let post = |addr: SocketAddr, body: &str| {
+        send_raw(
+            addr,
+            &format!(
+                "POST /api/approve HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {TEST_TOKEN}\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
 
+    // Default (allow_approve=false) must refuse POST /api/approve with 403.
+    let (def_handle, def_backend) = start_test_server(true);
+    let def_refused = post(def_handle.addr(), good_body);
+    assert_eq!(def_refused.status, 403);
+    assert!(def_backend.approved.lock().unwrap().is_empty());
+    def_handle.join();
+
+    // Opt-in allow_approve=true verifies lock_fp and signs.
+    let (handle, backend) = start_test_server_opts(true, true);
+    assert_eq!(post(handle.addr(), good_body).status, 200);
+    assert_eq!(backend.approved.lock().unwrap().len(), 1);
     let bad_fp = r#"{"task_id":"t-1","lock_fp":"stale-fp","reviewer":"alice"}"#;
-    let mismatch = send_raw(
-        addr,
-        &format!(
-            "POST /api/approve HTTP/1.1\r\n\
-             Host: {addr}\r\n\
-             Authorization: Bearer {TEST_TOKEN}\r\n\
-             Content-Length: {}\r\n\r\n{bad_fp}",
-            bad_fp.len()
-        ),
-    );
-    assert_eq!(mismatch.status, 400);
+    assert_eq!(post(handle.addr(), bad_fp).status, 400);
     handle.join();
 
-    // Read-only mode must refuse POST /api/approve with 403.
-    let (ro_handle, ro_backend) = start_test_server(false);
-    let ro_addr = ro_handle.addr();
-    let refused = send_raw(
-        ro_addr,
-        &format!(
-            "POST /api/approve HTTP/1.1\r\n\
-             Host: {ro_addr}\r\n\
-             Authorization: Bearer {TEST_TOKEN}\r\n\
-             Content-Length: {}\r\n\r\n{good_body}",
-            good_body.len()
-        ),
-    );
-    assert_eq!(refused.status, 403);
+    // Read-only mode must refuse POST /api/approve even when allow_approve=true.
+    let (ro_handle, ro_backend) = start_test_server_opts(false, true);
+    assert_eq!(post(ro_handle.addr(), good_body).status, 403);
     assert!(ro_backend.approved.lock().unwrap().is_empty());
     ro_handle.join();
 }

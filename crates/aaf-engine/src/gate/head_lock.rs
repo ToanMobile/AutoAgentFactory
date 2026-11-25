@@ -56,28 +56,6 @@ pub(super) fn content_hash(repo_root: &Path, path: &str) -> Result<String, GateE
     )))
 }
 
-/// Extract directory prefixes from non-test locked globs so a symlink placed
-/// at any parent directory of a locked config (e.g. `ln -s helper .cargo` or
-/// `ln -s helper .github/workflows`) is locked even though git reports the
-/// symlink entry itself rather than files beneath it.
-fn symlink_dir_prefixes(non_test_globs: &[String]) -> Vec<String> {
-    let mut prefixes = Vec::new();
-    for glob in non_test_globs {
-        let parts: Vec<&str> = glob.split('/').collect();
-        for end in 1..parts.len() {
-            let prefix = &parts[..end];
-            if prefix.iter().all(|seg| *seg == "**" || *seg == "*") {
-                continue;
-            }
-            let joined = prefix.join("/");
-            if !prefixes.contains(&joined) {
-                prefixes.push(joined);
-            }
-        }
-    }
-    prefixes
-}
-
 struct LockMatchers {
     /// Configured test-file globs (case-sensitive so `*Test.kt` does not match `latest.kt`).
     test_globs: GlobSet,
@@ -91,7 +69,7 @@ struct LockMatchers {
 }
 
 impl LockMatchers {
-    fn from_globs(globs: &[String]) -> Result<Self, GateError> {
+    fn from_globs(globs: &[String], extra_hard_globs: &[String]) -> Result<Self, GateError> {
         let mut test = Vec::new();
         let mut non_test = Vec::new();
         for g in globs {
@@ -101,7 +79,12 @@ impl LockMatchers {
                 non_test.push(g.clone());
             }
         }
-        let dir_prefixes = symlink_dir_prefixes(&non_test);
+        for g in extra_hard_globs {
+            if !non_test.contains(g) {
+                non_test.push(g.clone());
+            }
+        }
+        let dir_prefixes = changes::symlink_dir_prefixes(&non_test);
         Ok(Self {
             test_globs: glob_set(&test, false)?,
             non_test_globs: glob_set(&non_test, true)?,
@@ -190,20 +173,6 @@ fn locked_path<'a>(
 
 type LockEntry = (String, &'static str, String, String);
 
-/// Locked changes and their fingerprint (empty when nothing is locked).
-/// Any file whose diff adds a new inline allow marker is locked alongside
-/// glob-matched paths so suppressions require a signed approval.
-fn locked(
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    changes: &[Change],
-    added: &[AddedLines],
-) -> Result<(Vec<LockedChange>, String), GateError> {
-    let mut hash = |path: &str| content_hash(repo_root, path);
-    let (report, fp, _) = locked_with(repo_root, cfg, changes, added, &mut hash)?;
-    Ok((report, fp))
-}
-
 /// Locked changes, their fingerprint, and exact sorted entry tuples, with
 /// the content of each changed path read by `hash` (callers memoise it so
 /// derived views (base config, tracked-only changes) reuse the exact same
@@ -211,11 +180,12 @@ fn locked(
 fn locked_with(
     repo_root: &Path,
     cfg: &RepoConfig,
+    extra_hard_globs: &[String],
     changes: &[Change],
     added: &[AddedLines],
     hash: &mut dyn FnMut(&str) -> Result<String, GateError>,
 ) -> Result<(Vec<LockedChange>, String, Vec<LockEntry>), GateError> {
-    let matchers = LockMatchers::from_globs(&cfg.gate.head_lock_globs)?;
+    let matchers = LockMatchers::from_globs(&cfg.gate.head_lock_globs, extra_hard_globs)?;
     let mut allow_paths: HashSet<&str> = HashSet::new();
     for file in added {
         for (_, text) in &file.lines {
@@ -318,27 +288,28 @@ fn valid_approval(
     None
 }
 
-pub(crate) fn evaluate_changes(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    changes: &[Change],
-    added: &[AddedLines],
-) -> Result<HeadLockReport, GateError> {
-    let req = cfg.cross_audit.require_different_provider;
-    evaluate_changes_with_common(data_dir, repo_root, None, cfg, changes, added, req)
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_changes_with_common(
     data_dir: &Path,
     repo_root: &Path,
     common_root: Option<&Path>,
     cfg: &RepoConfig,
+    extra_hard_globs: &[String],
     changes: &[Change],
     added: &[AddedLines],
     require_independent: bool,
 ) -> Result<HeadLockReport, GateError> {
-    let (locked_changes, lock_fp) = locked(repo_root, cfg, changes, added)?;
+    let effective =
+        changes::with_ignored_matching(repo_root, extra_hard_globs, changes, GIT_TIMEOUT)?;
+    let mut hash = |path: &str| content_hash(repo_root, path);
+    let (locked_changes, lock_fp, _) = locked_with(
+        repo_root,
+        cfg,
+        extra_hard_globs,
+        &effective,
+        added,
+        &mut hash,
+    )?;
     if locked_changes.is_empty() {
         return Ok(HeadLockReport {
             status: LockStatus::Clear,
@@ -381,7 +352,19 @@ pub fn evaluate(
                 &static_checks::skip_path,
                 GIT_TIMEOUT,
             )?;
-            evaluate_changes(data_dir, repo_root, cfg, &set.changes, &added)
+            let (_, extra_hard) =
+                crate::proof::load_gate_base_capture_cmd(repo_root, Some(base_sha))?;
+            let req = cfg.cross_audit.require_different_provider;
+            evaluate_changes_with_common(
+                data_dir,
+                repo_root,
+                None,
+                cfg,
+                &extra_hard,
+                &set.changes,
+                &added,
+                req,
+            )
         })
         .unwrap_or_else(|_| HeadLockReport {
             status: LockStatus::Blocked,
@@ -501,8 +484,17 @@ pub(super) fn approve_inner(
         seen_content.insert(path.to_string(), hash.clone());
         Ok(hash)
     };
-    let (locked_changes, lock_fp, primary_entries) =
-        locked_with(repo_root, cfg, &set.changes, &added, &mut hash)?;
+    let (_, extra_hard) = crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())?;
+    let working_changes =
+        changes::with_ignored_matching(repo_root, &extra_hard, &set.changes, GIT_TIMEOUT)?;
+    let (locked_changes, lock_fp, primary_entries) = locked_with(
+        repo_root,
+        cfg,
+        &extra_hard,
+        &working_changes,
+        &added,
+        &mut hash,
+    )?;
     if locked_changes.is_empty() && expected_lock_fp.is_some() {
         return Err(GateError::NothingLocked);
     }
@@ -522,10 +514,17 @@ pub(super) fn approve_inner(
         let raw = aaf_fp::git(repo_root, &["show", &spec], &[], GIT_TIMEOUT).ok()?;
         toml::from_str::<RepoConfig>(&raw).ok()
     });
-    let base_view = base_cfg.as_ref().and_then(|bcfg| {
-        let (base_locked, fp, entries) =
-            locked_with(repo_root, bcfg, &set.changes, &added, &mut hash).ok()?;
-        (!base_locked.is_empty()).then_some((fp, entries))
+    let base_view = base_cfg.as_ref().and_then(|b| {
+        let (bl, fp, ent) = locked_with(
+            repo_root,
+            b,
+            &extra_hard,
+            &working_changes,
+            &added,
+            &mut hash,
+        )
+        .ok()?;
+        (!bl.is_empty()).then_some((fp, ent))
     });
     let (primary_fp, allowed_entries, base_view) = if !locked_changes.is_empty() {
         (lock_fp, primary_entries, base_view)
@@ -552,44 +551,38 @@ pub(super) fn approve_inner(
         extra_fps.push(fp);
     }
     if !tracked_changes.is_empty() {
-        if let Ok((tl, fp, entries)) =
-            locked_with(repo_root, cfg, &tracked_changes, &added, &mut hash)
-            && !tl.is_empty()
-            && entries.iter().all(|e| primary_set.contains(e))
-        {
-            extra_fps.push(fp);
-        }
-        if let Some(bcfg) = base_cfg.as_ref()
-            && let Ok((tl, fp, base_entries)) =
-                locked_with(repo_root, bcfg, &tracked_changes, &added, &mut hash)
-            && !tl.is_empty()
-            && base_entries.iter().all(|e| primary_set.contains(e))
-        {
-            extra_fps.push(fp);
+        for c in [Some(cfg), base_cfg.as_ref()].into_iter().flatten() {
+            if let Ok((tl, fp, ent)) = locked_with(
+                repo_root,
+                c,
+                &extra_hard,
+                &tracked_changes,
+                &added,
+                &mut hash,
+            ) && !tl.is_empty()
+                && ent.iter().all(|e| primary_set.contains(e))
+            {
+                extra_fps.push(fp);
+            }
         }
     }
-    let created_at = clock.now();
     let approval = Approval {
         lock_fp: primary_fp,
         reviewer: reviewer.to_string(),
         verdict: "PASS".to_string(),
         same_account,
-        created_at,
+        created_at: clock.now(),
     };
     let key = aaf_fp::load_or_create_key(data_dir)?;
     write_approval_everywhere(data_dir, &key, repo_root, &approval)?;
-    let mut seen = HashSet::new();
-    seen.insert(approval.lock_fp.clone());
+    let mut seen = HashSet::from([approval.lock_fp.clone()]);
     for extra_fp in extra_fps {
         if seen.insert(extra_fp.clone()) {
-            let extra_approval = Approval {
+            let extra = Approval {
                 lock_fp: extra_fp,
-                reviewer: reviewer.to_string(),
-                verdict: "PASS".to_string(),
-                same_account,
-                created_at,
+                ..approval.clone()
             };
-            write_approval_everywhere(data_dir, &key, repo_root, &extra_approval)?;
+            write_approval_everywhere(data_dir, &key, repo_root, &extra)?;
         }
     }
     Ok(approval)

@@ -35,6 +35,7 @@ pub use server::{UiServerHandle, start_server};
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 4319;
 pub const MIN_LAN_TOKEN_LEN: usize = 16;
+pub const APPROVE_DISABLED_MSG: &str = "POST /api/approve is disabled by default; start `aaf ui --allow-approve` or use interactive `aaf approve` on a TTY";
 
 pub const HTML_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
@@ -49,6 +50,7 @@ pub struct UiConfig {
     pub port: u16,
     pub token: String,
     pub allow_mutating: bool,
+    pub allow_approve: bool,
     pub lan_mode: bool,
 }
 
@@ -59,6 +61,7 @@ impl Default for UiConfig {
             port: DEFAULT_PORT,
             token: generate_token(),
             allow_mutating: true,
+            allow_approve: false,
             lan_mode: false,
         }
     }
@@ -67,6 +70,7 @@ impl Default for UiConfig {
 impl UiConfig {
     /// Builds and validates a [`UiConfig`], auto-generating a 32-hex bearer
     /// token only when binding to a loopback host without an explicit key.
+    /// `allow_approve` defaults to `false`; call [`Self::with_allow_approve`] to opt in.
     pub fn resolve(
         host: impl Into<String>,
         port: u16,
@@ -88,10 +92,22 @@ impl UiConfig {
             port,
             token,
             allow_mutating,
+            allow_approve: false,
             lan_mode: !loopback,
         };
         validate_ui_config(&cfg)?;
         Ok(cfg)
+    }
+
+    /// Opts in to `POST /api/approve`; fail-closed (`false`) when `allow_mutating` is `false`.
+    pub fn with_allow_approve(mut self, allow: bool) -> Self {
+        self.allow_approve = allow && self.allow_mutating;
+        self
+    }
+
+    /// Effective `POST /api/approve` policy (always `false` in read-only mode).
+    pub fn effective_allow_approve(&self) -> bool {
+        self.allow_mutating && self.allow_approve
     }
 }
 
@@ -99,7 +115,7 @@ impl UiConfig {
 #[derive(Debug, thiserror::Error)]
 pub enum UiError {
     #[error(
-        "refusing non-loopback bind on '{host}' without an explicit bearer token (>= {min_len} chars); pass --key or set AAF_UI_TOKEN"
+        "refusing non-loopback bind on '{host}' without an explicit bearer token (>= {min_len} chars); set AAF_UI_TOKEN (or pass --key)"
     )]
     InsecureLanBind { host: String, min_len: usize },
     #[error("invalid bind host '{host}'")]
@@ -268,6 +284,14 @@ pub fn verify_request_security(
     if req.is_mutating && !cfg.allow_mutating {
         return Err(SecurityRejection::Forbidden(
             "server is running in read-only mode".to_string(),
+        ));
+    }
+    if req.method.eq_ignore_ascii_case("POST")
+        && req.path == "/api/approve"
+        && !cfg.effective_allow_approve()
+    {
+        return Err(SecurityRejection::Forbidden(
+            APPROVE_DISABLED_MSG.to_string(),
         ));
     }
     Ok(())
@@ -449,6 +473,22 @@ pub(crate) fn write_sse_event(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     write!(stream, "event: {event}\ndata: {s}\n\n")?;
     stream.flush()
+}
+
+pub(crate) fn with_meta_policy(
+    res: Result<Value, String>,
+    cfg: &UiConfig,
+) -> Result<Value, String> {
+    res.map(|mut val| {
+        if let Value::Object(ref mut map) = val {
+            map.insert("read_only".into(), Value::Bool(!cfg.allow_mutating));
+            map.insert(
+                "allow_approve".into(),
+                Value::Bool(cfg.effective_allow_approve()),
+            );
+        }
+        val
+    })
 }
 
 pub(crate) fn wrap_ok(val: Value) -> Value {

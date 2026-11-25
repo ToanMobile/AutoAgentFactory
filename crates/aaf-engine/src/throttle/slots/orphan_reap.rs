@@ -37,6 +37,7 @@ fn reap_impl(data_dir: &Path, ceiling: usize, min_age: Option<Duration>) -> io::
             match file.try_lock() {
                 Ok(()) => {
                     if file.lock_has_content().unwrap_or(false) && file.clear_record().is_ok() {
+                        super::orphan_since::clear(data_dir, index);
                         reaped += 1;
                     }
                     file.unlock();
@@ -54,6 +55,7 @@ fn reap_impl(data_dir: &Path, ceiling: usize, min_age: Option<Duration>) -> io::
         {
             let non_empty = file.metadata().is_ok_and(|meta| meta.len() > 0);
             if non_empty && file.set_len(0).is_ok() {
+                super::orphan_since::clear(data_dir, index);
                 reaped += 1;
             }
             unlock_all(std::slice::from_ref(&file));

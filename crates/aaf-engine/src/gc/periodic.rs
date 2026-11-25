@@ -57,9 +57,10 @@ pub fn check_free_disk_bytes(path: &Path, min_free_bytes: u64) -> Result<(), GcE
 }
 
 /// Non-locking periodic GC safe to call from an active factory loop on
-/// `repo_root`. Cleans expired `data_dir` artifacts, stale fingerprint temps,
-/// orphan `aaf/batch-*` worktrees/branches, prunes gone worktree entries, and
-/// checks free disk space on `worktrees_dir`.
+/// `repo_root`. Cleans expired `data_dir` artifacts and audits (only when DB
+/// state is readable), stale fingerprint temps, orphan `aaf/batch-*`
+/// worktrees/branches, prunes gone worktree entries, and checks free disk space
+/// on `worktrees_dir`. Never writes or deletes rows in `aaf.db`.
 pub fn lightweight_sweep(
     repo_root: &Path,
     data_dir: &Path,
@@ -70,15 +71,42 @@ pub fn lightweight_sweep(
     let opts = GcOptions::default();
     let now_time = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(now).unwrap_or(0));
 
-    let (all_tasks, running_runs) = match collect_db_state(data_dir) {
-        Ok(state) => state,
+    let db_state = match collect_db_state(data_dir) {
+        Ok(state) => Some(state),
         Err(err) => {
             report.warnings.push(format!("db state: {err}"));
-            (Vec::new(), HashSet::new())
+            None
         }
     };
 
-    clean_expired_artifacts(data_dir, &opts, &running_runs, now_time, &mut report);
+    if let Some((ref all_tasks, ref running_runs, _)) = db_state {
+        clean_expired_artifacts(data_dir, &opts, running_runs, now_time, &mut report);
+
+        let mut busy_repos = HashSet::new();
+        busy_repos.insert(repo_root.display().to_string());
+        let canonical_repo = canonical_or_owned(repo_root);
+        busy_repos.insert(canonical_repo.display().to_string());
+        let protected_audits = crate::gc_audits::collect_protected_audit_ids_with_locks(
+            all_tasks,
+            &busy_repos,
+            data_dir,
+            worktrees_dir,
+        );
+        let cutoff = now_time
+            .checked_sub(Duration::from_secs(
+                opts.older_than_days.saturating_mul(86_400),
+            ))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let audit_stats = crate::gc_audits::clean_expired_audits(
+            data_dir,
+            cutoff,
+            opts.older_than_days,
+            &protected_audits,
+            false,
+        );
+        report.removed_files.extend(audit_stats.removed_files);
+        report.warnings.extend(audit_stats.warnings);
+    }
 
     if repo_root.is_dir() && aaf_fp::repo_root(repo_root).is_ok() {
         let canonical_repo = canonical_or_owned(repo_root);
@@ -86,27 +114,30 @@ pub fn lightweight_sweep(
             .repos_scanned
             .push(canonical_repo.display().to_string());
         let repo_id = aaf_fp::repo_id(&canonical_repo);
-        let active_ids: HashSet<String> = all_tasks
-            .iter()
-            .filter(|t| canonical_or_owned(Path::new(&t.repo_root)) == canonical_repo)
-            .map(|t| t.id.clone())
-            .collect();
 
-        match worktree::remove_orphan_batch_worktrees(
-            &canonical_repo,
-            worktrees_dir,
-            &repo_id,
-            &active_ids,
-            false,
-        ) {
-            Ok(sweep) => {
-                report.removed_orphan_batches.extend(sweep.removed);
-                report.warnings.extend(sweep.warnings);
+        if let Some((ref all_tasks, _, _)) = db_state {
+            let active_ids: HashSet<String> = all_tasks
+                .iter()
+                .filter(|t| canonical_or_owned(Path::new(&t.repo_root)) == canonical_repo)
+                .map(|t| t.id.clone())
+                .collect();
+
+            match worktree::remove_orphan_batch_worktrees(
+                &canonical_repo,
+                worktrees_dir,
+                &repo_id,
+                &active_ids,
+                false,
+            ) {
+                Ok(sweep) => {
+                    report.removed_orphan_batches.extend(sweep.removed);
+                    report.warnings.extend(sweep.warnings);
+                }
+                Err(err) => report.warnings.push(format!(
+                    "{}: orphan batch sweep: {err}",
+                    canonical_repo.display()
+                )),
             }
-            Err(err) => report.warnings.push(format!(
-                "{}: orphan batch sweep: {err}",
-                canonical_repo.display()
-            )),
         }
 
         match worktree::prune(&canonical_repo) {

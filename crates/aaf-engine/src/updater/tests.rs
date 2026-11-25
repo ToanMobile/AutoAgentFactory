@@ -69,7 +69,51 @@ impl ReleaseSource for FakeReleaseSource {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    encode_lower_hex(Sha256::digest(bytes).as_slice())
+    verify::encode_lower_hex(Sha256::digest(bytes).as_slice())
+}
+
+const TEST_PUBKEY_1: &str = "RWQBAgMEBQYHCNAlIrEywCYMycwLQ7sVFGdhwN1WS9nRZNDEBxQG9gsE";
+
+const SIG_GOOD: &str = "\
+untrusted comment: signature from aaf test key 0102030405060708
+RUQBAgMEBQYHCF4pUq8WYe/jdS9q29gPEL682HwdHdR/d/+1A+2XF+oWyj7QQvbfHB8Ih7pBDbojG1AMa91jyO2yltOjfp/02gY=
+trusted comment: timestamp:1700000000\tfile:SHA256SUMS.txt\tprehashed
+BzEI/by3DWICY1pCXjR07idOnAWlMW9zYyf0ZxMZyQw8mTen5Xmj7imbq/nxqw+pgF35ANOSjgcrikmI42tHBw==
+";
+
+const SIG_OTHER: &str = "\
+untrusted comment: signature from aaf test key 0102030405060708
+RUQBAgMEBQYHCFBBp+WAFEdnLec0S5Fu/lEgBbnr77zl/grQlzjqlMBHOTOo1VXPBv/D9zdctaVEgWbfnO8jva/mFjFEopNQmQ0=
+trusted comment: timestamp:1700000000\tfile:SHA256SUMS.txt\tprehashed
+XpGIjsy5BC7EUdIGLDwY6A62pt6719FlbeoQ/TWkwiaqbweOw/0nzLIH4L1fHgl6xlPaRqT6qzN893RzVTivDQ==
+";
+
+const SIG_E2E: &str = "\
+untrusted comment: signature from aaf test key 0102030405060708
+RUQBAgMEBQYHCD2d4puXqZM8bRToCBoejsqCkW7qBohy1RW/r5/Txp4OleC6egVORCuvOEdZMGuUycI9tg8irczwXhi65IhF0wc=
+trusted comment: timestamp:1700000000\tfile:SHA256SUMS.txt\tprehashed
+tlifJCwf3o+2qCwVcqjWR51dfTcpu1puQ5ZH8jzJGi0pvn1fJk5ImiWy6F2a32aCwaS872+dQN4BfiCf0rBZBQ==
+";
+
+// Deterministic tar.gz containing `aaf-v0.9.0-aarch64-apple-darwin/{aaf,aaf-hook}`.
+#[cfg(unix)]
+const E2E_TARBALL_HEX: &str = concat!(
+    "1f8b08000000000000ffedd4cd0a8240148661d75e85d17af4988ed1e59c4c99",
+    "2832b49fdb6f7213d8c240b082f7d9cc309b6fe0cc37aab5b949bc89c5a8b6a5",
+    "2b72a3e7f3b1323b6deffb53a25a075389b7b6b65fbde12a92a5affdf33ccd0a",
+    "5905914c4efec0b5bb68ebe3e7c8fa41cb45b2f563ee5c5895ae89fcb8a3fe35",
+    "84dfbe1866a1e3fd37ae690e5332c6fb5f0cfa9fdbdcd2ff39bcf7bf1f379f00",
+    "0000000000000000000000c09f78003ca73eb300280000",
+);
+
+#[cfg(unix)]
+fn decode_hex(hex: &str) -> Vec<u8> {
+    hex.as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
 }
 
 #[test]
@@ -274,6 +318,10 @@ fn check_for_update_classifies_newer_same_and_downgrade() {
         newer.checksums_url,
         "https://github.com/ToanMobile/AutoAgentFactory/releases/download/v0.3.0/SHA256SUMS.txt"
     );
+    assert_eq!(
+        newer.checksums_sig_url,
+        "https://github.com/ToanMobile/AutoAgentFactory/releases/download/v0.3.0/SHA256SUMS.txt.minisig"
+    );
 
     let same =
         check_for_update(&source, DEFAULT_REPO, "0.3.0", None, "aarch64-apple-darwin").unwrap();
@@ -322,10 +370,11 @@ fn download_and_verify_fails_closed_on_tampered_bytes_or_missing_checksum() {
             plan.checksums_url.clone(),
             format!("{good_hash}  {}\n", plan.archive_name),
         )
+        .with_text(plan.checksums_sig_url.clone(), SIG_GOOD)
         .with_blob(plan.archive_url.clone(), tampered);
 
     assert!(matches!(
-        download_and_verify(&tampered_source, &plan),
+        download_and_verify_with_keys(&tampered_source, &plan, &[TEST_PUBKEY_1]),
         Err(UpdateError::ChecksumMismatch { .. })
     ));
 
@@ -334,11 +383,24 @@ fn download_and_verify_fails_closed_on_tampered_bytes_or_missing_checksum() {
             plan.checksums_url.clone(),
             format!("{good_hash}  some-other-file.tar.gz\n"),
         )
+        .with_text(plan.checksums_sig_url.clone(), SIG_OTHER)
         .with_blob(plan.archive_url.clone(), good_bytes.clone());
 
     assert!(matches!(
-        download_and_verify(&missing_sum_source, &plan),
+        download_and_verify_with_keys(&missing_sum_source, &plan, &[TEST_PUBKEY_1]),
         Err(UpdateError::MissingChecksum(_))
+    ));
+
+    let unsigned_source = FakeReleaseSource::new("v0.5.0")
+        .with_text(
+            plan.checksums_url.clone(),
+            format!("{good_hash}  {}\n", plan.archive_name),
+        )
+        .with_blob(plan.archive_url.clone(), good_bytes.clone());
+
+    assert!(matches!(
+        download_and_verify_with_keys(&unsigned_source, &plan, &[TEST_PUBKEY_1]),
+        Err(UpdateError::VerificationFailed(_))
     ));
 
     let ok_source = FakeReleaseSource::new("v0.5.0")
@@ -346,9 +408,16 @@ fn download_and_verify_fails_closed_on_tampered_bytes_or_missing_checksum() {
             plan.checksums_url.clone(),
             format!("{good_hash}  {}\n", plan.archive_name),
         )
+        .with_text(plan.checksums_sig_url.clone(), SIG_GOOD)
         .with_blob(plan.archive_url.clone(), good_bytes.clone());
 
-    let verified = download_and_verify(&ok_source, &plan).unwrap();
+    // Default production TRUSTED_RELEASE_PUBKEYS fails closed until populated.
+    assert!(matches!(
+        download_and_verify(&ok_source, &plan),
+        Err(UpdateError::VerificationFailed(_))
+    ));
+
+    let verified = download_and_verify_with_keys(&ok_source, &plan, &[TEST_PUBKEY_1]).unwrap();
     assert_eq!(verified.sha256, good_hash);
     assert_eq!(verified.bytes, good_bytes);
 }
@@ -362,28 +431,11 @@ fn end_to_end_install_verified_tarball_and_reject_symlink_archive() {
     let target = "aarch64-apple-darwin";
     let tag = "v0.9.0";
     let pkg_dir = format!("aaf-{tag}-{target}");
-    let stage = tmp.path().join("stage");
-    let pkg_path = stage.join(&pkg_dir);
-    fs::create_dir_all(&pkg_path).unwrap();
 
     let fake_aaf = b"#!/bin/sh\necho aaf 0.9.0\n".to_vec();
     let fake_hook = b"#!/bin/sh\necho aaf-hook 0.9.0\n".to_vec();
-    fs::write(pkg_path.join("aaf"), &fake_aaf).unwrap();
-    fs::write(pkg_path.join("aaf-hook"), &fake_hook).unwrap();
-
     let archive_name = archive_filename(tag, target);
-    let tarball_path = tmp.path().join(&archive_name);
-    let status = Command::new("tar")
-        .arg("-czf")
-        .arg(&tarball_path)
-        .arg("-C")
-        .arg(&stage)
-        .arg(&pkg_dir)
-        .status()
-        .unwrap();
-    assert!(status.success(), "tar -czf failed");
-
-    let archive_bytes = fs::read(&tarball_path).unwrap();
+    let archive_bytes = decode_hex(E2E_TARBALL_HEX);
     let archive_hash = sha256_hex(&archive_bytes);
 
     let base_source = FakeReleaseSource::new(tag);
@@ -393,16 +445,25 @@ fn end_to_end_install_verified_tarball_and_reject_symlink_archive() {
             plan.checksums_url.clone(),
             format!("{archive_hash}  {archive_name}\n"),
         )
+        .with_text(plan.checksums_sig_url.clone(), SIG_E2E)
         .with_blob(plan.archive_url.clone(), archive_bytes);
 
-    let verified = download_and_verify(&source, &plan).unwrap();
     let install_dir = tmp.path().join("bin");
     fs::create_dir_all(&install_dir).unwrap();
     // Seed old binaries to verify atomic replacement cleans up backups.
     fs::write(install_dir.join("aaf"), b"old-aaf").unwrap();
     fs::write(install_dir.join("aaf-hook"), b"old-hook").unwrap();
 
-    let receipt = install_verified_binaries(&verified, &install_dir).unwrap();
+    let receipt = upgrade_with_source_and_keys(
+        &source,
+        DEFAULT_REPO,
+        "0.1.0",
+        None,
+        target,
+        &install_dir,
+        &[TEST_PUBKEY_1],
+    )
+    .unwrap();
     assert_eq!(receipt.tag, tag);
     assert_eq!(receipt.sha256, archive_hash);
     assert_eq!(receipt.installed_binaries.len(), 2);

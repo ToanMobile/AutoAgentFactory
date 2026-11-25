@@ -25,6 +25,7 @@ use std::time::Duration;
 use aaf_domain::ports::{PortError, PortResult};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 
+pub use history::ArchivedEventRow;
 pub use queries::BoardEnrichment;
 pub use schema::SCHEMA_VERSION;
 pub use snapshots::TurnSnapshot;

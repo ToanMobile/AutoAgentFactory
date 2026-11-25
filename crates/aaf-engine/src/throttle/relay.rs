@@ -26,9 +26,9 @@
 //! spawns in between holds a copy and the pipe stays open until that child
 //! ends (`aaf_fp::output`). A socket pair would not help: its reader too
 //! sees the end only once every copy is closed or `aaf` shuts it down, which
-//! a dead `aaf` cannot. So an armed relay also asks the kernel once a
-//! second whether `aaf`'s pid still exists (`kill -0`, a shell builtin) and
-//! treats its absence as the closed pipe. Two cases still fall back to the
+//! a dead `aaf` cannot. So an armed relay also asks the kernel every 0.2 s
+//! whether `aaf`'s pid still exists (`kill -0`, a shell builtin) and treats
+//! its absence as the closed pipe. Two cases still fall back to the
 //! pipe: an `aaf` that is a zombie its parent has not collected (`kill -0`
 //! answers for a zombie on macOS 27), and a pid already given to another
 //! process.
@@ -60,13 +60,21 @@ const DONE: &[u8] = b"done\n";
 /// started skips the wait. When armed, a watcher ends the reader (not done)
 /// once `$4` is gone, and the relay ends the watcher when it exits.
 ///
+/// The pre-`SIGTERM` closed-pipe check uses `kill -0 -"$1"` directly (avoiding
+/// a full `ps -A` scan before signalling; `SIGTERM` to a zombie-only group is
+/// a POSIX no-op). `bounded_ps` caps `/bin/ps -A` with a portable timer that
+/// cleans up its own sleep child; if `ps` stalls or fails, `group_live` treats
+/// the group as still alive (`return 0`) so the relay never exits early.
+///
 /// The SIGKILL is repeated until `kill -0` finds the group empty, for at
 /// most `$3` rounds a tenth of a second apart: on macOS one SIGKILL to a
 /// group misses a member being forked at that instant, which then runs on
 /// with the group id (as in `gate::proc::kill_group_until_empty`). The loop
-/// stops at the first empty answer, so a group id given to somebody else
-/// afterwards is not signalled. If members are still there at the end it
-/// says so on stderr, where the person who pressed Ctrl-C looks.
+/// stops at the first empty `kill -0` answer, so a group id given to somebody
+/// else afterwards is not signalled, and checks `group_live` only sparsely
+/// (never spawning bounded `ps` timers on every 0.1 s tick) to catch
+/// zombie-only groups. If members are still there at the end it says so on
+/// stderr, where the person who pressed Ctrl-C looks.
 const SCRIPT: &str = r#"sig=
 trap 'sig=INT' INT
 trap 'sig=TERM' TERM
@@ -78,19 +86,50 @@ for p in $leader_parent; do leader_parent=$p; break; done
 exec 3<&0
 /bin/sh -c 'IFS= read -r said && [ "$said" = done ]' aaf-relay-reader <&3 >/dev/null 2>&1 &
 reader=$!
+watcher=
+trap '[ -n "$watcher" ] && kill "$watcher" 2>/dev/null; [ -n "$reader" ] && kill "$reader" 2>/dev/null; wait 2>/dev/null' EXIT
 if [ -n "$armed" ]; then
   (
+    sp=
+    last_sp=$reader
+    trap '[ -n "$sp" ] && kill "$sp" 2>/dev/null; [ -n "$!" ] && [ "$!" != "$last_sp" ] && kill "$!" 2>/dev/null; exit 0' TERM INT HUP
     while kill -0 "$reader" 2>/dev/null; do
       kill -0 "$4" 2>/dev/null || { kill "$reader" 2>/dev/null; exit 0; }
-      /bin/sleep 1
+      /bin/sleep 0.2 &
+      sp=$!
+      wait "$sp" 2>/dev/null
+      last_sp=$sp
+      sp=
     done
   ) </dev/null >/dev/null 2>&1 3<&- &
   watcher=$!
-  trap 'kill "$watcher" 2>/dev/null' EXIT
 fi
+bounded_ps() {
+  (
+    ps_pid=
+    t_pid=
+    trap '[ -n "$t_pid" ] && kill "$t_pid" 2>/dev/null; [ -n "$ps_pid" ] && kill -KILL "$ps_pid" 2>/dev/null; exit 1' TERM INT HUP
+    /bin/ps -A -o pgid=,stat= </dev/null 2>/dev/null 3<&- &
+    ps_pid=$!
+    (
+      sp=
+      trap '[ -n "$sp" ] && kill "$sp" 2>/dev/null; [ -n "$!" ] && [ "$!" != "$ps_pid" ] && kill "$!" 2>/dev/null; exit 0' TERM INT HUP
+      kill -0 "$ps_pid" 2>/dev/null || exit 0
+      /bin/sleep 2 &
+      sp=$!
+      wait "$sp" 2>/dev/null && kill -KILL "$ps_pid" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 3<&- &
+    t_pid=$!
+    wait "$ps_pid" 2>/dev/null
+    rc=$?
+    kill "$t_pid" 2>/dev/null
+    wait "$t_pid" 2>/dev/null
+    exit "$rc"
+  )
+}
 group_live() {
   kill -0 -"$1" 2>/dev/null || return 1
-  out=$(/bin/ps -A -o pgid=,stat= 2>/dev/null) || return 0
+  out=$(bounded_ps) || return 0
   [ -n "$out" ] || return 0
   printf '%s\n' "$out" | (
     while read -r g s; do
@@ -102,22 +141,41 @@ group_live() {
 }
 [ -n "$sig" ] || wait "$reader"
 said=$?
+if [ -n "$watcher" ]; then
+  kill "$watcher" 2>/dev/null
+  wait "$watcher" 2>/dev/null
+  watcher=
+fi
+if [ -n "$sig" ]; then
+  kill "$reader" 2>/dev/null
+  wait "$reader" 2>/dev/null
+fi
+reader=
 if [ -z "$sig" ]; then
   [ "$said" -ne 0 ] && [ -n "$armed" ] || exit 0
-  group_live "$1" || exit 0
+  kill -0 -"$1" 2>/dev/null || exit 0
   sig=TERM
 fi
 kill -"$sig" -"$1" 2>/dev/null
 n=0
-while group_live "$1" && [ "$n" -lt "$2" ]; do
-  /bin/sleep 1
+grace_ticks=$(($2 * 5))
+while [ "$n" -lt "$grace_ticks" ]; do
+  kill -0 -"$1" 2>/dev/null || exit 0
+  if [ "$n" -eq 1 ] || [ $((n % 5)) -eq 0 ]; then
+    group_live "$1" || exit 0
+  fi
+  /bin/sleep 0.2
   n=$((n+1))
 done
 n=0
 while :; do
+  kill -0 -"$1" 2>/dev/null || exit 0
   kill -KILL -"$1" 2>/dev/null
-  group_live "$1" || exit 0
+  kill -0 -"$1" 2>/dev/null || exit 0
   n=$((n+1))
+  if [ "$n" -eq 2 ] || [ "$n" -eq 5 ] || [ $((n % 10)) -eq 0 ] || [ "$n" -ge "$3" ]; then
+    group_live "$1" || exit 0
+  fi
   [ "$n" -lt "$3" ] || break
   /bin/sleep 0.1
 done

@@ -18,29 +18,12 @@ use serde_json::{Value, json};
 use crate::db::Db;
 use crate::factory::adapters::SystemClock;
 
-/// Per-million-token pricing used for approximate cost display.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CostRates {
-    pub input_per_million_usd: f64,
-    pub output_per_million_usd: f64,
-}
-
-impl Default for CostRates {
-    fn default() -> Self {
-        Self {
-            input_per_million_usd: 3.0,
-            output_per_million_usd: 15.0,
-        }
-    }
-}
-
-impl CostRates {
-    pub fn estimate_usd(self, tokens_in: u64, tokens_out: u64) -> f64 {
-        let input = (tokens_in as f64 / 1_000_000.0) * self.input_per_million_usd;
-        let output = (tokens_out as f64 / 1_000_000.0) * self.output_per_million_usd;
-        ((input + output) * 1_000_000.0).round() / 1_000_000.0
-    }
-}
+#[path = "telemetry_autonomy.rs"]
+mod autonomy;
+pub use autonomy::{
+    AutonomyMetrics, CostRates, collect_autonomy_metrics, collect_autonomy_metrics_for_tasks,
+    compute_autonomy_metrics,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCounts {
@@ -100,6 +83,8 @@ pub struct TelemetrySummary {
     pub estimated_cost_usd: f64,
     pub accounts: Vec<AccountSummary>,
     pub throttle: ThrottleSnapshot,
+    #[serde(default)]
+    pub autonomy: AutonomyMetrics,
 }
 
 /// Probes whether `path` is a regular file currently held under an exclusive
@@ -241,7 +226,10 @@ pub fn collect_status(
         .map(|t| (t.state, t.blocked_reason.as_ref().map(|r| r.kind()), 1))
         .collect();
     let throttle = query.data_dir.map(inspect_throttle).unwrap_or_default();
-    assemble_status(&groups, totals, kv, accounts, query, throttle)
+    // Without an EventSink, task event history is unavailable so done tasks are
+    // omitted from autonomy denominators rather than assumed 100% autonomous.
+    let autonomy = AutonomyMetrics::default();
+    assemble_status(&groups, totals, kv, accounts, query, throttle, autonomy)
 }
 
 /// Collects global/repo status directly from [`Db`] using a single SQL
@@ -251,14 +239,16 @@ pub fn collect_status_from_db(db: &Db, query: &StatusQuery<'_>) -> PortResult<Te
     collect_status_from_db_with_throttle(db, query, throttle)
 }
 
-/// Collects global/repo status from [`Db`] reusing a pre-scanned
-/// [`ThrottleSnapshot`] from [`scan_throttle`].
+/// Collects global/repo status from [`Db`] reusing a pre-scanned [`ThrottleSnapshot`].
 pub fn collect_status_from_db_with_throttle(
     db: &Db,
     query: &StatusQuery<'_>,
     throttle: ThrottleSnapshot,
 ) -> PortResult<TelemetrySummary> {
     let groups = db.task_state_counts(query.repo_root)?;
+    let has_done = groups
+        .iter()
+        .any(|(s, _, n)| *s == TaskState::Done && *n > 0);
     let mut totals = RunTotals::default();
     for (status, count, t_in, t_out) in db.run_totals_by_repo(query.repo_root)? {
         bump_run(
@@ -269,7 +259,9 @@ pub fn collect_status_from_db_with_throttle(
         totals.tokens_in = totals.tokens_in.saturating_add(t_in);
         totals.tokens_out = totals.tokens_out.saturating_add(t_out);
     }
-    assemble_status(&groups, totals, db, Some(db), query, throttle)
+    let autonomy =
+        autonomy::collect_autonomy_metrics_with_done_hint(db, query.repo_root, has_done)?;
+    assemble_status(&groups, totals, db, Some(db), query, throttle, autonomy)
 }
 
 /// `task_groups`: `(state, blocked kind, task count)`.
@@ -280,15 +272,14 @@ fn assemble_status(
     accounts: Option<&dyn AccountStore>,
     query: &StatusQuery<'_>,
     throttle: ThrottleSnapshot,
+    autonomy: AutonomyMetrics,
 ) -> PortResult<TelemetrySummary> {
     let frozen = kv.get_meta(META_FACTORY_FROZEN)?.as_deref() == Some("1");
     let consecutive_root_fails = kv
         .get_meta(META_CONSECUTIVE_ROOT_FAILS)?
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
-
-    let mut counts = TaskCounts::default();
-    let mut blocked_reasons = BTreeMap::new();
+    let (mut counts, mut blocked_reasons) = (TaskCounts::default(), BTreeMap::new());
     for &(state, kind, n) in task_groups {
         bump_task(&mut counts, state, u32::try_from(n).unwrap_or(u32::MAX));
         if state == TaskState::Blocked {
@@ -298,7 +289,6 @@ fn assemble_status(
             *entry = entry.saturating_add(n);
         }
     }
-
     let leases_dir = query.data_dir.map(|dir| dir.join("leases"));
     let account_list = match accounts {
         Some(s) => summarize_accounts(&s.list_accounts()?, leases_dir.as_deref(), query.now),
@@ -319,6 +309,7 @@ fn assemble_status(
         estimated_cost_usd,
         accounts: account_list,
         throttle,
+        autonomy,
     })
 }
 

@@ -18,10 +18,12 @@ use crate::git::cmd::{git, git_raw};
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, path_str};
 
+mod archive;
 mod expired;
 mod oracle_scratch;
 #[cfg(test)]
 mod orphan_lock_tests;
+mod proofs;
 mod refs;
 mod squash;
 use expired::clean_expired_artifacts;
@@ -30,7 +32,9 @@ use expired::orphan_scratch_lock_removable;
 use refs::RepoRefs;
 pub(crate) use squash::verify_squash_merges;
 
+pub use archive::{GcArchiveStats, archive_old_terminal_events};
 pub use periodic::{DEFAULT_MIN_FREE_DISK_BYTES, check_free_disk_bytes, lightweight_sweep};
+pub use proofs::{GcProofStats, clean_expired_proofs, collect_protected_tree_fps};
 
 /// Default retention window for stream `.jsonl` and report `.html` artifacts.
 pub const DEFAULT_OLDER_THAN_DAYS: u64 = 14;
@@ -90,6 +94,10 @@ pub struct GcReport {
     pub removed_files: Vec<String>,
     pub pruned_repos: usize,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub proofs_removed: usize,
+    #[serde(default)]
+    pub events_archived: usize,
 }
 
 struct RepoLockGuard {
@@ -136,15 +144,18 @@ fn try_lock_repo(
     }
 }
 
-fn collect_db_state(data_dir: &Path) -> Result<(Vec<Task>, HashSet<String>), GcError> {
+type DbState = (Vec<Task>, HashSet<String>, HashSet<String>);
+
+fn collect_db_state(data_dir: &Path) -> Result<DbState, GcError> {
     let db_path = data_dir.join("aaf.db");
     if !db_path.is_file() {
-        return Ok((Vec::new(), HashSet::new()));
+        return Ok((Vec::new(), HashSet::new(), HashSet::new()));
     }
     let db = Db::open_read_only(&db_path)?;
     let tasks = db.list_tasks(None, None)?;
     let running_runs = db.running_run_ids()?;
-    Ok((tasks, running_runs))
+    let active_tree_fps = db.active_task_tree_fps()?;
+    Ok((tasks, running_runs, active_tree_fps))
 }
 
 fn resolve_target_repos(opts: &GcOptions, tasks: &[Task]) -> Vec<PathBuf> {
@@ -162,11 +173,11 @@ fn resolve_target_repos(opts: &GcOptions, tasks: &[Task]) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
-/// Runs garbage collection across the selected repository (or all repositories)
-/// and expired stream/report files in `data_dir`.
+/// Runs garbage collection across the selected repository (or all repositories),
+/// expired stream/report/audit/proof artifacts in `data_dir`, and archives old
+/// terminal-task `events` into `data_dir/archives/`.
 ///
-/// Never modifies `receipt.key`, `aaf.db`, `events`, `receipts/`, `approvals/`,
-/// or `proofs/`.
+/// Never modifies `receipt.key`, `receipts/`, or `approvals/`.
 pub fn run_gc(
     data_dir: &Path,
     worktrees_dir: &Path,
@@ -176,7 +187,7 @@ pub fn run_gc(
         dry_run: opts.dry_run,
         ..GcReport::default()
     };
-    let (all_tasks, running_runs) = collect_db_state(data_dir)?;
+    let (all_tasks, running_runs, active_db_tree_fps) = collect_db_state(data_dir)?;
     let repos = resolve_target_repos(opts, &all_tasks);
 
     for repo in repos {
@@ -211,9 +222,10 @@ pub fn run_gc(
     clean_expired_artifacts(data_dir, opts, &running_runs, now, &mut report);
     oracle_scratch::clean_oracle_scratch(data_dir, opts, now, &mut report);
     let busy_repos: HashSet<String> = report.skipped_busy.iter().cloned().collect();
-    let protected_audits = crate::gc_audits::collect_protected_audit_ids_for_tasks(
+    let protected_audits = crate::gc_audits::collect_protected_audit_ids_with_locks(
         &all_tasks,
         &busy_repos,
+        data_dir,
         worktrees_dir,
     );
     let cutoff = now
@@ -230,6 +242,39 @@ pub fn run_gc(
     );
     report.removed_files.extend(audit_stats.removed_files);
     report.warnings.extend(audit_stats.warnings);
+
+    let mut protected_tree_fps = proofs::collect_protected_tree_fps(data_dir, None);
+    protected_tree_fps.extend(active_db_tree_fps);
+    let active_task_ids: HashSet<String> = all_tasks
+        .iter()
+        .filter(|t| !t.state.is_terminal())
+        .map(|t| t.id.clone())
+        .collect();
+    let proof_stats = proofs::clean_expired_proofs(
+        data_dir,
+        now,
+        opts.older_than_days,
+        &protected_tree_fps,
+        &active_task_ids,
+        opts.dry_run,
+    );
+    report.removed_files.extend(proof_stats.removed_files);
+    report.proofs_removed += proof_stats.proofs_removed;
+    report.warnings.extend(proof_stats.warnings);
+
+    let now_epoch = i64::try_from(
+        now.duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX);
+    let archive_stats = archive::archive_old_terminal_events(
+        data_dir,
+        now_epoch,
+        opts.older_than_days,
+        opts.dry_run,
+    )?;
+    report.events_archived += archive_stats.events_archived;
     Ok(report)
 }
 

@@ -1,6 +1,7 @@
 //! The change set relative to the base: changed paths (including untracked
 //! files) and the lines they add.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -8,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use aaf_domain::gate::ChangeKind;
+use globset::{GlobBuilder, GlobSetBuilder};
 
 use super::GateError;
 use super::proc::git_bytes;
@@ -484,6 +486,93 @@ pub fn added_lines(
     let mut files = diff_added_tracked(repo_root, base, skip, timeout)?;
     append_untracked_lines(repo_root, &mut files, untracked, skip)?;
     Ok(files)
+}
+
+/// Extract directory prefixes from non-test locked globs so a symlink placed
+/// at any parent directory of a locked config (e.g. `ln -s helper .cargo` or
+/// `ln -s helper .github/workflows`) is locked even though git reports the
+/// symlink entry itself rather than files beneath it.
+pub(super) fn symlink_dir_prefixes(non_test_globs: &[String]) -> Vec<String> {
+    let mut prefixes = Vec::new();
+    for glob in non_test_globs {
+        let parts: Vec<&str> = glob.split('/').collect();
+        for end in 1..parts.len() {
+            let prefix = &parts[..end];
+            if prefix.iter().all(|seg| *seg == "**" || *seg == "*") {
+                continue;
+            }
+            let joined = prefix.join("/");
+            if !prefixes.contains(&joined) {
+                prefixes.push(joined);
+            }
+        }
+    }
+    prefixes
+}
+
+/// Scans gitignored untracked files via `git ls-files --others --ignored
+/// --exclude-standard -z` (fail-closed on git error) and appends `Added`
+/// changes for any path not already in `existing` that matches `globs`
+/// (case-insensitive) or is a symlink shadowing a directory prefix of `globs`.
+pub(super) fn with_ignored_matching<'a>(
+    repo_root: &Path,
+    globs: &[String],
+    existing: &'a [Change],
+    timeout: Duration,
+) -> Result<Cow<'a, [Change]>, GateError> {
+    if globs.is_empty() {
+        return Ok(Cow::Borrowed(existing));
+    }
+    let build_set = |patterns: &[String]| -> Result<globset::GlobSet, GateError> {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            let glob = GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .case_insensitive(true)
+                .build()
+                .map_err(|err| GateError::Config(format!("proof.capture_lock_globs: {err}")))?;
+            builder.add(glob);
+        }
+        builder
+            .build()
+            .map_err(|err| GateError::Config(format!("proof.capture_lock_globs: {err}")))
+    };
+    let file_set = build_set(globs)?;
+    let dir_set = build_set(&symlink_dir_prefixes(globs))?;
+    let raw = git_bytes(
+        repo_root,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        timeout,
+    )?;
+    let seen: HashSet<&str> = existing.iter().map(|c| c.path.as_str()).collect();
+    let mut matched = Vec::new();
+    for path in nul_fields(&raw) {
+        if seen.contains(path.as_str()) {
+            continue;
+        }
+        let is_symlink_dir = dir_set.is_match(&path)
+            && fs::symlink_metadata(repo_root.join(&path))
+                .is_ok_and(|meta| meta.file_type().is_symlink());
+        if file_set.is_match(&path) || is_symlink_dir {
+            matched.push(Change {
+                kind: ChangeKind::Added,
+                path,
+                old_path: None,
+            });
+        }
+    }
+    if matched.is_empty() {
+        return Ok(Cow::Borrowed(existing));
+    }
+    let mut all = existing.to_vec();
+    all.extend(matched);
+    Ok(Cow::Owned(all))
 }
 
 #[cfg(test)]

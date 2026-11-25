@@ -1,10 +1,11 @@
-//! Fail-closed SHA-256 verified self-updater for macOS, Linux, and Windows.
+//! Fail-closed minisign + SHA-256 verified self-updater for macOS, Linux, and Windows.
 
 #[cfg(test)]
 mod tests;
+pub mod verify;
 
 use std::collections::hash_map::RandomState;
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Read};
@@ -14,12 +15,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
+pub use verify::{
+    SHA256SUMS_FILENAME, SHA256SUMS_SIG_FILENAME, TRUSTED_RELEASE_PUBKEYS, parse_sha256sums,
+    validate_release_url, validate_repo_slug, verify_sha256, verify_sums_signature,
+};
 
 pub const DEFAULT_REPO: &str = "ToanMobile/AutoAgentFactory";
 pub const MAX_ARCHIVE_BYTES: usize = 100 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
-pub const SHA256SUMS_FILENAME: &str = "SHA256SUMS.txt";
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -53,6 +57,8 @@ pub enum UpdateError {
     SizeLimitExceeded { url: String, limit: usize },
     #[error("invalid release metadata: {0}")]
     InvalidMetadata(String),
+    #[error("release signature verification failed: {0}")]
+    VerificationFailed(String),
     #[error("SHA-256 entry missing for '{0}' in {SHA256SUMS_FILENAME}")]
     MissingChecksum(String),
     #[error("malformed SHA-256 checksum: {0}")]
@@ -79,6 +85,7 @@ pub struct UpdatePlan {
     pub archive_name: String,
     pub archive_url: String,
     pub checksums_url: String,
+    pub checksums_sig_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,93 +156,6 @@ pub fn archive_filename(tag: &str, target: &str) -> String {
         "tar.gz"
     };
     format!("aaf-{tag}-{target}.{ext}")
-}
-
-pub fn validate_repo_slug(repo: &str) -> Result<(), UpdateError> {
-    let ok = |p: &str| {
-        !p.is_empty()
-            && !p.contains("..")
-            && p.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-    };
-    match repo.split_once('/') {
-        Some((o, n)) if !n.contains('/') && ok(o) && ok(n) => Ok(()),
-        _ => Err(UpdateError::InvalidRepo(format!("'{repo}'"))),
-    }
-}
-
-pub fn validate_release_url(url: &str) -> Result<(), UpdateError> {
-    let bad = |why: &str| UpdateError::InvalidUrl(format!("'{url}': {why}"));
-    let uri: ureq::http::Uri = url.trim().parse().map_err(|_| bad("not a valid URL"))?;
-    if uri.scheme_str() != Some("https") {
-        return Err(bad("only https URLs are permitted"));
-    }
-    let auth = uri.authority().ok_or_else(|| bad("missing host"))?;
-    if auth.as_str().contains('@') {
-        return Err(bad("userinfo forbidden"));
-    }
-    let host = auth.host().to_ascii_lowercase();
-    let ok = [
-        "github.com",
-        "api.github.com",
-        "objects.githubusercontent.com",
-        "release-assets.githubusercontent.com",
-        "github-releases.githubusercontent.com",
-    ]
-    .contains(&host.as_str());
-    if !ok {
-        return Err(bad("host not allowlisted"));
-    }
-    Ok(())
-}
-
-/// Parse `SHA256SUMS.txt` (`<64-hex>  <file>` or `<64-hex> *<file>`), failing closed.
-pub fn parse_sha256sums(content: &str, filename: &str) -> Result<String, UpdateError> {
-    let bad = |why: &str| UpdateError::MalformedChecksum(format!("'{filename}': {why}"));
-    if filename.is_empty()
-        || filename.contains(['/', '\\'])
-        || filename.chars().any(char::is_whitespace)
-    {
-        return Err(bad("invalid target filename"));
-    }
-    let mut found: Option<String> = None;
-    for line in content.lines().map(str::trim) {
-        let Some((digest, rest)) = line.find(char::is_whitespace).map(|i| line.split_at(i)) else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        if line.starts_with('#') || rest.strip_prefix('*').unwrap_or(rest) != filename {
-            continue;
-        }
-        if !is_sha256_hex(digest) {
-            return Err(bad("digest must be 64 hex chars"));
-        }
-        let norm = digest.to_ascii_lowercase();
-        if found.as_ref().is_some_and(|prev| prev != &norm) {
-            return Err(bad("conflicting duplicate entries"));
-        }
-        found = Some(norm);
-    }
-    found.ok_or_else(|| UpdateError::MissingChecksum(filename.to_string()))
-}
-
-/// Compute `Sha256::digest(bytes)` and compare against `expected_hex` in constant time.
-pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<String, UpdateError> {
-    if !is_sha256_hex(expected_hex) {
-        return Err(UpdateError::MalformedChecksum(
-            "expected 64 hex chars".into(),
-        ));
-    }
-    let expected = expected_hex.to_ascii_lowercase();
-    let actual = encode_lower_hex(Sha256::digest(bytes).as_slice());
-    let diff = actual
-        .bytes()
-        .zip(expected.bytes())
-        .fold(0u8, |a, (x, y)| a | (x ^ y));
-    if actual.len() != expected.len() || diff != 0 {
-        return Err(UpdateError::ChecksumMismatch { expected, actual });
-    }
-    Ok(actual)
 }
 
 #[derive(Debug, Clone)]
@@ -365,8 +285,10 @@ pub fn check_for_update(
     let base = format!("https://github.com/{repo}/releases/download/{tag}");
     let archive_url = format!("{base}/{archive_name}");
     let checksums_url = format!("{base}/{SHA256SUMS_FILENAME}");
+    let checksums_sig_url = format!("{base}/{SHA256SUMS_SIG_FILENAME}");
     validate_release_url(&archive_url)?;
     validate_release_url(&checksums_url)?;
+    validate_release_url(&checksums_sig_url)?;
     Ok(UpdatePlan {
         repo: repo.into(),
         target: target.into(),
@@ -378,6 +300,7 @@ pub fn check_for_update(
         archive_name,
         archive_url,
         checksums_url,
+        checksums_sig_url,
     })
 }
 
@@ -385,9 +308,26 @@ pub fn download_and_verify(
     source: &dyn ReleaseSource,
     plan: &UpdatePlan,
 ) -> Result<VerifiedArchive, UpdateError> {
+    download_and_verify_with_keys(source, plan, TRUSTED_RELEASE_PUBKEYS)
+}
+
+pub fn download_and_verify_with_keys(
+    source: &dyn ReleaseSource,
+    plan: &UpdatePlan,
+    trusted_pubkeys: &[&str],
+) -> Result<VerifiedArchive, UpdateError> {
     validate_release_url(&plan.checksums_url)?;
+    validate_release_url(&plan.checksums_sig_url)?;
     validate_release_url(&plan.archive_url)?;
-    let expected = parse_sha256sums(&source.fetch_text(&plan.checksums_url)?, &plan.archive_name)?;
+    let sig_text = source.fetch_text(&plan.checksums_sig_url).map_err(|err| {
+        UpdateError::VerificationFailed(format!(
+            "missing or unreadable {SHA256SUMS_SIG_FILENAME} at {}: {err}",
+            plan.checksums_sig_url
+        ))
+    })?;
+    let sums_text = source.fetch_text(&plan.checksums_url)?;
+    verify_sums_signature(sums_text.as_bytes(), &sig_text, trusted_pubkeys)?;
+    let expected = parse_sha256sums(&sums_text, &plan.archive_name)?;
     let bytes = source.fetch_bytes(&plan.archive_url, MAX_ARCHIVE_BYTES)?;
     let sha256 = verify_sha256(&bytes, &expected)?;
     Ok(VerifiedArchive {
@@ -395,6 +335,57 @@ pub fn download_and_verify(
         sha256,
         bytes,
     })
+}
+
+pub fn upgrade_with_source_and_keys(
+    source: &dyn ReleaseSource,
+    repo: &str,
+    current_version: &str,
+    requested_tag: Option<&str>,
+    target: &str,
+    install_dir: &Path,
+    trusted_pubkeys: &[&str],
+) -> Result<InstallReceipt, UpdateError> {
+    let plan = check_for_update(source, repo, current_version, requested_tag, target)?;
+    let verified = download_and_verify_with_keys(source, &plan, trusted_pubkeys)?;
+    install_verified_binaries(&verified, install_dir)
+}
+
+pub fn upgrade_with_source(
+    source: &dyn ReleaseSource,
+    repo: &str,
+    current_version: &str,
+    requested_tag: Option<&str>,
+    target: &str,
+    install_dir: &Path,
+) -> Result<InstallReceipt, UpdateError> {
+    upgrade_with_source_and_keys(
+        source,
+        repo,
+        current_version,
+        requested_tag,
+        target,
+        install_dir,
+        TRUSTED_RELEASE_PUBKEYS,
+    )
+}
+
+pub fn upgrade(
+    repo: &str,
+    current_version: &str,
+    requested_tag: Option<&str>,
+    target: &str,
+    install_dir: &Path,
+) -> Result<InstallReceipt, UpdateError> {
+    let source = HttpReleaseSource::default();
+    upgrade_with_source(
+        &source,
+        repo,
+        current_version,
+        requested_tag,
+        target,
+        install_dir,
+    )
 }
 
 pub fn install_verified_binaries(
@@ -576,15 +567,4 @@ fn unique_nonce() -> String {
         std::process::id(),
         RandomState::new().build_hasher().finish()
     )
-}
-
-fn is_sha256_hex(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn encode_lower_hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
 }

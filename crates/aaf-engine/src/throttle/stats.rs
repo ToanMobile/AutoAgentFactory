@@ -90,6 +90,16 @@ fn peak_in(stats: &StatsFile, repo_id: &str, label: &str) -> Option<u64> {
     peaks.get(idx).copied()
 }
 
+fn max_peak_in(stats: &StatsFile, repo_id: &str, label: &str) -> Option<u64> {
+    stats
+        .entries
+        .get(&key(repo_id, label))?
+        .iter()
+        .map(|sample| sample.peak_rss_bytes)
+        .filter(|peak| *peak > 0)
+        .max()
+}
+
 /// Representative peak among the remembered runs; `None` means "never measured".
 ///
 /// Uses the conservative maximum while fewer than 4 samples exist, and drops
@@ -116,6 +126,9 @@ pub fn cmd_label(family: &str) -> String {
 
 /// Like [`recorded_peak`], falling back to `<repo_id>/@tool:<tool>` when
 /// the exact `(repo_id, label)` key has no prior measurement.
+///
+/// Fallback keys use the conservative maximum across remembered samples (not
+/// p75) because sibling commands of different weights share the family key.
 pub fn recorded_peak_with_tool(
     data_dir: &Path,
     repo_id: &str,
@@ -128,6 +141,11 @@ pub fn recorded_peak_with_tool(
 /// Like [`recorded_peak_with_tool`], falling back to `<repo_id>/@cmd:<family>`
 /// when `tool` is `None` and the command belongs to a known build/test command
 /// family (e.g. `cargo`).
+///
+/// Exact `(repo_id, label)` matches retain p75 (dropping the single highest
+/// outlier once 4+ samples exist). Family fallback keys (`@tool:<tool>` and
+/// `@cmd:<family>`) use the strict `max` so a single heavy sibling command is
+/// not masked by lighter siblings in the same family.
 pub fn recorded_peak_for(
     data_dir: &Path,
     repo_id: &str,
@@ -137,8 +155,8 @@ pub fn recorded_peak_for(
 ) -> Option<u64> {
     let stats = load(data_dir, is_guest(data_dir));
     peak_in(&stats, repo_id, label).or_else(|| match tool {
-        Some(t) => peak_in(&stats, repo_id, &tool_label(t)),
-        None => cmd_family.and_then(|f| peak_in(&stats, repo_id, &cmd_label(f))),
+        Some(t) => max_peak_in(&stats, repo_id, &tool_label(t)),
+        None => cmd_family.and_then(|f| max_peak_in(&stats, repo_id, &cmd_label(f))),
     })
 }
 

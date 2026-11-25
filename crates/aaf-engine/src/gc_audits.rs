@@ -104,13 +104,18 @@ pub fn collect_protected_audit_ids(
     collect_protected_audit_ids_for_tasks(&tasks, skipped_busy_repos, &data_dir.join("worktrees"))
 }
 
-/// Returns `true` if any `data_dir/locks/*.run.lock` file is currently locked.
-pub fn any_run_lock_held(data_dir: &Path) -> bool {
+/// Returns the `<repo_id>` prefixes of all `data_dir/locks/*.run.lock` files
+/// currently held by another process.
+pub fn held_run_lock_repo_ids(data_dir: &Path) -> HashSet<String> {
+    let mut held = HashSet::new();
     for path in sorted_real_entries(&data_dir.join("locks")) {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let real =
             fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink());
-        if !name.ends_with(".run.lock") || !real {
+        let Some(repo_id) = name.strip_suffix(".run.lock") else {
+            continue;
+        };
+        if !real || repo_id.is_empty() {
             continue;
         }
         if let Ok(file) = File::open(&path) {
@@ -118,12 +123,54 @@ pub fn any_run_lock_held(data_dir: &Path) -> bool {
                 Ok(()) => {
                     let _ = file.unlock();
                 }
-                Err(TryLockError::WouldBlock) => return true,
+                Err(TryLockError::WouldBlock) => {
+                    held.insert(repo_id.to_string());
+                }
                 Err(TryLockError::Error(_)) => {}
             }
         }
     }
-    false
+    held
+}
+
+/// Collects protected `<wt_id>` / `<repo_id>` directory names for every
+/// non-terminal task, every busy repository in `skipped_busy_repos`, and every
+/// repository currently holding a `data_dir/locks/<repo_id>.run.lock`.
+pub fn collect_protected_audit_ids_with_locks(
+    tasks: &[Task],
+    skipped_busy_repos: &HashSet<String>,
+    data_dir: &Path,
+    worktrees_dir: &Path,
+) -> HashSet<String> {
+    let locked_ids = held_run_lock_repo_ids(data_dir);
+    let mut busy_repos = skipped_busy_repos.clone();
+    if !locked_ids.is_empty() {
+        for task in tasks.iter().filter(|t| !t.repo_root.trim().is_empty()) {
+            let repo = Path::new(&task.repo_root);
+            let raw_id = aaf_fp::repo_id(repo);
+            let canon_id = fs::canonicalize(repo).ok().map(|c| aaf_fp::repo_id(&c));
+            if locked_ids.contains(&raw_id)
+                || canon_id
+                    .as_deref()
+                    .is_some_and(|id| locked_ids.contains(id))
+            {
+                busy_repos.insert(task.repo_root.clone());
+            }
+        }
+    }
+    let mut protected = collect_protected_audit_ids_for_tasks(tasks, &busy_repos, worktrees_dir);
+    for locked_id in locked_ids {
+        protected.insert(locked_id.clone());
+        for wt in sorted_real_entries(&worktrees_dir.join(&locked_id)) {
+            insert_path_id(&mut protected, &wt);
+        }
+    }
+    protected
+}
+
+/// Returns `true` if any `data_dir/locks/*.run.lock` file is currently locked.
+pub fn any_run_lock_held(data_dir: &Path) -> bool {
+    !held_run_lock_repo_ids(data_dir).is_empty()
 }
 
 /// Sweeps expired `.partial.json` and `.audit.json` files under `data_dir/audits/<wt_id>/`

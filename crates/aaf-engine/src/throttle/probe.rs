@@ -349,6 +349,61 @@ pub fn group_state(ps_output: &str, pgid: u32) -> Option<GroupState> {
     found
 }
 
+/// Columns of the listing [`parse_member_states`] reads; `lstart` last, it has spaces.
+pub const PS_MEMBER_STATE_COLUMNS: &str = "pid=,stat=,lstart=";
+
+/// Process identity and stopped status from `ps -A -o pid=,stat=,lstart=`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberState {
+    pub id: ProcId,
+    /// True when the `stat` column contains `'T'` (stopped).
+    pub stopped: bool,
+}
+
+/// Parses rows of `ps -A -o pid=,stat=,lstart=`; malformed lines or lines
+/// without a start time are skipped.
+pub fn parse_member_states(ps_output: &str) -> Vec<MemberState> {
+    let mut rows = Vec::new();
+    for line in ps_output.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let [pid, stat, started @ ..] = words.as_slice() else {
+            continue;
+        };
+        if started.is_empty() {
+            continue;
+        }
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        rows.push(MemberState {
+            id: ProcId {
+                pid,
+                started: started.join(" "),
+            },
+            stopped: stat.contains('T'),
+        });
+    }
+    rows
+}
+
+/// PIDs from `members` that `ps_output` (`pid=,stat=,lstart=`) confirms
+/// simultaneously satisfy: `pid > 1`, exact non-empty `lstart` match, and
+/// `stat` contains `'T'` (stopped).
+pub fn stopped_member_pids(ps_output: &str, members: &[ProcId]) -> Vec<u32> {
+    let mut pids = Vec::new();
+    for row in parse_member_states(ps_output) {
+        if row.id.pid > 1
+            && row.stopped
+            && !row.id.started.is_empty()
+            && members.contains(&row.id)
+            && !pids.contains(&row.id.pid)
+        {
+            pids.push(row.id.pid);
+        }
+    }
+    pids
+}
+
 pub(crate) const PS: &[&str] = &["/bin/ps", "/usr/bin/ps"];
 
 /// First of `candidates` that exists. The tools are addressed by absolute

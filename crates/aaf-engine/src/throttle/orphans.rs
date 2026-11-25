@@ -5,16 +5,19 @@
 //! lives, and the next heavy run continues the groups whose owner is gone.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::paths::{closed_dir, ensure_closed_dir, guest_dir, is_guest, open_guest_file};
-use super::probe::{GroupState, Unreadable};
+use super::probe::{GroupState, ProcId, Unreadable};
 use super::slot_file::unlock_all;
 use super::watchdog::GroupControl;
 use crate::db::private;
 
 const PREFIX: &str = "paused.";
+/// Cap on reading a pause record (matches `paths::GUEST_FILE_MAX`) so a
+/// malicious guest cannot force unbounded memory allocation.
+const MAX_RECORD_BYTES: u64 = 1 << 20;
 
 /// The records this process writes and sweeps: in the closed part of the
 /// data dir, and for a guest ([`super::paths`]) where it can write. The two
@@ -42,14 +45,28 @@ pub(crate) struct PauseRecord {
 }
 
 pub(super) const STARTED_KEY: &str = "lstart=";
+pub const MEMBER_KEY: &str = "member=";
+pub const MAX_RECORDED_MEMBERS: usize = 256;
 
 /// `leader_started` is the start time of the group's leader as `ps` prints
 /// it. The sweep compares it before it signals: by then the group may be
 /// gone and its id given to an unrelated process.
+#[cfg(test)]
 pub(crate) fn record_pause(
     data_dir: &Path,
     pgid: u32,
     leader_started: Option<&str>,
+) -> io::Result<PauseRecord> {
+    record_pause_with_members(data_dir, pgid, leader_started, &[])
+}
+
+/// Writes a pause record with `leader_started` and up to
+/// [`MAX_RECORDED_MEMBERS`] tracked process tree members (`member=<pid> <lstart>`).
+pub(crate) fn record_pause_with_members(
+    data_dir: &Path,
+    pgid: u32,
+    leader_started: Option<&str>,
+    members: &[ProcId],
 ) -> io::Result<PauseRecord> {
     let guest = is_guest(data_dir);
     let path = record_path(data_dir, pgid);
@@ -65,8 +82,28 @@ pub(crate) fn record_pause(
     // A draft left by a run that died between create and rename.
     file.set_len(0)?;
     file.try_lock().map_err(io::Error::other)?;
-    if let Some(started) = leader_started {
-        file.write_all(format!("{STARTED_KEY}{started}\n").as_bytes())?;
+    if let Some(started) = leader_started
+        && !started.contains(['\n', '\r'])
+    {
+        let started = started.trim();
+        if !started.is_empty() {
+            file.write_all(format!("{STARTED_KEY}{started}\n").as_bytes())?;
+        }
+    }
+    let mut written = 0usize;
+    for member in members {
+        if written >= MAX_RECORDED_MEMBERS {
+            break;
+        }
+        if member.pid <= 1 || member.started.contains(['\n', '\r']) {
+            continue;
+        }
+        let started = member.started.trim();
+        if started.is_empty() {
+            continue;
+        }
+        file.write_all(format!("{MEMBER_KEY}{} {started}\n", member.pid).as_bytes())?;
+        written += 1;
     }
     fs::rename(&draft, &path)?;
     Ok(PauseRecord {
@@ -113,10 +150,79 @@ fn is_the_stopped_group(recorded_start: Option<&str>, state: Option<&GroupState>
     }
 }
 
+#[cfg(unix)]
+fn is_plain_record_file(at_path: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    at_path.is_file()
+        && !at_path.file_type().is_symlink()
+        && opened.is_file()
+        && at_path.dev() == opened.dev()
+        && at_path.ino() == opened.ino()
+        && opened.nlink() == 1
+}
+
+#[cfg(not(unix))]
+fn is_plain_record_file(at_path: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    at_path.is_file() && !at_path.file_type().is_symlink() && opened.is_file()
+}
+
+fn read_record_bounded(file: &File) -> String {
+    let mut buf = Vec::new();
+    let _ = file.take(MAX_RECORD_BYTES).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+struct ParsedRecord<'a> {
+    leader_started: Option<&'a str>,
+    members: Vec<ProcId>,
+}
+
+fn parse_member_line(rest: &str) -> Option<ProcId> {
+    let (pid_str, started_raw) = rest.split_once(' ')?;
+    let pid = pid_str.parse::<u32>().ok().filter(|pid| *pid > 1)?;
+    let started = started_raw.trim();
+    if started.is_empty() {
+        return None;
+    }
+    Some(ProcId {
+        pid,
+        started: started.to_string(),
+    })
+}
+
+fn parse_record(text: &str) -> ParsedRecord<'_> {
+    let mut leader_started = None;
+    let mut members = Vec::new();
+    for line in text.lines() {
+        if leader_started.is_none()
+            && let Some(started) = line.strip_prefix(STARTED_KEY)
+        {
+            let started = started.trim();
+            if !started.is_empty() {
+                leader_started = Some(started);
+            }
+            continue;
+        }
+        if members.len() >= MAX_RECORDED_MEMBERS {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(MEMBER_KEY)
+            && let Some(member) = parse_member_line(rest)
+        {
+            members.push(member);
+        }
+    }
+    ParsedRecord {
+        leader_started,
+        members,
+    }
+}
+
 /// Continues every group whose record outlived its owner, when it is still
-/// that group and still stopped, and removes the record. Returns how many
-/// records were swept.
-pub(crate) fn resume_orphans(data_dir: &Path, control: &dyn GroupControl) -> usize {
+/// that group and still stopped, and wakes any stopped helper members
+/// recorded in it before removing the record. Returns how many records were
+/// swept.
+pub fn resume_orphans(data_dir: &Path, control: &dyn GroupControl) -> usize {
     // No directory: nothing was ever stopped from this data dir.
     let Ok(entries) = fs::read_dir(records_dir(data_dir)) else {
         return 0;
@@ -124,23 +230,41 @@ pub(crate) fn resume_orphans(data_dir: &Path, control: &dyn GroupControl) -> usi
     let mut swept = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let pgid = name
+        let Some(pgid) = name
             .to_str()
             .and_then(|name| name.strip_prefix(PREFIX))
             .and_then(|pgid| pgid.parse::<u32>().ok())
             // 0 and 1 are never a command's group; as a kill target they
             // would mean this process's own group and init.
-            .filter(|pgid| *pgid > 1);
-        // Never through a link: a guest can put any entry into `guest/`.
-        let plain = fs::symlink_metadata(entry.path()).is_ok_and(|meta| meta.is_file());
-        let (Some(pgid), true, Ok(file)) = (pgid, plain, File::open(entry.path())) else {
+            .filter(|pgid| *pgid > 1)
+        else {
             continue;
         };
+        let path = entry.path();
+        // Never through a symlink or hardlink: a guest can put any entry into `guest/`.
+        let Ok(before) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !before.is_file() || before.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(file) = File::open(&path) else {
+            continue;
+        };
+        let Ok(opened) = file.metadata() else {
+            continue;
+        };
+        let Ok(after) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !is_plain_record_file(&before, &opened) || !is_plain_record_file(&after, &opened) {
+            continue;
+        }
         // Still locked: the owner lives and continues the group itself.
         if file.try_lock().is_err() {
             continue;
         }
-        let gone = sweep_one(&entry.path(), pgid, control);
+        let gone = sweep_one(&file, &path, pgid, control);
         // Unlocked explicitly ([`unlock_all`]): a record that stays would
         // otherwise read as held by a live owner to the next sweep until
         // each child being spawned at this moment has exec'ed.
@@ -151,20 +275,21 @@ pub(crate) fn resume_orphans(data_dir: &Path, control: &dyn GroupControl) -> usi
 }
 
 /// Continues the group of the record at `path`, which the caller has
-/// locked, when it is still the stopped one; true when the record is gone.
-fn sweep_one(path: &Path, pgid: u32, control: &dyn GroupControl) -> bool {
+/// locked, when it is still the stopped one, and wakes any stopped helper
+/// members recorded in it; true when the record is gone.
+fn sweep_one(file: &File, path: &Path, pgid: u32, control: &dyn GroupControl) -> bool {
     // No answer from the process table decides nothing: the record
     // stays for the next heavy run. Removing it here left the group
     // stopped for good whenever `ps` ran over its time under load.
     let Ok(state) = control.read_group_state(pgid) else {
         return false;
     };
-    // An unreadable record names no start time, which matches no leader.
-    let recorded = fs::read_to_string(path).unwrap_or_default();
-    let recorded = recorded
-        .lines()
-        .find_map(|line| line.strip_prefix(STARTED_KEY));
-    if is_the_stopped_group(recorded, state.as_ref()) {
+    let recorded = read_record_bounded(file);
+    let parsed = parse_record(&recorded);
+    if !parsed.members.is_empty() && control.resume_stopped_members(&parsed.members).is_err() {
+        return false;
+    }
+    if is_the_stopped_group(parsed.leader_started, state.as_ref()) {
         // If the signal fails nothing more can be done for the group;
         // either way the record goes.
         let _ = control.resume(pgid);

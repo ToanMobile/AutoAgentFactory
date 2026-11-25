@@ -11,12 +11,15 @@
 //! ends or the bounded orphan-wait timeout reaps the stale lock file.
 
 mod orphan_reap;
+mod orphan_since;
 
 use std::fs::TryLockError;
 use std::io;
 use std::path::Path;
 
 pub use orphan_reap::{reap_orphaned_slots, reap_stale_orphans};
+use orphan_since::SidecarSet;
+pub(super) use orphan_since::{OrphanTracker, observe_and_reap_orphans};
 
 use super::drain::draining;
 pub use super::drain::{DrainGuard, try_drain};
@@ -157,6 +160,7 @@ pub struct SlotGuard {
     /// Locked files; a command that runs alone holds every slot so that
     /// nothing can start beside it.
     files: Vec<SlotFile>,
+    sidecars: SidecarSet,
     reservation: Reservation,
     /// Start time of the command's group leader as `ps` prints it, once the
     /// command runs: what tells this group from a later one with its id.
@@ -171,6 +175,7 @@ impl SlotGuard {
     fn holding(
         index: usize,
         files: Vec<SlotFile>,
+        sidecars: SidecarSet,
         reservation: Reservation,
     ) -> io::Result<SlotGuard> {
         let written = SlotToken::generate().and_then(|token| {
@@ -183,11 +188,13 @@ impl SlotGuard {
             Ok(token) => Ok(SlotGuard {
                 index,
                 files,
+                sidecars,
                 reservation,
                 started: None,
                 token,
             }),
             Err(err) => {
+                sidecars.clear();
                 release_all(&files);
                 Err(err)
             }
@@ -248,16 +255,14 @@ impl SlotGuard {
             return Err(err);
         }
         // The later slot is released for the next command.
+        std::mem::replace(&mut self.sidecars, SidecarSet::one(data_dir, 0)).clear();
         release_all(&std::mem::replace(&mut self.files, vec![file]));
         self.index = 0;
         Ok(true)
     }
 }
 
-/// The record a holder puts into a slot the moment it has the lock: no
-/// reservation and no token yet, which readers count as a command of
-/// unknown size that nothing may share the machine with. On an error the
-/// slot is given back.
+/// Writes the initial unmeasured placeholder while locked; gives the slot back on error.
 fn claim(file: &SlotFile) -> io::Result<()> {
     let nothing_yet = Reservation {
         reserved_bytes: None,
@@ -267,21 +272,18 @@ fn claim(file: &SlotFile) -> io::Result<()> {
         .inspect_err(|_| release_all(std::slice::from_ref(file)))
 }
 
-fn unlock_slots(files: &[SlotFile]) {
-    files.iter().for_each(SlotFile::unlock);
-}
-
 /// Gives back slots that carry this process's token and reservation.
 fn release_all(files: &[SlotFile]) {
     for file in files {
         // Empty while still locked so the next holder never inherits our token/reservation.
         let _ = file.clear_record();
+        file.unlock();
     }
-    unlock_slots(files);
 }
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
+        self.sidecars.clear();
         release_all(&self.files);
     }
 }
@@ -311,13 +313,7 @@ fn try_slot(
     match file.try_lock() {
         Ok(()) => {
             // Content without a holder: left by one that was killed.
-            let left_by_killed = match file.lock_has_content() {
-                Ok(left) => left,
-                Err(err) => {
-                    file.unlock();
-                    return Err(err);
-                }
-            };
+            let left_by_killed = file.lock_has_content().inspect_err(|_| file.unlock())?;
             // An empty lock file of a held slot means a guest holds it, and
             // its record in `guest/` is read. Claimed before the slower looks
             // below (each a `ps` run, and the other slots after this one), a
@@ -370,6 +366,7 @@ fn try_slot(
                 }
             }
             file.drop_guest_leftover(data_dir, index);
+            orphan_since::clear(data_dir, index);
             Ok(Probe::Taken(file))
         }
         Err(TryLockError::WouldBlock) => Ok(Probe::Held),
@@ -427,14 +424,9 @@ pub struct MachineView<'a> {
 /// Counts how many of the `0..ceiling` heavy slots are currently unlocked
 /// (ignoring legacy files; used as a non-blocking hint for FIFO yielding).
 pub fn free_slot_count(data_dir: &Path, ceiling: usize) -> usize {
-    let ceiling = ceiling.max(1);
-    let mut free = 0usize;
-    for index in 0..ceiling {
-        if !is_locked(&slot_path(data_dir, index)) {
-            free += 1;
-        }
-    }
-    free
+    (0..ceiling.max(1))
+        .filter(|&index| !is_locked(&slot_path(data_dir, index)))
+        .count()
 }
 
 /// [`try_acquire_in`] for a caller that cannot read the memory of other
@@ -502,10 +494,12 @@ fn acquire_alone(
     read_group: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
 ) -> io::Result<Result<SlotGuard, Busy>> {
     let mut files = Vec::new();
+    let mut sidecars = SidecarSet::empty();
     for index in 0..ceiling {
         let busy = match try_slot(data_dir, index, read_group)? {
             Probe::Taken(file) => {
                 files.push(file);
+                sidecars.push(data_dir, index);
                 continue;
             }
             // Nobody can hold a slot that has no lock file.
@@ -521,7 +515,7 @@ fn acquire_alone(
     if files.is_empty() {
         return Err(no_slot_file(data_dir));
     }
-    Ok(Ok(SlotGuard::holding(0, files, reservation)?))
+    Ok(Ok(SlotGuard::holding(0, files, sidecars, reservation)?))
 }
 
 fn acquire_shared(
@@ -568,7 +562,12 @@ fn acquire_shared(
     // at worst both step back and try again. Judging first would let both
     // through on the same free memory. Every refusal below drops the guard,
     // which gives the slot back.
-    let guard = SlotGuard::holding(index, vec![file], reservation)?;
+    let guard = SlotGuard::holding(
+        index,
+        vec![file],
+        SidecarSet::one(data_dir, index),
+        reservation,
+    )?;
     if busy.is_empty() {
         return Ok(Ok(guard));
     }

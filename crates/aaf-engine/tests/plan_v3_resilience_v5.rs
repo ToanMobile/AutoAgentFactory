@@ -94,7 +94,7 @@ fn make_task(id: &str, repo: &str) -> Task {
 
 #[test]
 fn schema_v4_to_v5_migration_and_open_read_only_compat() {
-    assert_eq!(SCHEMA_VERSION, 5);
+    const { assert!(SCHEMA_VERSION >= 5) };
     let tmp = TempDir::new().unwrap();
 
     // 1. Read-only compatibility on a v3 database (no scope_paths, retry_after, auto_recover_count).
@@ -138,7 +138,7 @@ fn schema_v4_to_v5_migration_and_open_read_only_compat() {
     drop(ro_v4);
 
     let rw = Db::open(&v4_path).unwrap();
-    assert_eq!(rw.schema_version(), 5);
+    assert_eq!(rw.schema_version(), SCHEMA_VERSION);
     rw.set_retry_schedule("t-v4", Some(500), 2, 100).unwrap();
     let migrated = rw.get_task("t-v4").unwrap();
     assert_eq!(migrated.retry_after, Some(500));
@@ -146,7 +146,7 @@ fn schema_v4_to_v5_migration_and_open_read_only_compat() {
     drop(rw);
 
     let ro_v5 = Db::open_read_only(&v4_path).unwrap();
-    assert_eq!(ro_v5.schema_version(), 5);
+    assert_eq!(ro_v5.schema_version(), SCHEMA_VERSION);
     let read_back = ro_v5.get_task("t-v4").unwrap();
     assert_eq!(read_back.retry_after, Some(500));
     assert_eq!(read_back.auto_recover_count, 2);

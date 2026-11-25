@@ -8,7 +8,9 @@ use aaf_domain::event::EventKind;
 use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::handover::CSP_META;
-use aaf_engine::telemetry::{CostRates, TaskCounts};
+use aaf_engine::telemetry::{
+    AutonomyMetrics, CostRates, TaskCounts, collect_autonomy_metrics_for_tasks,
+};
 use serde_json::{Value, json};
 
 use super::super::board::store::{err, open_db_read_only};
@@ -47,6 +49,7 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
         .since
         .map(|h| now.saturating_sub(i64::try_from(h.saturating_mul(3600)).unwrap_or(i64::MAX)));
     let mut counts = TaskCounts::default();
+    let mut autonomy = AutonomyMetrics::default();
     let mut completed = Vec::new();
     let mut blocked = Vec::new();
     let (mut tokens_in, mut tokens_out) = (0u64, 0u64);
@@ -55,10 +58,12 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
         let tasks = db
             .list_tasks(repo.as_deref(), None)
             .map_err(|e| err("tasks", e))?;
+        let mut window_tasks = Vec::new();
         for t in tasks
             .into_iter()
             .filter(|t| cutoff.is_none_or(|c| t.updated_at >= c || t.created_at >= c))
         {
+            window_tasks.push((t.id.clone(), t.state));
             counts.total += 1;
             match t.state {
                 TaskState::Backlog => counts.backlog += 1,
@@ -104,10 +109,13 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
                     .push(json!({ "id": t.id, "title": t.title, "kind": kind, "reason": reason }));
             }
         }
+        autonomy = collect_autonomy_metrics_for_tasks(&db, repo.as_deref(), &window_tasks)
+            .map_err(|e| err("autonomy", e))?;
     }
     let cost = CostRates::default().estimate_usd(tokens_in, tokens_out);
     let digest_json = json!({
         "mode": "digest", "since_hours": args.since, "counts": counts,
+        "autonomy": autonomy,
         "completed": completed, "blocked": blocked,
         "tokens_in": tokens_in, "tokens_out": tokens_out, "estimated_cost_usd": cost,
     });
@@ -116,11 +124,11 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
             serde_json::to_string_pretty(&digest_json).map_err(|e| err("json", e))?
         }
         HandoverFormat::Md => render_digest_md(
-            args.since, &counts, &completed, &blocked, tokens_in, tokens_out, cost,
+            args.since, &counts, &autonomy, &completed, &blocked, tokens_in, tokens_out, cost,
         ),
         HandoverFormat::Html => {
             let md = render_digest_md(
-                args.since, &counts, &completed, &blocked, tokens_in, tokens_out, cost,
+                args.since, &counts, &autonomy, &completed, &blocked, tokens_in, tokens_out, cost,
             );
             let esc = md
                 .replace('&', "&amp;")
@@ -155,9 +163,15 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
     Ok(out)
 }
 
+fn fmt_pct(pct: Option<f64>) -> String {
+    pct.map_or_else(|| "n/a".to_string(), |v| format!("{v:.1}%"))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_digest_md(
     since: Option<u64>,
     c: &TaskCounts,
+    a: &AutonomyMetrics,
     completed: &[Value],
     blocked: &[Value],
     tokens_in: u64,
@@ -172,6 +186,23 @@ fn render_digest_md(
         out,
         "Counts: {} total (done={}, review={}, blocked={}, running={}, gating={}, ready={}, backlog={}, cancelled={})",
         c.total, c.done, c.review, c.blocked, c.running, c.gating, c.ready, c.backlog, c.cancelled
+    );
+    let dur = a
+        .gate_avg_duration_ms
+        .map_or_else(String::new, |ms| format!(", avg {ms}ms"));
+    let _ = writeln!(
+        out,
+        "Autonomy: {}/{} done without human ({}), gate first-pass: {}/{} ({}{dur}), cross-audit fail: {}/{} ({}), escalations: {}",
+        a.done_without_human,
+        a.done_tasks,
+        fmt_pct(a.autonomy_rate_pct),
+        a.gate_first_pass_clear,
+        a.gate_tasks_evaluated,
+        fmt_pct(a.gate_first_pass_rate_pct),
+        a.cross_audit_failed,
+        a.cross_audit_total,
+        fmt_pct(a.cross_audit_fail_rate_pct),
+        a.implementer_escalations,
     );
     let _ = writeln!(
         out,
@@ -210,4 +241,38 @@ fn render_digest_md(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_digest_md;
+    use aaf_engine::telemetry::{AutonomyMetrics, TaskCounts};
+
+    #[test]
+    fn digest_markdown_renders_autonomy_and_gate_metrics() {
+        let a = AutonomyMetrics {
+            done_tasks: 2,
+            done_without_human: 1,
+            autonomy_rate_pct: Some(50.0),
+            gate_tasks_evaluated: 2,
+            gate_first_pass_clear: 1,
+            gate_first_pass_rate_pct: Some(50.0),
+            gate_avg_duration_ms: Some(1800),
+            cross_audit_total: 2,
+            cross_audit_failed: 1,
+            cross_audit_fail_rate_pct: Some(50.0),
+            implementer_escalations: 1,
+        };
+        let md = render_digest_md(Some(12), &TaskCounts::default(), &a, &[], &[], 10, 5, 0.0);
+        assert!(
+            md.contains("Autonomy: 1/2 done without human (50.0%)"),
+            "{md}"
+        );
+        assert!(
+            md.contains("gate first-pass: 1/2 (50.0%, avg 1800ms)"),
+            "{md}"
+        );
+        assert!(md.contains("cross-audit fail: 1/2 (50.0%)"), "{md}");
+        assert!(md.contains("escalations: 1"), "{md}");
+    }
 }

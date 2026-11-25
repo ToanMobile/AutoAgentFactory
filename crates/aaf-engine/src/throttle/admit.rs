@@ -118,7 +118,7 @@ impl Throttle<'_> {
         let mut free_unreadable = false;
         let mut load_wait_started: Option<i64> = None;
         let mut warn_wait_started: Option<i64> = None;
-        let mut orphan_wait_started: Option<i64> = None;
+        let mut orphan_tracker = slots::OrphanTracker::new();
         let mut warned = (false, false);
         // A second the clock turned while nothing slept is not a wait.
         let mut ever_waited = false;
@@ -240,6 +240,7 @@ impl Throttle<'_> {
                     ticket = None;
                 }
                 let ceiling = self.ceiling();
+                let read_group = |pgid| self.control.read_group_state(pgid);
                 // FIFO fairness for measured commands: if older live waiters are
                 // queued ahead and there are not enough free slots for them plus
                 // us, take our own ticket and yield so newcomers polling at 250 ms
@@ -259,7 +260,6 @@ impl Throttle<'_> {
                             },
                             group_state: &|pgid| self.control.group_state(pgid),
                         };
-                        let read_group = |pgid| self.control.read_group_state(pgid);
                         slots::try_acquire_reading(data_dir, ceiling, admission, &view, &read_group)
                     }
                 } else {
@@ -273,7 +273,6 @@ impl Throttle<'_> {
                         },
                         group_state: &|pgid| self.control.group_state(pgid),
                     };
-                    let read_group = |pgid| self.control.read_group_state(pgid);
                     slots::try_acquire_reading(data_dir, ceiling, admission, &view, &read_group)
                 };
                 match attempt? {
@@ -289,23 +288,24 @@ impl Throttle<'_> {
                         }
                         let now = clock.now();
                         if matches!(reason, Busy::Orphaned { .. }) {
-                            let since = *orphan_wait_started.get_or_insert(now);
-                            let timed_out = waited_from(since, now) >= self.machine.heavy_wait_secs;
-                            // The orphan's age counts from when this waiter first
-                            // saw it, never from the lock file's mtime: that is when
-                            // its command started, which may be long before `aaf`
-                            // died, and reaping on it would run beside a live group.
-                            let reaped = if timed_out {
-                                slots::reap_orphaned_slots(data_dir, ceiling).unwrap_or(0)
-                            } else {
-                                0
-                            };
+                            // Orphan age is measured via `Clock` from the earliest
+                            // `min(in_memory_since, persisted_since)` stored in
+                            // `locks/heavy.<n>.orphan_since` keyed by `(slot, pgid, lstart)`,
+                            // never from the lock file's mtime.
+                            let reaped = slots::observe_and_reap_orphans(
+                                data_dir,
+                                ceiling,
+                                now,
+                                self.machine.heavy_wait_secs,
+                                &mut orphan_tracker,
+                                &read_group,
+                            )
+                            .unwrap_or(0);
                             if reaped > 0 {
-                                orphan_wait_started = None;
                                 continue;
                             }
                         } else {
-                            orphan_wait_started = None;
+                            orphan_tracker.clear();
                         }
                         if budget.expired(now) {
                             return Ok(None);

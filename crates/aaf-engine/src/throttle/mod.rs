@@ -281,3 +281,29 @@ impl<'a> Throttle<'a> {
         slots::ceiling(self.machine.max_heavy_parallel, self.cpus)
     }
 }
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Busy::SlotsTaken => f.write_str("every heavy slot is taken"),
+            Busy::Draining => {
+                f.write_str("queue is draining for an unmeasured or exclusive command")
+            }
+            Busy::RunsAlone => f.write_str(
+                "runs alone: never measured, or a build tool that works through daemons",
+            ),
+            Busy::NotEnoughMemory {
+                free: Some(free),
+                needed,
+            } => write!(f, "needs {needed} bytes free, {free} bytes available"),
+            Busy::NotEnoughMemory { free: None, needed } => {
+                write!(f, "needs {needed} bytes free, free memory unreadable")
+            }
+            Busy::Orphaned { pgid } => write!(
+                f,
+                "process group {pgid} is recorded as the command of a killed aaf and still has \
+                 processes; inspect with `ps -o pid,lstart,command -g {pgid}`"
+            ),
+        }
+    }
+}

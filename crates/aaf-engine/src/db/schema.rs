@@ -132,6 +132,22 @@ const MIGRATIONS: &[&str] = &[
         ON tasks(repo_root, state, retry_after)
         WHERE state = 'blocked' AND retry_after IS NOT NULL;
     ",
+    // v6: allow archival deletion of events belonging only to terminal tasks
+    // (`done` or `cancelled`), and index events by `(kind, created_at)`.
+    "
+    DROP TRIGGER IF EXISTS events_no_delete;
+    CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+    WHEN OLD.task_id IS NULL
+      OR NOT EXISTS (
+          SELECT 1 FROM tasks
+          WHERE id = OLD.task_id AND state IN ('done', 'cancelled')
+      )
+    BEGIN
+        SELECT RAISE(ABORT, 'events is append-only for active tasks');
+    END;
+    CREATE INDEX IF NOT EXISTS idx_events_kind_created
+        ON events(kind, created_at);
+    ",
 ];
 
 /// Schema version this build reads and writes.

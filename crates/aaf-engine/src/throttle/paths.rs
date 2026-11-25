@@ -74,6 +74,12 @@ pub fn token_path(data_dir: &Path, index: usize) -> PathBuf {
     closed_dir(data_dir).join(format!("heavy.{index}.token"))
 }
 
+/// First-seen timestamp of an orphaned command in slot `index`, kept in the
+/// closed dir (`0700`/`0600`) so sandboxed guests can neither read nor forge it.
+pub fn orphan_since_path(data_dir: &Path, index: usize) -> PathBuf {
+    closed_dir(data_dir).join(format!("heavy.{index}.orphan_since"))
+}
+
 /// The record of a guest that holds slot `index`.
 pub fn guest_record_path(data_dir: &Path, index: usize) -> PathBuf {
     guest_dir(data_dir).join(format!("heavy.{index}.rec"))

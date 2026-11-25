@@ -242,6 +242,7 @@ pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
             estimated_cost_usd: 0.0,
             accounts: Vec::new(),
             throttle: inspect_throttle(&ctx.data_dir),
+            autonomy: Default::default(),
         },
     };
 

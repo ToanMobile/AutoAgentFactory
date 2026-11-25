@@ -9,8 +9,11 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use super::super::orphans::{record_path, record_pause, resume_orphans};
-use super::super::probe::{GroupState, Unreadable, group_state};
+use super::super::orphans::{
+    MAX_RECORDED_MEMBERS, MEMBER_KEY, record_path, record_pause, record_pause_with_members,
+    resume_orphans,
+};
+use super::super::probe::{GroupState, ProcId, Unreadable, group_state};
 use super::super::{GroupControl, HeavyJob, Sleeper, ThreadSleeper};
 use super::support::{Rig, answered};
 
@@ -318,4 +321,44 @@ fn real_group_with_another_start_time_is_left_stopped() {
     assert_eq!(swept, 1);
     assert!(after.is_some_and(|state| state.stopped), "it was continued");
     assert!(!record_path(data.path(), pgid).exists());
+}
+
+#[test]
+fn record_pause_with_members_filters_invalid_and_caps_at_limit() {
+    let data = TempDir::new().unwrap();
+    let mut members = vec![
+        ProcId {
+            pid: 0,
+            started: STARTED.to_string(),
+        },
+        ProcId {
+            pid: 1,
+            started: STARTED.to_string(),
+        },
+        ProcId {
+            pid: 500,
+            started: String::new(),
+        },
+        ProcId {
+            pid: 501,
+            started: format!("{STARTED}\nmember=999 injected"),
+        },
+        ProcId {
+            pid: 502,
+            started: format!("{STARTED}\rmember=998 injected"),
+        },
+    ];
+    for i in 0..(MAX_RECORDED_MEMBERS + 20) {
+        members.push(ProcId {
+            pid: 2_000 + u32::try_from(i).unwrap(),
+            started: STARTED.to_string(),
+        });
+    }
+    let rec = record_pause_with_members(data.path(), 77, Some(STARTED), &members).unwrap();
+    let text = fs::read_to_string(record_path(data.path(), 77)).unwrap();
+    let member_lines: Vec<&str> = text.lines().filter(|l| l.starts_with(MEMBER_KEY)).collect();
+    assert_eq!(member_lines.len(), MAX_RECORDED_MEMBERS);
+    assert_eq!(member_lines[0], format!("{MEMBER_KEY}2000 {STARTED}"));
+    assert!(!text.contains("999") && !text.contains("998"));
+    rec.clear();
 }

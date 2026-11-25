@@ -118,6 +118,7 @@ fn mk_cfg(allowed: Vec<i64>, allow_approve: bool, allow_mutating: bool) -> Teleg
         enabled: true,
         bot_token_env: "AAF_TELEGRAM_BOT_TOKEN".to_string(),
         allowed_chat_ids: allowed,
+        allowed_user_ids: Vec::new(),
         poll_timeout_secs: 5,
         confirm_ttl_secs: 60,
         allow_approve,
@@ -133,6 +134,7 @@ fn mk_update(update_id: i64, chat_id: i64, user_id: Option<i64>, text: &str) -> 
             message_id: update_id,
             from: user_id.map(|id| User {
                 id,
+                is_bot: false,
                 username: Some("owner".to_string()),
                 first_name: Some("Owner".to_string()),
             }),
@@ -235,14 +237,14 @@ fn read_only_commands_and_botname_suffix_work_for_authorized_chat() {
     let clock = FakeClock::new(3000);
     let mut handler = MockHandler::default();
     let api = MockApi::with_batches(vec![vec![
-        mk_update(10, 1001, Some(50), "/help@MyAafBot"),
-        mk_update(11, 1001, Some(50), "/status"),
-        mk_update(12, 1001, Some(50), "/status@MyAafBot all"),
-        mk_update(13, 1001, Some(50), "/board"),
-        mk_update(14, 1001, Some(50), "/board blocked"),
-        mk_update(15, 1001, Some(50), "/show t-abc123"),
-        mk_update(16, 1001, Some(50), "/handover t-abc123"),
-        mk_update(17, 1001, Some(50), "plain chat message ignored"),
+        mk_update(10, 1001, Some(1001), "/help@MyAafBot"),
+        mk_update(11, 1001, Some(1001), "/status"),
+        mk_update(12, 1001, Some(1001), "/status@MyAafBot all"),
+        mk_update(13, 1001, Some(1001), "/board"),
+        mk_update(14, 1001, Some(1001), "/board blocked"),
+        mk_update(15, 1001, Some(1001), "/show t-abc123"),
+        mk_update(16, 1001, Some(1001), "/handover t-abc123"),
+        mk_update(17, 1001, Some(1001), "plain chat message ignored"),
     ]]);
 
     let stats = run_poll_loop(&api, &cfg, &mut handler, &clock, Some(1)).unwrap();
@@ -276,7 +278,7 @@ fn approve_and_mutating_rejected_when_disabled_in_config() {
             &mut disp,
             &mut handler,
             &clock,
-            mk_update(id, 1001, Some(50), cmd),
+            mk_update(id, 1001, Some(1001), cmd),
         );
         assert!(reply.contains("refused:"), "{cmd} -> {reply}");
     }
@@ -295,7 +297,7 @@ fn two_step_approve_succeeds_once_and_rejects_replay() {
         &mut disp,
         &mut handler,
         &clock,
-        mk_update(1, 1001, Some(77), "/approve t-42"),
+        mk_update(1, 1001, Some(1001), "/approve t-42"),
     );
     assert!(preview.contains("deadbeef12345678"));
     assert!(preview.contains("M Cargo.toml"));
@@ -308,9 +310,9 @@ fn two_step_approve_succeeds_once_and_rejects_replay() {
         &mut disp,
         &mut handler,
         &clock,
-        mk_update(2, 1001, Some(77), &format!("/confirm {code}")),
+        mk_update(2, 1001, Some(1001), &format!("/confirm {code}")),
     );
-    assert_eq!(confirmed, "approve(t-42,deadbeef12345678,u=77)");
+    assert_eq!(confirmed, "approve(t-42,deadbeef12345678,u=1001)");
     assert_eq!(handler.calls.len(), 1);
 
     // Replay of the exact same single-use code MUST fail.
@@ -318,7 +320,7 @@ fn two_step_approve_succeeds_once_and_rejects_replay() {
         &mut disp,
         &mut handler,
         &clock,
-        mk_update(3, 1001, Some(77), &format!("/confirm {code}")),
+        mk_update(3, 1001, Some(1001), &format!("/confirm {code}")),
     );
     assert!(replay.contains("invalid or expired"));
     assert_eq!(handler.calls.len(), 1);
@@ -331,27 +333,25 @@ fn two_step_mutating_commands_work_and_anonymous_or_bad_id_refused() {
     let mut handler = MockHandler::default();
     let mut disp = CommandDispatcher::new(cfg).unwrap();
 
-    // Anonymous sender (`from: None`) and path-traversal task_id must be rejected.
-    let anon = reply_of(
-        &mut disp,
-        &mut handler,
-        &clock,
-        mk_update(1, 1001, None, "/unfreeze"),
+    // Anonymous sender (`from: None`) is silently rejected; path-traversal task_id is refused.
+    assert_eq!(
+        disp.handle_update(&mk_update(1, 1001, None, "/unfreeze"), &mut handler, &clock)
+            .unwrap(),
+        UpdateOutcome::IgnoredUnauthorized
     );
-    assert!(anon.contains("refused:"));
     let bad_id = reply_of(
         &mut disp,
         &mut handler,
         &clock,
-        mk_update(2, 1001, Some(88), "/show ../etc/passwd"),
+        mk_update(2, 1001, Some(1001), "/show ../etc/passwd"),
     );
     assert!(bad_id.contains("invalid task id"));
 
     // Safe recovery commands execute in 1 step when allowed_chat_ids is non-empty.
     for (idx, (cmd, expected)) in [
-        ("/unblock t-1", "unblock(t-1,u=88)"),
-        ("/unblock all", "unblock_all(u=88)"),
-        ("/unfreeze", "unfreeze(u=88)"),
+        ("/unblock t-1", "unblock(t-1,u=1001)"),
+        ("/unblock all", "unblock_all(u=1001)"),
+        ("/unfreeze", "unfreeze(u=1001)"),
     ]
     .iter()
     .enumerate()
@@ -360,7 +360,7 @@ fn two_step_mutating_commands_work_and_anonymous_or_bad_id_refused() {
             &mut disp,
             &mut handler,
             &clock,
-            mk_update(10 + idx as i64, 1001, Some(88), cmd),
+            mk_update(10 + idx as i64, 1001, Some(1001), cmd),
         );
         assert_eq!(done, *expected);
     }
@@ -370,9 +370,9 @@ fn two_step_mutating_commands_work_and_anonymous_or_bad_id_refused() {
     for (idx, (cmd, expected)) in [
         (
             "/rework t-2 add edge test",
-            "rework(t-2,add edge test,u=88)",
+            "rework(t-2,add edge test,u=1001)",
         ),
-        ("/steer t-3 avoid alloc", "steer(t-3,avoid alloc,u=88)"),
+        ("/steer t-3 avoid alloc", "steer(t-3,avoid alloc,u=1001)"),
     ]
     .iter()
     .enumerate()
@@ -382,14 +382,14 @@ fn two_step_mutating_commands_work_and_anonymous_or_bad_id_refused() {
             &mut disp,
             &mut handler,
             &clock,
-            mk_update(base_id, 1001, Some(88), cmd),
+            mk_update(base_id, 1001, Some(1001), cmd),
         );
         let code = extract_code(&preview);
         let done = reply_of(
             &mut disp,
             &mut handler,
             &clock,
-            mk_update(base_id + 1, 1001, Some(88), &format!("/confirm {code}")),
+            mk_update(base_id + 1, 1001, Some(1001), &format!("/confirm {code}")),
         );
         assert_eq!(done, *expected);
     }
@@ -398,7 +398,8 @@ fn two_step_mutating_commands_work_and_anonymous_or_bad_id_refused() {
 
 #[test]
 fn wrong_user_or_wrong_chat_cannot_confirm_another_users_nonce() {
-    let cfg = mk_cfg(vec![1001, 1002], true, true);
+    let mut cfg = mk_cfg(vec![1001, 1002], true, true);
+    cfg.allowed_user_ids = vec![500, 501];
     let clock = FakeClock::new(7000);
     let mut handler = MockHandler::default();
     let mut disp = CommandDispatcher::new(cfg).unwrap();
@@ -451,7 +452,7 @@ fn expired_nonce_is_rejected_and_pending_store_is_bounded() {
         &mut disp,
         &mut handler,
         &clock,
-        mk_update(1, 1001, Some(10), "/rework t-1 retry"),
+        mk_update(1, 1001, Some(1001), "/rework t-1 retry"),
     );
     let code = extract_code(&preview);
 
@@ -460,7 +461,7 @@ fn expired_nonce_is_rejected_and_pending_store_is_bounded() {
         &mut disp,
         &mut handler,
         &clock,
-        mk_update(2, 1001, Some(10), &format!("/confirm {code}")),
+        mk_update(2, 1001, Some(1001), &format!("/confirm {code}")),
     );
     assert!(expired.contains("invalid or expired"));
     assert!(handler.calls.is_empty());
@@ -470,7 +471,7 @@ fn expired_nonce_is_rejected_and_pending_store_is_bounded() {
             &mut disp,
             &mut handler,
             &clock,
-            mk_update(100 + i as i64, 1001, Some(10), "/rework t-1 retry"),
+            mk_update(100 + i as i64, 1001, Some(1001), "/rework t-1 retry"),
         );
     }
     assert_eq!(disp.pending_len(), MAX_PENDING_CONFIRMATIONS);

@@ -87,7 +87,7 @@ pub enum ParsedCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateOutcome {
-    /// Update came from a chat_id not in `allowed_chat_ids` — silently dropped.
+    /// Update came from an unauthorized chat, missing/bot sender, or disallowed user — silently dropped.
     IgnoredUnauthorized,
     /// Authorized message was empty or not a `/command`.
     IgnoredNonCommand,
@@ -222,11 +222,24 @@ impl CommandDispatcher {
         if !self.cfg.allowed_chat_ids.contains(&chat_id) {
             return Ok(UpdateOutcome::IgnoredUnauthorized);
         }
+        let Some(from) = msg.from.as_ref() else {
+            return Ok(UpdateOutcome::IgnoredUnauthorized);
+        };
+        if from.is_bot {
+            return Ok(UpdateOutcome::IgnoredUnauthorized);
+        }
+        let sender_allowed = if self.cfg.allowed_user_ids.is_empty() {
+            msg.chat.chat_type == "private" && chat_id > 0 && from.id == chat_id
+        } else {
+            self.cfg.allowed_user_ids.contains(&from.id)
+        };
+        if !sender_allowed {
+            return Ok(UpdateOutcome::IgnoredUnauthorized);
+        }
         let Some(cmd) = msg.text.as_deref().and_then(parse_command) else {
             return Ok(UpdateOutcome::IgnoredNonCommand);
         };
-        let user_id = msg.from.as_ref().map(|u| u.id);
-        let reply = self.dispatch(chat_id, user_id, cmd, handler, clock);
+        let reply = self.dispatch(chat_id, from.id, cmd, handler, clock);
         Ok(UpdateOutcome::Reply {
             chat_id,
             text: sanitize_output(&reply),
@@ -236,7 +249,7 @@ impl CommandDispatcher {
     fn dispatch(
         &mut self,
         chat_id: i64,
-        user_id: Option<i64>,
+        user_id: i64,
         cmd: ParsedCommand,
         handler: &mut dyn CommandHandler,
         clock: &dyn Clock,
@@ -309,7 +322,7 @@ impl CommandDispatcher {
     fn prepare_approve(
         &mut self,
         chat_id: i64,
-        user_id: Option<i64>,
+        uid: i64,
         task_id: &str,
         handler: &dyn CommandHandler,
         clock: &dyn Clock,
@@ -318,9 +331,6 @@ impl CommandDispatcher {
             return "refused: /approve is disabled in Tier-1 config (telegram.allow_approve = false)"
                 .to_string();
         }
-        let Some(uid) = user_id else {
-            return "refused: /approve requires an identifiable Telegram user".to_string();
-        };
         if let Err(e) = validate_task_id(task_id) {
             return format!("invalid task id: {e}");
         }
@@ -356,18 +366,13 @@ impl CommandDispatcher {
         out
     }
 
-    fn check_mutating(&self, user_id: Option<i64>, task_id: Option<&str>) -> Result<i64, String> {
+    fn check_mutating(&self, uid: i64, task_id: Option<&str>) -> Result<i64, String> {
         if !self.cfg.allow_mutating {
             return Err(
                 "refused: mutating commands are disabled in Tier-1 config (telegram.allow_mutating = false)"
                     .to_string(),
             );
         }
-        let Some(uid) = user_id else {
-            return Err(
-                "refused: mutating commands require an identifiable Telegram user".to_string(),
-            );
-        };
         if let Some(id) = task_id
             && let Err(e) = validate_task_id(id)
         {
@@ -378,12 +383,12 @@ impl CommandDispatcher {
 
     fn run_safe_recovery(
         &self,
-        user_id: Option<i64>,
+        uid: i64,
         task_id: Option<&str>,
         exec: impl FnOnce(&mut dyn CommandHandler, i64) -> String,
         handler: &mut dyn CommandHandler,
     ) -> String {
-        match self.check_mutating(user_id, task_id) {
+        match self.check_mutating(uid, task_id) {
             Ok(uid) if !self.cfg.allowed_chat_ids.is_empty() => exec(handler, uid),
             Ok(_) => "refused: telegram allowed_chat_ids is empty".to_string(),
             Err(msg) => msg,
@@ -393,13 +398,13 @@ impl CommandDispatcher {
     fn prepare_mutating(
         &mut self,
         chat_id: i64,
-        user_id: Option<i64>,
+        uid: i64,
         task_id: Option<&str>,
         action: MutatingAction,
         summary: String,
         clock: &dyn Clock,
     ) -> String {
-        let uid = match self.check_mutating(user_id, task_id) {
+        let uid = match self.check_mutating(uid, task_id) {
             Ok(uid) => uid,
             Err(msg) => return msg,
         };
@@ -415,14 +420,11 @@ impl CommandDispatcher {
     fn execute_confirm(
         &mut self,
         chat_id: i64,
-        user_id: Option<i64>,
+        uid: i64,
         code: &str,
         handler: &mut dyn CommandHandler,
         clock: &dyn Clock,
     ) -> String {
-        let Some(uid) = user_id else {
-            return "refused: /confirm requires an identifiable Telegram user".to_string();
-        };
         if !is_valid_confirm_code(code) {
             return "invalid or expired confirmation code".to_string();
         }

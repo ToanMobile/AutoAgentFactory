@@ -76,16 +76,10 @@ pub fn proof_triggered(cfg: &ProofConfig, changed_paths: &[String]) -> bool {
     changed_paths.iter().any(|path| set.is_match(path))
 }
 
-/// Loads `[proof].capture_cmd` strictly from immutable
-/// `git show <base_sha>:.autofactory/config.toml`.
-///
-/// Returns `Ok(None)` when `.autofactory/config.toml` does not exist at
-/// `base_sha` or its `[proof].capture_cmd` is empty. Fails closed on invalid
-/// `base_sha`, non-blob entries, git errors, or invalid TOML.
-pub fn load_base_proof_capture_cmd(
+fn load_base_proof_config(
     repo_root: &Path,
     base_sha: &str,
-) -> Result<Option<String>, ProofError> {
+) -> Result<Option<ProofConfig>, ProofError> {
     let sha = base_sha.trim();
     if sha.is_empty()
         || sha.starts_with('-')
@@ -116,7 +110,42 @@ pub fn load_base_proof_capture_cmd(
     let shown = aaf_fp::git(repo_root, &["show", &spec], &[], aaf_fp::GIT_TIMEOUT)?;
     let repo_cfg: RepoConfig = toml::from_str(&shown)
         .map_err(|err| ProofError::Invalid(format!("invalid TOML in {spec}: {}", err.message())))?;
-    let cmd = repo_cfg.proof.capture_cmd.trim();
+    Ok(Some(repo_cfg.proof))
+}
+
+fn normalize_capture_lock_globs(globs: Vec<String>) -> Vec<String> {
+    globs
+        .into_iter()
+        .filter_map(|raw| {
+            let mut s = raw.trim();
+            loop {
+                if let Some(rest) = s.strip_prefix("./") {
+                    s = rest;
+                } else if let Some(rest) = s.strip_prefix('/') {
+                    s = rest;
+                } else {
+                    break;
+                }
+            }
+            (!s.is_empty()).then(|| s.to_string())
+        })
+        .collect()
+}
+
+/// Loads `[proof].capture_cmd` strictly from immutable
+/// `git show <base_sha>:.autofactory/config.toml`.
+///
+/// Returns `Ok(None)` when `.autofactory/config.toml` does not exist at
+/// `base_sha` or its `[proof].capture_cmd` is empty. Fails closed on invalid
+/// `base_sha`, non-blob entries, git errors, or invalid TOML.
+pub fn load_base_proof_capture_cmd(
+    repo_root: &Path,
+    base_sha: &str,
+) -> Result<Option<String>, ProofError> {
+    let Some(proof) = load_base_proof_config(repo_root, base_sha)? else {
+        return Ok(None);
+    };
+    let cmd = proof.capture_cmd.trim();
     Ok((!cmd.is_empty()).then(|| cmd.to_string()))
 }
 
@@ -322,6 +351,14 @@ fn run_capture_attempt(
     for var in SCRUBBED_CAPTURE_ENV {
         cmd.env_remove(var);
     }
+    for (k, _) in std::env::vars_os() {
+        if k.as_encoded_bytes()
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"AAF_"))
+        {
+            cmd.env_remove(&k);
+        }
+    }
     cmd.env("AAF_PROOF_OUT", &temp_out.path);
 
     let done =
@@ -449,11 +486,19 @@ pub(crate) struct GateProofCheck<'a> {
 pub(crate) fn load_gate_base_capture_cmd(
     repo_root: &Path,
     base_sha: Option<&str>,
-) -> Result<Option<String>, GateError> {
+) -> Result<(Option<String>, Vec<String>), GateError> {
     let Some(sha) = base_sha else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
-    load_base_proof_capture_cmd(repo_root, sha).map_err(|e| GateError::Config(e.to_string()))
+    let Some(proof) =
+        load_base_proof_config(repo_root, sha).map_err(|e| GateError::Config(e.to_string()))?
+    else {
+        return Ok((None, Vec::new()));
+    };
+    let cmd = proof.capture_cmd.trim();
+    let cmd = (!cmd.is_empty()).then(|| cmd.to_string());
+    let lock_globs = normalize_capture_lock_globs(proof.capture_lock_globs);
+    Ok((cmd, lock_globs))
 }
 
 #[allow(clippy::too_many_arguments)]

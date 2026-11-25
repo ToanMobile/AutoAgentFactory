@@ -245,7 +245,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   const STATES = ["all","need_you","ready","running","gating","review","blocked","done","backlog"];
   const STATE_LABELS = { need_you: "Need You" };
   let token = "";
-  let meta = { read_only: true, scope: "", version: "" };
+  let meta = { read_only: true, allow_approve: false, scope: "", version: "" };
   let statusData = null;
   let boardTasks = [];
   let activeTab = "board";
@@ -604,6 +604,12 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const locked = (pv && pv.locked_changes) || [];
     const lockFp = (pv && pv.lock_fp) || "";
     const ro = Boolean(meta.read_only);
+    const allowApprove = !ro && Boolean(meta.allow_approve);
+    const approveHint = ro
+      ? "Disabled in read-only mode. Use `aaf approve` on a TTY or restart with `aaf ui --allow-approve`."
+      : (!allowApprove
+          ? "Web approve is disabled by default. Restart with `aaf ui --allow-approve` or run `aaf approve` on a TTY."
+          : "");
 
     box.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
@@ -637,25 +643,29 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           : `<div class="muted">Lock preview unavailable: ${esc(pvRes.reason && pvRes.reason.message || "")}</div>`}
       </div>
       <div class="action-bar">
-        <button id="btnApprove" class="btn-ok" ${ro || !locked.length || !lockFp ? "disabled" : ""}>Approve Locked Diff</button>
+        <button id="btnApprove" class="btn-ok" ${!allowApprove || !locked.length || !lockFp ? "disabled" : ""} ${approveHint ? `title="${esc(approveHint)}"` : ""}>Approve Locked Diff</button>
         <button id="btnRework" class="btn-danger" ${ro || st !== "review" ? "disabled" : ""}>Rework</button>
         <button id="btnUnblock" class="btn-primary" ${ro || st !== "blocked" ? "disabled" : ""}>Unblock</button>
         <button id="btnSteer" ${ro ? "disabled" : ""}>Steer</button>
-      </div>`;
+      </div>
+      ${approveHint ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(approveHint)}</div>` : ""}`;
 
-    $("btnApprove").onclick = () => openModal({
-      title: "Confirm Approve " + taskId,
-      desc: "Sign approval for locked fingerprint " + lockFp + " (" + locked.length + " file(s)).",
-      fields: `<label class="kv-title" style="display:block">Reviewer name</label><input id="mReviewer" value="web-ui" style="width:100%">`,
-      confirmLabel: "Sign Approval",
-      onConfirm: async () => {
-        const reviewer = ($("mReviewer").value || "web-ui").trim();
-        await api("/api/approve", { method: "POST", body: JSON.stringify({ task_id: taskId, lock_fp: lockFp, reviewer }) });
-        toast("Approved " + taskId);
-        await refreshAll();
-        loadReviewDetail(taskId);
-      },
-    });
+    $("btnApprove").onclick = () => {
+      if (!allowApprove) return;
+      openModal({
+        title: "Confirm Approve " + taskId,
+        desc: "Sign approval for locked fingerprint " + lockFp + " (" + locked.length + " file(s)).",
+        fields: `<label class="kv-title" style="display:block">Reviewer name</label><input id="mReviewer" value="web-ui" style="width:100%">`,
+        confirmLabel: "Sign Approval",
+        onConfirm: async () => {
+          const reviewer = ($("mReviewer").value || "web-ui").trim();
+          await api("/api/approve", { method: "POST", body: JSON.stringify({ task_id: taskId, lock_fp: lockFp, reviewer }) });
+          toast("Approved " + taskId);
+          await refreshAll();
+          loadReviewDetail(taskId);
+        },
+      });
+    };
     $("btnRework").onclick = () => promptMutate("rework", taskId);
     $("btnUnblock").onclick = () => promptMutate("unblock", taskId);
     $("btnSteer").onclick = () => promptMutate("steer", taskId);

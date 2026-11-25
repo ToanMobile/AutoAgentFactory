@@ -235,11 +235,14 @@ pub fn run_gate_with_options(
         &static_checks::skip_path,
     )?;
     let statics = static_checks::scan(&added)?;
+    let (base_capture_cmd, base_capture_lock_globs) =
+        crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())?;
     let head_lock = head_lock::evaluate_changes_with_common(
         data_dir,
         repo_root,
         Some(common_root),
         cfg,
+        &base_capture_lock_globs,
         &set.changes,
         &added,
         require_independent,
@@ -257,6 +260,7 @@ pub fn run_gate_with_options(
     if !proof_needed
         && pre_proof_err.is_some()
         && hidden.is_empty()
+        && head_lock.status != aaf_domain::gate::LockStatus::Blocked
         && let Some(receipt) = reuse::reusable_receipt(data_dir, &key, &asked)
     {
         return Ok(GateRun {
@@ -265,9 +269,7 @@ pub fn run_gate_with_options(
             unconfined: None,
         });
     }
-    let has_base_capture = proof_needed
-        && pre_proof_err.is_some()
-        && crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())?.is_some();
+    let has_base_capture = proof_needed && pre_proof_err.is_some() && base_capture_cmd.is_some();
     let pre_cmd_proof_block = (proof_needed && !has_base_capture)
         .then_some(pre_proof_err.as_deref())
         .flatten();

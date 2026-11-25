@@ -255,6 +255,13 @@ impl<'a> Round<'a> {
     }
 }
 
+pub(super) fn receipt_duration_ms(receipt: &Receipt) -> u64 {
+    receipt
+        .commands
+        .iter()
+        .fold(0u64, |acc, c| acc.saturating_add(c.duration_ms))
+}
+
 pub(super) fn gate_payload(
     deps: &Deps,
     worktree: &Path,
@@ -269,6 +276,7 @@ pub(super) fn gate_payload(
             .count()
     };
     let passed = receipt.commands.iter().filter(|c| c.passed()).count();
+    let duration_ms = receipt_duration_ms(receipt);
     let proof_ok = post_audit::proof_verified(deps, worktree, receipt);
     let score = compute_mechanical_score(receipt, proof_ok, false, false).score;
     json!({
@@ -282,6 +290,7 @@ pub(super) fn gate_payload(
         "store_unresolved": receipt.store_compliance.unresolved.len(),
         "head_lock_status": receipt.head_lock.status, "suppressions": receipt.suppressions,
         "commands_passed": passed, "commands_total": receipt.commands.len(),
+        "duration_ms": duration_ms,
         "mechanical_score": score,
     })
 }
@@ -435,5 +444,63 @@ pub(crate) fn settle(
             }
             blocked(format!("the gate could not run: {error}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::receipt_duration_ms;
+    use aaf_domain::gate::{
+        CommandResult, GateMode, GateStatus, HeadLockReport, LockStatus, RECEIPT_SCHEMA_VERSION,
+        Receipt, StoreComplianceReport,
+    };
+
+    fn receipt_with_durations(durations: &[u64]) -> Receipt {
+        Receipt {
+            schema_version: RECEIPT_SCHEMA_VERSION,
+            repo_root: "/repo".to_string(),
+            tree_fp: "fp".to_string(),
+            head_sha: None,
+            base_sha: None,
+            mode: GateMode::Scoped,
+            status: GateStatus::Clear,
+            reasons: Vec::new(),
+            config_hash: "cfg".to_string(),
+            commands: durations
+                .iter()
+                .enumerate()
+                .map(|(i, &duration_ms)| CommandResult {
+                    name: format!("c{i}"),
+                    command: "true".to_string(),
+                    exit_code: Some(0),
+                    timed_out: false,
+                    duration_ms,
+                    log_tail: String::new(),
+                })
+                .collect(),
+            static_findings: Vec::new(),
+            suppressions: 0,
+            head_lock: HeadLockReport {
+                status: LockStatus::Clear,
+                lock_fp: String::new(),
+                locked_changes: Vec::new(),
+                approval: None,
+            },
+            store_compliance: StoreComplianceReport::not_applicable(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn receipt_duration_ms_sums_and_saturates() {
+        assert_eq!(receipt_duration_ms(&receipt_with_durations(&[])), 0);
+        assert_eq!(
+            receipt_duration_ms(&receipt_with_durations(&[450, 750, 600])),
+            1800
+        );
+        assert_eq!(
+            receipt_duration_ms(&receipt_with_durations(&[u64::MAX, 10])),
+            u64::MAX
+        );
     }
 }

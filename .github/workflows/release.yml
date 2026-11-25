@@ -73,7 +73,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: refs/tags/${{ needs.resolve.outputs.tag }}
           persist-credentials: false
@@ -90,7 +90,7 @@ jobs:
           cargo --version
 
       - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: release-${{ matrix.target }}
 
@@ -140,7 +140,7 @@ jobs:
           Get-Item "dist/$PkgDir.zip" | Format-List Name, Length
 
       - name: Upload target archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-${{ matrix.target }}
           path: dist/aaf-*
@@ -150,13 +150,14 @@ jobs:
     name: publish release
     needs: [resolve, build]
     runs-on: ubuntu-latest
+    environment: release
     timeout-minutes: 15
     permissions:
       contents: write
 
     steps:
       - name: Download all release artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: dist
           pattern: release-*
@@ -170,8 +171,34 @@ jobs:
           LC_ALL=C sha256sum aaf-*.tar.gz aaf-*.zip | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      - name: Sign SHA256SUMS.txt with minisign
+        shell: bash
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY}" ]; then
+            echo "MINISIGN_SECRET_KEY secret is required in the 'release' environment" >&2
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          KEY_DIR="$(mktemp -d)"
+          trap 'rm -rf "${KEY_DIR}"' EXIT
+          KEY_FILE="${KEY_DIR}/minisign.key"
+          umask 077
+          printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${KEY_FILE}"
+          if [ -n "${MINISIGN_PASSWORD}" ]; then
+            printf '%s\n' "${MINISIGN_PASSWORD}" | minisign -S -s "${KEY_FILE}" -t "aaf release ${TAG}" -m dist/SHA256SUMS.txt -x dist/SHA256SUMS.txt.minisig
+          else
+            minisign -S -s "${KEY_FILE}" -t "aaf release ${TAG}" -m dist/SHA256SUMS.txt -x dist/SHA256SUMS.txt.minisig < /dev/null
+          fi
+          test -s dist/SHA256SUMS.txt.minisig
+
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@40c2ca6ddd77ba2a30bbea8f67409c0f76868d67 # v3
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           generate_release_notes: true
@@ -180,3 +207,4 @@ jobs:
             dist/aaf-*.tar.gz
             dist/aaf-*.zip
             dist/SHA256SUMS.txt
+            dist/SHA256SUMS.txt.minisig

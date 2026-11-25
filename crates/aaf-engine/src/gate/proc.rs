@@ -439,7 +439,15 @@ pub(crate) fn git_bytes(
         .arg(repo)
         .args(["-c", "gc.auto=0", "-c", "core.fsmonitor=false"])
         .args(args);
-    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+    const SCRUBBED_GIT_ENV: [&str; 6] = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+    ];
+    for var in SCRUBBED_GIT_ENV {
         cmd.env_remove(var);
     }
     // The git command, past the caller's own `-c <name>=<value>` options.
