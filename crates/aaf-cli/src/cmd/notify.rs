@@ -101,6 +101,18 @@ pub(crate) fn alert_for(event: &FactoryEvent, title: &dyn Fn(&str) -> String) ->
                 format!("aaf: factory halted on {}: {why}", name(&task)),
             )
         }
+        // Only `exhausted` needs the owner: rework/skipped are handled by
+        // the factory itself.
+        EventKind::PrFeedback if payload["action"].as_str() == Some("exhausted") => (
+            "pr_exhausted",
+            format!(
+                "aaf: {} stopped fixing PR #{} after {} feedback round(s); \
+                 it stays in Review for you",
+                name(&task),
+                payload["pr"].as_u64().unwrap_or(0),
+                payload["round"].as_u64().unwrap_or(0)
+            ),
+        ),
         EventKind::TaskStateChanged => match payload["to"].as_str() {
             Some("review") => (
                 "review",
@@ -342,3 +354,7 @@ pub fn run(args: &NotifyArgs, ctx: &Ctx) -> CmdResult {
         thread::sleep(Duration::from_secs(args.interval.max(1)));
     }
 }
+
+#[cfg(test)]
+#[path = "notify/tests_alert.rs"]
+mod tests_alert;

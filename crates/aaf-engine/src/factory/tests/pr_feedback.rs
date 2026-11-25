@@ -347,6 +347,12 @@ fn rounds_are_capped_and_exhausted_is_emitted_once() {
     set_snap(&world, snap3);
     assert!(!check_task(&deps, &world.task("t1")).unwrap());
     assert!(!check_task(&deps, &world.task("t1")).unwrap());
+    // New feedback after the cap (new head, another failing check) must not
+    // emit a second `exhausted`: the task stays parked in Review.
+    let mut snap4 = base_snap("t1", "sha-4");
+    snap4.checks.push(fail_check("ci/lint"));
+    set_snap(&world, snap4);
+    assert!(!check_task(&deps, &world.task("t1")).unwrap());
     assert_eq!(world.state("t1"), TaskState::Review);
     let exhausted = feedback_events(&world, "t1")
         .into_iter()

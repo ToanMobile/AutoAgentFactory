@@ -212,6 +212,8 @@ struct TaskPrHistory {
     last_feedback_digest: Option<String>,
     last_skip_why: Option<String>,
     comment_cutoff_ts: i64,
+    /// `exhausted` was already emitted: the task stays parked in Review.
+    exhausted: bool,
 }
 
 fn load_pr_history(deps: &Deps, task_id: &str) -> PortResult<Option<TaskPrHistory>> {
@@ -225,6 +227,7 @@ fn load_pr_history(deps: &Deps, task_id: &str) -> PortResult<Option<TaskPrHistor
     let mut last_feedback_digest: Option<String> = None;
     let mut last_skip_why: Option<String> = None;
     let mut last_rework_ts: Option<i64> = None;
+    let mut exhausted = false;
 
     // Events are returned newest-first.
     for ev in events {
@@ -255,6 +258,7 @@ fn load_pr_history(deps: &Deps, task_id: &str) -> PortResult<Option<TaskPrHistor
                             .map(str::to_string);
                     }
                 }
+                exhausted |= action == "exhausted";
                 if action == "rework" {
                     prior_rework_rounds = prior_rework_rounds.saturating_add(1);
                     if last_rework_ts.is_none() {
@@ -275,6 +279,7 @@ fn load_pr_history(deps: &Deps, task_id: &str) -> PortResult<Option<TaskPrHistor
         last_feedback_digest,
         last_skip_why,
         comment_cutoff_ts: last_rework_ts.unwrap_or(pr_opened_ts),
+        exhausted,
     }))
 }
 
@@ -296,6 +301,10 @@ pub(crate) fn check_task(deps: &Deps, task: &Task) -> PortResult<bool> {
     let Some(history) = load_pr_history(deps, &task.id)? else {
         return Ok(false);
     };
+    // `exhausted` is emitted once; later feedback must not re-alert.
+    if history.exhausted {
+        return Ok(false);
+    }
     let expected_branch = format!("{BRANCH_PREFIX}{}", task.id);
     let repo_root = Path::new(&deps.settings.repo_root);
     let snapshot = match deps

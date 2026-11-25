@@ -81,9 +81,12 @@ fn format_ci_logs(failed_logs: &[(String, String)]) -> Vec<(String, String)> {
             let scrubbed = scrub_secrets(&cleaned, &[]);
             let trimmed = if scrubbed.len() > per_job_bytes {
                 let tail = tail_utf8_bytes(&scrubbed, per_job_bytes);
+                // The first line is cut mid-way: a secret split there no
+                // longer matches the scrubber, so drop it; a single cut
+                // line is dropped whole.
                 match tail.find('\n') {
                     Some(nl) => &tail[nl + 1..],
-                    None => tail,
+                    None => "[log line too long; omitted]",
                 }
             } else {
                 &scrubbed
@@ -159,4 +162,20 @@ pub(super) fn build_note(
         MAX_NOTE_CHARS.saturating_sub(NOTE_HEADER.chars().count() + NOTE_FOOTER.chars().count());
     let bounded = truncate_chars(&safe_inner, budget);
     format!("{NOTE_HEADER}{bounded}{NOTE_FOOTER}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_ci_logs;
+
+    #[test]
+    fn single_overlong_line_is_omitted_not_kept_as_a_cut_fragment() {
+        // A token cut at the window start no longer matches the scrubber, so
+        // a cut line without a newline must not be passed on at all.
+        let raw = format!("{}SECRETFRAGMENT{}", "a".repeat(2_000), "b".repeat(9_000));
+        let out = format_ci_logs(&[("ci/build".into(), raw)]);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].1.contains('b'), "{}", out[0].1);
+        assert!(out[0].1.contains("omitted"), "{}", out[0].1);
+    }
 }
