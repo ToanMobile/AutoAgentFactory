@@ -68,7 +68,9 @@ pub use audit_backend::{
 pub use base_ref::{BaseRef, resolve_base};
 pub use git_real::RealGit;
 pub(crate) use infra_retry::INFRA_RETRY_MAX;
-pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
+pub use ports::{
+    AccountPool, GateRunner, GitOps, Grant, Integration, IntegrationGuard, Notifier, Purpose,
+};
 pub use post_audit::is_large_diff;
 pub use scheduler::{
     Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit,

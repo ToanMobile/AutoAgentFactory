@@ -294,12 +294,14 @@ fn clean_repo(
     let active_ids: HashSet<String> = repo_tasks.iter().map(|t| t.id.clone()).collect();
 
     // 1. Orphaned `aaf/batch-*` worktrees and branches.
-    match worktree::remove_orphan_batch_worktrees(
+    match worktree::remove_orphan_batch_worktrees_with(
         repo,
         worktrees_dir,
         repo_id,
         &active_ids,
         opts.dry_run,
+        opts.force,
+        None,
     ) {
         Ok(sweep) => {
             report.removed_orphan_batches.extend(sweep.removed);

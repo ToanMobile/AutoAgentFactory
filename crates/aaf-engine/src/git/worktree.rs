@@ -1,24 +1,28 @@
 //! One task = one worktree = one branch `aaf/<task_id>`.
 
-use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::cmd::{git, git_raw};
 use super::{GitError, path_str};
 
+mod batch;
 mod cleanup;
 mod submodules;
 
+pub use batch::{
+    OrphanBatchSweep, OrphanSweep, parse_batch_pid, process_alive, remove_orphan_batch_worktrees,
+    remove_orphan_batch_worktrees_with,
+};
+use cleanup::is_other_branch_holder;
 pub use cleanup::{
     cleanup_missing_worktree, cleanup_verified_merged_task, delete_snapshot_refs,
     is_operation_in_progress, remove_verified_merged,
 };
-use cleanup::{delete_branch_ignore_missing, is_other_branch_holder};
 
 pub const BRANCH_PREFIX: &str = "aaf/";
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/aaf/snapshots/";
-const BATCH_PREFIX: &str = "batch-";
+pub(super) const BATCH_PREFIX: &str = "batch-";
 pub(super) const SUBMODULES_REFUSAL: &str =
     "working trees containing submodules cannot be moved or removed";
 
@@ -286,153 +290,6 @@ pub fn existing_head(
     Ok(None)
 }
 
-/// Outcome of [`remove_orphan_batch_worktrees`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OrphanSweep {
-    /// Removed (or removable, on a dry run) batch names.
-    pub removed: Vec<String>,
-    /// `"<id>: worktree remove: <stderr>"` for each clean orphan git
-    /// refused to remove without `--force` (initialised submodules, a lock).
-    pub warnings: Vec<String>,
-}
-
-/// Inspects `<worktrees_root>/<repo_id>/` and local `aaf/batch-*` refs for
-/// orphaned integration worktrees/branches not present in `active_task_ids`.
-/// Dirty worktrees, and clean ones `git worktree remove` refuses without
-/// `--force`, are skipped rather than forced; a refusal is reported in
-/// [`OrphanSweep::warnings`].
-pub fn remove_orphan_batch_worktrees(
-    repo_root: &Path,
-    worktrees_root: &Path,
-    repo_id: &str,
-    active_task_ids: &HashSet<String>,
-    dry_run: bool,
-) -> Result<OrphanSweep, GitError> {
-    let mut candidates = BTreeSet::new();
-    let repo_wt_dir = worktrees_root.join(repo_id);
-    if let Ok(entries) = fs::read_dir(&repo_wt_dir) {
-        for entry in entries.filter_map(Result::ok) {
-            let name = entry.file_name();
-            if let Some(id) = name.to_str()
-                && id.starts_with(BATCH_PREFIX)
-                && validate_task_id(id).is_ok()
-                && !active_task_ids.contains(id)
-            {
-                candidates.insert(id.to_string());
-            }
-        }
-    }
-    let branch_refs = git(
-        repo_root,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads/aaf/batch-*",
-        ],
-    )?;
-    for short in branch_refs.lines().filter(|l| !l.is_empty()) {
-        if let Some(id) = short.strip_prefix(BRANCH_PREFIX)
-            && id.starts_with(BATCH_PREFIX)
-            && validate_task_id(id).is_ok()
-            && !active_task_ids.contains(id)
-        {
-            candidates.insert(id.to_string());
-        }
-    }
-    let registered = list(repo_root)?;
-    for entry in &registered {
-        if let Some(id) = entry.task_id()
-            && id.starts_with(BATCH_PREFIX)
-            && !active_task_ids.contains(id)
-        {
-            candidates.insert(id.to_string());
-        }
-    }
-
-    let mut sweep = OrphanSweep::default();
-    for id in candidates {
-        let branch = format!("{BRANCH_PREFIX}{id}");
-        let expected_path = repo_wt_dir.join(&id);
-        let reg_entry = registered
-            .iter()
-            .find(|e| e.branch.as_deref() == Some(branch.as_str()));
-        if let Some(entry) = reg_entry {
-            // Only the factory's own tree is removed: the branch checked out
-            // anywhere else (the main worktree, a user's linked worktree) is
-            // someone's checkout and is kept.
-            if let Some(warning) = foreign_checkout(&id, entry, &registered, &expected_path) {
-                sweep.warnings.push(warning);
-                continue;
-            }
-            if entry.path.exists() {
-                if !git(&entry.path, &["status", "--porcelain"])?.is_empty() {
-                    continue;
-                }
-                // A clean worktree git still refuses without --force
-                // (initialised submodules, a lock) is kept like a dirty
-                // one, without stopping the sweep, and reported.
-                let refusal = if dry_run {
-                    removal_refusal(&entry.path)?
-                        .map(|reason| format!("would be refused: {reason}"))
-                } else {
-                    let out = git_raw(repo_root, &["worktree", "remove", path_str(&entry.path)?])?;
-                    (!out.success()).then(|| out.stderr.trim().to_string())
-                };
-                if let Some(reason) = refusal {
-                    sweep
-                        .warnings
-                        .push(format!("{id}: worktree remove: {reason}"));
-                    continue;
-                }
-            } else if entry.locked {
-                // The tree is on a volume that is not mounted: git keeps
-                // its record and its branch.
-                sweep.warnings.push(format!(
-                    "{id}: worktree is locked and its directory is missing: kept"
-                ));
-                continue;
-            } else if !dry_run {
-                prune(repo_root)?;
-            }
-        } else if expected_path.exists() {
-            let Ok(meta) = fs::symlink_metadata(&expected_path) else {
-                continue;
-            };
-            if meta.file_type().is_symlink() || !meta.is_dir() {
-                continue;
-            }
-            if expected_path.join(".git").exists() {
-                // A tree git cannot read is kept, like a dirty one.
-                let status = git_raw(&expected_path, &["status", "--porcelain"])?;
-                if !status.success() || !status.stdout.trim().is_empty() {
-                    continue;
-                }
-                if !dry_run {
-                    fs::remove_dir_all(&expected_path)?;
-                }
-            } else {
-                let is_empty = fs::read_dir(&expected_path)?.next().transpose()?.is_none();
-                if !is_empty {
-                    continue;
-                }
-                if !dry_run {
-                    fs::remove_dir(&expected_path)?;
-                }
-            }
-        }
-        if !dry_run {
-            // e.g. a stale ref lock: this id's warning, the sweep goes on.
-            if let Err(err) = delete_branch_ignore_missing(repo_root, &branch) {
-                sweep.warnings.push(format!("{id}: branch delete: {err}"));
-                continue;
-            }
-            let _ = delete_snapshot_refs(repo_root, &id);
-        }
-        sweep.removed.push(id);
-    }
-    Ok(sweep)
-}
-
 /// `"<id>: branch is checked out in <where>: kept"` when `entry` (the
 /// registered tree holding task `id`'s branch) is not the factory's own
 /// worktree at `expected` (see [`worktree_path`]); `None` when it is. git
@@ -461,7 +318,7 @@ pub(crate) fn foreign_checkout(
 
 /// The canonical path; a missing one through its canonical parent, so a
 /// tree whose directory is gone still matches across symlinked prefixes.
-fn resolved(path: &Path) -> PathBuf {
+pub(super) fn resolved(path: &Path) -> PathBuf {
     if let Ok(real) = fs::canonicalize(path) {
         return real;
     }
@@ -473,4 +330,4 @@ fn resolved(path: &Path) -> PathBuf {
     }
 }
 
-pub use super::worktree_inspect::{list, prune, removal_refusal};
+pub use super::worktree_inspect::{active_in_progress_branches, list, prune, removal_refusal};

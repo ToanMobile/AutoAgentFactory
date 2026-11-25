@@ -56,6 +56,67 @@ pub struct Integration {
     pub conflicted: Vec<String>,
 }
 
+/// RAII guard for an [`Integration`] worktree: calls [`GitOps::discard`] on
+/// drop unless consumed via [`IntegrationGuard::into_inner`] or
+/// [`IntegrationGuard::discard`].
+pub struct IntegrationGuard<'a> {
+    git: &'a dyn GitOps,
+    integration: Option<Integration>,
+}
+
+impl<'a> IntegrationGuard<'a> {
+    pub fn acquire(git: &'a dyn GitOps, task_ids: &[String]) -> PortResult<Self> {
+        let integration = git.integrate(task_ids)?;
+        Ok(Self {
+            git,
+            integration: Some(integration),
+        })
+    }
+
+    pub fn from_existing(git: &'a dyn GitOps, integration: Integration) -> Self {
+        Self {
+            git,
+            integration: Some(integration),
+        }
+    }
+
+    pub fn integration(&self) -> &Integration {
+        match &self.integration {
+            Some(integration) => integration,
+            None => unreachable!("IntegrationGuard holds an Integration until consumed"),
+        }
+    }
+
+    pub fn integration_mut(&mut self) -> &mut Integration {
+        match &mut self.integration {
+            Some(integration) => integration,
+            None => unreachable!("IntegrationGuard holds an Integration until consumed"),
+        }
+    }
+
+    pub fn into_inner(mut self) -> Integration {
+        match self.integration.take() {
+            Some(integration) => integration,
+            None => unreachable!("IntegrationGuard holds an Integration until consumed"),
+        }
+    }
+
+    pub fn discard(mut self) -> PortResult<()> {
+        match self.integration.take() {
+            Some(integration) => self.git.discard(&integration),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for IntegrationGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(integration) = self.integration.take() {
+            let _ = self.git.discard(&integration);
+        }
+    }
+}
+
 pub trait GitOps: Send + Sync {
     /// The task's worktree on `aaf/<task_id>`: created from the base on
     /// first use, returned as it is afterwards.

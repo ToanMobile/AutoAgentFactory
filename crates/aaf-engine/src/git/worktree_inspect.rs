@@ -1,5 +1,7 @@
 //! Read-only inspection and pruning helpers for git worktrees.
 
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::GitError;
@@ -60,4 +62,52 @@ pub fn list(repo_root: &Path) -> Result<Vec<WorktreeEntry>, GitError> {
 /// Drops the records of worktrees whose directory is gone.
 pub fn prune(repo_root: &Path) -> Result<(), GitError> {
     git(repo_root, &["worktree", "prune"]).map(|_| ())
+}
+
+const IN_PROGRESS_MARKERS: [&str; 5] = [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+];
+
+/// Short branch names (without `refs/heads/`) currently undergoing an active
+/// rebase, merge, cherry-pick, or revert in any registered worktree of
+/// `repo_root`.
+///
+/// Covers detached-HEAD rebases by reading `<gitdir>/rebase-merge/head-name`
+/// and `<gitdir>/rebase-apply/head-name`. Fails closed if an existing
+/// worktree's gitdir cannot be inspected while a branch is checked out there.
+pub fn active_in_progress_branches(repo_root: &Path) -> Result<HashSet<String>, GitError> {
+    let mut active = HashSet::new();
+    for entry in list(repo_root)? {
+        if !entry.path.exists() {
+            continue;
+        }
+        let Ok(git_dir_raw) = git(&entry.path, &["rev-parse", "--absolute-git-dir"]) else {
+            if let Some(branch) = entry.branch {
+                active.insert(branch);
+            }
+            continue;
+        };
+        let git_dir = PathBuf::from(git_dir_raw.trim());
+        for rebase_dir in ["rebase-merge", "rebase-apply"] {
+            let head_name = git_dir.join(rebase_dir).join("head-name");
+            if let Ok(raw) = fs::read_to_string(&head_name) {
+                let trimmed = raw.trim();
+                let short = trimmed.strip_prefix("refs/heads/").unwrap_or(trimmed);
+                if !short.is_empty() {
+                    active.insert(short.to_string());
+                }
+            }
+        }
+        let has_marker = IN_PROGRESS_MARKERS
+            .iter()
+            .any(|marker| git_dir.join(marker).exists());
+        if has_marker && let Some(branch) = entry.branch {
+            active.insert(branch);
+        }
+    }
+    Ok(active)
 }

@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::Deps;
 use super::adapters::provider_for;
-use super::ports::{AccountPool, Grant};
+use super::ports::{AccountPool, Grant, IntegrationGuard};
 use super::prompt::{
     PLAN_APPROVED_PREFIX, PLAN_EXECUTOR, PromptContext, build_plan_prompt, plan_sandbox_policy_for,
 };
@@ -42,9 +42,9 @@ pub(super) fn run_plan_stage(
     stage: Option<&StageTarget>,
 ) -> PortResult<Next> {
     let accounts: &dyn AccountPool = stage.map_or(&*deps.accounts, |t| &*t.accounts);
-    let clean = deps.git.integrate(&[])?;
-    let ran = run_plan_in_tree(deps, task, &clean.tree, grant, stage);
-    let _ = deps.git.discard(&clean);
+    let clean = IntegrationGuard::acquire(&*deps.git, &[])?;
+    let ran = run_plan_in_tree(deps, task, &clean.integration().tree, grant, stage);
+    drop(clean);
     let Some((run_id, mut outcome)) = ran? else {
         return Ok(Next::Blocked);
     };
