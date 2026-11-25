@@ -12,6 +12,11 @@ use super::git_real::err;
 use crate::git::cmd::{Output, git, git_raw};
 use crate::git::pr::parse_pr_number_from_url;
 use crate::git::pr_merge::{PrMergeOutcome, PrMergeRequest, merge_pr};
+
+/// How long one unattended merge attempt waits for CI to register and
+/// finish. A PR still pending after it stays in Review with `ci_pending`
+/// and the review sweep retries it with backoff.
+pub(crate) const FACTORY_CI_WAIT_SECS: u64 = 60;
 use crate::git::{GitError, MergeStrategy, SystemGh, TaskWorktree};
 
 pub(super) const NO_HOOKS: &str = "core.hooksPath=/dev/null";
@@ -140,7 +145,8 @@ pub(super) fn merge_pr_real(
         strategy: MergeStrategy::Squash,
         subject: None,
         body_file: None,
-        ci_wait_secs: 0,
+        ci_wait_secs: FACTORY_CI_WAIT_SECS,
+        require_checks: true,
         lock_timeout,
         dry_run: false,
         machine,

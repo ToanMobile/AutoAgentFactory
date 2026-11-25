@@ -14,6 +14,8 @@ pub mod merge_queue;
 pub mod pr;
 pub mod pr_feedback_gh;
 pub mod pr_merge;
+#[cfg(test)]
+mod pr_merge_ci_tests;
 mod pr_merge_support;
 pub mod warm_slot;
 mod warm_slot_ops;

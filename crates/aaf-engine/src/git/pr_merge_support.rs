@@ -240,6 +240,7 @@ pub(super) fn check_ci(
     repo_root: &Path,
     pr_number: u64,
     wait_secs: u64,
+    require_checks: bool,
 ) -> Result<(Option<(String, String)>, bool), GitError> {
     let deadline = bounded_deadline(Duration::from_secs(wait_secs.min(MAX_WAIT_SECS)));
     let mut waited = false;
@@ -259,11 +260,14 @@ pub(super) fn check_ci(
                 waited,
             ));
         }
-        let pending: Vec<&str> = checks
+        let mut pending: Vec<&str> = checks
             .iter()
             .filter(|c| c.bucket == "pending")
             .map(|c| c.name.as_str())
             .collect();
+        if require_checks && checks.is_empty() {
+            pending.push("(no check registered yet)");
+        }
         if pending.is_empty() {
             return Ok((None, waited));
         }

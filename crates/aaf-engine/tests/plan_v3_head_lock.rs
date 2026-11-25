@@ -167,6 +167,7 @@ require_different_provider = false
             subject: None,
             body_file: None,
             ci_wait_secs: 0,
+            require_checks: false,
             lock_timeout: Duration::from_secs(10),
             dry_run,
             machine: MachineConfig::default(),

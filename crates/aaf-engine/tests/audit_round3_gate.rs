@@ -391,6 +391,7 @@ fn pr_merge_hits_common_receipt_cache_with_auto_base_and_rejects_same_account() 
         subject: None,
         body_file: None,
         ci_wait_secs: 0,
+        require_checks: false,
         lock_timeout: Duration::from_secs(10),
         dry_run,
         machine: machine.clone(),

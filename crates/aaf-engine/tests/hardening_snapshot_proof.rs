@@ -327,6 +327,7 @@ fn merge_oracle_and_hydration_seed_from_shared_base_snapshot() {
         subject: None,
         body_file: None,
         ci_wait_secs: 0,
+        require_checks: false,
         lock_timeout: Duration::from_secs(10),
         dry_run: true,
         machine: calm_machine(),

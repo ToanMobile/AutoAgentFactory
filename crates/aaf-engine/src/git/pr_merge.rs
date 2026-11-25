@@ -52,6 +52,9 @@ pub struct PrMergeRequest {
     pub subject: Option<String>,
     pub body_file: Option<PathBuf>,
     pub ci_wait_secs: u64,
+    /// Unattended merges set this: a PR with no registered check is
+    /// `ci_pending`, never a pass (a just-opened PR has none yet).
+    pub require_checks: bool,
     pub lock_timeout: Duration,
     pub dry_run: bool,
     pub machine: MachineConfig,
@@ -340,7 +343,13 @@ pub fn merge_pr(
             receipt: None,
         });
     }
-    let (ci_blocked, ci_waited) = check_ci(gh, &req.repo_root, req.pr_number, req.ci_wait_secs)?;
+    let (ci_blocked, ci_waited) = check_ci(
+        gh,
+        &req.repo_root,
+        req.pr_number,
+        req.ci_wait_secs,
+        req.require_checks,
+    )?;
     if let Some((code, reason)) = ci_blocked {
         return Ok(PrMergeOutcome::Blocked {
             code,

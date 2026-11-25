@@ -273,6 +273,7 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
         subject: args.subject.clone(),
         body_file: args.body_file.clone(),
         ci_wait_secs: args.ci_wait,
+        require_checks: false,
         lock_timeout: Duration::from_secs(args.lock_timeout),
         dry_run: args.dry_run,
         machine: cfg.global.machine.clone(),

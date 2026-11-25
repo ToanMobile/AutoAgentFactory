@@ -125,6 +125,7 @@ fn run_merge(work: &Path, data: &Path, head: &str) -> (PrMergeOutcome, usize) {
         subject: None,
         body_file: None,
         ci_wait_secs: 0,
+        require_checks: false,
         lock_timeout: Duration::from_secs(10),
         dry_run: false,
         // The CPU-load wait is off: the host running the tests may be busy.
