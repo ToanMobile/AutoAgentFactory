@@ -20,8 +20,9 @@ use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef, fetch_pr_feedback};
 use crate::git::pr_merge::PrMergeOutcome;
 use crate::git::worktree::{self, BRANCH_PREFIX};
 use crate::git::{GitError, MergeOutcome, MergeRequest, PrOutcome, PrRequest, TaskWorktree};
-use crate::process::{CommandRunner, SystemRunner};
+use crate::process::SystemRunner;
 
+mod cleanup;
 #[allow(dead_code)]
 mod commit;
 mod pr_note;
@@ -113,26 +114,6 @@ impl RealGit {
         &self.base
     }
 
-    /// Runs squash-merge PR verification using `runner` (injectable in tests).
-    pub fn verify_squash_merges_with(
-        &self,
-        candidates: &[(String, String)],
-        runner: &dyn CommandRunner,
-    ) -> Result<HashMap<String, String>, GitError> {
-        let fetch = || {
-            self.fetch_base()
-                .map_err(|e| GitError::Invalid(e.to_string()))
-        };
-        crate::gc::verify_squash_merges(
-            &self.repo_root,
-            &self.base.branch,
-            &self.start(),
-            candidates,
-            &fetch,
-            runner,
-        )
-    }
-
     fn admin(&self) -> MutexGuard<'_, ()> {
         self.admin.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -143,25 +124,6 @@ impl RealGit {
 
     fn remote(&self) -> &str {
         self.base.remote.as_deref().unwrap_or(DEFAULT_REMOTE)
-    }
-
-    /// The task's worktree when git has it registered on the task's branch.
-    fn existing(&self, task_id: &str) -> PortResult<Option<TaskWorktree>> {
-        let path =
-            worktree::worktree_path(&self.repo_root, &self.worktrees_dir, task_id).map_err(err)?;
-        let branch = format!("{BRANCH_PREFIX}{task_id}");
-        // Git lists resolved paths; the configured directory may be a link.
-        let Ok(resolved) = std::fs::canonicalize(&path) else {
-            return Ok(None);
-        };
-        let registered = worktree::list(&self.repo_root)
-            .map_err(err)?
-            .into_iter()
-            .any(|entry| {
-                entry.branch.as_deref() == Some(branch.as_str())
-                    && std::fs::canonicalize(&entry.path).is_ok_and(|p| p == resolved)
-            });
-        Ok(registered.then_some(TaskWorktree { path, branch }))
     }
 }
 
@@ -182,12 +144,11 @@ impl GitOps for RealGit {
     }
 
     fn cleanup(&self, task_id: &str) -> PortResult<()> {
-        let _admin = self.admin();
-        match self.existing(task_id)? {
-            // Not forced: refuses a dirty tree and an unmerged branch.
-            Some(tree) => worktree::remove(&self.repo_root, &tree, true, false).map_err(err),
-            None => Ok(()),
-        }
+        self.cleanup_impl(task_id)
+    }
+
+    fn cleanup_verified_merged(&self, task_id: &str) -> PortResult<()> {
+        self.cleanup_verified_merged_impl(task_id)
     }
 
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()> {

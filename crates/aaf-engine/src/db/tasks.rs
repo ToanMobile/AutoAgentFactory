@@ -1,14 +1,13 @@
 //! `TaskStore` on SQLite: tasks and their dependency edges.
 
 use aaf_domain::blocked::BlockedReason;
-use aaf_domain::budget::RootBudget;
 use aaf_domain::dag;
-use aaf_domain::event::{EventKind, FactoryEvent};
+use aaf_domain::event::EventKind;
 use aaf_domain::ports::{PortError, PortResult, TaskStore};
 use aaf_domain::task::{Priority, Task, TaskState};
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
-use super::{Db, corrupt, sql_err, to_i64};
+use super::{Db, corrupt, sql_err};
 
 const MAX_AUTO_RECOVER_COUNT: u32 = crate::factory::INFRA_RETRY_MAX;
 
@@ -35,7 +34,7 @@ fn task_cols(schema_version: i64) -> &'static str {
     }
 }
 
-fn to_json<T: serde::Serialize>(value: &T, what: &str) -> PortResult<String> {
+pub(super) fn to_json<T: serde::Serialize>(value: &T, what: &str) -> PortResult<String> {
     serde_json::to_string(value).map_err(|e| PortError::Invalid(format!("{what}: {e}")))
 }
 
@@ -100,15 +99,15 @@ fn query_tasks(
     Ok(tasks)
 }
 
-struct EncodedTask {
-    task: Task,
+pub(super) struct EncodedTask {
+    pub(super) task: Task,
     spec: String,
     notes: String,
     blocked: Option<String>,
     scope_paths: String,
 }
 
-fn encode_task(task: &Task) -> PortResult<EncodedTask> {
+pub(super) fn encode_task(task: &Task) -> PortResult<EncodedTask> {
     Ok(EncodedTask {
         spec: to_json(&task.spec, "spec")?,
         notes: to_json(&task.context_notes, "context_notes")?,
@@ -122,7 +121,11 @@ fn encode_task(task: &Task) -> PortResult<EncodedTask> {
     })
 }
 
-fn insert_task_row(conn: &Connection, enc: &EncodedTask, state_str: &str) -> PortResult<()> {
+pub(super) fn insert_task_row(
+    conn: &Connection,
+    enc: &EncodedTask,
+    state_str: &str,
+) -> PortResult<()> {
     let t = &enc.task;
     conn.prepare_cached(
         "INSERT INTO tasks (id, repo_root, parent_id, root_id, depth, title, spec, \
@@ -156,7 +159,12 @@ fn insert_task_row(conn: &Connection, enc: &EncodedTask, state_str: &str) -> Por
     Ok(())
 }
 
-fn append_note_tx(conn: &Connection, id: &str, note: String, now: i64) -> PortResult<()> {
+pub(super) fn append_note_tx(
+    conn: &Connection,
+    id: &str,
+    note: String,
+    now: i64,
+) -> PortResult<()> {
     let stored: Option<String> = conn
         .prepare_cached("SELECT context_notes FROM tasks WHERE id = ?1")
         .and_then(|mut stmt| stmt.query_row(params![id], |row| row.get(0)).optional())
@@ -171,11 +179,11 @@ fn append_note_tx(conn: &Connection, id: &str, note: String, now: i64) -> PortRe
     Ok(())
 }
 
-fn task_not_found(id: &str) -> PortError {
+pub(super) fn task_not_found(id: &str) -> PortError {
     PortError::NotFound(format!("task {id}"))
 }
 
-fn require_task(conn: &Connection, id: &str) -> PortResult<()> {
+pub(super) fn require_task(conn: &Connection, id: &str) -> PortResult<()> {
     let found = conn
         .prepare_cached("SELECT 1 FROM tasks WHERE id = ?1")
         .and_then(|mut stmt| stmt.exists(params![id]))
@@ -284,6 +292,17 @@ impl TaskStore for Db {
                 .map_err(sql_err)?;
             Ok(())
         })
+    }
+
+    fn compare_and_set_state(
+        &self,
+        id: &str,
+        expected: TaskState,
+        next: TaskState,
+        blocked_reason: Option<&BlockedReason>,
+        now: i64,
+    ) -> PortResult<bool> {
+        super::tasks_cas::compare_and_set_state_impl(self, id, expected, next, blocked_reason, now)
     }
 
     fn append_context_note(&self, id: &str, note: &str, now: i64) -> PortResult<()> {
@@ -465,130 +484,6 @@ impl TaskStore for Db {
                 woken.push(id);
             }
             Ok(woken)
-        })
-    }
-}
-
-impl Db {
-    /// Atomically persists a split (root budget if absent, child tasks, DAG
-    /// edges, creation events, and parent context note) in one `BEGIN IMMEDIATE`
-    /// transaction. Rejects with [`PortError::Conflict`] if `parent_id` already
-    /// has subtasks.
-    #[allow(clippy::too_many_arguments)]
-    pub fn apply_split_atomic(
-        &self,
-        parent_id: &str,
-        budget: &RootBudget,
-        children: &[Task],
-        deps: &[(String, String)],
-        events: &[FactoryEvent],
-        parent_note: &str,
-        now: i64,
-    ) -> PortResult<()> {
-        let parent_id = parent_id.to_string();
-        let budget = budget.clone();
-        let tokens_used = to_i64(budget.tokens_used, "tokens_used")?;
-        let token_limit = to_i64(budget.token_limit, "token_limit")?;
-        let wall_secs_used = to_i64(budget.wall_secs_used, "wall_secs_used")?;
-        let wall_secs_limit = to_i64(budget.wall_secs_limit, "wall_secs_limit")?;
-        let encoded_children: Vec<EncodedTask> = children
-            .iter()
-            .map(encode_task)
-            .collect::<PortResult<_>>()?;
-        let deps = deps.to_vec();
-        let events = events.to_vec();
-        let parent_note = parent_note.to_string();
-
-        self.write(move |tx| {
-            let parent_state: Option<String> = tx
-                .prepare_cached("SELECT state FROM tasks WHERE id = ?1")
-                .and_then(|mut stmt| {
-                    stmt.query_row(params![parent_id], |row| row.get(0))
-                        .optional()
-                })
-                .map_err(sql_err)?;
-            let parent_state = parent_state.ok_or_else(|| task_not_found(&parent_id))?;
-            let parent_state = TaskState::parse(&parent_state)
-                .ok_or_else(|| corrupt("tasks.state", &parent_state))?;
-            if !matches!(parent_state, TaskState::Ready | TaskState::Backlog) {
-                return Err(PortError::Invalid(format!(
-                    "task {parent_id} in state {} cannot be split (must be ready or backlog)",
-                    parent_state.as_str()
-                )));
-            }
-            let has_children = tx
-                .prepare_cached("SELECT 1 FROM tasks WHERE parent_id = ?1 LIMIT 1")
-                .and_then(|mut stmt| stmt.exists(params![parent_id]))
-                .map_err(sql_err)?;
-            if has_children {
-                return Err(PortError::Conflict(format!(
-                    "task {parent_id} already has subtasks"
-                )));
-            }
-            tx.prepare_cached(
-                "INSERT OR IGNORE INTO root_budgets (root_id, tokens_used, token_limit, \
-                 wall_secs_used, wall_secs_limit, cycles_used, cycles_limit, frozen) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )
-            .and_then(|mut stmt| {
-                stmt.execute(params![
-                    budget.root_id,
-                    tokens_used,
-                    token_limit,
-                    wall_secs_used,
-                    wall_secs_limit,
-                    budget.cycles_used,
-                    budget.cycles_limit,
-                    budget.frozen,
-                ])
-            })
-            .map_err(sql_err)?;
-
-            for enc in &encoded_children {
-                insert_task_row(tx, enc, parent_state.as_str())?;
-            }
-
-            let mut edges: Vec<(String, String)> = tx
-                .prepare_cached("SELECT task_id, blocked_by FROM task_deps")
-                .and_then(|mut stmt| {
-                    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                        .collect()
-                })
-                .map_err(sql_err)?;
-            for (task_id, blocked_by) in deps {
-                require_task(tx, &task_id)?;
-                require_task(tx, &blocked_by)?;
-                if dag::would_create_cycle(&edges, &task_id, &blocked_by) {
-                    return Err(PortError::Conflict(format!(
-                        "dependency {task_id} -> {blocked_by} would create a cycle"
-                    )));
-                }
-                tx.prepare_cached(
-                    "INSERT OR IGNORE INTO task_deps (task_id, blocked_by) VALUES (?1, ?2)",
-                )
-                .and_then(|mut stmt| stmt.execute(params![task_id, blocked_by]))
-                .map_err(sql_err)?;
-                edges.push((task_id, blocked_by));
-            }
-
-            for event in events {
-                tx.prepare_cached(
-                    "INSERT INTO events (task_id, run_id, kind, payload_json, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                )
-                .and_then(|mut stmt| {
-                    stmt.execute(params![
-                        event.task_id,
-                        event.run_id,
-                        event.kind.as_str(),
-                        event.payload_json,
-                        event.created_at,
-                    ])
-                })
-                .map_err(sql_err)?;
-            }
-
-            append_note_tx(tx, &parent_id, parent_note, now)
         })
     }
 }

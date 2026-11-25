@@ -6,12 +6,12 @@
 //! retried here: red CI goes to the PR feedback loop, the rest to a person.
 
 use aaf_domain::event::EventKind;
-use aaf_domain::ports::{PortError, PortResult};
+use aaf_domain::ports::PortResult;
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
+use super::Deps;
 use super::scheduler::Scheduler;
-use super::{Deps, finish, unblock};
 use crate::git::TaskWorktree;
 use crate::git::pr_merge::PrMergeOutcome;
 
@@ -144,24 +144,24 @@ pub(crate) fn retry_task(deps: &Deps, task: &Task) -> PortResult<bool> {
                 return Ok(false);
             }
             let why = format!("merged pull request #{pr_number} ({}) on retry", p.url);
-            match deps.move_to(&task.id, TaskState::Done, None, &why) {
-                Ok(()) => {}
-                Err(PortError::Invalid(_)) => return Ok(false),
-                Err(err) => return Err(err),
+            let merge_payload = json!({
+                "merged": true,
+                "kind": "pr_merge",
+                "pr_number": pr_number,
+                "retry": true,
+            });
+            if !deps
+                .store
+                .complete_review_task(&task.id, &why, Some(&merge_payload), deps.now())?
+            {
+                return Ok(false);
             }
-            deps.emit(
-                EventKind::MergeResult,
-                &task.id,
-                json!({"merged": true, "kind": "pr_merge", "pr_number": pr_number, "retry": true}),
-            )?;
             if let Err(err) = deps.git.fetch_base() {
                 eprintln!("aaf: post-merge fetch {}: {err}", task.id);
             }
-            if let Err(err) = deps.git.cleanup(&task.id) {
+            if let Err(err) = deps.git.cleanup_verified_merged(&task.id) {
                 eprintln!("aaf: post-merge cleanup {}: {err}", task.id);
             }
-            finish::close(deps, task)?;
-            unblock::root_succeeded(deps, task)?;
             Ok(true)
         }
         PrMergeOutcome::Blocked { code, .. } => {

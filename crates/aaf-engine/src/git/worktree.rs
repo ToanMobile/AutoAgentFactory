@@ -4,10 +4,17 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::cmd::{failure, git, git_raw};
+use super::cmd::{git, git_raw};
 use super::{GitError, path_str};
 
+mod cleanup;
 mod submodules;
+
+pub use cleanup::{
+    cleanup_missing_worktree, cleanup_verified_merged_task, delete_snapshot_refs,
+    is_operation_in_progress, remove_verified_merged,
+};
+use cleanup::{delete_branch_ignore_missing, is_other_branch_holder};
 
 pub const BRANCH_PREFIX: &str = "aaf/";
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/aaf/snapshots/";
@@ -168,6 +175,12 @@ pub fn remove(
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     if !force {
         ensure_clean(&worktree.path)?;
+        if is_operation_in_progress(&worktree.path)? {
+            return Err(GitError::Invalid(format!(
+                "git operation in progress in {}",
+                worktree.path.display()
+            )));
+        }
         if delete_branch {
             let holders = git(
                 repo_root,
@@ -180,7 +193,10 @@ pub fn remove(
                     "refs/remotes",
                 ],
             )?;
-            if !holders.lines().any(|name| name != branch_ref) {
+            if !holders
+                .lines()
+                .any(|name| is_other_branch_holder(name, &worktree.branch, &branch_ref))
+            {
                 return Err(GitError::Unmerged(worktree.branch.clone()));
             }
         }
@@ -215,107 +231,6 @@ pub fn remove(
 /// and any `refs/aaf/snapshots/<task_id>/*` refs.
 pub fn remove_merged(repo_root: &Path, worktree: &TaskWorktree) -> Result<(), GitError> {
     remove(repo_root, worktree, true, false)
-}
-
-fn is_valid_oid(oid: &str) -> bool {
-    (40..=64).contains(&oid.len()) && oid.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn delete_branch_ignore_missing(repo_root: &Path, branch: &str) -> Result<(), GitError> {
-    let args = ["branch", "-D", branch];
-    let del = git_raw(repo_root, &args)?;
-    if !del.success() && !del.stderr.to_ascii_lowercase().contains("not found") {
-        return Err(failure(&args, &del));
-    }
-    Ok(())
-}
-
-/// Deletes every `refs/aaf/snapshots/<task_id>/*` ref in `repo_root`.
-/// Works even when the task's worktree directory has already been removed.
-pub fn delete_snapshot_refs(repo_root: &Path, task_id: &str) -> Result<usize, GitError> {
-    validate_task_id(task_id)?;
-    let prefix = format!("{SNAPSHOT_REF_PREFIX}{task_id}/");
-    let listed = git(repo_root, &["for-each-ref", "--format=%(refname)", &prefix])?;
-    let mut deleted = 0usize;
-    for refname in listed.lines().filter(|line| !line.is_empty()) {
-        if !refname.starts_with(&prefix) {
-            continue;
-        }
-        git(repo_root, &["update-ref", "-d", refname])?;
-        deleted += 1;
-    }
-    Ok(deleted)
-}
-
-/// Removes a worktree and branch whose PR was externally verified as
-/// squash-merged at `expected_head_oid`.
-///
-/// Fails closed: refuses dirty worktrees (`GitError::Dirty`), refuses HEAD
-/// mismatches against `expected_head_oid`, never passes `--force` to
-/// `git worktree remove`, deletes the branch (skipping `--contains`), and
-/// deletes `refs/aaf/snapshots/<task_id>/*`.
-pub fn remove_verified_merged(
-    repo_root: &Path,
-    worktree: &TaskWorktree,
-    expected_head_oid: &str,
-) -> Result<(), GitError> {
-    let task_id = worktree.task_id()?;
-    if !is_valid_oid(expected_head_oid) {
-        return Err(GitError::Invalid(format!(
-            "invalid expected head oid {expected_head_oid:?}"
-        )));
-    }
-    if worktree.path.exists() {
-        let wanted = fs::canonicalize(&worktree.path)?;
-        let registered = list(repo_root)?.into_iter().any(|entry| {
-            entry.branch.as_deref() == Some(worktree.branch.as_str())
-                && fs::canonicalize(&entry.path).is_ok_and(|p| p == wanted)
-        });
-        if !registered {
-            return Err(GitError::Invalid(format!(
-                "{} is not a worktree of branch {}",
-                worktree.path.display(),
-                worktree.branch
-            )));
-        }
-        ensure_clean(&worktree.path)?;
-        let actual_head = git(&worktree.path, &["rev-parse", "HEAD"])?;
-        if actual_head != expected_head_oid {
-            return Err(GitError::Command {
-                command: "git rev-parse HEAD".to_string(),
-                code: Some(0),
-                stderr: format!(
-                    "HEAD mismatch for {}: expected {expected_head_oid}, got {actual_head}",
-                    worktree.branch
-                ),
-            });
-        }
-        let path = path_str(&worktree.path)?;
-        git(repo_root, &["worktree", "remove", path])?;
-    } else {
-        prune(repo_root)?;
-        let branch_ref = format!("refs/heads/{}", worktree.branch);
-        let rev = git_raw(
-            repo_root,
-            &["rev-parse", "--verify", "--quiet", &branch_ref],
-        )?;
-        if rev.success() {
-            let branch_oid = rev.stdout.trim();
-            if branch_oid != expected_head_oid {
-                return Err(GitError::Command {
-                    command: format!("git rev-parse {branch_ref}"),
-                    code: Some(0),
-                    stderr: format!(
-                        "branch HEAD mismatch for {}: expected {expected_head_oid}, got {branch_oid}",
-                        worktree.branch
-                    ),
-                });
-            }
-        }
-    }
-    delete_branch_ignore_missing(repo_root, &worktree.branch)?;
-    delete_snapshot_refs(repo_root, task_id)?;
-    Ok(())
 }
 
 /// Returns the task's registered worktree and its `HEAD` oid only when the
