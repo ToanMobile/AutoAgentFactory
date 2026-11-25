@@ -25,7 +25,7 @@ use std::time::Duration;
 use super::squash::verify_branch_squash_merges_with_warnings;
 use super::{GcOptions, GcReport};
 use crate::config::{ConfigInputs, ConfigOverlay, load as load_config};
-use crate::factory::{BaseRef, resolve_base};
+use crate::git::base_ref::{BaseRef, resolve_base};
 use crate::git::cmd::{git, git_raw};
 use crate::git::pr_cleanup::{is_protected_branch, main_work_tree};
 use crate::git::worktree::{self, BRANCH_PREFIX, WorktreeEntry};

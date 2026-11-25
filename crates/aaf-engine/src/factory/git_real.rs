@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use aaf_domain::gate::Receipt;
 use aaf_domain::ports::{PortError, PortResult};
 
-use super::base_ref::{BaseRef, DEFAULT_REMOTE};
 use super::commit_lock::{self, CommitLock};
 use super::git_real_base::{
     NO_HOOKS, abort_rebase, git_no_hooks, merge_pr_real, refuse_nested_repositories,
 };
 use super::ports::{GitOps, Integration, IntegrationGuard};
+use crate::git::base_ref::{BaseRef, DEFAULT_REMOTE};
 use crate::git::cmd::{failure, git, git_raw, git_timed};
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef, fetch_pr_feedback};
 use crate::git::pr_merge::PrMergeOutcome;

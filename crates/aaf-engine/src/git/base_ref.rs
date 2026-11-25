@@ -4,12 +4,15 @@ use std::path::Path;
 
 use aaf_domain::ports::{PortError, PortResult};
 
-use super::git_real::err;
+use super::cmd::{git, git_raw};
+use super::{GitError, has_remote};
 use crate::gate::base::{AUTO_FALLBACKS, origin_head_branch, parse_remote_tracking_ref};
-use crate::git::cmd::{git, git_raw};
-use crate::git::has_remote;
 
-pub(super) const DEFAULT_REMOTE: &str = "origin";
+pub(crate) const DEFAULT_REMOTE: &str = "origin";
+
+fn err(error: GitError) -> PortError {
+    PortError::Io(error.to_string())
+}
 
 /// The branch tasks start from and land on.
 #[derive(Debug, Clone, PartialEq, Eq)]

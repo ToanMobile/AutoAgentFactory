@@ -7,6 +7,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub mod base_ref;
 pub mod cmd;
 pub mod gh_client;
 pub mod hydration;

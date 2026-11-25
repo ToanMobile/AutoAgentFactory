@@ -15,7 +15,6 @@
 pub mod adapters;
 pub mod audit_backend;
 mod audit_turn;
-mod base_ref;
 pub mod batch;
 mod commit_lock;
 pub mod dual_audit;
@@ -60,12 +59,12 @@ use aaf_domain::ports::{
 use aaf_domain::task::TaskState;
 use serde::Serialize;
 
+pub use crate::git::base_ref::{BaseRef, resolve_base};
 pub use audit_backend::{
     AuditBackend, audit_cmd_is_claude, build_audit_command, configured_audit_provider,
     effective_audit_provider, resolve_audit_policy, resolve_auto_audit_executor,
     same_audit_provider,
 };
-pub use base_ref::{BaseRef, resolve_base};
 pub use git_real::RealGit;
 pub(crate) use infra_retry::INFRA_RETRY_MAX;
 pub use ports::{

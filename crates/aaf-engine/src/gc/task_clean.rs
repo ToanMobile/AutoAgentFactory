@@ -10,7 +10,7 @@ use aaf_domain::event::{EventKind, FactoryEvent};
 use super::refs::RepoRefs;
 use super::{GcError, GcReport, PRUNE_EXPIRE};
 use crate::config::{self, ConfigInputs, ConfigOverlay};
-use crate::factory::{BaseRef, resolve_base};
+use crate::git::base_ref::{BaseRef, resolve_base};
 use crate::git::cmd::{git, git_raw};
 use crate::git::path_str;
 use crate::git::pr_cleanup::main_work_tree;

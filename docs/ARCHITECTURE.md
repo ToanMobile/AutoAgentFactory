@@ -97,6 +97,11 @@ verified proof has a `needs_human` flow, see `SECURITY.md` §19). Breaking one i
 or a small type into `aaf-domain` or into the lower module. Do one per change
 and shrink the list in the same commit.
 
+The `handover*` modules (`handover`, `handover_devkit`, `handover_dual`,
+`handover_export`, `handover_html`) are one feature split across top-level
+files and call each other in both directions. Folding them into submodules of
+`handover/` would remove those edges from the list.
+
 ## 6. House rules
 
 - No `.rs` file over 600 lines, tests included (`aaf-cli/tests/repo_rules.rs`).
