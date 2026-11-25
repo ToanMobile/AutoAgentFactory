@@ -46,7 +46,7 @@ pub(super) fn clean_expired_artifacts(
             let ext = path.extension().and_then(|e| e.to_str());
             let allowed_ext = match subdir {
                 "streams" => matches!(ext, Some("jsonl")),
-                "reports" => matches!(ext, Some("html" | "md")),
+                "reports" => matches!(ext, Some("html" | "md" | "tmp")),
                 _ => false,
             };
             if !meta.is_file() || meta.file_type().is_symlink() || !allowed_ext {

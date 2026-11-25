@@ -122,6 +122,36 @@ pub(super) fn attach_auto_handover_reports(
     out.field("handover_reports", json!(reports))
 }
 
+/// Fail-soft incremental export for long-running `aaf run --auto`: writes
+/// DevKit handover reports immediately when a task transitions to `Review` or
+/// `Done` (or updates) instead of waiting for process exit.
+pub(crate) fn flush_completed_reports_for_repo(
+    ctx: &Ctx,
+    db: &Db,
+    repo_root: &str,
+    repo_cfg: &RepoConfig,
+    exported_ts: &mut std::collections::HashMap<String, i64>,
+) {
+    use aaf_domain::ports::TaskStore as _;
+    use aaf_domain::task::TaskState;
+
+    for state in [TaskState::Done, TaskState::Review] {
+        let Ok(tasks) = db.list_tasks(Some(repo_root), Some(state)) else {
+            continue;
+        };
+        for task in tasks {
+            if exported_ts.get(&task.id) == Some(&task.updated_at) {
+                continue;
+            }
+            if let Err(err) = write_auto_handover_reports(&ctx.data_dir, db, &task.id, repo_cfg) {
+                eprintln!("aaf: handover report skipped for {}: {err}", task.id);
+            } else {
+                exported_ts.insert(task.id, task.updated_at);
+            }
+        }
+    }
+}
+
 /// Fail-soft single-task DevKit handover report export for `aaf merge`.
 /// Opens `aaf.db` read-only (never creates a new database file).
 pub(crate) fn attach_single_handover_report(

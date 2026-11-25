@@ -41,12 +41,18 @@ pub enum HandoverError {
 }
 
 fn ensure_safe_reports_dir(data_dir: &Path) -> Result<PathBuf, HandoverError> {
-    if let Ok(meta) = fs::symlink_metadata(data_dir)
-        && (meta.file_type().is_symlink() || !meta.is_dir())
-    {
-        return Err(HandoverError::UnsafePath(data_dir.to_path_buf()));
-    }
-    let reports_dir = data_dir.join("reports");
+    let base_dir = match fs::canonicalize(data_dir) {
+        Ok(canon) if canon.is_dir() => canon,
+        Ok(_) => return Err(HandoverError::UnsafePath(data_dir.to_path_buf())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => data_dir.to_path_buf(),
+        Err(source) => {
+            return Err(HandoverError::Io {
+                path: data_dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let reports_dir = base_dir.join("reports");
     match fs::symlink_metadata(&reports_dir) {
         Ok(meta) => {
             if meta.file_type().is_symlink() || !meta.is_dir() {
@@ -95,7 +101,10 @@ fn check_target_not_symlink(target: &Path) -> Result<(), HandoverError> {
 fn write_atomic_0600(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), HandoverError> {
     check_target_not_symlink(target)?;
     let seq = EXPORT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let temp = dir.join(format!(".aaf-auto-handover-{}-{seq}", std::process::id()));
+    let temp = dir.join(format!(
+        ".aaf-auto-handover-{}-{seq}.tmp",
+        std::process::id()
+    ));
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]

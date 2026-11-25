@@ -108,7 +108,7 @@ pub fn check_dual_review_missing(
     missing
 }
 
-fn is_internal_note(note: &str) -> bool {
+pub(crate) fn is_internal_note(note: &str) -> bool {
     let lower = note.trim().to_ascii_lowercase();
     INTERNAL_NOTE_PREFIXES.iter().any(|p| lower.starts_with(p))
 }

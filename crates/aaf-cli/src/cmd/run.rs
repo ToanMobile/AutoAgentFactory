@@ -450,8 +450,19 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         None
     });
     let gh = super::board::github::gh_runner();
+    let exported_reports = std::sync::Mutex::new(std::collections::HashMap::<String, i64>::new());
+    let repo_root_str = deps.settings.repo_root.clone();
     let hooks = Hooks {
         idle: &|| {
+            if let Ok(mut seen) = exported_reports.lock() {
+                report::flush_completed_reports_for_repo(
+                    ctx,
+                    &db,
+                    &repo_root_str,
+                    &cfg.repo,
+                    &mut seen,
+                );
+            }
             if should_stop() {
                 return false;
             }

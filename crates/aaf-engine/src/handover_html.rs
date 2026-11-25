@@ -327,6 +327,12 @@ fn sanitizer_rules() -> &'static [(Regex, &'static str)] {
     })
 }
 
+/// Strips secrets, raw HTML, and inline images from handover text before
+/// sending it to external channels (such as Telegram or GitHub comments).
+pub fn sanitize_external_markdown(input: &str) -> String {
+    sanitize_pr_body(input)
+}
+
 fn sanitize_pr_body(input: &str) -> String {
     let mut text = input.to_string();
     for (re, repl) in sanitizer_rules() {

@@ -11,7 +11,7 @@ When `AAF_RUN_ID` is set, you are running **headlessly with no human present** i
 - **Autonomy**: **NEVER** stop to ask questions, **NEVER** wait for user confirmation, and **NEVER** hand off manual steps. Make pragmatic engineering decisions from the repository and task spec, verify your changes with automated tests, and finish cleanly with your work committed on the task branch.
 - **Allowed**: read/edit repo source, write paired RED -> GREEN tests (`tdd-workflow`), run project unit/lint/build commands (wrap heavy builds via `aaf slot -- <cmd>` when needed), and capture device screenshots via `mobile-mcp` (`mobile_save_screenshot`) if configured.
 - **Blocked by policy & sandbox**: do **not** run host/operator commands (`aaf gate`, `aaf proof record`, `aaf approve`, `aaf merge`, `aaf board *`, `aaf skills sync`, `aaf gc`, `aaf handover --out/--open`). The data dir and `receipt.key` are intentionally unreachable inside the sandbox; `aaf run` runs the gate, post-gate cross-audit, and PR/merge flow automatically after your turn completes.
-- **Discipline**: never modify `.claude/settings.json`, `.mcp.json`, or head-locked tests unless the task explicitly requires it; keep changes scoped to explicit paths and never use `git add -A`. For merge conflicts, use `git rebase <base>` instead of merge commits. In your final turn summary, always include a standalone `Nguyên nhân: ...` line so the handover report extracts root cause cleanly.
+- **Discipline**: never modify `.claude/settings.json`, `.mcp.json`, or head-locked tests unless the task explicitly requires it; keep changes scoped to explicit paths and never use `git add -A`. For merge conflicts, use `git rebase <base>` instead of merge commits. Include a standalone `Nguyên nhân: ...` line in your task plan/notes when documenting a fix so the handover report extracts root cause cleanly.
 
 ## Interactive AI Orchestrator / Operator (`AAF_RUN_ID` Unset)
 
@@ -38,9 +38,9 @@ Outside `AAF_RUN_ID` (interactive chat session or operator terminal):
 Áp dụng cho cả headless worker (`AAF_RUN_ID` set) lẫn interactive orchestrator/operator (`AAF_RUN_ID` unset):
 
 - **Quy chuẩn mở đầu 3 dòng B10 (đúng thứ tự):**
-  1. **Dòng 1 — Trạng thái 1 từ:** `XONG` (chỉ khi toàn bộ gate, proof và score-gate bắt buộc đều đạt), `CHƯA XONG`, hoặc `CHỜ DUYỆT`.
+  1. **Dòng 1 — Trạng thái 1 từ:** `XONG` (chỉ khi toàn bộ gate, proof và score-gate bắt buộc đều đạt) hoặc `CHƯA XONG`.
   2. **Dòng 2 — Kết quả người dùng nhận được:** tóm tắt ngắn gọn thay đổi/giá trị thực tế.
-  3. **Dòng 3 — Bằng chứng & bước tiếp theo:** mã thoát gate + ảnh nghiệm thu (hoặc `ảnh: không cần — <lý do>`) + bước tiếp theo.
+  3. **Dòng 3 — Bằng chứng & bước tiếp theo:** trạng thái/mã thoát gate + ảnh nghiệm thu (hoặc `ảnh: không cần — <lý do>`) + bước tiếp theo.
 - **5 mục nghiệm thu** (mọi con số/kết quả phải gắn nhãn nguồn **`[tự chạy]`** từ lệnh/biên nhận đã xác minh hoặc **`[agent báo]`** từ tường thuật của agent):
   1. **Đã làm gì / Đã fix gì** — kèm dòng riêng **`Nguyên nhân: ...`** nêu rõ căn nguyên gốc.
   2. **Chặn bug cũ** — regression test / guard ngăn lỗi tái diễn.
@@ -53,5 +53,5 @@ Outside `AAF_RUN_ID` (interactive chat session or operator terminal):
   - **Biên bản Dual-Review** (cross-audit / auditor độc lập) khi có.
   - **Ảnh PNG nghiệm thu** đã xác minh HMAC/SHA-256 (`<= 4 MiB`), nhúng base64 trong HTML.
 - **Tự động xuất & dọn dẹp:**
-  - `aaf run` (khi task hoàn tất sang `Review` / `Done`) và `aaf merge` tự động xuất `<data_dir>/reports/handover-<task_id>.{html,md}` (mode `0600`; bản HTML áp dụng CSP chặt + nhúng base64 PNG; file quá hạn được `aaf gc --older-than-days N` tự dọn).
-  - **Nhắc worker:** khi viết summary cuối turn luôn ghi rõ dòng riêng `Nguyên nhân: ...` để báo cáo bàn giao tự trích xuất chính xác vào mục 1.
+  - `aaf run` (kể cả chế độ `--auto` 24/7 ngay khi từng task hoàn tất sang `Review` / `Done`) và `aaf merge` tự động xuất `<data_dir>/reports/handover-<task_id>.{html,md}` (mode `0600`; bản HTML áp dụng CSP chặt + nhúng base64 PNG; file `.html`/`.md`/`.tmp` quá hạn được `aaf gc --older-than-days N` tự dọn).
+  - **Nguồn `Nguyên nhân:`:** `aaf handover` tự trích dòng riêng `Nguyên nhân: ...` từ `context_notes` (đã lọc note nội bộ), event `Plan*` hoặc spec/description của task.

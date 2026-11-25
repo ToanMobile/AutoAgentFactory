@@ -18,6 +18,7 @@ pub use crate::handover_export::{AutoHandoverPaths, HandoverError, write_auto_ha
 pub use crate::handover_html::{
     CSP_META, HandoverProof, MAX_HTML_PROOF_BYTES, MAX_PR_BODY_BYTES, compose_pr_body,
     encode_base64, escape_html, render_html, render_json, render_markdown,
+    sanitize_external_markdown,
 };
 pub use load::load_handover;
 

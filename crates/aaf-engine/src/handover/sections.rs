@@ -304,6 +304,9 @@ fn extract_event_summary_text(events: &[FactoryEvent], kind: EventKind) -> Optio
 
 pub(super) fn extract_root_cause(task: &Task, events: &[FactoryEvent], what_done: &str) -> String {
     for note in task.context_notes.iter().rev() {
+        if crate::handover_dual::is_internal_note(note) {
+            continue;
+        }
         if let Some(found) = find_root_cause_in_text(note) {
             return found;
         }
