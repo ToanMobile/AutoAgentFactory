@@ -70,8 +70,8 @@ pub(crate) use infra_retry::INFRA_RETRY_MAX;
 pub use ports::{AccountPool, GateRunner, GitOps, Grant, Integration, Notifier, Purpose};
 pub use post_audit::is_large_diff;
 pub use scheduler::{
-    Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit, run_with_router,
-    transient_backoff_secs,
+    Hooks, MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, run, run_with_audit,
+    run_with_audit_and_stop, run_with_router, run_with_router_and_stop, transient_backoff_secs,
 };
 pub use select_pool::{BindingView, SelectingPool};
 pub use stage_router::{

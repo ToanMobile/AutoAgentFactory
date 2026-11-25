@@ -179,8 +179,8 @@ fn downstream_depth<'a>(
 }
 
 /// For each task in `ready` that has a direct or transitive upstream blocker
-/// currently in [`TaskState::Blocked`], returns `(task.id, blocker.id)` sorted
-/// deterministically.
+/// currently in [`TaskState::Blocked`] or [`TaskState::Cancelled`], returns
+/// `(task.id, blocker.id)` sorted deterministically.
 ///
 /// Dependencies whose state is already [`TaskState::Done`] are satisfied and
 /// are not traversed further.
@@ -221,7 +221,7 @@ pub fn blocked_upstream_tasks(
         }
         while let Some(cur) = queue.pop_front() {
             match state_by_id.get(cur).copied() {
-                Some(TaskState::Blocked) => {
+                Some(TaskState::Blocked | TaskState::Cancelled) => {
                     result.push((task.id.clone(), cur.to_string()));
                     break;
                 }
@@ -285,4 +285,59 @@ pub fn deps_by_task(all_deps: &[(String, String)]) -> HashMap<&str, Vec<&str>> {
             .push(dep_id.as_str());
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use aaf_domain::task::{ImmutableSpec, Priority};
+
+    use super::*;
+
+    fn mk(id: &str, state: TaskState) -> Task {
+        let mut task = Task::new_root(
+            id,
+            "/repo",
+            id,
+            ImmutableSpec {
+                description: "d".to_string(),
+                acceptance: vec!["a".to_string()],
+            },
+            Priority::P2,
+            1,
+        );
+        task.state = state;
+        task
+    }
+
+    #[test]
+    fn blocked_upstream_tasks_detects_cancelled_direct_and_transitive() {
+        let cancelled = mk("t-cancel", TaskState::Cancelled);
+        let mid = mk("t-mid", TaskState::Ready);
+        let leaf = mk("t-leaf", TaskState::Ready);
+        let done = mk("t-done", TaskState::Done);
+        let after_done = mk("t-after-done", TaskState::Ready);
+
+        let all = vec![
+            cancelled,
+            mid.clone(),
+            leaf.clone(),
+            done,
+            after_done.clone(),
+        ];
+        let ready = vec![mid, leaf, after_done];
+        let deps = vec![
+            ("t-mid".to_string(), "t-cancel".to_string()),
+            ("t-leaf".to_string(), "t-mid".to_string()),
+            ("t-done".to_string(), "t-cancel".to_string()),
+            ("t-after-done".to_string(), "t-done".to_string()),
+        ];
+
+        assert_eq!(
+            blocked_upstream_tasks(&ready, &all, &deps),
+            vec![
+                ("t-leaf".to_string(), "t-cancel".to_string()),
+                ("t-mid".to_string(), "t-cancel".to_string()),
+            ]
+        );
+    }
 }

@@ -56,6 +56,8 @@ fn exhausted_switch_parks_with_deadline_and_unparks_while_busy() {
         audit: None,
         router: None,
         mode: Mode::Auto,
+        should_stop: &|| false,
+        stopping: false,
         msg_tx,
         msg_rx,
         gate_tx,

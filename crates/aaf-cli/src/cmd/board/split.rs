@@ -297,9 +297,18 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
 
 /// Proactively splits eligible `Ready` root tasks in `deps.settings.repo_root`
 /// before `factory::run_with_audit` starts.
+#[allow(dead_code)]
 pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> {
+    run_auto_split_with_stop(deps, &|| false)
+}
+
+/// [`run_auto_split`] with a cooperative stop predicate checked between tasks.
+pub(crate) fn run_auto_split_with_stop(
+    deps: &Deps,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<AutoSplitOutcome, CmdError> {
     let mut split_count = 0_u32;
-    if is_frozen(&*deps.store).map_err(|e| err("store", e))? {
+    if should_stop() || is_frozen(&*deps.store).map_err(|e| err("store", e))? {
         return Ok(AutoSplitOutcome {
             split_count,
             halted: None,
@@ -312,7 +321,7 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
     let profiles = deps.accounts.profiles().map_err(|e| err("accounts", e))?;
 
     for task in ready {
-        if is_frozen(&*deps.store).map_err(|e| err("store", e))? {
+        if should_stop() || is_frozen(&*deps.store).map_err(|e| err("store", e))? {
             break;
         }
         if task.depth != 0 {

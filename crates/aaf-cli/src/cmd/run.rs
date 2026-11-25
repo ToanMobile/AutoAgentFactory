@@ -7,6 +7,7 @@ pub(crate) mod detach;
 mod goal;
 mod progress;
 mod stage_wiring;
+mod stop;
 #[cfg(test)]
 mod tests;
 
@@ -110,6 +111,12 @@ pub struct RunArgs {
     /// Run the factory loop in the background and return once ready.
     #[arg(long)]
     pub detach: bool,
+    /// Ask a running `aaf run` for this repository to drain in-flight work and stop cleanly.
+    #[arg(
+        long,
+        conflicts_with_all = ["goal", "auto", "once", "detach", "detached_child"]
+    )]
+    pub stop: bool,
     /// Internal flag set when spawned by `--detach`.
     #[arg(long, hide = true)]
     pub detached_child: bool,
@@ -317,6 +324,9 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             .field("refused_kind", json!("agent_run"))
             .field("reason", json!(reason)));
     }
+    if args.stop {
+        return stop::request_stop(ctx);
+    }
     let sandboxed = match sandbox_choice(args.unsandboxed, cfg!(target_os = "macos")) {
         Ok(sandboxed) => sandboxed,
         Err(why) => {
@@ -422,6 +432,8 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
         return detach::spawn_detached(args, ctx, &repo, created_task_id.as_deref());
     }
     let _lock = lock;
+    let stop_guard = stop::StopFileGuard::arm(&ctx.data_dir, &repo)?;
+    let should_stop = || stop_guard.should_stop();
     let meta_task_id = created_task_id
         .clone()
         .or_else(|| std::env::var(detach::DETACHED_TASK_ENV).ok());
@@ -475,7 +487,7 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     }
     let mut auto_split_count = 0_u32;
     if args.auto_split {
-        let split_outcome = super::board::split::run_auto_split(&deps)?;
+        let split_outcome = super::board::split::run_auto_split_with_stop(&deps, &should_stop)?;
         auto_split_count = split_outcome.split_count;
         if let Some(why) = split_outcome.halted {
             let summary = RunSummary {
@@ -508,14 +520,16 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     let gh = super::board::github::gh_runner();
     let hooks = Hooks {
         idle: &|| {
+            if should_stop() {
+                return false;
+            }
             if let Ok(mut guard) = issue_poller.lock()
                 && let Some(poller) = guard.as_mut()
                 && let Some(e) = poller.tick(&gh, &db, deps.clock.now())
             {
                 eprintln!("aaf: issue import: {e}");
             }
-            std::thread::sleep(AUTO_POLL);
-            true
+            !stop::sleep_or_stop(AUTO_POLL, &should_stop)
         },
         // What an interrupted run left alive still carries its AAF_RUN_ID or
         // sits in its sandbox; the marks of a run that never finished are
@@ -537,8 +551,19 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     } else {
         Mode::Drain
     };
-    let summary = factory::run_with_router(&deps, audit.as_ref(), Some(&router), mode, &hooks)
-        .map_err(|e| err("factory", e))?;
+    let summary = if should_stop() {
+        RunSummary::default()
+    } else {
+        factory::run_with_router_and_stop(
+            &deps,
+            audit.as_ref(),
+            Some(&router),
+            mode,
+            &hooks,
+            &should_stop,
+        )
+        .map_err(|e| err("factory", e))?
+    };
     // Read after the run: the binding of a repository's first run exists
     // only once that run is recorded.
     let binding = pool
@@ -547,6 +572,7 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     let mut out = report(&summary, &cfg.warnings, &binding)?
         .field("max_parallel", json!(deps.settings.max_parallel))
         .field("auto_split_count", json!(auto_split_count));
+    out = stop::apply_stopped_report(out, stop_guard.was_stopped(), &summary);
     if summary.halted.is_some() {
         out = out.field("halt_recorded", json!(true));
     }

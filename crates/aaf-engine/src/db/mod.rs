@@ -7,6 +7,7 @@
 //! `busy_timeout` plus `BEGIN IMMEDIATE` make a second writer wait instead of
 //! failing half-way through a transaction.
 
+mod cancel;
 mod history;
 pub mod private;
 mod queries;
@@ -25,6 +26,7 @@ use std::time::Duration;
 use aaf_domain::ports::{PortError, PortResult};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 
+pub use cancel::{CancelOutcome, CancelRefusal};
 pub use history::ArchivedEventRow;
 pub use queries::BoardEnrichment;
 pub use schema::SCHEMA_VERSION;
