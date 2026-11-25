@@ -113,6 +113,14 @@ pub(crate) fn alert_for(event: &FactoryEvent, title: &dyn Fn(&str) -> String) ->
                 payload["round"].as_u64().unwrap_or(0)
             ),
         ),
+        EventKind::MergeResult if payload["code"].as_str() == Some("merge_retry_exhausted") => (
+            "merge_stuck",
+            format!(
+                "aaf: {} could not be merged automatically ({}); it stays in Review for you",
+                name(&task),
+                payload["url"].as_str().unwrap_or("pull request")
+            ),
+        ),
         EventKind::TaskStateChanged => match payload["to"].as_str() {
             Some("review") => (
                 "review",

@@ -39,3 +39,16 @@ fn infra_block_with_a_scheduled_retry_is_silent_but_the_final_one_alerts() {
         "blocked"
     );
 }
+
+#[test]
+fn merge_retries_used_up_is_a_needs_you_alert_but_a_pending_block_is_not() {
+    let ev = |code: &str| {
+        let payload =
+            json!({"merged": false, "kind": "pr_merge", "code": code, "url": "https://x/pull/9"});
+        FactoryEvent::new(EventKind::MergeResult, payload.to_string(), 7).for_task("t1")
+    };
+    let alert = alert_for(&ev("merge_retry_exhausted"), &|_| "t".into()).unwrap();
+    assert_eq!(alert.kind, "merge_stuck");
+    assert!(alert.text.contains("https://x/pull/9"), "{}", alert.text);
+    assert!(alert_for(&ev("ci_pending"), &|_| String::new()).is_none());
+}

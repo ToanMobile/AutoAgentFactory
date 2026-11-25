@@ -17,6 +17,12 @@ use crate::git::pr_merge::{PrMergeOutcome, PrMergeRequest, merge_pr};
 /// finish. A PR still pending after it stays in Review with `ci_pending`
 /// and the review sweep retries it with backoff.
 pub(crate) const FACTORY_CI_WAIT_SECS: u64 = 60;
+
+/// `(ci_wait_secs, require_checks)` of an unattended merge: wait a bounded
+/// time for CI, and never read "no check registered" as a pass.
+pub(crate) fn factory_ci_policy() -> (u64, bool) {
+    (FACTORY_CI_WAIT_SECS, true)
+}
 use crate::git::{GitError, MergeStrategy, SystemGh, TaskWorktree};
 
 pub(super) const NO_HOOKS: &str = "core.hooksPath=/dev/null";
@@ -145,12 +151,22 @@ pub(super) fn merge_pr_real(
         strategy: MergeStrategy::Squash,
         subject: None,
         body_file: None,
-        ci_wait_secs: FACTORY_CI_WAIT_SECS,
-        require_checks: true,
+        ci_wait_secs: factory_ci_policy().0,
+        require_checks: factory_ci_policy().1,
         lock_timeout,
         dry_run: false,
         machine,
         global_config,
     };
     merge_pr(&req, &SystemGh, &SystemClock, &|_| {}).map_err(err)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unattended_merge_waits_for_ci_and_requires_a_check() {
+        let (wait, require) = super::factory_ci_policy();
+        assert!(wait > 0 && wait <= 300, "{wait}");
+        assert!(require);
+    }
 }

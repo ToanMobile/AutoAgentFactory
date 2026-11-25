@@ -108,3 +108,28 @@ fn after_the_last_retry_the_block_is_final_and_notifies_once() {
             .is_empty()
     );
 }
+
+#[test]
+fn the_factory_parks_a_repeated_upstream_5xx_as_a_silent_self_retrying_block() {
+    let world = World::new();
+    world.add("t1");
+    let tail = "Error: HTTP 503 Service Unavailable";
+    world.runner.script(
+        "t1",
+        (0..6).map(|_| super::fakes::failed_outcome(tail)).collect(),
+    );
+    for _ in 0..4 {
+        world.once();
+        if world.state("t1") == TaskState::Blocked {
+            break;
+        }
+    }
+    let task = world.task("t1");
+    assert_eq!(task.state, TaskState::Blocked, "{task:?}");
+    assert!(matches!(
+        task.blocked_reason,
+        Some(BlockedReason::Infra { .. })
+    ));
+    assert!(task.retry_after.is_some(), "scheduled comeback: {task:?}");
+    assert_eq!(webhooks(&world), 0);
+}

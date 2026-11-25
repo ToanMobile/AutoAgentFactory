@@ -171,3 +171,14 @@ fn a_pr_merge_land_blocked_by_pending_ci_records_a_retryable_merge_result() {
     assert_eq!(payload["merged"], false);
     assert_eq!(payload["url"], URL);
 }
+
+#[test]
+fn the_review_sweep_of_a_factory_run_performs_the_retry() {
+    let world = World::new();
+    review_task_blocked(&world, "t1", "ci_pending", 1_000);
+    script(&world, vec![merged()]);
+    set_clock(&world, 5_000);
+    let summary = world.once();
+    assert_eq!(world.state("t1"), TaskState::Done, "{summary:?}");
+    assert_eq!(merge_calls(&world), 1);
+}
