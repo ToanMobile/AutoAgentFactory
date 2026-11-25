@@ -7,6 +7,7 @@
 //! `busy_timeout` plus `BEGIN IMMEDIATE` make a second writer wait instead of
 //! failing half-way through a transaction.
 
+mod cancel;
 mod history;
 pub mod private;
 mod queries;
@@ -16,6 +17,7 @@ mod schema;
 pub mod snapshots;
 mod stores;
 mod tasks;
+mod tasks_cas;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -25,10 +27,12 @@ use std::time::Duration;
 use aaf_domain::ports::{PortError, PortResult};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 
+pub use cancel::{CancelOutcome, CancelRefusal};
 pub use history::ArchivedEventRow;
 pub use queries::BoardEnrichment;
 pub use schema::SCHEMA_VERSION;
 pub use snapshots::TurnSnapshot;
+pub use tasks_cas::complete_review_task;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 /// Together these bound the wait in [`Db::open`] to about `BUSY_TIMEOUT`.

@@ -1,43 +1,61 @@
 //! Garbage collection for worktrees, branches, snapshot refs, stale
-//! fingerprint temp files, and expired stream/report artifacts, plus verified
-//! squash-merge matching for the factory review sweep.
+//! fingerprint temp files, merge/oracle scratch artifacts, verified-merged
+//! `Review` / orphan `aaf/*` branches, and expired stream/report/audit/proof
+//! artifacts, plus verified squash-merge matching for the factory review sweep.
+//!
+//! DB inspection is strictly read-only except when `aaf gc` (not `--dry-run`)
+//! atomically transitions verified-merged `Review` tasks to `Done` before
+//! cleaning their worktrees/branches or archives old terminal-task events.
 
+mod archive;
+mod expired;
+mod merged_branches;
+#[cfg(test)]
+mod orphan_lock_tests;
 mod periodic;
+mod proofs;
+mod refs;
+mod review;
+mod scratch;
+mod squash;
+mod task_clean;
 
 use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, File, TryLockError};
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use aaf_domain::ports::{PortError, TaskStore};
+use aaf_domain::event::EventKind;
+use aaf_domain::ports::{EventSink, PortError, TaskStore};
 use aaf_domain::task::{Task, TaskState};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Db, DbError, private};
-use crate::git::cmd::{git, git_raw};
-use crate::git::worktree::{self, BRANCH_PREFIX};
-use crate::git::{GitError, path_str};
+use crate::git::GitError;
+use crate::git::worktree;
 
-mod archive;
-mod expired;
-mod oracle_scratch;
-#[cfg(test)]
-mod orphan_lock_tests;
-mod proofs;
-mod refs;
-mod squash;
 use expired::clean_expired_artifacts;
 #[cfg(test)]
 use expired::orphan_scratch_lock_removable;
 use refs::RepoRefs;
-pub(crate) use squash::verify_squash_merges;
+pub(crate) use squash::verify_squash_merges_with_warnings;
+pub(crate) use task_clean::verified_merged_head_from_events;
+use task_clean::{
+    ResolvedBase, TaskCleanOpts, canonical_main_repo, canonical_or_owned, check_cwd_blocks,
+    clean_task_artifacts_by_id, record_removed_file, resolve_repo_base, resolved_path,
+};
 
 pub use archive::{GcArchiveStats, archive_old_terminal_events};
-pub use periodic::{DEFAULT_MIN_FREE_DISK_BYTES, check_free_disk_bytes, lightweight_sweep};
+pub use periodic::{
+    DEFAULT_MIN_FREE_DISK_BYTES, OfflineSweepReport, check_free_disk_bytes,
+    clean_repo_offline_unlocked, clean_repo_offline_unlocked_with_heads, lightweight_sweep,
+};
 pub use proofs::{GcProofStats, clean_expired_proofs, collect_protected_tree_fps};
 
 /// Default retention window for stream `.jsonl` and report `.html` artifacts.
 pub const DEFAULT_OLDER_THAN_DAYS: u64 = 14;
+/// Prune grace window preventing races with concurrent `git worktree add`.
+pub(super) const PRUNE_EXPIRE: &str = "5.minutes.ago";
 
 #[derive(Debug, thiserror::Error)]
 pub enum GcError {
@@ -65,6 +83,9 @@ pub struct GcOptions {
     pub include_cancelled: bool,
     pub force: bool,
     pub older_than_days: u64,
+    pub cwd: Option<PathBuf>,
+    pub merged_branches: bool,
+    pub base: Option<String>,
 }
 
 impl Default for GcOptions {
@@ -76,6 +97,9 @@ impl Default for GcOptions {
             include_cancelled: false,
             force: false,
             older_than_days: DEFAULT_OLDER_THAN_DAYS,
+            cwd: None,
+            merged_branches: false,
+            base: None,
         }
     }
 }
@@ -98,6 +122,16 @@ pub struct GcReport {
     pub proofs_removed: usize,
     #[serde(default)]
     pub events_archived: usize,
+    #[serde(default)]
+    pub merged_branches_base: Option<String>,
+    #[serde(default)]
+    pub merged_branches_deleted: Vec<String>,
+    #[serde(default)]
+    pub merged_worktrees_removed: Vec<PathBuf>,
+    #[serde(default)]
+    pub completed_review_tasks: Vec<String>,
+    #[serde(default)]
+    pub removed_merge_refs: usize,
 }
 
 struct RepoLockGuard {
@@ -108,10 +142,6 @@ impl Drop for RepoLockGuard {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
-}
-
-fn canonical_or_owned(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn try_lock_repo(
@@ -158,15 +188,57 @@ fn collect_db_state(data_dir: &Path) -> Result<DbState, GcError> {
     Ok((tasks, running_runs, active_tree_fps))
 }
 
+fn collect_repo_lock_ids(repo: &Path, all_tasks: &[Task]) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    ids.insert(aaf_fp::repo_id(repo));
+    if let Ok(entries) = worktree::list(repo) {
+        for entry in entries {
+            let canon = canonical_or_owned(&entry.path);
+            ids.insert(aaf_fp::repo_id(&canon));
+        }
+    }
+    for task in all_tasks {
+        if task.repo_root.trim().is_empty() {
+            continue;
+        }
+        let task_root = Path::new(&task.repo_root);
+        if canonical_main_repo(task_root) == repo {
+            let canon = canonical_or_owned(task_root);
+            ids.insert(aaf_fp::repo_id(&canon));
+        }
+    }
+    ids
+}
+
+fn try_lock_repo_set(
+    data_dir: &Path,
+    lock_ids: &BTreeSet<String>,
+    dry_run: bool,
+) -> Result<Option<Vec<RepoLockGuard>>, GcError> {
+    let mut guards = Vec::with_capacity(lock_ids.len());
+    for id in lock_ids {
+        match try_lock_repo(data_dir, id, dry_run) {
+            Ok(Some(guard)) => guards.push(guard),
+            Ok(None) => {}
+            Err(GcError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                drop(guards);
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(Some(guards))
+}
+
 fn resolve_target_repos(opts: &GcOptions, tasks: &[Task]) -> Vec<PathBuf> {
     let mut set = BTreeSet::new();
     if let Some(repo) = &opts.repo_root {
-        set.insert(canonical_or_owned(repo));
+        set.insert(canonical_main_repo(repo));
     }
     if opts.all {
         for task in tasks {
             if !task.repo_root.trim().is_empty() {
-                set.insert(canonical_or_owned(Path::new(&task.repo_root)));
+                set.insert(canonical_main_repo(Path::new(&task.repo_root)));
             }
         }
     }
@@ -174,8 +246,9 @@ fn resolve_target_repos(opts: &GcOptions, tasks: &[Task]) -> Vec<PathBuf> {
 }
 
 /// Runs garbage collection across the selected repository (or all repositories),
-/// expired stream/report/audit/proof artifacts in `data_dir`, and archives old
-/// terminal-task `events` into `data_dir/archives/`.
+/// verified-merged `Review` / orphan `aaf/*` branches, merge/oracle scratch
+/// leftovers, expired stream/report/audit/proof artifacts in `data_dir`, and
+/// archives old terminal-task `events` into `data_dir/archives/`.
 ///
 /// Never modifies `receipt.key`, `receipts/`, or `approvals/`.
 pub fn run_gc(
@@ -189,6 +262,7 @@ pub fn run_gc(
     };
     let (all_tasks, running_runs, active_db_tree_fps) = collect_db_state(data_dir)?;
     let repos = resolve_target_repos(opts, &all_tasks);
+    let now = SystemTime::now();
 
     for repo in repos {
         let repo_label = repo.display().to_string();
@@ -199,28 +273,39 @@ pub fn run_gc(
             continue;
         }
         let repo_id = aaf_fp::repo_id(&repo);
-        let _lock = match try_lock_repo(data_dir, &repo_id, opts.dry_run) {
-            Ok(guard) => guard,
-            Err(GcError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                report.skipped_busy.push(repo_label);
+        let lock_ids = collect_repo_lock_ids(&repo, &all_tasks);
+        let Some(_locks) = try_lock_repo_set(data_dir, &lock_ids, opts.dry_run)? else {
+            report.skipped_busy.push(repo_label);
+            continue;
+        };
+        // Re-read tasks after acquiring `.run.lock` so state transitions that
+        // happened before lock acquisition are observed accurately. Fail closed
+        // if the re-read fails rather than acting on a stale pre-lock snapshot.
+        let fresh_tasks = match collect_db_state(data_dir) {
+            Ok((tasks, _, _)) => tasks,
+            Err(err) => {
+                report
+                    .warnings
+                    .push(format!("{repo_label}: db re-read failed (skipped): {err}"));
                 continue;
             }
-            Err(err) => return Err(err),
         };
         report.repos_scanned.push(repo_label);
         clean_repo(
             &repo,
             &repo_id,
+            &lock_ids,
+            data_dir,
             worktrees_dir,
-            &all_tasks,
+            &fresh_tasks,
             opts,
+            now,
             &mut report,
-        )?;
+        );
     }
 
-    let now = SystemTime::now();
     clean_expired_artifacts(data_dir, opts, &running_runs, now, &mut report);
-    oracle_scratch::clean_oracle_scratch(data_dir, opts, now, &mut report);
+    scratch::clean_legacy_oracle_scratch(data_dir, opts, now, &mut report);
     let busy_repos: HashSet<String> = report.skipped_busy.iter().cloned().collect();
     let protected_audits = crate::gc_audits::collect_protected_audit_ids_with_locks(
         &all_tasks,
@@ -278,62 +363,200 @@ pub fn run_gc(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn clean_repo(
     repo: &Path,
     repo_id: &str,
+    lock_ids: &BTreeSet<String>,
+    data_dir: &Path,
     worktrees_dir: &Path,
     all_tasks: &[Task],
     opts: &GcOptions,
+    now: SystemTime,
     report: &mut GcReport,
-) -> Result<(), GcError> {
-    let canonical_repo = canonical_or_owned(repo);
+) {
     let repo_tasks: Vec<&Task> = all_tasks
         .iter()
-        .filter(|t| canonical_or_owned(Path::new(&t.repo_root)) == canonical_repo)
+        .filter(|t| canonical_main_repo(Path::new(&t.repo_root)) == repo)
         .collect();
     let active_ids: HashSet<String> = repo_tasks.iter().map(|t| t.id.clone()).collect();
+    let all_task_ids: HashSet<String> = all_tasks.iter().map(|t| t.id.clone()).collect();
 
-    // 1. Orphaned `aaf/batch-*` worktrees and branches.
-    match worktree::remove_orphan_batch_worktrees(
-        repo,
-        worktrees_dir,
-        repo_id,
-        &active_ids,
-        opts.dry_run,
-    ) {
-        Ok(sweep) => {
-            report.removed_orphan_batches.extend(sweep.removed);
-            report.warnings.extend(sweep.warnings);
-        }
-        Err(err) => report
-            .warnings
-            .push(format!("{}: orphan batch sweep: {err}", repo.display())),
-    }
-
-    // 2. Done tasks (and Cancelled tasks when `include_cancelled`).
-    let registered = worktree::list(repo)?;
-    let refs = RepoRefs::list(repo)?;
-    for task in repo_tasks {
-        let eligible = match task.state {
-            TaskState::Done => true,
-            TaskState::Cancelled => opts.include_cancelled,
-            _ => false,
-        };
-        if !eligible {
-            continue;
-        }
-        if worktree::validate_task_id(&task.id).is_err() {
+    let registered = worktree::list(repo)
+        .map_err(|err| {
             report
                 .warnings
-                .push(format!("skipped invalid task id {:?}", task.id));
-            continue;
+                .push(format!("{}: worktree list: {err}", repo.display()));
+        })
+        .ok();
+    let refs = RepoRefs::list(repo)
+        .map_err(|err| {
+            report
+                .warnings
+                .push(format!("{}: list refs: {err}", repo.display()));
+        })
+        .ok();
+    let active_ops = registered
+        .as_deref()
+        .map(worktree::active_in_progress_branches_for)
+        .unwrap_or_default();
+
+    let mut batch_repo_ids = vec![repo_id];
+    for id in lock_ids {
+        if id != repo_id && worktrees_dir.join(id).is_dir() {
+            batch_repo_ids.push(id.as_str());
         }
-        clean_task_artifacts(repo, worktrees_dir, task, &registered, &refs, opts, report)?;
+    }
+    let pre_batch_branches = refs.as_ref().map(RepoRefs::batch_short_branches);
+    for sweep_repo_id in batch_repo_ids {
+        let res = match registered.as_deref() {
+            Some(reg) => worktree::remove_orphan_batch_worktrees_prepared(
+                repo,
+                worktrees_dir,
+                sweep_repo_id,
+                reg,
+                &active_ops,
+                pre_batch_branches.as_deref(),
+                &active_ids,
+                opts.dry_run,
+                opts.force,
+                opts.force,
+                opts.cwd.as_deref(),
+            ),
+            None => worktree::remove_orphan_batch_worktrees_with(
+                repo,
+                worktrees_dir,
+                sweep_repo_id,
+                &active_ids,
+                opts.dry_run,
+                opts.force,
+                opts.cwd.as_deref(),
+            ),
+        };
+        match res {
+            Ok(sweep) => {
+                for name in sweep.removed {
+                    if !report.removed_orphan_batches.contains(&name) {
+                        report.removed_orphan_batches.push(name);
+                    }
+                }
+                for w in sweep.warnings {
+                    if !report.warnings.contains(&w) {
+                        report.warnings.push(w);
+                    }
+                }
+            }
+            Err(err) => report
+                .warnings
+                .push(format!("{}: orphan batch sweep: {err}", repo.display())),
+        }
     }
 
-    // 3. `worktree::prune` + `aaf_fp::sweep_stale`.
+    if let (Some(registered), Some(refs)) = (registered.as_deref(), refs.as_ref()) {
+        let mut ro_db: Option<Option<Db>> = None;
+        let mut cached_base: Option<Result<ResolvedBase, String>> = None;
+        for task in &repo_tasks {
+            let eligible = match task.state {
+                TaskState::Done => true,
+                TaskState::Cancelled => opts.include_cancelled,
+                _ => false,
+            };
+            if !eligible {
+                continue;
+            }
+            if worktree::validate_task_id(&task.id).is_err() {
+                report
+                    .warnings
+                    .push(format!("skipped invalid task id {:?}", task.id));
+                continue;
+            }
+            let require_verified_merge = task.state == TaskState::Done && !opts.force;
+            let branch = format!("{}{}", worktree::BRANCH_PREFIX, task.id);
+            let branch_ref = format!("refs/heads/{branch}");
+            let has_artifacts = refs.has_branch(&branch_ref)
+                || registered
+                    .iter()
+                    .any(|e| e.branch.as_deref() == Some(branch.as_str()))
+                || worktree::worktree_path(repo, worktrees_dir, &task.id).is_ok_and(|p| p.exists());
+            let expected_head = if require_verified_merge && has_artifacts {
+                let db_opt = ro_db.get_or_insert_with(|| {
+                    let db_path = data_dir.join("aaf.db");
+                    db_path
+                        .is_file()
+                        .then(|| Db::open_read_only(&db_path).ok())
+                        .flatten()
+                });
+                db_opt.as_ref().and_then(|db| {
+                    db.events_for_task_by_kinds(&task.id, &[EventKind::MergeResult], 10)
+                        .ok()
+                        .and_then(|events| verified_merged_head_from_events(&events))
+                })
+            } else {
+                None
+            };
+            let base = if require_verified_merge && has_artifacts && expected_head.is_none() {
+                cached_base
+                    .get_or_insert_with(|| resolve_repo_base(repo))
+                    .as_ref()
+                    .ok()
+            } else {
+                None
+            };
+            let task_opts = TaskCleanOpts {
+                dry_run: opts.dry_run,
+                force: opts.force,
+                require_verified_merge,
+                base,
+                cwd: opts.cwd.as_deref(),
+                expected_head: expected_head.as_deref(),
+            };
+            if let Err(err) = clean_task_artifacts_by_id(
+                repo,
+                worktrees_dir,
+                &task.id,
+                registered,
+                refs,
+                &active_ops,
+                &task_opts,
+                report,
+            ) {
+                report.warnings.push(format!("{}: {err}", task.id));
+            }
+        }
+
+        review::clean_merged_review_and_orphan_tasks(
+            repo,
+            data_dir,
+            worktrees_dir,
+            &repo_tasks,
+            &all_task_ids,
+            registered,
+            refs,
+            &active_ops,
+            cached_base.as_ref(),
+            opts,
+            now,
+            report,
+        );
+
+        scratch::clean_repo_scratch(
+            repo,
+            data_dir,
+            registered,
+            refs.merge_refs(),
+            opts.cwd.as_deref(),
+            opts.dry_run,
+            now,
+            report,
+        );
+    }
+
+    if opts.merged_branches {
+        merged_branches::sweep_merged_branches(repo, opts, report);
+    }
+
     if !opts.dry_run {
-        match worktree::prune(repo) {
+        match worktree::prune_with_expire(repo, PRUNE_EXPIRE) {
             Ok(()) => report.pruned_repos += 1,
             Err(err) => report
                 .warnings
@@ -346,139 +569,4 @@ fn clean_repo(
                 .push(format!("{}: sweep_stale: {err}", repo.display())),
         }
     }
-    Ok(())
-}
-
-fn clean_task_artifacts(
-    repo: &Path,
-    worktrees_dir: &Path,
-    task: &Task,
-    registered: &[worktree::WorktreeEntry],
-    refs: &RepoRefs,
-    opts: &GcOptions,
-    report: &mut GcReport,
-) -> Result<(), GcError> {
-    let branch = format!("{BRANCH_PREFIX}{}", task.id);
-    let expected_path = worktree::worktree_path(repo, worktrees_dir, &task.id)?;
-    let reg_entry = registered
-        .iter()
-        .find(|e| e.branch.as_deref() == Some(branch.as_str()));
-    // Only the task's own aaf worktree is removed: the branch checked out in
-    // the main worktree or a user's linked worktree is kept, and so is it.
-    if let Some(warning) =
-        reg_entry.and_then(|e| worktree::foreign_checkout(&task.id, e, registered, &expected_path))
-    {
-        report.warnings.push(warning);
-        return Ok(());
-    }
-    let existing_wt_path = reg_entry
-        .filter(|e| e.path.exists())
-        .map(|e| e.path.clone())
-        .or_else(|| expected_path.exists().then_some(expected_path.clone()));
-
-    if let Some(wt_path) = &existing_wt_path {
-        let dirty = git_raw(wt_path, &["status", "--porcelain"])
-            .map(|o| !o.success() || !o.stdout.trim().is_empty())
-            .unwrap_or(true);
-        if dirty && !opts.force {
-            report.skipped_dirty.push(task.id.clone());
-            return Ok(());
-        }
-        // A probe git cannot answer (e.g. a broken `.git` link) means the
-        // real run's removal fails too: a per-task warning, not an error.
-        if opts.dry_run
-            && reg_entry.is_some()
-            && let Some(reason) = removal_refusal(wt_path, opts.force)
-                .map_or_else(|err| Some(err.to_string()), |r| r.map(str::to_string))
-        {
-            report.warnings.push(format!(
-                "{}: worktree remove: would be refused: {reason}",
-                task.id
-            ));
-            return Ok(());
-        }
-        if !opts.dry_run {
-            if reg_entry.is_some() {
-                let p = path_str(wt_path)?;
-                // Git refuses some worktrees: without --force initialised
-                // submodules or a lock, with one --force still a lock (never
-                // `-f -f`). Keep this task's worktree, branch and snapshot
-                // refs; the rest of the run goes on.
-                let out = if opts.force {
-                    git_raw(repo, &["worktree", "remove", "--force", p])?
-                } else {
-                    git_raw(repo, &["worktree", "remove", p])?
-                };
-                if !out.success() {
-                    report.warnings.push(format!(
-                        "{}: worktree remove: {}",
-                        task.id,
-                        out.stderr.trim()
-                    ));
-                    return Ok(());
-                }
-            } else if let Ok(meta) = fs::symlink_metadata(wt_path)
-                && !meta.file_type().is_symlink()
-                && meta.is_dir()
-            {
-                fs::remove_dir_all(wt_path)?;
-            }
-        }
-        report.removed_worktrees.push(wt_path.display().to_string());
-    } else if reg_entry.is_some_and(|e| e.locked) {
-        // A locked tree whose directory is gone (a volume not mounted):
-        // prune keeps its record, so git keeps its branch too.
-        report.warnings.push(format!(
-            "{}: worktree is locked and its directory is missing: kept",
-            task.id
-        ));
-        return Ok(());
-    } else if reg_entry.is_some() && !opts.dry_run {
-        worktree::prune(repo)?;
-    }
-
-    let branch_ref = format!("refs/heads/{branch}");
-    if refs.has_branch(&branch_ref) {
-        if !opts.dry_run {
-            let del = git_raw(repo, &["branch", "-D", &branch])?;
-            if !del.success() && !del.stderr.to_ascii_lowercase().contains("not found") {
-                // A branch git keeps (e.g. still checked out somewhere) is
-                // this task's warning; the rest of the run goes on.
-                report
-                    .warnings
-                    .push(format!("{}: branch delete: {}", task.id, del.stderr.trim()));
-                return Ok(());
-            }
-        }
-        report.removed_branches.push(branch);
-    }
-
-    // Only a task git listed snapshot refs for is asked to delete them.
-    let snapshots = refs.snapshot_count(&task.id);
-    if opts.dry_run {
-        report.removed_snapshot_refs += snapshots;
-    } else if snapshots > 0 {
-        match worktree::delete_snapshot_refs(repo, &task.id) {
-            Ok(deleted) => report.removed_snapshot_refs += deleted,
-            // e.g. a stale ref lock: this task's warning, the run goes on.
-            Err(err) => report
-                .warnings
-                .push(format!("{}: snapshot refs: {err}", task.id)),
-        }
-    }
-    Ok(())
-}
-
-/// Why the real run's `git worktree remove` of `wt` would be refused. With
-/// `--force` git still refuses a locked worktree (gc never passes `-f -f`:
-/// a lock is explicit intent to keep it); initialised submodules are fine.
-fn removal_refusal(wt: &Path, force: bool) -> Result<Option<&'static str>, GcError> {
-    if !force {
-        return Ok(worktree::removal_refusal(wt)?);
-    }
-    let git_dir = git(wt, &["rev-parse", "--absolute-git-dir"])?;
-    Ok(Path::new(git_dir.trim())
-        .join("locked")
-        .exists()
-        .then_some("cannot remove a locked working tree"))
 }

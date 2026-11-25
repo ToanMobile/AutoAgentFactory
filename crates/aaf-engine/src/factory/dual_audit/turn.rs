@@ -26,7 +26,7 @@ use crate::cross_audit::prompt::{PRIOR_BEGIN, PRIOR_END, neutralise, summarize_d
 use crate::factory::audit_backend::{report_audit_limit, route_audit_limit};
 use crate::factory::audit_turn::short_circuit_audit_reason;
 use crate::factory::plan_job;
-use crate::factory::ports::Grant;
+use crate::factory::ports::{Grant, IntegrationGuard};
 use crate::factory::post_audit;
 use crate::factory::stage_router::StageTarget;
 use crate::factory::worker::{self, GateJob, Next};
@@ -42,10 +42,8 @@ fn with_clean_tree<T>(
     deps: &Deps,
     f: impl FnOnce(&TaskWorktree) -> PortResult<T>,
 ) -> PortResult<T> {
-    let clean = deps.git.integrate(&[])?;
-    let res = f(&clean.tree);
-    let _ = deps.git.discard(&clean);
-    res
+    let clean = IntegrationGuard::acquire(&*deps.git, &[])?;
+    f(&clean.integration().tree)
 }
 
 fn run_clean_turn(

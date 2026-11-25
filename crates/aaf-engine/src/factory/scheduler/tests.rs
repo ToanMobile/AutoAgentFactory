@@ -485,6 +485,8 @@ fn expire_waits_clears_restarts_when_cooldown_elapses() {
         audit: None,
         router: None,
         mode: Mode::Auto,
+        should_stop: &|| false,
+        stopping: false,
         msg_tx,
         msg_rx,
         gate_tx,

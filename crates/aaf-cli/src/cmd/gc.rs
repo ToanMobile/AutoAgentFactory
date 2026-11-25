@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use aaf_engine::gc::{DEFAULT_OLDER_THAN_DAYS, GcOptions, GcReport, run_gc};
+use aaf_engine::git::main_work_tree;
 use serde_json::Value;
 
 use super::board::store::{err, refuse_inside_agent_run};
@@ -31,6 +32,14 @@ pub struct GcArgs {
     /// Delete expired `.jsonl`/`.html` stream and report files older than N days.
     #[arg(long, default_value_t = DEFAULT_OLDER_THAN_DAYS, value_name = "N")]
     pub older_than_days: u64,
+    /// Opt-in: remove clean linked worktrees and local branches under `audit/*`,
+    /// `fix/*`, and `lane/*` verified as merged into the base ref (never applies
+    /// `--force` to dirty worktrees).
+    #[arg(long)]
+    pub merged_branches: bool,
+    /// Base ref for `--merged-branches` (overrides `gate.base_ref` / auto).
+    #[arg(long, value_name = "REF")]
+    pub base: Option<String>,
 }
 
 fn resolve_repo(args: &GcArgs, ctx: &Ctx) -> Result<Option<PathBuf>, CmdError> {
@@ -50,12 +59,14 @@ fn resolve_repo(args: &GcArgs, ctx: &Ctx) -> Result<Option<PathBuf>, CmdError> {
             )));
         }
         let root = aaf_fp::repo_root(&candidate).unwrap_or(candidate);
-        let canonical = fs::canonicalize(&root).unwrap_or(root);
+        let main = main_work_tree(&root);
+        let canonical = fs::canonicalize(&main).unwrap_or(main);
         return Ok(Some(canonical));
     }
     let root = aaf_fp::repo_root(&ctx.cwd)
         .map_err(|_| CmdError::new("not inside a git repository: pass --repo <path> or --all"))?;
-    let canonical = fs::canonicalize(&root).unwrap_or(root);
+    let main = main_work_tree(&root);
+    let canonical = fs::canonicalize(&main).unwrap_or(main);
     Ok(Some(canonical))
 }
 
@@ -80,6 +91,17 @@ fn format_report(report: &GcReport) -> String {
         report.events_archived,
         report.pruned_repos
     ));
+    if report.merged_branches_base.is_some()
+        || !report.merged_branches_deleted.is_empty()
+        || !report.merged_worktrees_removed.is_empty()
+    {
+        let base = report.merged_branches_base.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "merged branches (base {base}): {} worktree(s), {} branch(es)",
+            report.merged_worktrees_removed.len(),
+            report.merged_branches_deleted.len()
+        ));
+    }
     if !report.warnings.is_empty() {
         lines.push(format!("warnings: {}", report.warnings.join("; ")));
     }
@@ -98,6 +120,9 @@ pub fn run(args: &GcArgs, ctx: &Ctx) -> CmdResult {
         include_cancelled: args.include_cancelled,
         force: args.force,
         older_than_days: args.older_than_days,
+        cwd: Some(ctx.cwd.clone()),
+        merged_branches: args.merged_branches,
+        base: args.base.clone(),
     };
     let report = run_gc(&ctx.data_dir, &ctx.worktrees_dir, &opts).map_err(|e| err("gc", e))?;
     let mut out = CmdOutput::ok("ok", format_report(&report));

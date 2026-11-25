@@ -149,12 +149,15 @@ pub(super) fn build_deps(
         clock: clock.clone(),
         runner,
         accounts: pool.clone(),
-        git: Arc::new(RealGit::new(
-            repo.to_path_buf(),
-            ctx.worktrees_dir.clone(),
-            ctx.data_dir.join("locks"),
-            base,
-        )),
+        git: Arc::new(
+            RealGit::new(
+                repo.to_path_buf(),
+                ctx.worktrees_dir.clone(),
+                ctx.data_dir.join("locks"),
+                base,
+            )
+            .with_cwd(ctx.cwd.clone()),
+        ),
         gate: Arc::new(RealGate {
             data_dir: ctx.data_dir.clone(),
             cfg: cfg.repo.clone(),

@@ -595,7 +595,7 @@ How `[cross_audit]` merges:
 | **`v3.2`** `aaf board approve-plan <ID>` | Approve a `plan_stage` plan and move the task back to Ready (**human only**) | — |
 | **`v3.2`** `aaf board undo <ID>` | Roll back a task worktree to its latest verified `refs/aaf/snapshots/*` commit (**human only**) | `--dry-run` |
 | **`v3.2`** `aaf board steer <ID>` | Append a sanitized `steer:` note without editing `ImmutableSpec` (**human only**) | `--note "…"` |
-| **`v3.2`** `aaf gc` | Clean orphaned worktrees, finished task refs/snapshots, and expired streams/reports | `--dry-run` |
+| **`v3.2`** `aaf gc` | Clean orphaned worktrees, finished task refs/snapshots, expired streams/reports, and (opt-in) merged non-`aaf/*` branches | `--dry-run`, `--merged-branches`, `--base <ref>` |
 | **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
 | **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
 | **`v3.4`** `aaf telegram` | Zero-port outbound Telegram companion for status, handover, and opt-in two-step `/confirm` approvals (**human only**) | `--once`, `--all`, `--repo <path>`, `--send-test` |
@@ -805,7 +805,11 @@ aaf cockpit --all                            # inspect tasks across every reposi
 aaf board undo t-1a2b3c4d                    # roll back worktree to latest verified turn snapshot
 aaf board steer t-1a2b3c4d --note "use X"    # append sanitized steer: note (ImmutableSpec untouched)
 aaf gc --dry-run                             # preview orphan worktrees, finished refs, expired logs
+aaf gc --merged-branches --dry-run           # opt-in preview of merged audit/*, fix/*, lane/* worktrees & branches
+aaf gc --merged-branches --base main         # opt-in cleanup against explicit base ref (never forces dirty worktrees)
 ```
+
+- **`aaf gc --merged-branches [--base <ref>] [--dry-run]`** is opt-in (off by default) and fail-closed: it only scans `audit/*`, `fix/*`, and `lane/*` (ignoring `aaf/*` and other prefixes), never applies `--force` to dirty worktrees (keeping both worktree and branch when dirty/locked/in-rebase/containing `cwd`), protects `main`/`master`/`develop`/`development`/`trunk`/`head`/`release/*`/`public-*`/non-ASCII/`base.branch`/main `HEAD` (case-insensitive ASCII), refuses 0-commit branches (including renamed branches via `git branch -m`), and never runs `git fetch` during `--dry-run`.
 
 - **`aaf handover`** never creates `receipt.key` or writes to the database. HTML output uses std base64 (zero extra crates) and embeds `Content-Security-Policy: default-src 'none'; img-src data:; style-src 'unsafe-inline';`. PR bodies are secret-scrubbed and bounded under `60 KB`.
 - **`aaf cockpit`** opens zero network ports, adds zero crate dependencies, uses zero `unsafe`, refuses non-TTY stdin and `AAF_RUN_ID` (exit 2), strips all ANSI/OSC/DCS/APC/PM/SOS and C0/C1 controls, and never auto-refreshes in the background while waiting for input. Short read-only commands (`d`, `t`, `h`, `g`, `tail <id>`) run immediately; every mutating command (`approve`, `rework`, `steer`, `undo`, `unblock`, `unfreeze`) previews its target (`locked_changes` or `commit_oid`) and requires explicit `y/N` confirmation (defaulting to NO).

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use aaf_domain::gate::{GateStatus, Receipt};
 
-use super::ports::{GateRunner, GitOps};
+use super::ports::{GateRunner, GitOps, IntegrationGuard};
 use crate::git::TaskWorktree;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +131,7 @@ impl Batcher<'_> {
     fn many(&mut self, members: &[Member]) -> bool {
         let ids: Vec<String> = members.iter().map(|m| m.task_id.clone()).collect();
         let base_before = self.git.base_sha().ok();
-        let Ok(integration) = self.git.integrate(&ids) else {
+        let Ok(guard) = IntegrationGuard::acquire(self.git, &ids) else {
             // No integration tree: the batch is lost, the tasks are not.
             return self.each_alone(members);
         };
@@ -142,12 +142,13 @@ impl Batcher<'_> {
         let (merged, alone): (Vec<Member>, Vec<Member>) = members
             .iter()
             .cloned()
-            .partition(|m| integration.merged.contains(&m.task_id));
-        let verdict = (merged.len() > 1).then(|| self.run(&integration.tree.path));
-        if let Err(err) = self.git.discard(&integration) {
+            .partition(|m| guard.integration().merged.contains(&m.task_id));
+        let tree_path = guard.integration().tree.path.clone();
+        let verdict = (merged.len() > 1).then(|| self.run(&tree_path));
+        if let Err(err) = guard.discard() {
             self.out.warnings.push(format!(
                 "integration worktree {} was not removed: {err}",
-                integration.tree.path.display()
+                tree_path.display()
             ));
         }
         // A branch that conflicted while the batch was built does not sink

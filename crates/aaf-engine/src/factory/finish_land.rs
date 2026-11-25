@@ -217,23 +217,32 @@ pub(super) fn land_pr_merge(
             ..
         }) => {
             let why = format!("merged pull request #{pr_number} ({url})");
-            deps.move_to(&task.id, TaskState::Done, None, &why)?;
+            let already_done = match deps.move_to(&task.id, TaskState::Done, None, &why) {
+                Ok(()) => false,
+                Err(_) if merge_retry::completed_by_pr_cleanup(deps, &task.id, pr_number)? => true,
+                Err(err) => return Err(err),
+            };
             let fetch_error = warn_err(deps.git.fetch_base(), "post-merge fetch");
-            let leftover = warn_err(deps.git.cleanup(&task.id), "post-merge cleanup");
-            deps.emit(
-                EventKind::MergeResult,
-                &task.id,
-                json!({
-                    "merged": true,
-                    "kind": "pr_merge",
-                    "pr_number": pr_number,
-                    "head_sha": head_sha,
-                    "base_sha": base_sha,
-                    "local_sync_note": local_sync_note,
-                    "leftover": leftover,
-                    "fetch_error": fetch_error,
-                }),
-            )?;
+            let leftover = warn_err(
+                deps.git.cleanup_verified_merged(&task.id, &head_sha),
+                "post-merge cleanup",
+            );
+            if !already_done {
+                deps.emit(
+                    EventKind::MergeResult,
+                    &task.id,
+                    json!({
+                        "merged": true,
+                        "kind": "pr_merge",
+                        "pr_number": pr_number,
+                        "head_sha": head_sha,
+                        "base_sha": base_sha,
+                        "local_sync_note": local_sync_note,
+                        "leftover": leftover,
+                        "fetch_error": fetch_error,
+                    }),
+                )?;
+            }
             close(deps, task)?;
             unblock::root_succeeded(deps, task)?;
             Ok(Resolution::Settled(TaskState::Done))
@@ -243,9 +252,27 @@ pub(super) fn land_pr_merge(
             url: merged_url,
         }) => {
             let why = format!("pull request #{pr_number} already merged ({merged_url})");
-            deps.move_to(&task.id, TaskState::Done, None, &why)?;
-            let _ = warn_err(deps.git.fetch_base(), "post-merge fetch");
-            let _ = warn_err(deps.git.cleanup(&task.id), "post-merge cleanup");
+            let already_done = match deps.move_to(&task.id, TaskState::Done, None, &why) {
+                Ok(()) => false,
+                Err(_) if merge_retry::completed_by_pr_cleanup(deps, &task.id, pr_number)? => true,
+                Err(err) => return Err(err),
+            };
+            let fetch_error = warn_err(deps.git.fetch_base(), "post-merge fetch");
+            let leftover = warn_err(deps.git.cleanup(&task.id), "post-merge cleanup");
+            if !already_done {
+                deps.emit(
+                    EventKind::MergeResult,
+                    &task.id,
+                    json!({
+                        "merged": true,
+                        "kind": "pr_merge",
+                        "pr_number": pr_number,
+                        "already_merged": true,
+                        "leftover": leftover,
+                        "fetch_error": fetch_error,
+                    }),
+                )?;
+            }
             close(deps, task)?;
             unblock::root_succeeded(deps, task)?;
             Ok(Resolution::Settled(TaskState::Done))

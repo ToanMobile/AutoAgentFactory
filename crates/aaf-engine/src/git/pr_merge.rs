@@ -24,12 +24,12 @@ use aaf_domain::ports::Clock;
 
 use super::cmd::{git, git_raw};
 use super::gh_client::{GhClient, MergeStrategy, PrInfo};
+use super::pr_cleanup::{PrCleanupReport, finalize_early, finish_merged};
 use super::pr_merge_support::{
     InMemoryMerge, ScratchWorktree, acquire_merge_lock, bounded_deadline, check_ci,
     fetch_base_and_pr, has_local_commit_and_tree, in_memory_merge_tree, load_trusted_base_config,
-    ls_remote_head, sync_local_base as sync_checked_out_local_base, valid_sha40,
+    ls_remote_head, sync_local_base as sync_local_base_impl, valid_sha40,
 };
-use super::worktree;
 use super::{GitError, has_remote};
 use crate::gate::{self, HiddenPolicy};
 use crate::throttle::{Progress, SystemProbe, Throttle};
@@ -294,6 +294,19 @@ pub fn merge_pr(
     clock: &dyn Clock,
     progress: &dyn Fn(&Progress<'_>),
 ) -> Result<PrMergeOutcome, GitError> {
+    merge_pr_with_cwd(req, None, gh, clock, progress).map(|(outcome, _)| outcome)
+}
+
+/// Companion to [`merge_pr`] that accepts the caller's working directory (so
+/// post-merge cleanup never removes a worktree containing `caller_cwd`) and
+/// returns any [`PrCleanupReport`].
+pub fn merge_pr_with_cwd(
+    req: &PrMergeRequest,
+    caller_cwd: Option<&Path>,
+    gh: &dyn GhClient,
+    clock: &dyn Clock,
+    progress: &dyn Fn(&Progress<'_>),
+) -> Result<(PrMergeOutcome, Option<PrCleanupReport>), GitError> {
     if req.pr_number == 0 {
         return Err(GitError::Invalid("PR number must be > 0".to_string()));
     }
@@ -334,14 +347,11 @@ pub fn merge_pr(
         }
     }
     if let Some(outcome) = check_pr_open_and_head(&pr, &req.expect_head, false, None) {
-        return Ok(outcome);
+        return Ok(finalize_early(outcome, req, &pr, caller_cwd, false, clock));
     }
     if pr.mergeable.eq_ignore_ascii_case("CONFLICTING") {
-        return Ok(PrMergeOutcome::Blocked {
-            code: "merge_conflict".to_string(),
-            reason: format!("GitHub reports PR #{} has merge conflicts", pr.number),
-            receipt: None,
-        });
+        let reason = format!("GitHub reports PR #{} has merge conflicts", pr.number);
+        return Ok((blocked("merge_conflict", reason, None), None));
     }
     let (ci_blocked, ci_waited) = check_ci(
         gh,
@@ -351,11 +361,7 @@ pub fn merge_pr(
         req.require_checks,
     )?;
     if let Some((code, reason)) = ci_blocked {
-        return Ok(PrMergeOutcome::Blocked {
-            code,
-            reason,
-            receipt: None,
-        });
+        return Ok((blocked(&code, reason, None), None));
     }
 
     let common_id = gate::stats_repo_id(&req.repo_root);
@@ -384,19 +390,17 @@ pub fn merge_pr(
                 if let Ok(pr_now) = gh.view_pr(&req.repo_root, req.pr_number)
                     && pr_now.state.eq_ignore_ascii_case("MERGED")
                 {
-                    return Ok(PrMergeOutcome::AlreadyMerged {
+                    let out = PrMergeOutcome::AlreadyMerged {
                         pr_number: pr_now.number,
-                        url: pr_now.url,
-                    });
+                        url: pr_now.url.clone(),
+                    };
+                    return Ok(finalize_early(out, req, &pr_now, caller_cwd, false, clock));
                 }
-                return Ok(PrMergeOutcome::Blocked {
-                    code: "merge_in_progress".to_string(),
-                    reason: format!(
-                        "another merge in this repository held the merge lock for {}s",
-                        req.lock_timeout.as_secs()
-                    ),
-                    receipt: None,
-                });
+                let reason = format!(
+                    "another merge in this repository held the merge lock for {}s",
+                    req.lock_timeout.as_secs()
+                );
+                return Ok((blocked("merge_in_progress", reason, None), None));
             }
         }
     };
@@ -408,7 +412,14 @@ pub fn merge_pr(
         let pr_after_wait = gh.view_pr(&req.repo_root, req.pr_number)?;
         if let Some(outcome) = check_pr_open_and_head(&pr_after_wait, &req.expect_head, false, None)
         {
-            return Ok(outcome);
+            return Ok(finalize_early(
+                outcome,
+                req,
+                &pr_after_wait,
+                caller_cwd,
+                _lock.is_some(),
+                clock,
+            ));
         }
         pr = pr_after_wait;
     }
@@ -429,7 +440,7 @@ pub fn merge_pr(
             &throttle,
         )? {
             VerifyOutcome::Clear(r) => *r,
-            VerifyOutcome::Blocked(outcome) => return Ok(outcome),
+            VerifyOutcome::Blocked(outcome) => return Ok((outcome, None)),
         };
 
         // Phase B3b: parallel post-gate refresh (`gh.view_pr` + `ls_remote_head`).
@@ -446,7 +457,14 @@ pub fn merge_pr(
         if let Some(outcome) =
             check_pr_open_and_head(&pr_now, &req.expect_head, true, Some(&receipt))
         {
-            return Ok(outcome);
+            return Ok(finalize_early(
+                outcome,
+                req,
+                &pr_now,
+                caller_cwd,
+                _lock.is_some(),
+                clock,
+            ));
         }
         let remote_base_sha = remote_base_res.ok().flatten();
         let can_skip_fetch = pr_now.state.eq_ignore_ascii_case("OPEN")
@@ -477,7 +495,7 @@ pub fn merge_pr(
                 req, &common_id, &base_now, &head_now, &cfg_now, clock, &throttle,
             )? {
                 VerifyOutcome::Clear(r) => (*r, cfg_now),
-                VerifyOutcome::Blocked(outcome) => return Ok(outcome),
+                VerifyOutcome::Blocked(outcome) => return Ok((outcome, None)),
             }
         };
 
@@ -491,21 +509,24 @@ pub fn merge_pr(
                 .as_ref()
                 .is_some_and(|a| !a.same_account)
         {
-            return Ok(PrMergeOutcome::Blocked {
-                code: "cross_approval_required".to_string(),
-                reason: "head-locked changes require an independent (different-provider) approval"
-                    .to_string(),
-                receipt: Some(Box::new(final_receipt)),
-            });
+            let reason = "head-locked changes require an independent (different-provider) approval"
+                .to_string();
+            return Ok((
+                blocked("cross_approval_required", reason, Some(final_receipt)),
+                None,
+            ));
         }
 
         if req.dry_run {
-            return Ok(PrMergeOutcome::DryRunClear {
-                pr_number: pr_now.number,
-                head_sha: head_now,
-                base_sha: base_now,
-                receipt: Box::new(final_receipt),
-            });
+            return Ok((
+                PrMergeOutcome::DryRunClear {
+                    pr_number: pr_now.number,
+                    head_sha: head_now,
+                    base_sha: base_now,
+                    receipt: Box::new(final_receipt),
+                },
+                None,
+            ));
         }
 
         gh.merge_pr(
@@ -516,71 +537,21 @@ pub fn merge_pr(
             req.subject.as_deref(),
             req.body_file.as_deref(),
         )?;
-        let local_sync_note = sync_local_base(&req.repo_root, &req.remote, &pr_now.base_ref_name);
-        return Ok(PrMergeOutcome::Merged {
-            pr_number: pr_now.number,
-            head_sha: head_now,
-            base_sha: base_now,
-            receipt: Box::new(final_receipt),
-            local_sync_note,
-        });
+        let (local_sync_note, cleanup) = finish_merged(req, &pr_now, caller_cwd, clock);
+        return Ok((
+            PrMergeOutcome::Merged {
+                pr_number: pr_now.number,
+                head_sha: head_now,
+                base_sha: base_now,
+                receipt: Box::new(final_receipt),
+                local_sync_note,
+            },
+            Some(cleanup),
+        ));
     }
 }
 
-/// Fetches `remote/base_branch` and fast-forwards local `refs/heads/<base_branch>`:
-/// - when `HEAD == base_branch`, delegates to clean checked-out `--ff-only` merge;
-/// - when `HEAD != base_branch` and `worktree::list` confirms no worktree has
-///   `base_branch` checked out, fast-forwards via `--is-ancestor` + CAS `update-ref`.
+/// Fetches `remote/base_branch` and fast-forwards local `refs/heads/<base_branch>`.
 pub fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str) -> String {
-    let current = git(repo_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
-    if current == base_branch {
-        return sync_checked_out_local_base(repo_root, remote, base_branch);
-    }
-    let refspec = format!("+refs/heads/{base_branch}:refs/remotes/{remote}/{base_branch}");
-    if git(repo_root, &["fetch", "--quiet", "--", remote, &refspec]).is_err() {
-        return format!("warning: could not fetch {remote}/{base_branch} after merge");
-    }
-    let checked_out_elsewhere = worktree::list(repo_root)
-        .map(|entries| {
-            entries
-                .into_iter()
-                .any(|entry| entry.branch.as_deref() == Some(base_branch))
-        })
-        .unwrap_or(true);
-    if checked_out_elsewhere {
-        return format!(
-            "local branch `{base_branch}` is checked out in another worktree; skipped local fast-forward"
-        );
-    }
-    let remote_ref = format!("refs/remotes/{remote}/{base_branch}");
-    let local_ref = format!("refs/heads/{base_branch}");
-    let Ok(new_sha) = git(repo_root, &["rev-parse", "--verify", &remote_ref]) else {
-        return format!("warning: could not resolve `{remote_ref}` after fetch");
-    };
-    let Ok(old_sha) = git(repo_root, &["rev-parse", "--verify", &local_ref]) else {
-        return format!("local branch `{base_branch}` does not exist; skipped local fast-forward");
-    };
-    if old_sha == new_sha {
-        return format!("local `{base_branch}` already up to date with `{remote}/{base_branch}`");
-    }
-    let is_ancestor = git_raw(
-        repo_root,
-        &["merge-base", "--is-ancestor", &old_sha, &new_sha],
-    )
-    .is_ok_and(|out| out.code == Some(0));
-    if !is_ancestor {
-        return format!(
-            "warning: local `{base_branch}` could not fast-forward to `{remote}/{base_branch}` (diverged)"
-        );
-    }
-    match git_raw(repo_root, &["update-ref", &local_ref, &new_sha, &old_sha]) {
-        Ok(out) if out.success() => {
-            format!(
-                "fast-forwarded local `{base_branch}` to `{remote}/{base_branch}` via update-ref"
-            )
-        }
-        _ => format!(
-            "warning: local `{base_branch}` moved concurrently; skipped update-ref to `{remote}/{base_branch}`"
-        ),
-    }
+    sync_local_base_impl(repo_root, remote, base_branch)
 }

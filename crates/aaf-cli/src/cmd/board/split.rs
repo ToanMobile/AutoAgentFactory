@@ -14,7 +14,8 @@ use aaf_engine::executors::{self, ExecEnv};
 use aaf_engine::factory::adapters::{RouterPool, SystemClock, provider_for};
 use aaf_engine::factory::prompt::sandbox_policy_for;
 use aaf_engine::factory::{
-    AccountPool, Deps, GitOps, Purpose, RealGit, SelectingPool, is_frozen, resolve_base,
+    AccountPool, Deps, GitOps, IntegrationGuard, Purpose, RealGit, SelectingPool, is_frozen,
+    resolve_base,
 };
 use aaf_engine::hook_settings;
 use aaf_engine::split::{MAX_SPLIT_SUBTASKS, SplitOutcome, propose_and_apply_split};
@@ -234,18 +235,19 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         ctx.data_dir.join("locks"),
         base,
     );
-    let clean = git.integrate(&[]).map_err(port)?;
+    let clean = IntegrationGuard::acquire(&git, &[]).map_err(port)?;
     let hook_required = run_executor_is_claude(&cfg.repo.run);
     if hook_required {
         let problem = match git.base_sha() {
-            Ok(base_sha) => {
-                hook_settings::check_worktree(&clean.tree.path, &ctx.path_var, Some(&base_sha))
-                    .err()
-            }
+            Ok(base_sha) => hook_settings::check_worktree(
+                &clean.integration().tree.path,
+                &ctx.path_var,
+                Some(&base_sha),
+            )
+            .err(),
             Err(e) => Some(format!("the base branch could not be read ({e})")),
         };
         if let Some(problem) = problem {
-            let _ = git.discard(&clean);
             return Ok(CmdOutput::policy("refused", problem.clone())
                 .field("task_id", json!(task.id))
                 .field("reason", json!(problem)));
@@ -265,7 +267,7 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
     let base_request = AgentRequest {
         run_id: split_run_id(&task.id, now),
         prompt: String::new(),
-        cwd: clean.tree.path.to_string_lossy().into_owned(),
+        cwd: clean.integration().tree.path.to_string_lossy().into_owned(),
         account: grant.account.clone(),
         timeout_secs: SPLIT_TIMEOUT_SECS,
         sandbox,
@@ -286,7 +288,7 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         now,
         args.dry_run,
     );
-    let _ = git.discard(&clean);
+    drop(clean);
     let (_, limit_hit) = watch.take();
     if let (Some(account), Some(hit)) = (grant.account_id(), limit_hit.as_ref()) {
         let _ = pool.report_limit(account, hit);
@@ -297,9 +299,18 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
 
 /// Proactively splits eligible `Ready` root tasks in `deps.settings.repo_root`
 /// before `factory::run_with_audit` starts.
+#[allow(dead_code)]
 pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> {
+    run_auto_split_with_stop(deps, &|| false)
+}
+
+/// [`run_auto_split`] with a cooperative stop predicate checked between tasks.
+pub(crate) fn run_auto_split_with_stop(
+    deps: &Deps,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<AutoSplitOutcome, CmdError> {
     let mut split_count = 0_u32;
-    if is_frozen(&*deps.store).map_err(|e| err("store", e))? {
+    if should_stop() || is_frozen(&*deps.store).map_err(|e| err("store", e))? {
         return Ok(AutoSplitOutcome {
             split_count,
             halted: None,
@@ -312,7 +323,7 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
     let profiles = deps.accounts.profiles().map_err(|e| err("accounts", e))?;
 
     for task in ready {
-        if is_frozen(&*deps.store).map_err(|e| err("store", e))? {
+        if should_stop() || is_frozen(&*deps.store).map_err(|e| err("store", e))? {
             break;
         }
         if task.depth != 0 {
@@ -336,7 +347,7 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
         else {
             break;
         };
-        let clean = deps.git.integrate(&[]).map_err(|e| err("auto-split", e))?;
+        let clean = IntegrationGuard::acquire(&*deps.git, &[]).map_err(|e| err("auto-split", e))?;
         if deps.settings.hook_required {
             let exec = if run_executor_is_claude(&deps.settings.repo.run) {
                 "claude"
@@ -345,7 +356,7 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
             };
             let problem = match deps.git.base_sha() {
                 Ok(base_sha) => hook_settings::check_worktree_for_executor(
-                    &clean.tree.path,
+                    &clean.integration().tree.path,
                     &deps.settings.agent_path,
                     Some(&base_sha),
                     exec,
@@ -354,7 +365,6 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
                 Err(e) => Some(format!("the base branch could not be read ({e})")),
             };
             if let Some(problem) = problem {
-                let _ = deps.git.discard(&clean);
                 return Ok(AutoSplitOutcome {
                     split_count,
                     halted: Some(problem),
@@ -374,7 +384,7 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
         let base_request = AgentRequest {
             run_id: split_run_id(&task.id, now),
             prompt: String::new(),
-            cwd: clean.tree.path.to_string_lossy().into_owned(),
+            cwd: clean.integration().tree.path.to_string_lossy().into_owned(),
             account: grant.account.clone(),
             timeout_secs: SPLIT_TIMEOUT_SECS,
             sandbox,
@@ -391,7 +401,7 @@ pub(crate) fn run_auto_split(deps: &Deps) -> Result<AutoSplitOutcome, CmdError> 
             now,
             false,
         );
-        let _ = deps.git.discard(&clean);
+        drop(clean);
         let (infra, limit_hit) = watch.take();
         if let Some(hit) = limit_hit {
             if let Some(account) = grant.account_id() {
