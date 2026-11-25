@@ -21,9 +21,9 @@ pub use orphan_reap::{reap_orphaned_slots, reap_stale_orphans};
 use super::drain::draining;
 pub use super::drain::{DrainGuard, try_drain};
 use super::legacy;
-use super::orphans::{STARTED_KEY, orphan_in};
+use super::orphans::{STARTED_KEY, orphan_in, orphan_reading};
 pub use super::paths::{drain_path, locks_dir, slot_path};
-use super::probe::GroupState;
+use super::probe::{GroupState, Unreadable};
 pub(super) use super::reservation::recorded_pgid;
 pub use super::reservation::{Reservation, read_reservation};
 use super::slot_file::{SlotFile, holder_token_text, lock_text, owner_token_text};
@@ -233,7 +233,7 @@ impl SlotGuard {
             return Ok(true);
         }
         // Slot 0 with the command of a killed holder still in it is taken.
-        let Probe::Taken(file) = try_slot(data_dir, 0, group_state)? else {
+        let Probe::Taken(file) = try_slot(data_dir, 0, &|pgid| Ok(group_state(pgid)))? else {
             return Ok(false);
         };
         // The token moves along: the processes below this command still
@@ -302,7 +302,7 @@ enum Probe {
 fn try_slot(
     data_dir: &Path,
     index: usize,
-    group_state: &dyn Fn(u32) -> Option<GroupState>,
+    read_group: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
 ) -> io::Result<Probe> {
     locks_dir(data_dir)?;
     let Some(file) = SlotFile::open(data_dir, index)? else {
@@ -334,7 +334,7 @@ fn try_slot(
                     release_all(&[file]);
                 }
             };
-            if let Some(busy) = legacy::holder(data_dir, index, group_state) {
+            if let Some(busy) = legacy::holder(data_dir, index, read_group) {
                 give_back(file);
                 return Ok(match busy {
                     legacy::Holder::Live => Probe::Held,
@@ -344,12 +344,19 @@ fn try_slot(
             if left_by_killed {
                 // Unreadable content names no group to wait for.
                 let left = lock_text(data_dir, index);
-                if let Some(pgid) = orphan_in(&left, group_state) {
+                let busy = match orphan_reading(&left, read_group) {
+                    Ok(None) => None,
                     // Its command still runs. The file stays as it is, for
                     // the next look and for the processes below that
                     // command, which still prove themselves with its token.
+                    Ok(Some(pgid)) => Some(Probe::Orphaned(pgid)),
+                    // No answer from the process table: its command may
+                    // still run, so the slot is busy and the record stays.
+                    Err(Unreadable) => Some(Probe::Held),
+                };
+                if let Some(busy) = busy {
                     give_back(file);
-                    return Ok(Probe::Orphaned(pgid));
+                    return Ok(busy);
                 }
                 // From this moment the slot reads as held, and that
                 // holder's token must not be found in it: a process that
@@ -381,7 +388,7 @@ pub fn prepare_for_guests(
 ) -> io::Result<()> {
     super::paths::prepare(data_dir)?;
     for index in 0..slots.max(1) {
-        if let Probe::Taken(file) = try_slot(data_dir, index, group_state)? {
+        if let Probe::Taken(file) = try_slot(data_dir, index, &|pgid| Ok(group_state(pgid)))? {
             release_all(&[file]);
         }
     }
@@ -463,13 +470,27 @@ pub fn try_acquire_in(
     admission: Admission,
     view: &MachineView<'_>,
 ) -> io::Result<Result<SlotGuard, Busy>> {
+    let read_group = |pgid| Ok((view.group_state)(pgid));
+    try_acquire_reading(data_dir, ceiling, admission, view, &read_group)
+}
+
+/// [`try_acquire_in`] that reads process groups with `read_group`
+/// instead of `view.group_state`: a process table that cannot be read
+/// (`Err`) leaves a slot with a killed holder's record busy and untouched.
+pub(crate) fn try_acquire_reading(
+    data_dir: &Path,
+    ceiling: usize,
+    admission: Admission,
+    view: &MachineView<'_>,
+    read_group: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
+) -> io::Result<Result<SlotGuard, Busy>> {
     let ceiling = ceiling.max(1);
     let reservation = Reservation::of(admission);
     match admission {
-        Admission::Unmeasured => acquire_alone(data_dir, ceiling, reservation, view),
+        Admission::Unmeasured => acquire_alone(data_dir, ceiling, reservation, read_group),
         Admission::Measured { peak_rss_bytes } => {
             let needed = required_free(peak_rss_bytes);
-            acquire_shared(data_dir, ceiling, reservation, needed, view)
+            acquire_shared(data_dir, ceiling, reservation, needed, view, read_group)
         }
     }
 }
@@ -478,11 +499,11 @@ fn acquire_alone(
     data_dir: &Path,
     ceiling: usize,
     reservation: Reservation,
-    view: &MachineView<'_>,
+    read_group: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
 ) -> io::Result<Result<SlotGuard, Busy>> {
     let mut files = Vec::new();
     for index in 0..ceiling {
-        let busy = match try_slot(data_dir, index, view.group_state)? {
+        let busy = match try_slot(data_dir, index, read_group)? {
             Probe::Taken(file) => {
                 files.push(file);
                 continue;
@@ -509,6 +530,7 @@ fn acquire_shared(
     reservation: Reservation,
     needed: u64,
     view: &MachineView<'_>,
+    read_group: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
 ) -> io::Result<Result<SlotGuard, Busy>> {
     if draining(data_dir) {
         return Ok(Err(Busy::Draining));
@@ -518,7 +540,7 @@ fn acquire_shared(
     let mut orphan = None;
     let mut missing = 0;
     for index in 0..ceiling {
-        match try_slot(data_dir, index, view.group_state)? {
+        match try_slot(data_dir, index, read_group)? {
             Probe::Taken(file) if mine.is_none() => mine = Some((index, file)),
             // Free: it was only looked at.
             Probe::Taken(file) => release_all(&[file]),
