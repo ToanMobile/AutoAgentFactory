@@ -55,7 +55,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
         ],
     ),
     ("gc_audits", &["db", "git"]),
-    ("git", &["config", "db", "gate", "process", "throttle"]),
+    (
+        "git",
+        &["config", "db", "gate", "process", "proof", "throttle"],
+    ),
     ("github_board", &["detector", "factory", "process"]),
     ("github_poll", &["factory", "github_board", "process"]),
     (
@@ -76,12 +79,12 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ),
     ("hook_settings", &["gate"]),
     ("plan_debate", &["cross_audit", "factory", "gate"]),
-    ("proof", &["config", "db", "gate"]),
+    ("proof", &["config", "db", "executors", "gate"]),
     ("roles", &["executors"]),
     ("skills", &["config"]),
     ("split", &["db", "factory", "git", "throttle"]),
     ("telegram", &["git", "webhook"]),
-    ("telemetry", &["clock", "db"]),
+    ("telemetry", &["accounts", "clock", "db"]),
     ("throttle", &["db", "gate", "process", "telemetry"]),
     ("unblocker", &["gate", "store_compliance"]),
     (

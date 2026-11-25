@@ -211,7 +211,8 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     return s < 45 ? "just now" : dur(s) + " ago";
   }
   const pct = (v) => v == null ? "n/a" : Number(v).toFixed(0) + "%";
-  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
+  // null = no API-billed account in scope: subscription accounts show tokens only.
+  const usd = (v) => (v == null ? "—" : "$" + (Number(v) || 0).toFixed(2));
   const num = (v) => (Number(v) || 0).toLocaleString();
   function compact(v) {
     v = Number(v) || 0;

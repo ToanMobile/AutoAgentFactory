@@ -10,30 +10,6 @@ use serde_json::Value;
 
 use crate::db::Db;
 
-/// Per-million-token pricing used for approximate cost display.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CostRates {
-    pub input_per_million_usd: f64,
-    pub output_per_million_usd: f64,
-}
-
-impl Default for CostRates {
-    fn default() -> Self {
-        Self {
-            input_per_million_usd: 3.0,
-            output_per_million_usd: 15.0,
-        }
-    }
-}
-
-impl CostRates {
-    pub fn estimate_usd(self, tokens_in: u64, tokens_out: u64) -> f64 {
-        let input = (tokens_in as f64 / 1_000_000.0) * self.input_per_million_usd;
-        let output = (tokens_out as f64 / 1_000_000.0) * self.output_per_million_usd;
-        ((input + output) * 1_000_000.0).round() / 1_000_000.0
-    }
-}
-
 /// Autonomous execution, first-pass gate, CrossAudit, and escalation KPIs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AutonomyMetrics {

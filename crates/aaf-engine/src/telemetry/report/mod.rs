@@ -11,7 +11,9 @@ use aaf_domain::task::{Task, TaskState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{AutonomyMetrics, CostRates, TaskCounts, bump_task, compute_autonomy_metrics};
+use super::{
+    AutonomyMetrics, CostBasis, CostPolicy, TaskCounts, bump_task, compute_autonomy_metrics,
+};
 use crate::db::Db;
 
 /// Label of the time from task creation to its first recorded state move.
@@ -78,7 +80,8 @@ pub struct StageStat {
     pub open_now: u64,
 }
 
-/// Runs, tokens, wall time and approximate cost of one executor.
+/// Runs, tokens, wall time and approximate cost of one executor (USD only
+/// for runs on API-billed accounts; `None` when it has none).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutorStat {
     pub executor: String,
@@ -89,7 +92,7 @@ pub struct ExecutorStat {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub wall_secs: u64,
-    pub estimated_cost_usd: f64,
+    pub estimated_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,7 +109,11 @@ pub struct FactoryReport {
     pub executors: Vec<ExecutorStat>,
     pub total_tokens_in: u64,
     pub total_tokens_out: u64,
-    pub estimated_cost_usd: f64,
+    /// Approximate USD for runs on API-billed accounts only; `None` when the
+    /// period has none (subscription accounts report tokens only).
+    pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cost_basis: CostBasis,
     /// `(reason kind, tasks)` of the tasks blocked now, most frequent first.
     pub top_blocked: Vec<(String, u64)>,
     pub autonomy: AutonomyMetrics,
@@ -117,7 +124,7 @@ pub fn collect_report(
     db: &Db,
     repo_root: Option<&str>,
     window: ReportWindow,
-    rates: CostRates,
+    cost: &CostPolicy,
 ) -> PortResult<FactoryReport> {
     let tasks: Vec<Task> = db
         .list_tasks(repo_root, None)?
@@ -134,7 +141,7 @@ pub fn collect_report(
         .into_iter()
         .filter(|e| e.task_id.as_deref().is_some_and(|id| ids.contains(id)))
         .collect();
-    Ok(compute_report(&tasks, &runs, &events, window, rates))
+    Ok(compute_report(&tasks, &runs, &events, window, cost))
 }
 
 fn in_window(task: &Task, window: ReportWindow) -> bool {
@@ -147,7 +154,7 @@ pub fn compute_report(
     runs: &[RunRecord],
     events: &[FactoryEvent],
     window: ReportWindow,
-    rates: CostRates,
+    cost: &CostPolicy,
 ) -> FactoryReport {
     let tasks: Vec<&Task> = tasks.iter().filter(|t| in_window(t, window)).collect();
     let ids: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
@@ -193,7 +200,13 @@ pub fn compute_report(
         }
     }
 
-    let executors = executor_stats(runs, &ids, window, rates);
+    let in_scope = |r: &&RunRecord| ids.contains(r.task_id.as_str()) && window.covers(r.started_at);
+    let executors = executor_stats(runs, &ids, window, cost);
+    let estimated_cost_usd = cost.estimate(
+        runs.iter()
+            .filter(in_scope)
+            .map(|r| (r.account_id.as_deref(), r.tokens_in, r.tokens_out)),
+    );
     let total_tokens_in = executors.iter().map(|e| e.tokens_in).sum();
     let total_tokens_out = executors.iter().map(|e| e.tokens_out).sum();
     let scoped_events: Vec<FactoryEvent> = events
@@ -211,7 +224,8 @@ pub fn compute_report(
         executors,
         total_tokens_in,
         total_tokens_out,
-        estimated_cost_usd: rates.estimate_usd(total_tokens_in, total_tokens_out),
+        estimated_cost_usd,
+        cost_basis: CostBasis::from_estimate(estimated_cost_usd),
         top_blocked: top_blocked(blocked),
         autonomy: compute_autonomy_metrics(&done_ids, &scoped_events),
     }
@@ -306,13 +320,14 @@ fn executor_stats(
     runs: &[RunRecord],
     ids: &HashSet<&str>,
     window: ReportWindow,
-    rates: CostRates,
+    cost: &CostPolicy,
 ) -> Vec<ExecutorStat> {
     let mut by_exec: BTreeMap<&str, ExecutorStat> = BTreeMap::new();
-    for run in runs
+    let in_scope: Vec<&RunRecord> = runs
         .iter()
         .filter(|r| ids.contains(r.task_id.as_str()) && window.covers(r.started_at))
-    {
+        .collect();
+    for run in &in_scope {
         let stat = by_exec
             .entry(run.executor.as_str())
             .or_insert_with(|| ExecutorStat {
@@ -324,7 +339,7 @@ fn executor_stats(
                 tokens_in: 0,
                 tokens_out: 0,
                 wall_secs: 0,
-                estimated_cost_usd: 0.0,
+                estimated_cost_usd: None,
             });
         stat.runs += 1;
         match run.status {
@@ -342,7 +357,12 @@ fn executor_stats(
     by_exec
         .into_values()
         .map(|mut stat| {
-            stat.estimated_cost_usd = rates.estimate_usd(stat.tokens_in, stat.tokens_out);
+            stat.estimated_cost_usd = cost.estimate(
+                in_scope
+                    .iter()
+                    .filter(|r| r.executor == stat.executor)
+                    .map(|r| (r.account_id.as_deref(), r.tokens_in, r.tokens_out)),
+            );
             stat
         })
         .collect()

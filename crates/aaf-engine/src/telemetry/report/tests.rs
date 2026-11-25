@@ -30,7 +30,7 @@ fn run(task_id: &str, exec: &str, status: RunStatus, start: i64, end: Option<i64
     RunRecord {
         id: format!("r-{task_id}-{start}"),
         task_id: task_id.into(),
-        account_id: None,
+        account_id: Some("api".into()),
         executor: exec.into(),
         worktree_path: "/wt".into(),
         branch: "b".into(),
@@ -72,7 +72,7 @@ fn a_finished_task_gives_stage_times_lead_time_and_done_count() {
         moved("t1", "review", 520),
         moved("t1", "done", 1000),
     ];
-    let report = compute_report(&[t], &[], &events, all(2000), CostRates::default());
+    let report = compute_report(&[t], &[], &events, all(2000), &CostPolicy::default());
     assert_eq!(report.tasks_done, 1);
     assert_eq!(report.lead_time.max_secs, 900);
     let by_stage: HashMap<&str, u64> = report
@@ -95,7 +95,7 @@ fn a_finished_task_gives_stage_times_lead_time_and_done_count() {
 fn a_stage_still_in_progress_is_open_not_a_sample() {
     let t = task("t1", TaskState::Running, 100, 200);
     let events = vec![moved("t1", "ready", 150), moved("t1", "running", 200)];
-    let report = compute_report(&[t], &[], &events, all(9999), CostRates::default());
+    let report = compute_report(&[t], &[], &events, all(9999), &CostPolicy::default());
     let running = report.stages.iter().find(|s| s.stage == "running").unwrap();
     assert_eq!(running.durations.samples, 0);
     assert_eq!(running.open_now, 1);
@@ -122,7 +122,13 @@ fn the_window_drops_old_tasks_old_runs_and_old_stays() {
         since: Some(100),
         now: 1000,
     };
-    let report = compute_report(&[old, fresh], &runs, &events, window, CostRates::default());
+    let report = compute_report(
+        &[old, fresh],
+        &runs,
+        &events,
+        window,
+        &CostPolicy::default(),
+    );
     assert_eq!(report.counts.total, 1);
     assert_eq!(report.counts.blocked, 1);
     assert_eq!(report.tasks_done, 0);
@@ -143,7 +149,7 @@ fn executors_sum_tokens_cost_and_outcomes() {
         run("t1", "claude", RunStatus::TimedOut, 40, Some(100)),
         run("t1", "agy", RunStatus::Running, 90, None),
     ];
-    let report = compute_report(&[t], &runs, &[], all(120), CostRates::default());
+    let report = compute_report(&[t], &runs, &[], all(120), &api_policy(&["api"]));
     let names: Vec<&str> = report
         .executors
         .iter()
@@ -154,11 +160,11 @@ fn executors_sum_tokens_cost_and_outcomes() {
     assert_eq!((claude.runs, claude.succeeded, claude.failed), (2, 1, 1));
     assert_eq!(claude.wall_secs, 90);
     // 2M in at $3/M + 0.2M out at $15/M.
-    assert!((claude.estimated_cost_usd - 9.0).abs() < 1e-9);
+    assert!((claude.estimated_cost_usd.unwrap() - 9.0).abs() < 1e-9);
     let agy = &report.executors[0];
     assert_eq!((agy.running, agy.wall_secs), (1, 30));
     assert_eq!(report.total_tokens_in, 3_000_000);
-    assert!((report.estimated_cost_usd - 13.5).abs() < 1e-9);
+    assert!((report.estimated_cost_usd.unwrap() - 13.5).abs() < 1e-9);
 }
 
 #[test]
@@ -167,7 +173,7 @@ fn malformed_or_foreign_events_are_ignored() {
     let mut bad = moved("t1", "nonsense", 5);
     bad.payload_json = "not json".into();
     let events = vec![bad, moved("other", "running", 6), moved("t1", "ready", 10)];
-    let report = compute_report(&[t], &[], &events, all(20), CostRates::default());
+    let report = compute_report(&[t], &[], &events, all(20), &CostPolicy::default());
     let queued = report
         .stages
         .iter()
@@ -199,7 +205,7 @@ fn collect_report_reads_the_database() {
     db.insert_task(&t).unwrap();
     db.set_state("t1", TaskState::Ready, None, 130).unwrap();
     db.emit(&moved("t1", "ready", 130)).unwrap();
-    let report = collect_report(&db, Some("/repo"), all(200), CostRates::default()).unwrap();
+    let report = collect_report(&db, Some("/repo"), all(200), &CostPolicy::default()).unwrap();
     assert_eq!(report.counts.ready, 1);
     let queued = report
         .stages
@@ -207,6 +213,51 @@ fn collect_report_reads_the_database() {
         .find(|s| s.stage == QUEUED_STAGE)
         .unwrap();
     assert_eq!(queued.durations.total_secs, 30);
-    let other = collect_report(&db, Some("/elsewhere"), all(200), CostRates::default()).unwrap();
+    let other = collect_report(&db, Some("/elsewhere"), all(200), &CostPolicy::default()).unwrap();
     assert_eq!(other.counts.total, 0);
+}
+
+fn api_policy(ids: &[&str]) -> CostPolicy {
+    CostPolicy {
+        rates: crate::telemetry::CostRates::default(),
+        api_accounts: ids.iter().map(|s| (*s).to_string()).collect(),
+    }
+}
+
+#[test]
+fn subscription_runs_report_tokens_but_no_usd() {
+    let t = task("t1", TaskState::Done, 0, 50);
+    let mut sub = run("t1", "claude", RunStatus::Succeeded, 0, Some(30));
+    sub.account_id = Some("claude-max".into());
+    let report = compute_report(&[t], &[sub], &[], all(120), &CostPolicy::default());
+    assert_eq!(report.total_tokens_in, 1_000_000);
+    assert_eq!(report.estimated_cost_usd, None);
+    assert_eq!(report.cost_basis, CostBasis::None);
+    assert_eq!(report.executors[0].estimated_cost_usd, None);
+}
+
+#[test]
+fn only_api_billed_runs_are_priced() {
+    let t = task("t1", TaskState::Done, 0, 50);
+    let mut api = run("t1", "claude", RunStatus::Succeeded, 0, Some(30));
+    api.account_id = Some("claude-api".into());
+    let mut sub = run("t1", "claude", RunStatus::Succeeded, 40, Some(60));
+    sub.account_id = Some("claude-max".into());
+    let other = run("t1", "codex", RunStatus::Succeeded, 70, Some(80));
+    let policy = api_policy(&["claude-api"]);
+    let report = compute_report(&[t], &[api, sub, other], &[], all(120), &policy);
+    // Tokens count every run; USD only the API-billed one ($3 + $1.5).
+    assert_eq!(report.total_tokens_in, 3_000_000);
+    assert_eq!(report.estimated_cost_usd, Some(4.5));
+    assert_eq!(report.cost_basis, CostBasis::ApiAccounts);
+    let by_name = |name: &str| {
+        report
+            .executors
+            .iter()
+            .find(|e| e.executor == name)
+            .unwrap()
+            .estimated_cost_usd
+    };
+    assert_eq!(by_name("claude"), Some(4.5));
+    assert_eq!(by_name("codex"), None);
 }

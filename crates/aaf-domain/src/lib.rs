@@ -4,6 +4,7 @@
 //! caller gets the current time through [`ports::Clock`].
 
 pub mod account;
+pub mod accounts_config;
 pub mod blocked;
 pub mod budget;
 pub mod config;
@@ -18,6 +19,7 @@ pub mod oracle_config;
 pub mod pipeline;
 pub mod ports;
 pub mod proof;
+pub mod proof_flow_config;
 pub mod run;
 pub mod sop;
 pub mod task;

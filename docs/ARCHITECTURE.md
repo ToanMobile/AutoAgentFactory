@@ -92,7 +92,8 @@ free of any dependency on the orchestration layer.
 `proof`, `telemetry`, `throttle`, `unblocker`. The edges that close it point
 upwards from infrastructure, for example `db → factory` (two constants),
 `db → cross_audit`/`unblocker` (executor names), `git → gate`, and
-`throttle → telemetry`. Breaking one is usually a matter of moving a constant
+`throttle → telemetry`, and `git → proof` (`aaf merge` refuses a tree whose
+verified proof has a `needs_human` flow, see `SECURITY.md` §19). Breaking one is usually a matter of moving a constant
 or a small type into `aaf-domain` or into the lower module. Do one per change
 and shrink the list in the same commit.
 

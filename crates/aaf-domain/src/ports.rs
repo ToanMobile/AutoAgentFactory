@@ -179,6 +179,12 @@ pub trait KvStore: Send + Sync {
 
 /// `meta` key: `"1"` while the whole factory is frozen.
 pub const META_FACTORY_FROZEN: &str = "factory_frozen";
+/// `meta` key: Unix seconds of the last `aaf board unfreeze`, anchoring the 1h
+/// token-spike window so pre-unfreeze spikes do not immediately re-freeze.
+pub const META_FACTORY_UNFROZEN_AT: &str = "factory_unfrozen_at";
+/// `meta` key: estimated resume Unix timestamp while paused by the 24h token
+/// cap (`"0"` or absent when not paused); never shares state with `META_FACTORY_FROZEN`.
+pub const META_COST_PAUSED_UNTIL: &str = "cost_paused_until";
 /// `meta` key: count of consecutive failed root tasks.
 pub const META_CONSECUTIVE_ROOT_FAILS: &str = "consecutive_root_fails";
 

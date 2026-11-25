@@ -564,4 +564,5 @@ fn expire_waits_clears_restarts_when_cooldown_elapses() {
     assert!(scheduler.parked.is_empty());
     assert!(!scheduler.state.default_wait_until.contains_key(&work));
 }
+mod cost;
 mod park;

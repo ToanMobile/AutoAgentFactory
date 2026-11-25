@@ -223,8 +223,9 @@ impl Db {
 
     /// Events with `id > after_id`, oldest first, at most `limit`, optionally
     /// scoped to tasks under `repo_root` (always including global
-    /// `factory_frozen` / `factory_unfrozen` events): a cursor-driven tail of
-    /// the log for consumers that must see every event once (`aaf notify`).
+    /// `factory_frozen` / `factory_unfrozen` / `cost_paused` / `cost_resumed`
+    /// events): a cursor-driven tail of the log for consumers that must see
+    /// every event once (`aaf notify`).
     pub fn events_after(
         &self,
         repo_root: Option<&str>,
@@ -237,7 +238,7 @@ impl Db {
                 .prepare_cached(
                     "SELECT e.id, e.task_id, e.run_id, e.kind, e.payload_json, e.created_at \
                      FROM events e LEFT JOIN tasks t ON t.id = e.task_id \
-                     WHERE e.id > ?1 AND (?2 IS NULL OR t.repo_root = ?2 OR e.kind IN (?4, ?5)) \
+                     WHERE e.id > ?1 AND (?2 IS NULL OR t.repo_root = ?2 OR e.kind IN (?4, ?5, ?6, ?7)) \
                      ORDER BY e.id ASC LIMIT ?3",
                 )
                 .map_err(sql_err)?;
@@ -248,6 +249,8 @@ impl Db {
                     limit,
                     EventKind::FactoryFrozen.as_str(),
                     EventKind::FactoryUnfrozen.as_str(),
+                    EventKind::CostPaused.as_str(),
+                    EventKind::CostResumed.as_str(),
                 ])
                 .map_err(sql_err)?;
             let mut events = Vec::new();
@@ -259,18 +262,20 @@ impl Db {
     }
 
     /// Highest event id, optionally scoped to tasks under `repo_root`
-    /// (always including global `factory_frozen` / `factory_unfrozen` events;
-    /// `0` when there is none).
+    /// (always including global `factory_frozen` / `factory_unfrozen` /
+    /// `cost_paused` / `cost_resumed` events; `0` when there is none).
     pub fn max_event_id(&self, repo_root: Option<&str>) -> PortResult<i64> {
         let repo_root = repo_root.map(str::to_string);
         self.read(move |conn| {
             conn.query_row(
                 "SELECT COALESCE(MAX(e.id), 0) FROM events e LEFT JOIN tasks t \
-                 ON t.id = e.task_id WHERE ?1 IS NULL OR t.repo_root = ?1 OR e.kind IN (?2, ?3)",
+                 ON t.id = e.task_id WHERE ?1 IS NULL OR t.repo_root = ?1 OR e.kind IN (?2, ?3, ?4, ?5)",
                 params![
                     repo_root,
                     EventKind::FactoryFrozen.as_str(),
                     EventKind::FactoryUnfrozen.as_str(),
+                    EventKind::CostPaused.as_str(),
+                    EventKind::CostResumed.as_str(),
                 ],
                 |row| row.get(0),
             )

@@ -111,6 +111,8 @@ fn write_proof_pair(data_dir: &Path, repo_root: &Path, tree_fp: &str) -> (PathBu
         device_serial: HOST_CAPTURE_DEVICE.to_string(),
         task_id: None,
         recorded_at: 1_700_000_000,
+        base_sha: None,
+        flows: Vec::new(),
     };
     (png_path, aaf_fp::write_proof(data_dir, &record).unwrap())
 }

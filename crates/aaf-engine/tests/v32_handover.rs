@@ -440,6 +440,8 @@ fn compose_pr_body_sanitizes_html_links_secrets_base64_dedupes_proof_and_truncat
         device_serial: "emulator-5554".to_string(),
         task_id: Some("t-pr".to_string()),
         recorded_at: 1_700_000_800,
+        base_sha: None,
+        flows: Vec::new(),
     };
     let mut handover = build_handover_from_parts(
         &task,

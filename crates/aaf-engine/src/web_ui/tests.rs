@@ -34,6 +34,7 @@ impl UiBackend for FakeBackend {
             "tokens_in": 1200,
             "tokens_out": 400,
             "estimated_cost_usd": 0.0096,
+            "cost_basis": "api_accounts",
         }))
     }
 
@@ -226,6 +227,7 @@ fn index_returns_html_with_strict_csp_and_security_headers() {
     assert_eq!(resp.status, 200);
     assert!(resp.body.contains("<!DOCTYPE html>"));
     assert!(resp.body.contains("AutoAgentFactory Cockpit"));
+    assert!(resp.body.contains("subscription accounts: tokens only"));
     assert_eq!(
         resp.headers
             .get("content-security-policy")

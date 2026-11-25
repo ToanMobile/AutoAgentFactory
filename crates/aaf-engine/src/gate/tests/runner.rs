@@ -162,12 +162,14 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Shell text that leaves a process holding its stdout and stderr open
-/// after the shell ends (what a copy of the pipe leaked into another child
-/// does on macOS, see `aaf_fp::output`), then writes `out`.
+/// Shell text that leaves a process in its own process group holding
+/// stdout and stderr open after the shell ends (what a copy of the pipe
+/// leaked into another child does on macOS, see `aaf_fp::output`), then
+/// writes `out`. Run with `/bin/bash` so `set -m` takes effect without a
+/// controlling terminal (`dash` silently ignores `set -m`).
 fn leaves_a_holder(pid_file: &std::path::Path) -> String {
     format!(
-        "/bin/sleep 30 & echo $! > '{}'; echo out",
+        "set -m; /bin/sleep 30 & echo $! > '{}'; echo out",
         pid_file.display()
     )
 }
@@ -178,13 +180,89 @@ fn another_holder_of_the_output_does_not_make_a_finished_capture_incomplete() {
     for with_stderr in [true, false] {
         let pid_file = dir.path().join(format!("holder-{with_stderr}.pid"));
         let _holder = KillOnDrop(pid_file.clone());
-        let mut cmd = Command::new("/bin/sh");
+        let mut cmd = Command::new("/bin/bash");
         cmd.args(["-c", &leaves_a_holder(&pid_file)]);
         let done = super::super::proc::capture(cmd, LONG, None, with_stderr).unwrap();
         assert_eq!(done.exit_code, Some(0));
         assert!(done.complete, "with_stderr={with_stderr}");
         assert_eq!(done.output, b"out\n");
+        let pid = fs::read_to_string(&pid_file).unwrap().trim().to_string();
+        assert!(!pid.is_empty());
+        assert!(
+            alive(&pid),
+            "holder {pid} in its own process group was killed (with_stderr={with_stderr})"
+        );
     }
+}
+
+#[test]
+fn a_finished_capture_kills_background_jobs_left_in_its_group() {
+    let dir = TempDir::new().unwrap();
+    let pid_file = dir.path().join("bg-capture.pid");
+    let _holder = KillOnDrop(pid_file.clone());
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        &format!(
+            "/bin/sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; exit 0",
+            pid_file.display()
+        ),
+    ]);
+    let done = super::super::proc::capture(cmd, LONG, None, true).unwrap();
+    assert_eq!(done.exit_code, Some(0));
+    assert!(!done.timed_out);
+    assert!(done.complete);
+
+    let pid = fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    assert!(!pid.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while alive(&pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !alive(&pid),
+        "background sleep {pid} survived normal capture exit"
+    );
+}
+
+#[test]
+fn a_finished_run_supervised_kills_background_jobs_left_in_its_group() {
+    struct Noop;
+    impl super::super::proc::Supervise for Noop {
+        fn tick(&mut self, _pgid: u32, _elapsed: Duration) -> bool {
+            false
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let pid_file = dir.path().join("bg-run-supervised.pid");
+    let _holder = KillOnDrop(pid_file.clone());
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        &format!(
+            "/bin/sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '{}'; exit 0",
+            pid_file.display()
+        ),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    let (waited, unkilled) = super::super::proc::run_supervised(cmd, LONG, &mut Noop).unwrap();
+    assert_eq!(waited.status.code(), Some(0));
+    assert!(!waited.timed_out);
+    assert_eq!(unkilled, None);
+
+    let pid = fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    assert!(!pid.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while alive(&pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !alive(&pid),
+        "background sleep {pid} survived normal run_supervised exit"
+    );
 }
 
 /// The error names the git command, not the `-c` option before it.

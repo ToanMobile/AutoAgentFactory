@@ -213,6 +213,28 @@ fn kill_group(pgid: u32) -> bool {
     kill_group_until_empty(pgid, KILL_LIMIT)
 }
 
+/// After the leader was reaped: SIGKILL the members it left in its group,
+/// checking before every kill that the group still has a live member. A
+/// live member keeps the group id in use, so it cannot name anyone else;
+/// once the group is empty nothing is sent (no blind confirm-kill). The
+/// only remaining race is between the `ps` check seeing a live member and
+/// the `kill` immediately after, which would require pid wraparound in a
+/// few milliseconds (same policy as `executors/pty.rs`).
+fn kill_left_members(pgid: u32, limit: Duration) -> bool {
+    let group = format!("-{pgid}");
+    let end = Instant::now() + limit;
+    loop {
+        if !group_has_live_member(pgid) {
+            return true;
+        }
+        kill(&["-KILL", "--", &group]);
+        if Instant::now() >= end {
+            return !group_has_live_member(pgid);
+        }
+        thread::sleep(KILL_AGAIN);
+    }
+}
+
 /// The line a captured log gets when its group could not be emptied.
 fn unkilled_note(pgid: u32) -> String {
     format!(
@@ -253,8 +275,10 @@ fn next_poll(elapsed: Duration) -> Duration {
 }
 
 /// Waits for `child`, the leader of its own process group, under
-/// `supervisor`; kills the group once it has run for `timeout`. Besides how
-/// it ended: the group, when the timeout kill gave up with members left.
+/// `supervisor`; kills the group once it has run for `timeout`, and on a
+/// normal exit kills the members the leader left in its group. Besides how
+/// it ended: the group, when the timeout or normal-exit kill gave up with
+/// members left.
 fn wait_supervised(
     child: &mut Child,
     started: Instant,
@@ -310,15 +334,21 @@ fn wait_supervised(
         duration: (end - started).saturating_sub(paused_total),
         paused: paused_total,
     };
+    // Normal exit: the leader is reaped, so `supervisor.before_kill` (which
+    // is tied to timeouts) is not called; kill any background jobs still
+    // living in the leader's group without charging cleanup to `duration`.
+    if !timed_out && !kill_left_members(child.id(), KILL_LIMIT) {
+        unkilled = Some(child.id());
+    }
     Ok((waited, unkilled))
 }
 
 /// Runs `cmd` in its own process group under `supervisor` with the output
 /// streams it was given (the caller's own, unless it set others): nothing
 /// is captured. For a command whose output belongs to the user. Besides how
-/// it ended: the group, when the timeout kill gave up with members left
-/// (there is no log to put the line `capture_supervised` writes; the caller
-/// reports it).
+/// it ended: the group, when the timeout or normal-exit kill gave up with
+/// members left (there is no log to put the line `capture_supervised`
+/// writes; the caller reports it).
 pub(crate) fn run_supervised(
     mut cmd: Command,
     timeout: Duration,
@@ -332,7 +362,8 @@ pub(crate) fn run_supervised(
 
 /// [`capture`] with a supervisor. Time during which the supervisor reports
 /// the group stopped is not charged to `timeout`: a command paused to
-/// protect the machine must not be killed for the pause.
+/// protect the machine must not be killed for the pause. On a normal exit,
+/// kills the members the leader left in its group.
 pub(crate) fn capture_supervised(
     mut cmd: Command,
     timeout: Duration,
@@ -402,7 +433,7 @@ pub(crate) fn capture_supervised(
         }
     };
     let mut output = sink.lock().map(|mut s| s.take()).unwrap_or_default();
-    // The log is where a person reads what the timeout left behind.
+    // The log is where a person reads what the timeout or a normal exit left behind.
     if let Some(pgid) = unkilled {
         output.extend_from_slice(unkilled_note(pgid).as_bytes());
     }

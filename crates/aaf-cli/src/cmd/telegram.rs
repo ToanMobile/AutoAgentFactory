@@ -22,7 +22,7 @@ use aaf_engine::telegram::{
     ApprovePreview, CommandHandler, HttpTelegramApi, LockedFileSummary, TelegramError, ack_offset,
     run_poll_loop_with_retry, send_alert, validate_config,
 };
-use aaf_engine::telemetry::{CostRates, StatusQuery, collect_status_from_db};
+use aaf_engine::telemetry::{StatusQuery, collect_status_from_db};
 use serde_json::json;
 
 use super::board::store::{SharedRoDb, open_db, refuse_inside_agent_run};
@@ -202,11 +202,12 @@ impl CommandHandler for CliTelegramHandler<'_> {
             return Ok(format!("scope: {scope_label}\nno database initialized yet"));
         };
         let repo = if all { None } else { self.repo_root.as_deref() };
+        let cost = self.ctx.cost_policy(&db);
         let q = StatusQuery {
             repo_root: repo,
             data_dir: Some(&self.ctx.data_dir),
             now: SystemClock.now(),
-            rates: CostRates::default(),
+            cost: &cost,
         };
         let s = collect_status_from_db(&db, &q).map_err(s_err)?;
         let blocked = if s.blocked_reasons.is_empty() {
@@ -230,10 +231,13 @@ impl CommandHandler for CliTelegramHandler<'_> {
                 "runs: {} total (running={}, ok={}, fail={})",
                 r.total, r.running, r.succeeded, r.failed
             ),
-            format!(
-                "tokens: {} in + {} out (~${:.4})",
-                s.tokens_in, s.tokens_out, s.estimated_cost_usd
-            ),
+            match s.estimated_cost_usd {
+                Some(usd) => format!(
+                    "tokens: {} in + {} out (~${usd:.4})",
+                    s.tokens_in, s.tokens_out
+                ),
+                None => format!("tokens: {} in + {} out", s.tokens_in, s.tokens_out),
+            },
             format!(
                 "factory: frozen={}, accounts={}, slots={}",
                 s.frozen,

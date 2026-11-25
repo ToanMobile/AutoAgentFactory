@@ -189,6 +189,26 @@ pub trait Store:
         }
         Ok(false)
     }
+
+    /// Returns `(total_tokens, earliest_nonzero_ts)` across every run on this
+    /// machine with `COALESCE(ended_at, started_at) >= since`.
+    fn cost_window_usage(&self, since: i64) -> PortResult<(u64, Option<i64>)> {
+        let mut total: u64 = 0;
+        let mut earliest: Option<i64> = None;
+        for task in self.list_tasks(None, None)? {
+            for run in self.runs_for_task(&task.id)? {
+                let ts = run.ended_at.unwrap_or(run.started_at);
+                if ts >= since {
+                    let tokens = run.tokens_in.saturating_add(run.tokens_out);
+                    total = total.saturating_add(tokens);
+                    if tokens > 0 {
+                        earliest = Some(earliest.map_or(ts, |e| e.min(ts)));
+                    }
+                }
+            }
+        }
+        Ok((total, earliest))
+    }
 }
 
 impl Store for crate::db::Db {
@@ -238,6 +258,10 @@ impl Store for crate::db::Db {
 
     fn has_overlapping_run(&self, repo_root: &str, at: i64, now: i64) -> PortResult<bool> {
         crate::db::Db::has_overlapping_run(self, repo_root, at, now)
+    }
+
+    fn cost_window_usage(&self, since: i64) -> PortResult<(u64, Option<i64>)> {
+        crate::db::Db::cost_window_usage(self, since)
     }
 }
 
@@ -328,6 +352,7 @@ pub struct RunSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blocked_upstream: Vec<(String, String)>,
     pub frozen: bool,
+    pub cost_paused: bool,
     /// Why the run stopped taking tasks: the agent CLI failed for its
     /// account or the network (`AgentOutcome::infra`). Every further task
     /// would fail the same way, so none was started after it; the task it

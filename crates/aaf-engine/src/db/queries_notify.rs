@@ -122,4 +122,35 @@ mod tests {
         let ids: Vec<i64> = seen.iter().filter_map(|e| e.id).collect();
         assert_eq!(ids, vec![ev_a, ev_frozen, ev_unfrozen]);
     }
+
+    #[test]
+    fn events_after_and_max_event_id_include_untasked_cost_events_across_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("aaf.db")).unwrap();
+        db.insert_task(&make_task("ta", "/repo-a")).unwrap();
+        db.insert_task(&make_task("tb", "/repo-b")).unwrap();
+
+        let _ev_b = db
+            .emit(&FactoryEvent::new(EventKind::TaskCreated, "{}", 10).for_task("tb"))
+            .unwrap();
+        let ev_paused = db
+            .emit(&FactoryEvent::new(
+                EventKind::CostPaused,
+                r#"{"tokens_24h":1200,"cap":1000,"resume_at":90000}"#,
+                20,
+            ))
+            .unwrap();
+        let ev_resumed = db
+            .emit(&FactoryEvent::new(
+                EventKind::CostResumed,
+                r#"{"tokens_24h":0,"cap":1000}"#,
+                30,
+            ))
+            .unwrap();
+
+        assert_eq!(db.max_event_id(Some("/repo-a")).unwrap(), ev_resumed);
+        let seen = db.events_after(Some("/repo-a"), 0, 100).unwrap();
+        let ids: Vec<i64> = seen.iter().filter_map(|e| e.id).collect();
+        assert_eq!(ids, vec![ev_paused, ev_resumed]);
+    }
 }

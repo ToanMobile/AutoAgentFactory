@@ -1,6 +1,7 @@
 //! The loop itself: the scheduler on the caller's thread, one thread per job
 //! that needs an account, and one gate thread for the repository.
 
+mod cost_guard;
 pub(super) mod dual_coord;
 mod halt;
 mod outcome;
@@ -33,6 +34,7 @@ use super::sweep;
 pub use super::sweep::recover;
 use super::worker::{self, GateJob, Job, Outcome, PreGateAudit};
 use super::{Deps, Mode, RunSummary, is_frozen};
+use cost_guard::CostGate;
 use dual_coord::JobDispatch;
 use outcome::gate_loop;
 
@@ -154,6 +156,8 @@ pub(super) struct LoopState {
     pub(super) last_pr_feedback: HashMap<String, i64>,
     pre_audits: HashMap<String, Box<PreGateAudit>>,
     pub(super) dual_review_in_flight: HashMap<String, DualReviewCoord>,
+    pub(super) cost_checked_at: Option<i64>,
+    pub(super) cost_cached_paused: bool,
 }
 
 pub(super) struct TickBoard {
@@ -219,9 +223,16 @@ impl<'a> Scheduler<'a> {
             // only on the idle-slot timeout: un-park its task either way.
             self.expire_waits();
             let frozen = is_frozen(&*self.deps.store)?;
+            let gate = if frozen {
+                CostGate::Allow
+            } else {
+                self.cost_gate()?
+            };
+            let frozen = frozen || gate == CostGate::Frozen;
+            let paused = gate == CostGate::Paused;
             let halted = self.summary.halted.is_some();
             let stopping = self.is_stopping();
-            if !frozen && !halted && !stopping {
+            if !frozen && !halted && !paused && !stopping {
                 if matches!(self.mode, Mode::Auto | Mode::Drain) {
                     self.poll_gating()?;
                 }
@@ -245,6 +256,7 @@ impl<'a> Scheduler<'a> {
                 };
                 match msg {
                     Some(Msg::Worker(outcome)) => {
+                        self.state.cost_checked_at = None;
                         if matches!(
                             outcome.next,
                             worker::Next::Gate(_)
@@ -272,6 +284,7 @@ impl<'a> Scheduler<'a> {
             }
             let stopping = self.is_stopping();
             self.summary.frozen = frozen;
+            self.summary.cost_paused = paused;
             let board = self.load_tick_board()?;
             let capped = !board.candidates.is_empty()
                 && self
@@ -282,8 +295,13 @@ impl<'a> Scheduler<'a> {
                 .keys()
                 .filter(|id| !board.candidates.iter().any(|t| t.id == **id))
                 .count();
-            let waiting =
-                self.state.jobs.len() + parked + if capped { 0 } else { board.candidates.len() };
+            let waiting = self.state.jobs.len()
+                + parked
+                + if capped || paused || frozen {
+                    0
+                } else {
+                    board.candidates.len()
+                };
             if !halted && !stopping {
                 self.summary.waiting_for_account = u32::try_from(waiting).unwrap_or(u32::MAX);
             }

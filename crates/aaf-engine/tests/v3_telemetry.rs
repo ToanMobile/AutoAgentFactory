@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Pillar 2 (OpenAgentd essence): read-only telemetry, timeline trace, and plan prompt.
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
@@ -15,8 +16,8 @@ use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 use aaf_engine::db::Db;
 use aaf_engine::plan_mode::build_plan_prompt;
 use aaf_engine::telemetry::{
-    CostRates, StatusQuery, collect_status, collect_status_from_db, collect_trace,
-    collect_trace_at, inspect_throttle,
+    CostBasis, CostPolicy, CostRates, StatusQuery, collect_status, collect_status_from_db,
+    collect_trace, collect_trace_at, inspect_throttle,
 };
 
 #[test]
@@ -113,12 +114,15 @@ fn telemetry_status_and_trace_aggregate_costs_runs_and_events() {
         .unwrap();
     lease_file.try_lock().unwrap();
 
-    let rates = CostRates::default();
+    let cost = CostPolicy {
+        rates: CostRates::default(),
+        api_accounts: BTreeSet::from(["work".to_string()]),
+    };
     let query = StatusQuery {
         repo_root: Some("/repo"),
         data_dir: Some(dir.path()),
         now: 300,
-        rates,
+        cost: &cost,
     };
     let status = collect_status(&db, &db, &db, Some(&db), &query).unwrap();
     let status_db = collect_status_from_db(&db, &query).unwrap();
@@ -135,7 +139,8 @@ fn telemetry_status_and_trace_aggregate_costs_runs_and_events() {
     assert_eq!(status.runs.succeeded, 1);
     assert_eq!(status.tokens_in, 1_000_000);
     assert_eq!(status.tokens_out, 500_000);
-    assert!((status.estimated_cost_usd - 10.5).abs() < 1e-9);
+    assert_eq!(status.cost_basis, CostBasis::ApiAccounts);
+    assert!((status.estimated_cost_usd.unwrap() - 10.5).abs() < 1e-9);
     assert_eq!(status.accounts.len(), 1);
     assert_eq!(status.accounts[0].status, "leased");
 
@@ -152,11 +157,13 @@ fn telemetry_status_and_trace_aggregate_costs_runs_and_events() {
     db.emit(&FactoryEvent::new(EventKind::RunFinished, r#"{"seq":3}"#, 245).for_task("t-1"))
         .unwrap();
 
-    let trace = collect_trace(&db, &db, &db, "t-1", rates, 50).unwrap();
+    let trace = collect_trace(&db, &db, &db, "t-1", &cost, 50).unwrap();
     assert_eq!(trace.task_id, "t-1");
     assert_eq!(trace.total_tokens_in, 1_000_000);
     assert_eq!(trace.total_tokens_out, 500_000);
     assert_eq!(trace.total_wall_secs, 45);
+    assert_eq!(trace.cost_basis, CostBasis::ApiAccounts);
+    assert!((trace.estimated_cost_usd.unwrap() - 10.5).abs() < 1e-9);
     assert!(!trace.events_truncated);
     assert_eq!(trace.entries.len(), 4);
     // At timestamp 200: "run" sorts before "event", and same-timestamp events stay in chronological id ASC order.
@@ -169,7 +176,7 @@ fn telemetry_status_and_trace_aggregate_costs_runs_and_events() {
     assert_eq!(trace.entries[3].timestamp, 245);
 
     // Limit smaller than total events sets events_truncated = true and keeps the newest events.
-    let truncated = collect_trace(&db, &db, &db, "t-1", rates, 2).unwrap();
+    let truncated = collect_trace(&db, &db, &db, "t-1", &cost, 2).unwrap();
     assert!(truncated.events_truncated);
     assert_eq!(truncated.entries.len(), 3); // 1 run + 2 most recent events
 
@@ -189,10 +196,133 @@ fn telemetry_status_and_trace_aggregate_costs_runs_and_events() {
         ended_at: None,
     })
     .unwrap();
-    let live = collect_trace_at(&db, &db, &db, "t-2", rates, 10, 530).unwrap();
+    let live = collect_trace_at(&db, &db, &db, "t-2", &cost, 10, 530).unwrap();
     assert_eq!(live.total_wall_secs, 30);
-    let skewed = collect_trace_at(&db, &db, &db, "t-2", rates, 10, 400).unwrap();
+    assert_eq!(live.estimated_cost_usd, None);
+    assert_eq!(live.cost_basis, CostBasis::None);
+    let skewed = collect_trace_at(&db, &db, &db, "t-2", &cost, 10, 400).unwrap();
     assert_eq!(skewed.total_wall_secs, 0);
+}
+
+#[test]
+fn cost_policy_excludes_subscription_none_account_and_unused_api_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("state.db")).unwrap();
+
+    let spec = ImmutableSpec {
+        description: "Cost policy".to_string(),
+        acceptance: vec!["ok".to_string()],
+    };
+    db.insert_task(&Task::new_root(
+        "t-sub",
+        "/repo-sub",
+        "Sub only",
+        spec.clone(),
+        Priority::P2,
+        100,
+    ))
+    .unwrap();
+    db.insert_task(&Task::new_root(
+        "t-mix",
+        "/repo-mix",
+        "Mixed",
+        spec,
+        Priority::P2,
+        100,
+    ))
+    .unwrap();
+
+    let add_run = |id: &str, task: &str, acct: Option<&str>, t_in: u64, t_out: u64| {
+        db.insert_run(&RunRecord {
+            id: id.to_string(),
+            task_id: task.to_string(),
+            account_id: acct.map(str::to_string),
+            executor: "claude".to_string(),
+            worktree_path: "/wt".to_string(),
+            branch: "aaf/b".to_string(),
+            status: RunStatus::Running,
+            exit_code: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            started_at: 100,
+            ended_at: None,
+        })
+        .unwrap();
+        db.finish_run(
+            id,
+            &RunFinish {
+                status: RunStatus::Succeeded,
+                exit_code: Some(0),
+                tokens_in: t_in,
+                tokens_out: t_out,
+                ended_at: 120,
+            },
+        )
+        .unwrap();
+    };
+
+    // Repo with only subscription runs (1M in + 0 out).
+    add_run("r-sub-only", "t-sub", Some("sub-acct"), 1_000_000, 0);
+    // Mixed repo: subscription + API + account_id = None.
+    add_run("r-mix-sub", "t-mix", Some("sub-acct"), 2_000_000, 1_000_000);
+    add_run("r-mix-none", "t-mix", None, 500_000, 500_000);
+    add_run("r-mix-api", "t-mix", Some("api-acct"), 1_000_000, 200_000);
+
+    // 1. Empty api_accounts -> always None / CostBasis::None.
+    let empty_policy = CostPolicy::default();
+    let q_empty = StatusQuery {
+        repo_root: None,
+        data_dir: None,
+        now: 200,
+        cost: &empty_policy,
+    };
+    let s_empty = collect_status(&db, &db, &db, Some(&db), &q_empty).unwrap();
+    let s_empty_db = collect_status_from_db(&db, &q_empty).unwrap();
+    assert_eq!(s_empty, s_empty_db);
+    assert_eq!(s_empty.estimated_cost_usd, None);
+    assert_eq!(s_empty.cost_basis, CostBasis::None);
+
+    // 2. Machine has API account configured, but scoped repo has ONLY subscription runs -> None.
+    let api_policy = CostPolicy {
+        rates: CostRates::default(),
+        api_accounts: BTreeSet::from(["api-acct".to_string()]),
+    };
+    let q_sub_repo = StatusQuery {
+        repo_root: Some("/repo-sub"),
+        data_dir: None,
+        now: 200,
+        cost: &api_policy,
+    };
+    let s_sub = collect_status(&db, &db, &db, Some(&db), &q_sub_repo).unwrap();
+    let s_sub_db = collect_status_from_db(&db, &q_sub_repo).unwrap();
+    assert_eq!(s_sub, s_sub_db);
+    assert_eq!(s_sub.tokens_in, 1_000_000);
+    assert_eq!(s_sub.estimated_cost_usd, None);
+    assert_eq!(s_sub.cost_basis, CostBasis::None);
+
+    // 3. Mixed repo: only api-acct (1M in = $3, 0.2M out = $3 => $6.00) is priced;
+    //    sub-acct and account_id=None are excluded from USD while still counted in tokens.
+    let q_mix = StatusQuery {
+        repo_root: Some("/repo-mix"),
+        data_dir: None,
+        now: 200,
+        cost: &api_policy,
+    };
+    let s_mix = collect_status(&db, &db, &db, Some(&db), &q_mix).unwrap();
+    let s_mix_db = collect_status_from_db(&db, &q_mix).unwrap();
+    assert_eq!(s_mix, s_mix_db);
+    assert_eq!(s_mix.tokens_in, 3_500_000);
+    assert_eq!(s_mix.tokens_out, 1_700_000);
+    assert_eq!(s_mix.cost_basis, CostBasis::ApiAccounts);
+    assert!((s_mix.estimated_cost_usd.unwrap() - 6.0).abs() < 1e-9);
+
+    let trace_mix = collect_trace(&db, &db, &db, "t-mix", &api_policy, 10).unwrap();
+    assert_eq!(trace_mix.cost_basis, CostBasis::ApiAccounts);
+    assert!((trace_mix.estimated_cost_usd.unwrap() - 6.0).abs() < 1e-9);
+
+    let trace_sub = collect_trace(&db, &db, &db, "t-sub", &api_policy, 10).unwrap();
+    assert_eq!(trace_sub.estimated_cost_usd, None);
+    assert_eq!(trace_sub.cost_basis, CostBasis::None);
 }
 
 #[test]

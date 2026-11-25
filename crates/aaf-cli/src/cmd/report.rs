@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use aaf_domain::ports::Clock;
 use aaf_engine::factory::adapters::SystemClock;
 use aaf_engine::telemetry::{
-    CostRates, DurationStats, FactoryReport, ReportWindow, TaskCounts, collect_report,
+    CostBasis, DurationStats, FactoryReport, ReportWindow, TaskCounts, collect_report,
 };
 use serde_json::json;
 
@@ -38,7 +38,7 @@ pub fn run(args: &ReportArgs, ctx: &Ctx) -> CmdResult {
         now,
     };
     let report = match open_db_read_only(ctx)? {
-        Some(db) => collect_report(&db, repo.as_deref(), window, CostRates::default())
+        Some(db) => collect_report(&db, repo.as_deref(), window, &ctx.cost_policy(&db))
             .map_err(|e| err("report", e))?,
         None => empty_report(window),
     };
@@ -65,7 +65,8 @@ pub(crate) fn empty_report(window: ReportWindow) -> FactoryReport {
         executors: Vec::new(),
         total_tokens_in: 0,
         total_tokens_out: 0,
-        estimated_cost_usd: 0.0,
+        estimated_cost_usd: None,
+        cost_basis: CostBasis::None,
         top_blocked: Vec::new(),
         autonomy: Default::default(),
     }
@@ -117,11 +118,14 @@ pub(crate) fn render_text(report: &FactoryReport, scope: &str, since: Option<u64
         pct(a.autonomy_rate_pct),
         pct(a.gate_first_pass_rate_pct)
     );
-    let _ = writeln!(
-        out,
-        "Cost: ~${:.2} ({} tokens in / {} out)",
-        report.estimated_cost_usd, report.total_tokens_in, report.total_tokens_out
+    let tokens = format!(
+        "{} tokens in / {} out",
+        report.total_tokens_in, report.total_tokens_out
     );
+    let _ = match report.estimated_cost_usd {
+        Some(usd) => writeln!(out, "Cost: ~${usd:.2} ({tokens}, API-billed accounts)"),
+        None => writeln!(out, "Usage: {tokens}"),
+    };
 
     if !report.stages.is_empty() {
         let _ = writeln!(out, "\nStage time:");
@@ -156,7 +160,7 @@ pub(crate) fn render_text(report: &FactoryReport, scope: &str, since: Option<u64
         for e in &report.executors {
             let _ = writeln!(
                 out,
-                "  {:<10} {} runs ({} ok, {} failed, {} running)  {}  ~${:.2}",
+                "  {:<10} {} runs ({} ok, {} failed, {} running)  {}{}",
                 e.executor,
                 e.runs,
                 e.succeeded,
@@ -164,6 +168,7 @@ pub(crate) fn render_text(report: &FactoryReport, scope: &str, since: Option<u64
                 e.running,
                 human_secs(e.wall_secs),
                 e.estimated_cost_usd
+                    .map_or_else(String::new, |usd| format!("  ~${usd:.2}"))
             );
         }
     }
@@ -215,6 +220,38 @@ mod tests {
     }
 
     #[test]
+    fn subscription_usage_prints_tokens_without_usd() {
+        let mut report = empty_report(ReportWindow {
+            since: None,
+            now: 0,
+        });
+        report.counts.total = 1;
+        report.total_tokens_in = 10;
+        report.total_tokens_out = 5;
+        report.executors.push(ExecutorStat {
+            executor: "claude".into(),
+            runs: 1,
+            succeeded: 1,
+            failed: 0,
+            running: 0,
+            tokens_in: 10,
+            tokens_out: 5,
+            wall_secs: 60,
+            estimated_cost_usd: None,
+        });
+        let text = render_text(&report, "/repo", None);
+        assert!(text.contains("Usage: 10 tokens in / 5 out"), "{text}");
+        assert!(!text.contains('$'), "{text}");
+
+        report.estimated_cost_usd = Some(0.5);
+        let text = render_text(&report, "/repo", None);
+        assert!(
+            text.contains("Cost: ~$0.50 (10 tokens in / 5 out, API-billed accounts)"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn full_report_lists_stages_executors_and_blocks() {
         let mut report = empty_report(ReportWindow {
             since: Some(0),
@@ -238,7 +275,7 @@ mod tests {
             tokens_in: 10,
             tokens_out: 5,
             wall_secs: 400,
-            estimated_cost_usd: 1.25,
+            estimated_cost_usd: Some(1.25),
         });
         report.top_blocked.push(("infra".into(), 1));
         let text = render_text(&report, "/repo", Some(24));

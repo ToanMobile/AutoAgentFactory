@@ -2,7 +2,7 @@
 
 use aaf_domain::ports::Clock;
 use aaf_engine::factory::adapters::SystemClock;
-use aaf_engine::telemetry::{CostRates, collect_trace_at};
+use aaf_engine::telemetry::collect_trace_at;
 use serde_json::json;
 
 use super::store::{err, open_db_read_only};
@@ -20,26 +20,31 @@ pub fn run(args: &TraceArgs, ctx: &Ctx) -> CmdResult {
     let Some(db) = open_db_read_only(ctx)? else {
         return Err(CmdError::new(format!("not found: task {}", args.id)));
     };
+    let cost = ctx.cost_policy(&db);
     let trace = collect_trace_at(
         &db,
         &db,
         &db,
         &args.id,
-        CostRates::default(),
+        &cost,
         args.limit,
         SystemClock.now(),
     )
     .map_err(|e| CmdError::new(e.to_string()))?;
 
+    let cost_str = match trace.estimated_cost_usd {
+        Some(usd) => format!("${usd:.4}"),
+        None => "n/a".to_string(),
+    };
     let mut lines = vec![format!(
-        "{}  {}  {}  tokens={}+{}  wall={}s  cost=${:.4}",
+        "{}  {}  {}  tokens={}+{}  wall={}s  cost={}",
         trace.task_id,
         trace.state.as_str(),
         trace.title,
         trace.total_tokens_in,
         trace.total_tokens_out,
         trace.total_wall_secs,
-        trace.estimated_cost_usd
+        cost_str
     )];
     for entry in &trace.entries {
         lines.push(format!(

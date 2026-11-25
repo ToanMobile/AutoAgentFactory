@@ -59,6 +59,9 @@ fn report_counts_tasks_stages_and_executor_cost() {
     assert_eq!(report["executors"][0]["executor"], "claude");
     assert_eq!(report["executors"][0]["succeeded"], 1);
     assert_eq!(report["executors"][0]["wall_secs"], 60);
-    assert_eq!(report["estimated_cost_usd"], 3.0);
+    // No account is billed per API token: tokens only, no USD (W4c).
+    assert_eq!(report["total_tokens_in"], 1_000_000);
+    assert!(report["estimated_cost_usd"].is_null());
+    assert_eq!(report["cost_basis"], "none");
     assert!(report["window"]["since"].is_i64());
 }

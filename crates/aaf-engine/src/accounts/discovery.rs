@@ -1,12 +1,13 @@
 //! Finds agent accounts on disk by looking at directory and file *names*
 //! only. Nothing in here opens a file: credentials and tokens stay unread.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aaf_domain::account::{AccountProfile, ProviderKind, default_account_name};
-use aaf_domain::config::AccountsConfig;
+use aaf_domain::account::{AccountProfile, AccountState, ProviderKind, default_account_name};
+use aaf_domain::config::{AccountsConfig, Billing};
 
 /// Everything discovery needs from the process environment, passed in so
 /// tests can point it at a fake home.
@@ -114,6 +115,37 @@ fn resolve_aliases(cfg: &AccountsConfig, home: &Path) -> Vec<(PathBuf, String)> 
             let canonical = fs::canonicalize(expand_home(dir, home)).ok()?;
             Some((canonical, name.trim().to_string()))
         })
+        .collect()
+}
+
+/// Canonical config directories configured with `billing = "api"`.
+/// Keys that do not exist on disk are skipped.
+pub fn api_billed_dirs(cfg: &AccountsConfig, home: &Path) -> BTreeSet<PathBuf> {
+    cfg.billing
+        .iter()
+        .filter(|(_, billing)| **billing == Billing::Api)
+        .filter_map(|(dir, _)| fs::canonicalize(expand_home(dir, home)).ok())
+        .collect()
+}
+
+/// Account ids from `accounts` eligible for default USD estimation:
+/// Claude Code accounts whose canonical `config_dir` appears in `dirs`.
+pub fn api_billed_account_ids(
+    dirs: &BTreeSet<PathBuf>,
+    accounts: &[AccountState],
+) -> BTreeSet<String> {
+    if dirs.is_empty() {
+        return BTreeSet::new();
+    }
+    accounts
+        .iter()
+        .filter(|acct| acct.profile.provider == ProviderKind::ClaudeCode)
+        .filter(|acct| {
+            let path = Path::new(&acct.profile.config_dir);
+            let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            dirs.contains(&canonical)
+        })
+        .map(|acct| acct.profile.id.clone())
         .collect()
 }
 

@@ -14,7 +14,7 @@ use aaf_domain::config::UnblockerConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{
     BudgetStore, Clock, EventSink, KvStore, META_CONSECUTIVE_ROOT_FAILS, META_FACTORY_FROZEN,
-    PortError, PortResult, TaskStore,
+    META_FACTORY_UNFROZEN_AT, PortError, PortResult, TaskStore,
 };
 use aaf_domain::task::Task;
 
@@ -530,13 +530,13 @@ impl<'a> Ladder<'a> {
     }
 
     pub fn unfreeze(&self) -> Result<(), PortError> {
+        let now = self.clock.now();
         self.kv.set_meta(META_FACTORY_FROZEN, "0")?;
         self.kv.set_meta(META_CONSECUTIVE_ROOT_FAILS, "0")?;
-        self.events.emit(&FactoryEvent::new(
-            EventKind::FactoryUnfrozen,
-            "{}",
-            self.clock.now(),
-        ))?;
+        self.kv
+            .set_meta(META_FACTORY_UNFROZEN_AT, &now.to_string())?;
+        self.events
+            .emit(&FactoryEvent::new(EventKind::FactoryUnfrozen, "{}", now))?;
         Ok(())
     }
 

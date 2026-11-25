@@ -24,7 +24,7 @@ use aaf_engine::factory::{
 };
 use aaf_engine::git::{MergeOutcome, PrOutcome, TaskWorktree};
 use aaf_engine::telemetry::{
-    AutonomyMetrics, CostRates, StatusQuery, TelemetrySummary, collect_status_from_db,
+    AutonomyMetrics, CostPolicy, StatusQuery, TelemetrySummary, collect_status_from_db,
 };
 use aaf_engine::webhook::WebhookEvent;
 use serde_json::{Value, json};
@@ -128,7 +128,7 @@ fn autonomy_metrics_exclude_auto_unblock_and_work_read_only() {
             repo_root: Some(repo),
             data_dir: Some(dir.path()),
             now: 2_000,
-            rates: CostRates::default(),
+            cost: &CostPolicy::default(),
         },
     )
     .unwrap();
@@ -267,7 +267,7 @@ fn human_state_changes_count_while_auto_and_normal_lifecycle_do_not() {
             repo_root: Some(repo),
             data_dir: None,
             now: 500,
-            rates: CostRates::default(),
+            cost: &CostPolicy::default(),
         },
     )
     .unwrap();
@@ -572,7 +572,7 @@ fn archived_done_task_does_not_inflate_autonomy_and_straddling_task_is_not_split
         repo_root: Some(repo),
         data_dir: Some(dir.path()),
         now,
-        rates: CostRates::default(),
+        cost: &CostPolicy::default(),
     };
     let a = collect_status_from_db(&ro, &q).unwrap().autonomy;
     assert_eq!((a.done_tasks, a.done_without_human), (1, 0));
