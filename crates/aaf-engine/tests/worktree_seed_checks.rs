@@ -4,17 +4,22 @@
 
 #[path = "git_support.rs"]
 mod git_support;
+#[path = "seed_support.rs"]
+mod seed_support;
 
 use std::fs;
 use std::path::Path;
 
 use aaf_domain::worktree_config::WorktreeConfig;
+use aaf_engine::git::hydration::gitignore_source_is_valid;
 use aaf_engine::git::hydration::seed::{
-    SeedCandidate, SeedKind, SeedTarget, check_npm_lock_match, check_pods_lock_match,
+    SEED_TIMEOUT, SeedCandidate, SeedKind, SeedTarget, check_npm_lock_match, check_pods_lock_match,
     check_unity_editor_not_open, check_unity_state_match, detect_seed_candidates,
-    overlaps_worktree_config, unity_editor_conflict,
+    overlaps_worktree_config, seed_worktree_with, unity_editor_conflict,
 };
+use aaf_engine::git::worktree;
 use git_support::{Fixture, commit_file, git};
+use seed_support::MockBackend;
 
 fn write_nested(root: &Path, rel: &str, content: &str) {
     let full = root.join(rel);
@@ -443,5 +448,72 @@ fn seed_overlap_checks_clone_copy_gate_case_insensitive_and_invalid_fail_closed(
     assert!(
         overlaps_worktree_config(Path::new("Pods"), &bad_cfg).is_some(),
         "invalid worktree config entry must fail closed as overlap"
+    );
+}
+
+#[test]
+fn gitignore_source_is_valid_accepts_repo_gitignore_and_rejects_untrusted_sources() {
+    assert!(gitignore_source_is_valid(".gitignore"));
+    assert!(gitignore_source_is_valid("sub/.gitignore"));
+    assert!(gitignore_source_is_valid("a/b/c/.gitignore"));
+
+    for rejected in [
+        "info/exclude",
+        ".git/info/exclude",
+        "/.gitignore",
+        "/tmp/repo/.gitignore",
+        "sub/.GIT/x/.gitignore",
+        "sub/.git/.gitignore",
+        ".gitignore.local",
+        "sub/exclude",
+        "../.gitignore",
+        "./.gitignore",
+    ] {
+        assert!(
+            !gitignore_source_is_valid(rejected),
+            "expected gitignore_source_is_valid({rejected:?}) to be false"
+        );
+    }
+}
+
+#[test]
+fn seed_target_ignored_only_via_git_info_exclude_skips_and_does_not_create_dst() {
+    let fx = Fixture::new();
+    commit_file(&fx.repo, "Podfile", "platform :ios, '15.0'\n", "podfile");
+    let sha = commit_file(
+        &fx.repo,
+        "Podfile.lock",
+        "PODS:\n  - Foo (1.0)\n",
+        "podlock",
+    );
+    write_nested(&fx.repo, "Pods/Manifest.lock", "PODS:\n  - Foo (1.0)\n");
+    write_nested(&fx.repo, "Pods/Foo/Foo.swift", "let x = 1\n");
+
+    // Ignore Pods/ ONLY via `.git/info/exclude`, with no tracked `.gitignore` rule.
+    fs::write(fx.repo.join(".git/info/exclude"), "Pods/\n").unwrap();
+
+    let wt = worktree::create(&fx.repo, &fx.worktrees, "t-info-exclude", "main").unwrap();
+    let report = seed_worktree_with(
+        &fx.repo,
+        &wt.path,
+        &WorktreeConfig::default(),
+        &sha,
+        SEED_TIMEOUT,
+        &MockBackend::default(),
+    );
+    assert_eq!(report.entries.len(), 1);
+    assert!(!report.entries[0].seeded, "{report:?}");
+    let reason = report.entries[0].skip_reason.as_deref().unwrap_or("");
+    assert!(
+        reason.starts_with("not_tracked_gitignored"),
+        "expected not_tracked_gitignored skip reason, got {reason:?}"
+    );
+    assert!(
+        reason.contains("must be ignored by a repo .gitignore"),
+        "expected repo .gitignore source rejection, got {reason:?}"
+    );
+    assert!(
+        !wt.path.join("Pods").exists(),
+        "dst must not be created when ignored only via .git/info/exclude"
     );
 }

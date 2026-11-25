@@ -10,7 +10,7 @@ use super::checks::{
 };
 use super::clone::SeedBackend;
 use super::git_bytes::{git_raw_bytes, remaining_time};
-use crate::git::hydration::cleanup::{MAX_WALK_DEPTH, remove_partial_dst_bounded};
+use crate::git::hydration::cleanup::MAX_WALK_DEPTH;
 use crate::git::hydration::device::nearest_existing_canonical;
 use crate::git::hydration::stage::truncate_stderr_first_line;
 
@@ -55,20 +55,6 @@ pub(super) fn post_clone_verify(
     backend: &dyn SeedBackend,
 ) -> Result<usize, String> {
     let _ = remaining_time(deadline)?;
-
-    // S1 (npm): remove `dst/.cache` within remaining seed deadline.
-    if matches!(target.kind, SeedKind::Npm) {
-        let cache_dir = dst.join(".cache");
-        if fs::symlink_metadata(&cache_dir).is_ok() {
-            remove_partial_dst_bounded(&cache_dir, Some(deadline)).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::TimedOut {
-                    "timeout".to_string()
-                } else {
-                    format!("remove_npm_dot_cache_failed: {e}")
-                }
-            })?;
-        }
-    }
 
     // S2.4 (+ S2.5 for Unity) re-check after clone.
     match target.kind {

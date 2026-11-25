@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -55,6 +56,9 @@ pub struct MockBackend {
     /// `Err(CloneSkip::pre(reason))` (`created = false`) to test caller `!skip.created` handling.
     pub pre_skip_with_sentinel: Option<String>,
     pub same_dev_calls: AtomicUsize,
+    pub clone_dir_calls: AtomicUsize,
+    pub captured_entries: Mutex<Vec<Vec<OsString>>>,
+    pub captured_mount_sub_entries: Mutex<Vec<Option<Vec<OsString>>>>,
 }
 
 impl Default for MockBackend {
@@ -69,6 +73,9 @@ impl Default for MockBackend {
             nested_mount_err: false,
             pre_skip_with_sentinel: None,
             same_dev_calls: AtomicUsize::new(0),
+            clone_dir_calls: AtomicUsize::new(0),
+            captured_entries: Mutex::new(Vec::new()),
+            captured_mount_sub_entries: Mutex::new(Vec::new()),
         }
     }
 }
@@ -76,6 +83,18 @@ impl Default for MockBackend {
 impl MockBackend {
     pub fn same_dev_call_count(&self) -> usize {
         self.same_dev_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn clone_dir_call_count(&self) -> usize {
+        self.clone_dir_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn captured_clone_entries(&self) -> Vec<Vec<OsString>> {
+        self.captured_entries.lock().unwrap().clone()
+    }
+
+    pub fn captured_mount_sub_entries(&self) -> Vec<Option<Vec<OsString>>> {
+        self.captured_mount_sub_entries.lock().unwrap().clone()
     }
 }
 
@@ -86,6 +105,7 @@ impl SeedBackend for MockBackend {
     }
 
     fn clone_dir_strict(&self, src: &Path, dst: &Path, timeout: Duration) -> Result<(), CloneSkip> {
+        self.clone_dir_calls.fetch_add(1, Ordering::SeqCst);
         if !self.delay.is_zero() {
             std::thread::sleep(self.delay.min(timeout));
             if self.delay >= timeout {
@@ -126,6 +146,7 @@ impl SeedBackend for MockBackend {
         dst_dir: &Path,
         timeout: Duration,
     ) -> Result<(), CloneSkip> {
+        self.captured_entries.lock().unwrap().push(entries.to_vec());
         if !self.delay.is_zero() {
             std::thread::sleep(self.delay.min(timeout));
             if self.delay >= timeout {
@@ -146,9 +167,13 @@ impl SeedBackend for MockBackend {
     fn check_no_nested_mount(
         &self,
         _src: &Path,
-        _sub_entries: Option<&[OsString]>,
+        sub_entries: Option<&[OsString]>,
         _deadline: Instant,
     ) -> Result<(), String> {
+        self.captured_mount_sub_entries
+            .lock()
+            .unwrap()
+            .push(sub_entries.map(<[OsString]>::to_vec));
         if self.nested_mount_err {
             Err("nested_mount: mocked".to_string())
         } else {

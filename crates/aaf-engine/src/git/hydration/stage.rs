@@ -442,61 +442,27 @@ pub fn cow_clone_dir_with(
             )),
         }
     }
-    let try_primary = {
-        #[cfg(target_os = "macos")]
-        {
-            true
+    #[cfg(not(target_os = "macos"))]
+    let _ = &same_device;
+
+    let (mut cmd, label) = strict_cp_cmd(cp_bin);
+    cmd.args([src_s, dst_s]);
+    match run_external(&mut cmd, label, timeout) {
+        Ok(out) if out.success() => return Ok(()),
+        Err(err @ GitError::Timeout { .. }) => return Err(cleanup_or_git_err(dst, err)),
+        Ok(out) => {
+            remove_partial_dst(dst)?;
+            warn(&format!(
+                "clone_dirs {label} failed (exit {:?}: {}); falling back to deep copy",
+                out.code,
+                truncate_stderr_first_line(&out.stderr)
+            ));
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = same_device;
-            // Probe inside gitignored `dst` (never `dst_parent`).
-            match fs::create_dir(dst) {
-                Ok(()) => {
-                    let probe = probe_linux_reflink_inside(dst, cp_bin, timeout);
-                    remove_partial_dst(dst)?;
-                    match probe {
-                        Ok(true) => true,
-                        Ok(false) => {
-                            warn(&format!(
-                                "clone_dirs {} -> {} does not support reflink; using --reflink=never",
-                                src.display(),
-                                dst.display()
-                            ));
-                            false
-                        }
-                        Err(err) => {
-                            warn(&format!(
-                                "clone_dirs reflink probe failed ({err}); using --reflink=never"
-                            ));
-                            false
-                        }
-                    }
-                }
-                Err(_) => true,
-            }
-        }
-    };
-    if try_primary {
-        let (mut cmd, label) = strict_cp_cmd(cp_bin);
-        cmd.args([src_s, dst_s]);
-        match run_external(&mut cmd, label, timeout) {
-            Ok(out) if out.success() => return Ok(()),
-            Err(err @ GitError::Timeout { .. }) => return Err(cleanup_or_git_err(dst, err)),
-            Ok(out) => {
-                remove_partial_dst(dst)?;
-                warn(&format!(
-                    "clone_dirs {label} failed (exit {:?}: {}); falling back to deep copy",
-                    out.code,
-                    truncate_stderr_first_line(&out.stderr)
-                ));
-            }
-            Err(err) => {
-                remove_partial_dst(dst)?;
-                warn(&format!(
-                    "clone_dirs {label} error ({err}); falling back to deep copy"
-                ));
-            }
+        Err(err) => {
+            remove_partial_dst(dst)?;
+            warn(&format!(
+                "clone_dirs {label} error ({err}); falling back to deep copy"
+            ));
         }
     }
     let mut fallback = Command::new(cp_bin);

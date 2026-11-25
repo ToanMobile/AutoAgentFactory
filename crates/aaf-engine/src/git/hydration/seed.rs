@@ -2,7 +2,9 @@
 
 pub mod checks;
 pub mod clone;
+mod dry_run;
 mod git_bytes;
+mod report;
 mod verify;
 
 use std::ffi::OsStr;
@@ -19,12 +21,13 @@ pub fn seed_cache_enabled() -> bool {
 }
 
 pub use checks::{
-    SeedCandidate, SeedKind, SeedTarget, UNITY_EXCLUDED_ENTRIES, check_npm_lock_match,
-    check_pods_lock_match, check_unity_editor_not_open, check_unity_state_match,
-    detect_seed_candidates, overlaps_worktree_config, unity_editor_conflict,
+    NPM_EXCLUDED_ENTRIES, SeedCandidate, SeedKind, SeedTarget, UNITY_EXCLUDED_ENTRIES,
+    check_npm_lock_match, check_pods_lock_match, check_unity_editor_not_open,
+    check_unity_state_match, detect_seed_candidates, overlaps_worktree_config,
+    unity_editor_conflict,
 };
-pub use clone::{
-    DryRunItem, RealSeedBackend, SEED_TIMEOUT, SeedBackend, SeedEntryReport, SeedReport,
-    dry_run_seed, dry_run_seed_with, seed_worktree, seed_worktree_with,
-};
+pub use clone::{RealSeedBackend, SEED_TIMEOUT, SeedBackend, seed_worktree, seed_worktree_with};
+pub use dry_run::{DryRunItem, dry_run_seed, dry_run_seed_with};
 pub use git_bytes::run_git_raw_bytes_timed;
+pub(crate) use report::run_seed_during_hydrate;
+pub use report::{SeedEntryReport, SeedReport};

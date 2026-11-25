@@ -1,4 +1,4 @@
-//! S1–S4 seed execution, injectable clone backend, and doctor dry-run.
+//! S1–S4 seed execution and injectable clone backend.
 
 use std::ffi::OsString;
 use std::fs;
@@ -10,21 +10,21 @@ use std::time::{Duration, Instant};
 use aaf_domain::worktree_config::WorktreeConfig;
 
 use super::checks::{
-    SeedCandidate, SeedKind, SeedTarget, UNITY_EXCLUDED_ENTRIES, assert_tracked_gitignore_timed,
-    check_npm_lock_match, check_pods_lock_match, check_unity_editor_not_open,
-    check_unity_state_match_timed, detect_seed_candidates_timed, git_blob_at_base_timed,
-    overlaps_worktree_config, read_regular_file_opt,
+    NPM_EXCLUDED_ENTRIES, SeedCandidate, SeedKind, SeedTarget, UNITY_EXCLUDED_ENTRIES,
+    assert_tracked_gitignore_timed, check_npm_lock_match, check_pods_lock_match,
+    check_unity_editor_not_open, check_unity_state_match_timed, detect_seed_candidates_timed,
+    git_blob_at_base_timed, overlaps_worktree_config, read_regular_file_opt,
 };
 use super::git_bytes::remaining_time;
+use super::report::{SeedEntryReport, SeedReport, skipped_entry};
 use super::verify::{check_hidden_files_for_target, post_clone_verify};
-use crate::git::hydration::cleanup::make_writable_no_symlinks;
+use crate::git::cmd;
 use crate::git::hydration::device::{check_no_nested_mount, same_cow_device};
 use crate::git::hydration::stage::{
     CloneSkip, cow_clone_dir_strict_with, cow_clone_entries_strict_with, cp_program,
     remove_partial_dst, truncate_stderr_first_line,
 };
 use crate::git::hydration::{assert_no_escaping_symlink, assert_no_escaping_wt_prefix};
-use crate::git::{GitError, cmd};
 
 pub const SEED_TIMEOUT: Duration = Duration::from_secs(60);
 const PS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -103,95 +103,6 @@ impl SeedBackend for RealSeedBackend {
         }
         Ok(out.stdout)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedEntryReport {
-    pub rel_dir: &'static str,
-    pub kind: Option<SeedKind>,
-    pub seeded: bool,
-    pub files: usize,
-    pub duration_ms: u128,
-    pub skip_reason: Option<String>,
-    /// Set whenever a post-creation failure (`created == true`) could not be cleaned up;
-    /// escalates hydrate to `Err` (fail-closed) so no unverified tree remains.
-    pub fatal_cleanup_error: Option<String>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct SeedReport {
-    pub entries: Vec<SeedEntryReport>,
-    pub duration_ms: u128,
-}
-
-impl SeedReport {
-    pub fn summary_line(&self) -> Option<String> {
-        if self.entries.is_empty() {
-            return None;
-        }
-        let parts: Vec<String> = self
-            .entries
-            .iter()
-            .map(|e| {
-                if e.seeded {
-                    format!("{} ({} files, {}ms)", e.rel_dir, e.files, e.duration_ms)
-                } else {
-                    format!(
-                        "{} skipped ({})",
-                        e.rel_dir,
-                        e.skip_reason.as_deref().unwrap_or("unknown")
-                    )
-                }
-            })
-            .collect();
-        Some(format!(
-            "aaf: seed {} [{}ms]",
-            parts.join("; "),
-            self.duration_ms
-        ))
-    }
-
-    pub fn fatal_cleanup_error(&self) -> Option<&str> {
-        self.entries
-            .iter()
-            .find_map(|e| e.fatal_cleanup_error.as_deref())
-    }
-}
-
-/// Dry-run outcome for `aaf doctor` (S7).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DryRunItem {
-    pub rel_dir: &'static str,
-    pub kind: Option<SeedKind>,
-    pub would_seed: bool,
-    pub reason: Option<String>,
-}
-
-/// Invoked by `hydrate_for_agent_inner`: runs seeding, prints summary line, and
-/// fails closed (`Err`) if any post-creation cleanup failed (restoring owner write
-/// permissions on `dst` first so `worktree::remove` succeeds).
-pub(crate) fn run_seed_during_hydrate(
-    repo_root: &Path,
-    wt_root: &Path,
-    cfg: &WorktreeConfig,
-    base_sha: &str,
-    backend: &dyn SeedBackend,
-) -> Result<(), GitError> {
-    let report = seed_worktree_with(repo_root, wt_root, cfg, base_sha, SEED_TIMEOUT, backend);
-    if let Some(line) = report.summary_line() {
-        eprintln!("{line}");
-    }
-    if let Some(fatal) = report.fatal_cleanup_error() {
-        for entry in &report.entries {
-            if entry.fatal_cleanup_error.is_some() {
-                make_writable_no_symlinks(&wt_root.join(entry.rel_dir), 0, None);
-            }
-        }
-        return Err(GitError::Invalid(format!(
-            "seed post-clone cleanup failed: {fatal}"
-        )));
-    }
-    Ok(())
 }
 
 /// Seeds a fresh task worktree using `RealSeedBackend` and `SEED_TIMEOUT`.
@@ -297,78 +208,14 @@ pub fn seed_worktree_with(
     }
 }
 
-/// Runs S1–S2 pre-clone checks for `aaf doctor` against `HEAD` without cloning or writing.
-pub fn dry_run_seed(
-    repo_root: &Path,
-    cfg: &WorktreeConfig,
-    worktrees_dir: &Path,
-) -> Result<Vec<DryRunItem>, String> {
-    dry_run_seed_with(repo_root, cfg, worktrees_dir, "HEAD", &RealSeedBackend)
-}
-
-/// Testable core of [`dry_run_seed`].
-pub fn dry_run_seed_with(
-    repo_root: &Path,
-    cfg: &WorktreeConfig,
-    worktrees_dir: &Path,
-    base_ref: &str,
-    backend: &dyn SeedBackend,
-) -> Result<Vec<DryRunItem>, String> {
-    let resolved_sha = cmd::git(
-        repo_root,
-        &["rev-parse", "--verify", &format!("{base_ref}^{{commit}}")],
-    )
-    .map_err(|e| format!("no commit at {base_ref}: {e}"))?;
-    let deadline = Instant::now() + SEED_TIMEOUT;
-    let candidates = detect_seed_candidates_timed(repo_root, &resolved_sha, deadline)?;
-    let mut items = Vec::with_capacity(candidates.len());
-    for cand in candidates {
-        match cand {
-            SeedCandidate::Skipped { rel_dir, reason } => items.push(DryRunItem {
-                rel_dir,
-                kind: None,
-                would_seed: false,
-                reason: Some(reason),
-            }),
-            SeedCandidate::Target(target) => {
-                let res = precheck_target(
-                    repo_root,
-                    None,
-                    worktrees_dir,
-                    cfg,
-                    &resolved_sha,
-                    &target,
-                    deadline,
-                    backend,
-                );
-                match res {
-                    Ok(_) => items.push(DryRunItem {
-                        rel_dir: target.rel_dir,
-                        kind: Some(target.kind),
-                        would_seed: true,
-                        reason: None,
-                    }),
-                    Err(reason) => items.push(DryRunItem {
-                        rel_dir: target.rel_dir,
-                        kind: Some(target.kind),
-                        would_seed: false,
-                        reason: Some(reason),
-                    }),
-                }
-            }
-        }
-    }
-    Ok(items)
-}
-
-struct PrecheckContext {
-    src: PathBuf,
-    base_lock: Option<Vec<u8>>,
-    unity_entries: Vec<OsString>,
+pub(super) struct PrecheckContext {
+    pub(super) src: PathBuf,
+    pub(super) base_lock: Option<Vec<u8>>,
+    pub(super) entries: Vec<OsString>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn precheck_target(
+pub(super) fn precheck_target(
     repo_root: &Path,
     wt_root: Option<&Path>,
     dst_device_probe: &Path,
@@ -418,9 +265,13 @@ fn precheck_target(
     }
 
     let mut base_lock = None;
-    let mut unity_entries = Vec::new();
+    let mut entries = Vec::new();
     match target.kind {
         SeedKind::Npm => {
+            entries = list_seed_entries(&src, &NPM_EXCLUDED_ENTRIES)?;
+            if entries.is_empty() {
+                return Err("npm_node_modules_empty_after_exclude".to_string());
+            }
             let l =
                 git_blob_at_base_timed(repo_root, base_sha, "package-lock.json", false, deadline)?
                     .ok_or_else(|| "missing_base_package_lock".to_string())?;
@@ -442,35 +293,34 @@ fn precheck_target(
             let ps_rem = remaining_time(deadline)?;
             let ps_res = backend.ps_listing(ps_rem);
             check_unity_editor_not_open(repo_root, ps_res.as_deref().map_err(String::as_str))?;
-            unity_entries = list_unity_seed_entries(&src)?;
-            if unity_entries.is_empty() {
+            entries = list_seed_entries(&src, &UNITY_EXCLUDED_ENTRIES)?;
+            if entries.is_empty() {
                 return Err("unity_library_empty_after_exclude".to_string());
             }
         }
     }
 
-    let sub_entries = matches!(target.kind, SeedKind::Unity).then_some(unity_entries.as_slice());
+    let sub_entries =
+        matches!(target.kind, SeedKind::Unity | SeedKind::Npm).then_some(entries.as_slice());
     backend.check_no_nested_mount(&src, sub_entries, deadline)?;
 
     Ok(PrecheckContext {
         src,
         base_lock,
-        unity_entries,
+        entries,
     })
 }
 
-fn list_unity_seed_entries(src_library: &Path) -> Result<Vec<OsString>, String> {
+fn list_seed_entries(src: &Path, excluded: &[&str]) -> Result<Vec<OsString>, String> {
     let mut kept = Vec::new();
-    let rd = fs::read_dir(src_library).map_err(|e| format!("read_dir Library: {e}"))?;
+    let rd = fs::read_dir(src).map_err(|e| format!("read_dir {}: {e}", src.display()))?;
     for entry in rd {
         let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
         let name = entry.file_name();
-        let excluded = name.to_str().is_some_and(|s| {
-            UNITY_EXCLUDED_ENTRIES
-                .iter()
-                .any(|ex| s.eq_ignore_ascii_case(ex))
-        });
-        if !excluded {
+        let is_excluded = name
+            .to_str()
+            .is_some_and(|s| excluded.iter().any(|ex| s.eq_ignore_ascii_case(ex)));
+        if !is_excluded {
             kept.push(name);
         }
     }
@@ -527,12 +377,10 @@ fn seed_one_target(
     };
 
     let clone_res = match target.kind {
-        SeedKind::Unity => {
-            backend.clone_entries_strict(&ctx.src, &ctx.unity_entries, &dst, clone_rem)
+        SeedKind::Unity | SeedKind::Npm => {
+            backend.clone_entries_strict(&ctx.src, &ctx.entries, &dst, clone_rem)
         }
-        SeedKind::Npm | SeedKind::CocoaPods { .. } => {
-            backend.clone_dir_strict(&ctx.src, &dst, clone_rem)
-        }
+        SeedKind::CocoaPods { .. } => backend.clone_dir_strict(&ctx.src, &dst, clone_rem),
     };
     if let Err(skip) = clone_res {
         if skip.cleanup_failed {
@@ -579,22 +427,5 @@ fn seed_one_target(
                 skipped_entry(target, started, msg.clone(), Some(msg))
             }
         },
-    }
-}
-
-fn skipped_entry(
-    target: &SeedTarget,
-    started: Instant,
-    reason: String,
-    fatal_cleanup_error: Option<String>,
-) -> SeedEntryReport {
-    SeedEntryReport {
-        rel_dir: target.rel_dir,
-        kind: Some(target.kind.clone()),
-        seeded: false,
-        files: 0,
-        duration_ms: started.elapsed().as_millis(),
-        skip_reason: Some(reason),
-        fatal_cleanup_error,
     }
 }

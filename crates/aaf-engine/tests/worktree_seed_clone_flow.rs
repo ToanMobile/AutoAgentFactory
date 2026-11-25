@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! Step 4 tests: filtered Unity clone, npm `.cache` removal, CocoaPods,
+//! Step 4 tests: filtered Unity clone, npm `.cache` exclusion, CocoaPods,
 //! gitignore/negation/global-exclude rejections, symlink scanning (S2.6),
 //! and overlap/0555 recovery (S3/S4).
 
@@ -126,7 +126,7 @@ fn seed_unity_fixture_seeds_writable_library_without_excluded_entries() {
 }
 
 #[test]
-fn seed_npm_fixture_seeds_node_modules_and_removes_dot_cache() {
+fn seed_npm_fixture_excludes_dot_cache_from_clone() {
     let fx = Fixture::new();
     let lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"demo"},"node_modules/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#;
     commit_file(&fx.repo, ".gitignore", "node_modules/\n", "ignore nm");
@@ -156,9 +156,10 @@ fn seed_npm_fixture_seeds_node_modules_and_removes_dot_cache() {
     );
     assert!(report.entries[0].seeded, "{report:?}");
     assert!(wt.path.join("node_modules/pkg/index.js").is_file());
+    assert!(wt.path.join("node_modules/.package-lock.json").is_file());
     assert!(
         !wt.path.join("node_modules/.cache").exists(),
-        "node_modules/.cache must be removed after clone"
+        "node_modules/.cache must be excluded from clone"
     );
 }
 
@@ -452,4 +453,107 @@ fn seed_clone_pre_skip_created_false_preserves_existing_sentinel_at_dst() {
         "keep-me",
         "caller !skip.created branch must preserve sentinel at dst without deleting it"
     );
+}
+
+#[test]
+fn seed_npm_uses_clone_entries_strict_excluding_dot_cache_case_insensitively() {
+    let lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"demo"},"node_modules/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#;
+    let inst = r#"{"lockfileVersion":3,"packages":{"node_modules/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#;
+
+    for (idx, cache_name) in [".cache", ".CACHE"].iter().enumerate() {
+        let fx = Fixture::new();
+        commit_file(&fx.repo, ".gitignore", "node_modules/\n", "ignore nm");
+        commit_file(&fx.repo, "package.json", "{\"name\":\"demo\"}\n", "pkg");
+        let sha = commit_file(&fx.repo, "package-lock.json", lock, "lock");
+
+        write_nested(&fx.repo, "node_modules/.package-lock.json", inst);
+        write_nested(
+            &fx.repo,
+            "node_modules/pkg/index.js",
+            "module.exports = 1;\n",
+        );
+        write_nested(
+            &fx.repo,
+            &format!("node_modules/{cache_name}/babel/c.json"),
+            "stale",
+        );
+
+        let wt =
+            worktree::create(&fx.repo, &fx.worktrees, &format!("t-npm-ent-{idx}"), "main").unwrap();
+        let backend = MockBackend::default();
+        let report = seed_worktree_with(
+            &fx.repo,
+            &wt.path,
+            &WorktreeConfig::default(),
+            &sha,
+            SEED_TIMEOUT,
+            &backend,
+        );
+        assert!(report.entries[0].seeded, "{report:?}");
+        assert_eq!(
+            backend.clone_dir_call_count(),
+            0,
+            "npm must use clone_entries_strict, never clone_dir_strict"
+        );
+        let captured = backend.captured_clone_entries();
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        assert!(
+            !captured[0]
+                .iter()
+                .any(|e| e.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".cache"))),
+            "excluded {cache_name} must not appear in clone_entries_strict list: {:?}",
+            captured[0]
+        );
+        assert!(
+            captured[0].iter().any(|e| e == ".package-lock.json"),
+            ".package-lock.json must remain in clone list: {:?}",
+            captured[0]
+        );
+        assert!(
+            captured[0].iter().any(|e| e == "pkg"),
+            "pkg must remain in clone list: {:?}",
+            captured[0]
+        );
+        assert_eq!(
+            backend.captured_mount_sub_entries(),
+            vec![Some(captured[0].clone())],
+            "npm must pass filtered entries to check_no_nested_mount"
+        );
+        assert!(!wt.path.join("node_modules").join(cache_name).exists());
+    }
+}
+
+#[test]
+fn seed_npm_dot_cache_only_node_modules_skips_empty_after_exclude() {
+    let fx = Fixture::new();
+    let lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"demo"},"node_modules/pkg":{"version":"1.0.0","integrity":"sha512-x"}}}"#;
+    commit_file(&fx.repo, ".gitignore", "node_modules/\n", "ignore nm");
+    commit_file(&fx.repo, "package.json", "{\"name\":\"demo\"}\n", "pkg");
+    let sha = commit_file(&fx.repo, "package-lock.json", lock, "lock");
+
+    write_nested(&fx.repo, "node_modules/.cache/babel/c.json", "only-cache");
+
+    let wt = worktree::create(&fx.repo, &fx.worktrees, "t-npm-empty", "main").unwrap();
+    let backend = MockBackend::default();
+    let report = seed_worktree_with(
+        &fx.repo,
+        &wt.path,
+        &WorktreeConfig::default(),
+        &sha,
+        SEED_TIMEOUT,
+        &backend,
+    );
+    assert_eq!(report.entries.len(), 1, "{report:?}");
+    assert!(!report.entries[0].seeded, "{report:?}");
+    assert_eq!(
+        report.entries[0].skip_reason.as_deref(),
+        Some("npm_node_modules_empty_after_exclude"),
+        "{report:?}"
+    );
+    assert!(
+        !wt.path.join("node_modules").exists(),
+        "dst must not be created when node_modules is empty after excluding .cache"
+    );
+    assert_eq!(backend.clone_dir_call_count(), 0);
+    assert!(backend.captured_clone_entries().is_empty());
 }

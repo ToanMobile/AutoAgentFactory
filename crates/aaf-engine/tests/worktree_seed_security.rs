@@ -427,3 +427,112 @@ fn seed_s2_1_rejects_symlink_parent_component_ios_in_source_and_worktree() {
     );
     assert!(!wt_outside.path().join("Pods").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn seed_fatal_cleanup_restores_parent_chain_and_wt_root_so_worktree_remove_succeeds() {
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+
+    use aaf_engine::git::hydration::seed::SeedBackend;
+    use aaf_engine::git::hydration::stage::CloneSkip;
+
+    struct LockedParentChainBackend;
+
+    impl SeedBackend for LockedParentChainBackend {
+        fn same_cow_device(&self, _src: &Path, _dst_parent: &Path) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        fn clone_dir_strict(
+            &self,
+            _src: &Path,
+            dst: &Path,
+            _timeout: Duration,
+        ) -> Result<(), CloneSkip> {
+            let nested = dst.join("sub");
+            fs::create_dir_all(&nested).unwrap();
+            fs::write(nested.join("locked.txt"), "partial").unwrap();
+            fs::set_permissions(&nested, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(dst, fs::Permissions::from_mode(0o555)).unwrap();
+            let intermediate = dst.parent().expect("ios parent dir");
+            let wt_root = intermediate.parent().expect("wt_root");
+            fs::set_permissions(intermediate, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(wt_root, fs::Permissions::from_mode(0o555)).unwrap();
+            Err(CloneSkip::cleanup_failed(
+                "permission denied",
+                "injected_clone_error",
+            ))
+        }
+
+        fn clone_entries_strict(
+            &self,
+            _src_dir: &Path,
+            _entries: &[OsString],
+            _dst_dir: &Path,
+            _timeout: Duration,
+        ) -> Result<(), CloneSkip> {
+            unreachable!("ios/Pods uses clone_dir_strict")
+        }
+
+        fn ps_listing(&self, _timeout: Duration) -> Result<String, String> {
+            Ok(String::new())
+        }
+
+        fn check_no_nested_mount(
+            &self,
+            _src: &Path,
+            _sub_entries: Option<&[OsString]>,
+            _deadline: Instant,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct UnlockOnDrop(std::path::PathBuf);
+    impl Drop for UnlockOnDrop {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+                let ios = self.0.join("ios");
+                let _ = fs::set_permissions(&ios, fs::Permissions::from_mode(0o755));
+                let pods = ios.join("Pods");
+                let _ = fs::set_permissions(&pods, fs::Permissions::from_mode(0o755));
+                let _ = fs::set_permissions(pods.join("sub"), fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
+    let fx = Fixture::new();
+    commit_file(&fx.repo, ".gitignore", "ios/Pods/\n", "ignore ios pods");
+    commit_nested(&fx.repo, "ios/Podfile", "platform :ios, '15.0'\n", "pod");
+    let sha = commit_nested(&fx.repo, "ios/Podfile.lock", "PODS: []\n", "lock");
+    write_nested(&fx.repo, "ios/Pods/Manifest.lock", "PODS: []\n");
+
+    let wt = worktree::create(&fx.repo, &fx.worktrees, "t-m4-parent-chain", "main").unwrap();
+    let _unlock_guard = UnlockOnDrop(wt.path.clone());
+
+    let res = hydrate_fresh_worktree_with_seed_options(
+        &fx.repo,
+        &wt,
+        &sha,
+        None,
+        true,
+        &LockedParentChainBackend,
+    );
+    assert!(
+        res.is_err(),
+        "hydrate must fail closed when seed cleanup fails: {res:?}"
+    );
+    assert!(
+        fs::symlink_metadata(&wt.path).is_err(),
+        "worktree directory must be completely removed even when wt_root and ios/ were 0555"
+    );
+
+    let porcelain = git(&fx.repo, &["worktree", "list", "--porcelain"]);
+    let wt_str = wt.path.to_str().unwrap();
+    assert!(
+        !porcelain.contains(wt_str) && !porcelain.contains(&wt.branch),
+        "git worktree list --porcelain must no longer list removed worktree:\n{porcelain}"
+    );
+}

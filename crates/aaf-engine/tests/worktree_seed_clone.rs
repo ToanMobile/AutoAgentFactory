@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Step 2 & Round-2 (Findings #1-#4, #8, #9g, #11) tests: strict vs fallback CoW clone,
-//! cross-device behavior, Linux probe-in-dst & fallback, batching (arg count & 64 KiB),
-//! timeout/error cleanup on every branch, and read-only (`0555`) recovery.
+//! cross-device behavior, Linux strict probe-in-dst & clone_dirs fallback without probe,
+//! batching (arg count & 64 KiB), timeout/error cleanup on every branch, and read-only (`0555`) recovery.
 
 use std::fs;
 use std::path::Path;
@@ -351,10 +351,10 @@ fn seed_linux_clone_dirs_fallback_and_probe_stays_inside_dst() {
     let logged = fs::read_to_string(&log).unwrap();
     assert!(logged.contains("--reflink=always"), "{logged}");
     assert!(logged.contains("--reflink=never"), "{logged}");
-    // Probe must run inside `dst` (not `parent_dir`), leaving no probe files in `parent_dir`.
+    // Legacy clone_dirs must never create a reflink probe file or call cp with one.
     assert!(
-        logged.contains(&format!("{}/.aaf-reflink-probe", dst.display())),
-        "{logged}"
+        !logged.contains(".aaf-reflink-probe"),
+        "clone_dirs must not run a reflink probe:\n{logged}"
     );
     let parent_entries: Vec<_> = fs::read_dir(&parent_dir)
         .unwrap()
@@ -375,4 +375,91 @@ fn seed_linux_clone_dirs_fallback_and_probe_stays_inside_dst() {
     .unwrap_err();
     assert_eq!(err.reason, "reflink_unsupported");
     assert!(!dst_strict.exists());
+    let logged_after_strict = fs::read_to_string(&log).unwrap();
+    assert!(
+        logged_after_strict.contains(&format!("{}/.aaf-reflink-probe", dst_strict.display())),
+        "strict clone probe must run inside dst_strict:\n{logged_after_strict}"
+    );
+    let parent_entries_after: Vec<_> = fs::read_dir(&parent_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(parent_entries_after, vec![std::ffi::OsString::from("dst")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn seed_clone_dirs_never_probes_and_never_creates_dst_before_first_cp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("item.txt"), "payload").unwrap();
+    let parent_dir = tmp.path().join("wt");
+    fs::create_dir_all(&parent_dir).unwrap();
+    let dst = parent_dir.join("dst");
+    let log = tmp.path().join("cp_args.log");
+    let first_marker = tmp.path().join("first_cp.marker");
+    let dst_state = tmp.path().join("dst_state.log");
+
+    let fake_cp = tmp.path().join("fake_cp_record.sh");
+    make_executable(
+        &fake_cp,
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> \"{}\"\n\
+             if [ ! -f \"{}\" ]; then\n\
+               : > \"{}\"\n\
+               if [ -e \"{}\" ] || [ -L \"{}\" ]; then\n\
+                 printf 'dst_existed' > \"{}\"\n\
+               else\n\
+                 printf 'dst_absent' > \"{}\"\n\
+               fi\n\
+             fi\n\
+             exec /bin/cp -RP -- \"{}\" \"{}\"\n",
+            log.display(),
+            first_marker.display(),
+            first_marker.display(),
+            dst.display(),
+            dst.display(),
+            dst_state.display(),
+            dst_state.display(),
+            src.display(),
+            dst.display(),
+        ),
+    );
+
+    let mut warnings = Vec::new();
+    cow_clone_dir_with(
+        &src,
+        &dst,
+        Duration::from_secs(10),
+        Ok(true),
+        fake_cp.to_str().unwrap(),
+        &mut |w| warnings.push(w.to_string()),
+    )
+    .unwrap();
+
+    assert_eq!(fs::read_to_string(dst.join("item.txt")).unwrap(), "payload");
+    assert!(
+        warnings.is_empty(),
+        "primary fake cp succeeded; expected no fallback warnings: {warnings:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&dst_state).unwrap(),
+        "dst_absent",
+        "clone_dirs must not create dst before the first cp invocation"
+    );
+    let logged = fs::read_to_string(&log).unwrap();
+    assert!(
+        !logged.contains(".aaf-reflink-probe"),
+        "clone_dirs must never invoke cp with a .aaf-reflink-probe path:\n{logged}"
+    );
+    if cfg!(target_os = "macos") {
+        assert!(logged.contains("-cRP"), "expected -cRP on macOS:\n{logged}");
+    } else {
+        assert!(
+            logged.contains("--reflink=always"),
+            "expected --reflink=always on Linux:\n{logged}"
+        );
+    }
 }

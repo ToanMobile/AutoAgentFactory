@@ -139,19 +139,7 @@ pub(super) fn assert_tracked_gitignore_inner(
             "could not determine gitignore source for {rel_str:?}"
         ))
     })?;
-    let source_path = Path::new(source);
-    let valid_source = !source_path.is_absolute()
-        && !source.ends_with("/info/exclude")
-        && source != "info/exclude"
-        && source_path.file_name() == Some(OsStr::new(".gitignore"))
-        && source_path.components().all(|c| {
-            matches!(
-                c,
-                Component::Normal(n)
-                    if n.to_str().is_some_and(|s| !s.eq_ignore_ascii_case(".git"))
-            )
-        });
-    if !valid_source {
+    if !gitignore_source_is_valid(source) {
         return Err(invalid(format!(
             "hydration path {rel_str:?} must be ignored by a repo .gitignore (matched {source:?})"
         )));
@@ -164,7 +152,25 @@ pub(super) fn assert_tracked_gitignore_inner(
     Ok(())
 }
 
-fn parse_check_ignore_source(stdout: &str) -> Option<&str> {
+/// Validates that a `git check-ignore --verbose` source path is a repo-relative `.gitignore`
+/// (rejecting absolute paths, `info/exclude`, `.git` components, and non-`.gitignore` names).
+#[doc(hidden)]
+pub fn gitignore_source_is_valid(source: &str) -> bool {
+    let source_path = Path::new(source);
+    !source_path.is_absolute()
+        && !source.ends_with("/info/exclude")
+        && source != "info/exclude"
+        && source_path.file_name() == Some(OsStr::new(".gitignore"))
+        && source_path.components().all(|c| {
+            matches!(
+                c,
+                Component::Normal(n)
+                    if n.to_str().is_some_and(|s| !s.eq_ignore_ascii_case(".git"))
+            )
+        })
+}
+
+pub(in crate::git::hydration) fn parse_check_ignore_source(stdout: &str) -> Option<&str> {
     let line = stdout.lines().find(|l| !l.trim().is_empty())?;
     let (meta, _) = line.split_once('\t')?;
     let (source, rest) = meta.split_once(':')?;
@@ -420,7 +426,7 @@ fn hydrate_for_agent_inner(
     if let Some(sha) = base_sha
         && seed_enabled
     {
-        seed::clone::run_seed_during_hydrate(repo_root, wt_root, cfg, sha, seed_backend)?;
+        seed::run_seed_during_hydrate(repo_root, wt_root, cfg, sha, seed_backend)?;
     }
     Ok(HydratedPaths { write_denied })
 }
@@ -474,8 +480,13 @@ pub fn hydrate_fresh_worktree_with_seed_options(
             seed_backend,
         )
     });
-    if result.is_err() {
-        let _ = worktree::remove(repo_root, worktree, true, true);
+    if result.is_err()
+        && let Err(rm_err) = worktree::remove(repo_root, worktree, true, true)
+    {
+        eprintln!(
+            "aaf: warning: failed to remove worktree {} after hydration error: {rm_err}",
+            worktree.path.display()
+        );
     }
     result
 }

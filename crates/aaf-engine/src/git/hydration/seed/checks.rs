@@ -13,7 +13,9 @@ use serde_json::Value;
 use super::clone::SEED_TIMEOUT;
 use super::git_bytes::git_raw_bytes;
 use crate::git::hydration::stage::truncate_stderr_first_line;
-use crate::git::hydration::validate_relative_entry;
+use crate::git::hydration::{
+    gitignore_source_is_valid, parse_check_ignore_source, validate_relative_entry,
+};
 use crate::git::path_str;
 
 pub const UNITY_EXCLUDED_ENTRIES: [&str; 7] = [
@@ -25,6 +27,8 @@ pub const UNITY_EXCLUDED_ENTRIES: [&str; 7] = [
     "EditorUserBuildSettings.asset",
     "LastBuild.buildreport",
 ];
+
+pub const NPM_EXCLUDED_ENTRIES: [&str; 1] = [".cache"];
 
 const MARKER_PATHS: [&str; 9] = [
     "ProjectSettings/ProjectVersion.txt",
@@ -133,19 +137,7 @@ pub(super) fn assert_tracked_gitignore_timed(
     let stdout = String::from_utf8_lossy(&out.stdout);
     let source = parse_check_ignore_source(&stdout)
         .ok_or_else(|| format!("could not determine gitignore source for {rel_str:?}"))?;
-    let source_path = Path::new(source);
-    let valid_source = !source_path.is_absolute()
-        && !source.ends_with("/info/exclude")
-        && source != "info/exclude"
-        && source_path.file_name() == Some(OsStr::new(".gitignore"))
-        && source_path.components().all(|c| {
-            matches!(
-                c,
-                Component::Normal(n)
-                    if n.to_str().is_some_and(|s| !s.eq_ignore_ascii_case(".git"))
-            )
-        });
-    if !valid_source {
+    if !gitignore_source_is_valid(source) {
         return Err(format!(
             "hydration path {rel_str:?} must be ignored by a repo .gitignore (matched {source:?})"
         ));
@@ -161,15 +153,6 @@ pub(super) fn assert_tracked_gitignore_timed(
         ));
     }
     Ok(())
-}
-
-fn parse_check_ignore_source(stdout: &str) -> Option<&str> {
-    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
-    let (meta, _) = line.split_once('\t')?;
-    let (source, rest) = meta.split_once(':')?;
-    let (linenum, _) = rest.split_once(':')?;
-    let digits = !linenum.is_empty() && linenum.bytes().all(|b| b.is_ascii_digit());
-    (!source.is_empty() && digits).then_some(source)
 }
 
 /// S1: Selects seed candidates solely from `git ls-tree <base_sha>` (never reading disk).
