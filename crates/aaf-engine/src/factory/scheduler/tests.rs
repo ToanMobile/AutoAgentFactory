@@ -565,3 +565,6 @@ fn expire_waits_clears_restarts_when_cooldown_elapses() {
 
 #[path = "tests_park.rs"]
 mod park;
+
+#[path = "tests_cost.rs"]
+mod tests_cost;

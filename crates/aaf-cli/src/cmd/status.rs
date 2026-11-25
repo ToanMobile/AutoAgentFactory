@@ -10,7 +10,7 @@ use aaf_domain::ports::Clock;
 use aaf_engine::factory::adapters::SystemClock;
 use aaf_engine::gate::{GIT_TIMEOUT, base, head_lock};
 use aaf_engine::telemetry::{
-    CostRates, RunCounts, StatusQuery, TaskCounts, TelemetrySummary, collect_status_from_db,
+    CostBasis, RunCounts, StatusQuery, TaskCounts, TelemetrySummary, collect_status_from_db,
     inspect_throttle,
 };
 use serde_json::json;
@@ -220,16 +220,19 @@ pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
     };
 
     let summary = match db {
-        Some(db) => collect_status_from_db(
-            &db,
-            &StatusQuery {
-                repo_root: repo.as_deref(),
-                data_dir: Some(&ctx.data_dir),
-                now: SystemClock.now(),
-                rates: CostRates::default(),
-            },
-        )
-        .map_err(|e| CmdError::new(e.to_string()))?,
+        Some(db) => {
+            let cost = ctx.cost_policy(&db);
+            collect_status_from_db(
+                &db,
+                &StatusQuery {
+                    repo_root: repo.as_deref(),
+                    data_dir: Some(&ctx.data_dir),
+                    now: SystemClock.now(),
+                    cost: &cost,
+                },
+            )
+            .map_err(|e| CmdError::new(e.to_string()))?
+        }
         None => TelemetrySummary {
             frozen: false,
             consecutive_root_fails: 0,
@@ -239,7 +242,8 @@ pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
             runs: RunCounts::default(),
             tokens_in: 0,
             tokens_out: 0,
-            estimated_cost_usd: 0.0,
+            estimated_cost_usd: None,
+            cost_basis: CostBasis::None,
             accounts: Vec::new(),
             throttle: inspect_throttle(&ctx.data_dir),
         },
@@ -281,10 +285,16 @@ pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
             summary.runs.limit_hit,
             summary.runs.killed
         ),
-        format!(
-            "tokens: {} in + {} out (~${:.4})",
-            summary.tokens_in, summary.tokens_out, summary.estimated_cost_usd
-        ),
+        match summary.estimated_cost_usd {
+            Some(usd) => format!(
+                "tokens: {} in + {} out (~${usd:.4})",
+                summary.tokens_in, summary.tokens_out
+            ),
+            None => format!(
+                "tokens: {} in + {} out",
+                summary.tokens_in, summary.tokens_out
+            ),
+        },
         format!(
             "factory: frozen={}, consecutive_root_fails={}, accounts={}, active_slots={} (lock_files={}), draining={}",
             summary.frozen,
@@ -337,6 +347,7 @@ pub fn run(args: &StatusArgs, ctx: &Ctx) -> CmdResult {
         .field("tokens_in", json!(summary.tokens_in))
         .field("tokens_out", json!(summary.tokens_out))
         .field("estimated_cost_usd", json!(summary.estimated_cost_usd))
+        .field("cost_basis", json!(summary.cost_basis))
         .field(
             "accounts",
             serde_json::to_value(&summary.accounts).map_err(|e| err("accounts", e))?,

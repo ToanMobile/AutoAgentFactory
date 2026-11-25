@@ -735,12 +735,15 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     if (!statusData) return;
     const c = statusData.counts || {};
     const r = statusData.runs || {};
-    const cost = Number(statusData.estimated_cost_usd || 0).toFixed(4);
+    const hasCost = statusData.estimated_cost_usd !== null && statusData.estimated_cost_usd !== undefined;
+    const costHtml = hasCost
+      ? `<div class="stat-val">$${esc(Number(statusData.estimated_cost_usd).toFixed(4))}</div>`
+      : `<div class="stat-val" title="subscription accounts: tokens only">—</div>`;
     $("metricCards").innerHTML = `
       <div class="card"><div class="stat-label">Tasks</div><div class="stat-val">${esc(c.total ?? 0)}</div><div class="stat-sub">ready ${esc(c.ready??0)} · running ${esc(c.running??0)} · review ${esc(c.review??0)} · blocked ${esc(c.blocked??0)}</div></div>
       <div class="card"><div class="stat-label">Runs</div><div class="stat-val">${esc(r.total ?? 0)}</div><div class="stat-sub">active ${esc(r.running??0)} · ok ${esc(r.succeeded??0)} · fail ${esc(r.failed??0)}</div></div>
       <div class="card"><div class="stat-label">Tokens</div><div class="stat-val">${esc((statusData.tokens_in||0).toLocaleString())}</div><div class="stat-sub">in · ${esc((statusData.tokens_out||0).toLocaleString())} out</div></div>
-      <div class="card"><div class="stat-label">Est. Cost</div><div class="stat-val">$${esc(cost)}</div><div class="stat-sub">frozen: ${statusData.frozen ? "YES" : "no"}</div></div>`;
+      <div class="card"><div class="stat-label">Est. Cost</div>${costHtml}<div class="stat-sub">frozen: ${statusData.frozen ? "YES" : "no"}</div></div>`;
 
     const hs = statusData.heavy_slots || {};
     const th = statusData.throttle || {};

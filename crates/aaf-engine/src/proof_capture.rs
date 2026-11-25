@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aaf_domain::config::{ProofConfig, RepoConfig};
+use aaf_domain::config::{ProofConfig, ProofFlow, RepoConfig};
 use aaf_domain::gate::GateStatus;
 use aaf_domain::ports::Clock;
 use aaf_domain::proof::{PROOF_SCHEMA_VERSION, ProofRecord};
@@ -76,16 +76,7 @@ pub fn proof_triggered(cfg: &ProofConfig, changed_paths: &[String]) -> bool {
     changed_paths.iter().any(|path| set.is_match(path))
 }
 
-/// Loads `[proof].capture_cmd` strictly from immutable
-/// `git show <base_sha>:.autofactory/config.toml`.
-///
-/// Returns `Ok(None)` when `.autofactory/config.toml` does not exist at
-/// `base_sha` or its `[proof].capture_cmd` is empty. Fails closed on invalid
-/// `base_sha`, non-blob entries, git errors, or invalid TOML.
-pub fn load_base_proof_capture_cmd(
-    repo_root: &Path,
-    base_sha: &str,
-) -> Result<Option<String>, ProofError> {
+pub(super) fn validate_base_sha(base_sha: &str) -> Result<&str, ProofError> {
     let sha = base_sha.trim();
     if sha.is_empty()
         || sha.starts_with('-')
@@ -96,6 +87,14 @@ pub fn load_base_proof_capture_cmd(
             "invalid base_sha {base_sha:?}"
         )));
     }
+    Ok(sha)
+}
+
+pub(super) fn load_base_repo_config(
+    repo_root: &Path,
+    base_sha: &str,
+) -> Result<Option<RepoConfig>, ProofError> {
+    let sha = validate_base_sha(base_sha)?;
     let listed = aaf_fp::git(
         repo_root,
         &["ls-tree", sha, "--", REPO_CONFIG_REL],
@@ -116,6 +115,22 @@ pub fn load_base_proof_capture_cmd(
     let shown = aaf_fp::git(repo_root, &["show", &spec], &[], aaf_fp::GIT_TIMEOUT)?;
     let repo_cfg: RepoConfig = toml::from_str(&shown)
         .map_err(|err| ProofError::Invalid(format!("invalid TOML in {spec}: {}", err.message())))?;
+    Ok(Some(repo_cfg))
+}
+
+/// Loads `[proof].capture_cmd` strictly from immutable
+/// `git show <base_sha>:.autofactory/config.toml`.
+///
+/// Returns `Ok(None)` when `.autofactory/config.toml` does not exist at
+/// `base_sha` or its `[proof].capture_cmd` is empty. Fails closed on invalid
+/// `base_sha`, non-blob entries, git errors, or invalid TOML.
+pub fn load_base_proof_capture_cmd(
+    repo_root: &Path,
+    base_sha: &str,
+) -> Result<Option<String>, ProofError> {
+    let Some(repo_cfg) = load_base_repo_config(repo_root, base_sha)? else {
+        return Ok(None);
+    };
     let cmd = repo_cfg.proof.capture_cmd.trim();
     Ok((!cmd.is_empty()).then(|| cmd.to_string()))
 }
@@ -202,7 +217,7 @@ impl Drop for PrivateTempFile {
     }
 }
 
-fn choose_temp_dir(canon_data: &Path, canon_repo: &Path) -> Result<PathBuf, ProofError> {
+pub(super) fn choose_temp_dir(canon_data: &Path, canon_repo: &Path) -> Result<PathBuf, ProofError> {
     let candidates = [std::env::temp_dir(), PathBuf::from("/tmp")];
     for candidate in candidates {
         let Ok(canon) = fs::canonicalize(&candidate) else {
@@ -286,6 +301,8 @@ fn build_record(
         device_serial: HOST_CAPTURE_DEVICE.to_string(),
         task_id: None,
         recorded_at,
+        base_sha: None,
+        flows: Vec::new(),
     }
 }
 
@@ -355,6 +372,53 @@ fn run_capture_attempt(
     Ok((bytes, width, height))
 }
 
+pub(super) fn run_capture_with_retry(
+    canon_root: &Path,
+    data_dir: &Path,
+    capture_cmd: &str,
+    cfg: &ProofConfig,
+) -> Result<(Vec<u8>, u32, u32), ProofError> {
+    match run_capture_attempt(canon_root, data_dir, capture_cmd, cfg) {
+        Ok(ok) => Ok(ok),
+        Err(err) if is_retryable_capture_error(&err) => {
+            let delay = proof_retry_delay();
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            run_capture_attempt(canon_root, data_dir, capture_cmd, cfg)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub(super) fn write_and_mirror_proof(
+    canon_root: &Path,
+    data_dir: &Path,
+    fp: &str,
+    bytes: &[u8],
+    mut build: impl FnMut(&Path, &Path, &str, u64) -> ProofRecord,
+) -> Result<RecordedProof, ProofError> {
+    let image_sha256 = aaf_fp::sha256_hex(bytes);
+    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let dest_png = captured_proof_image_path(data_dir, canon_root, fp);
+    let canon_dest = write_private_bytes(data_dir, &dest_png, bytes)?;
+    let record = build(canon_root, &canon_dest, &image_sha256, byte_len);
+    let proof_path = aaf_fp::write_proof(data_dir, &record)?;
+
+    if let Ok(layout) = aaf_fp::probe_git_layout(canon_root, aaf_fp::GIT_TIMEOUT) {
+        let common = layout.common_repo_root();
+        let canon_common = fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
+        if canon_common != canon_root {
+            let common_png = captured_proof_image_path(data_dir, &canon_common, fp);
+            let canon_common_png = write_private_bytes(data_dir, &common_png, bytes)?;
+            let mirrored = build(&canon_common, &canon_common_png, &image_sha256, byte_len);
+            aaf_fp::write_proof(data_dir, &mirrored)?;
+        }
+    }
+
+    Ok(RecordedProof { record, proof_path })
+}
+
 /// Runs the immutable `base_sha` `[proof].capture_cmd` on the host, validates
 /// the PNG output from a private per-run temp file outside `AAF_DATA_DIR`
 /// (retrying once automatically after a brief settle pause on transient capture
@@ -381,57 +445,26 @@ pub fn capture_and_record_proof(
         ProofError::Invalid("no [proof].capture_cmd configured at base_sha".to_string())
     })?;
 
-    let (bytes, width, height) = match run_capture_attempt(&canon_root, data_dir, &capture_cmd, cfg)
-    {
-        Ok(ok) => ok,
-        Err(err) if is_retryable_capture_error(&err) => {
-            let delay = proof_retry_delay();
-            if !delay.is_zero() {
-                thread::sleep(delay);
-            }
-            run_capture_attempt(&canon_root, data_dir, &capture_cmd, cfg)?
-        }
-        Err(err) => return Err(err),
-    };
-    let image_sha256 = aaf_fp::sha256_hex(&bytes);
-    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let (bytes, width, height) = run_capture_with_retry(&canon_root, data_dir, &capture_cmd, cfg)?;
     let recorded_at = clock.now();
-
-    let dest_png = captured_proof_image_path(data_dir, &canon_root, fp);
-    let canon_dest = write_private_bytes(data_dir, &dest_png, &bytes)?;
-    let record = build_record(
+    write_and_mirror_proof(
         &canon_root,
+        data_dir,
         fp,
-        &canon_dest,
-        &image_sha256,
-        width,
-        height,
-        byte_len,
-        recorded_at,
-    );
-    let proof_path = aaf_fp::write_proof(data_dir, &record)?;
-
-    if let Ok(layout) = aaf_fp::probe_git_layout(&canon_root, aaf_fp::GIT_TIMEOUT) {
-        let common = layout.common_repo_root();
-        let canon_common = fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
-        if canon_common != canon_root {
-            let common_png = captured_proof_image_path(data_dir, &canon_common, fp);
-            let canon_common_png = write_private_bytes(data_dir, &common_png, &bytes)?;
-            let mirrored = build_record(
-                &canon_common,
+        &bytes,
+        |root, img_path, img_sha, byte_len| {
+            build_record(
+                root,
                 fp,
-                &canon_common_png,
-                &image_sha256,
+                img_path,
+                img_sha,
                 width,
                 height,
                 byte_len,
                 recorded_at,
-            );
-            aaf_fp::write_proof(data_dir, &mirrored)?;
-        }
-    }
-
-    Ok(RecordedProof { record, proof_path })
+            )
+        },
+    )
 }
 
 pub(crate) struct GateProofCheck<'a> {
@@ -440,6 +473,8 @@ pub(crate) struct GateProofCheck<'a> {
     pub layout: &'a aaf_fp::GitLayout,
     pub cfg: &'a ProofConfig,
     pub base_sha: Option<&'a str>,
+    pub base_flows: &'a [ProofFlow],
+    pub proof_secret_allowlist: Option<&'a [String]>,
     pub fp_before: &'a str,
     pub policy: HiddenPolicy,
     pub release: bool,
@@ -461,7 +496,7 @@ pub(crate) fn finalize_gate_proof(
     ctx: &GateProofCheck<'_>,
     proof_needed: bool,
     pre_proof_err: Option<&str>,
-    has_base_capture: bool,
+    has_base_proof: bool,
     pre_capture_status: GateStatus,
     tree_fp: &mut String,
     hidden: &mut Vec<String>,
@@ -471,13 +506,16 @@ pub(crate) fn finalize_gate_proof(
         return Ok(None);
     }
     if pre_proof_err.is_none() {
-        return Ok(
-            super::verify_proof(ctx.repo_root, ctx.data_dir, ctx.cfg, Some(ctx.fp_before))
-                .err()
-                .map(|e| e.to_string()),
-        );
+        return Ok(super::flows::verify_gate_pre_proof(
+            ctx.repo_root,
+            ctx.data_dir,
+            ctx.cfg,
+            ctx.fp_before,
+            ctx.base_sha,
+            ctx.base_flows,
+        ));
     }
-    if !has_base_capture {
+    if !has_base_proof {
         return Ok(pre_proof_err.map(str::to_string));
     }
     if pre_capture_status != GateStatus::Clear {
@@ -488,14 +526,28 @@ pub(crate) fn finalize_gate_proof(
     let Some(base_sha) = ctx.base_sha else {
         return Ok(pre_proof_err.map(str::to_string));
     };
-    if let Err(err) = capture_and_record_proof(
-        ctx.repo_root,
-        ctx.data_dir,
-        base_sha,
-        ctx.cfg,
-        ctx.fp_before,
-        ctx.clock,
-    ) {
+    let run_res = if !ctx.base_flows.is_empty() {
+        super::flows::run_flows_and_record_proof(
+            ctx.repo_root,
+            ctx.data_dir,
+            base_sha,
+            ctx.cfg,
+            ctx.base_flows,
+            ctx.proof_secret_allowlist,
+            ctx.fp_before,
+            ctx.clock,
+        )
+    } else {
+        capture_and_record_proof(
+            ctx.repo_root,
+            ctx.data_dir,
+            base_sha,
+            ctx.cfg,
+            ctx.fp_before,
+            ctx.clock,
+        )
+    };
+    if let Err(err) = run_res {
         return Ok(Some(err.to_string()));
     }
     if ctx.policy == HiddenPolicy::Remove || ctx.release {

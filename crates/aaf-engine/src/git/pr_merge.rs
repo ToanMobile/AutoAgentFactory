@@ -266,12 +266,28 @@ fn verify_merged_tree(
             require_independent_approval: require_independent,
             allow_common_receipt_write: true,
             strip_compiler_wrappers: true,
+            proof_secret_allowlist: req
+                .global_config
+                .as_ref()
+                .map(|g| g.proof.secret_env_allowlist.as_slice()),
         },
     )
     .map_err(|e| GitError::Gate(e.to_string()))?;
 
     let receipt = gate_run.receipt;
     if receipt.status == GateStatus::Clear {
+        if let Some(reason) = crate::proof::verified_proof_needs_human_reason(
+            scratch.path(),
+            &req.data_dir,
+            &trusted_cfg.proof,
+            &receipt.tree_fp,
+        ) {
+            return Ok(VerifyOutcome::Blocked(blocked(
+                "proof_needs_human",
+                reason,
+                Some(receipt),
+            )));
+        }
         Ok(VerifyOutcome::Clear(Box::new(receipt)))
     } else {
         let code = if receipt.head_lock.status == LockStatus::Blocked {

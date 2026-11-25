@@ -21,8 +21,7 @@ use aaf_engine::factory::{snapshots::steer_task, unfreeze};
 use aaf_engine::gate::GateError;
 use aaf_engine::handover::{load_handover, render_markdown};
 use aaf_engine::telemetry::{
-    CostRates, RunCounts, StatusQuery, TaskCounts, collect_status_from_db_with_throttle,
-    scan_throttle,
+    RunCounts, StatusQuery, TaskCounts, collect_status_from_db_with_throttle, scan_throttle,
 };
 use aaf_engine::throttle::{LoadProbe, Pressure, SystemProbe};
 use aaf_engine::watch::{WatchQuery, collect_watch_overlay_with_scan};
@@ -255,11 +254,12 @@ impl UiBackend for CliUiBackend {
         let drain_active = throttle_snap.drain_lock_present;
         let (mut out, accounts_summary) = match db.as_ref() {
             Some(db) => {
+                let cost = self.ctx.cost_policy(db);
                 let q = StatusQuery {
                     repo_root: repo,
                     data_dir: Some(&self.ctx.data_dir),
                     now,
-                    rates: CostRates::default(),
+                    cost: &cost,
                 };
                 let s = collect_status_from_db_with_throttle(db, &q, throttle_snap)
                     .map_err(|e| e.to_string())?;
@@ -271,7 +271,7 @@ impl UiBackend for CliUiBackend {
                     "frozen": false, "consecutive_root_fails": 0, "repo_root": repo,
                     "counts": TaskCounts::default(), "blocked_reasons": {},
                     "runs": RunCounts::default(), "tokens_in": 0, "tokens_out": 0,
-                    "estimated_cost_usd": 0.0, "accounts": [],
+                    "estimated_cost_usd": null, "cost_basis": "none", "accounts": [],
                     "throttle": throttle_snap,
                 }),
                 Vec::new(),

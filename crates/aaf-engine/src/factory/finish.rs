@@ -376,6 +376,24 @@ pub(crate) fn settle(
                 });
             }
             let gated_in = judged.batch_group.and_then(|id| round.groups.get(&id));
+            if let Some(why) = crate::proof::verified_proof_needs_human_reason(
+                &job.worktree.path,
+                &deps.settings.data_dir,
+                &deps.settings.repo.proof,
+                &receipt.tree_fp,
+            ) {
+                deps.store.append_context_note(&task.id, &why, deps.now())?;
+                return match deps.settings.effective_land() {
+                    LandMode::Pr | LandMode::PrMerge => {
+                        open_pr(deps, job, &task, &receipt, gated_in, round.warnings)
+                    }
+                    LandMode::Auto | LandMode::Branch => {
+                        deps.move_to(&task.id, TaskState::Review, None, &why)?;
+                        unblock::root_succeeded(deps, &task)?;
+                        Ok(Resolution::Settled(TaskState::Review))
+                    }
+                };
+            }
             match deps.settings.effective_land() {
                 LandMode::Branch => land_branch(deps, job, &task),
                 LandMode::Pr => open_pr(deps, job, &task, &receipt, gated_in, round.warnings),

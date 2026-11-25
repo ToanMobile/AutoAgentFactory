@@ -28,6 +28,7 @@ pub mod split;
 pub mod store_compliance;
 pub mod telegram;
 pub mod telemetry;
+pub mod telemetry_cost;
 pub mod throttle;
 pub mod unblocker;
 pub mod updater;

@@ -3,16 +3,16 @@
 //! Parsing and tier merging live in `aaf-engine::config`; this module only
 //! defines the shapes and their defaults.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
+pub use crate::accounts_config::{AccountSelection, AccountsConfig, Billing};
 pub use crate::land_mode::LandMode;
 pub use crate::oracle_config::OracleMode;
 pub use crate::pipeline::{
     DEFAULT_ESCALATE_IMPLEMENTER_AFTER_REWORKS, DEFAULT_MAX_PLAN_ROUNDS, GlobalPipelineConfig,
     GlobalUnblockerConfig, MAX_PLAN_ROUNDS_CAP, ReviewerConfig, StageModelConfig,
 };
+pub use crate::proof_flow_config::{GlobalProofConfig, ProofFlow, validate_flows};
 
 /// Tier 1: `~/.config/autofactory/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -27,6 +27,7 @@ pub struct GlobalConfig {
     pub pipeline: GlobalPipelineConfig,
     pub unblocker: GlobalUnblockerConfig,
     pub telegram: crate::telegram::TelegramConfig,
+    pub proof: GlobalProofConfig,
 }
 
 /// The part of `[run]` the operator may also set for the whole machine.
@@ -109,55 +110,6 @@ impl Default for MachineConfig {
             max_unity_parallel: 1,
             idle_max_load_percent: 100,
             writable_caches: Vec::new(),
-        }
-    }
-}
-
-/// How a job gets its account (PLAN C.8). Tier 1 only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountSelection {
-    /// One account per provider for a repository. While that account is
-    /// cooling down or leased the job waits; it never moves to another
-    /// account of the same provider.
-    Pinned,
-    /// Default. A task keeps its account and a repository prefers its
-    /// configured or last account, but a limit hit or a busy lease moves to
-    /// another free account, which is then kept.
-    #[default]
-    Sticky,
-    /// The free account with the fewest tokens in the last 5 hours.
-    LeastUsed,
-}
-
-impl AccountSelection {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AccountSelection::Pinned => "pinned",
-            AccountSelection::Sticky => "sticky",
-            AccountSelection::LeastUsed => "least_used",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AccountsConfig {
-    pub discovery_globs: Vec<String>,
-    pub max_concurrent_per_account: u32,
-    pub selection: AccountSelection,
-    /// Display names: config dir path (a leading `~` is the home dir) to the
-    /// name shown for that account. Never changes an account id.
-    pub aliases: BTreeMap<String, String>,
-}
-
-impl Default for AccountsConfig {
-    fn default() -> Self {
-        AccountsConfig {
-            discovery_globs: vec!["~/.claude".to_string(), "~/.claude-*".to_string()],
-            max_concurrent_per_account: 1,
-            selection: AccountSelection::default(),
-            aliases: BTreeMap::new(),
         }
     }
 }
@@ -301,6 +253,9 @@ pub struct ProofConfig {
     /// Optional globs scoping `proof.required` to matching diff paths.
     #[serde(default)]
     pub trigger_globs: Vec<String>,
+    /// Optional declarative proof flows loaded strictly from `base_sha`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flows: Vec<ProofFlow>,
 }
 
 impl Default for ProofConfig {
@@ -314,6 +269,7 @@ impl Default for ProofConfig {
             allowed_tools: vec!["mobile-mcp:mobile_save_screenshot".to_string()],
             capture_cmd: String::new(),
             trigger_globs: Vec::new(),
+            flows: Vec::new(),
         }
     }
 }
@@ -439,6 +395,7 @@ pub struct UnblockerConfig {
     pub max_token_budget: u64,
     pub max_wall_clock_secs: u64,
     pub global_freeze_consecutive_fails: u32,
+    pub cost_guard: crate::pipeline::CostGuardConfig,
 }
 
 impl Default for UnblockerConfig {
@@ -449,6 +406,7 @@ impl Default for UnblockerConfig {
             max_token_budget: 2_000_000,
             max_wall_clock_secs: 10_800,
             global_freeze_consecutive_fails: 3,
+            cost_guard: crate::pipeline::CostGuardConfig::default(),
         }
     }
 }

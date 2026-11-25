@@ -2,14 +2,25 @@
 
 #[path = "proof_capture.rs"]
 mod capture;
+#[path = "proof_flows.rs"]
+mod flows;
 #[path = "proof_png.rs"]
 mod png;
+
+/// Source tool identifier recorded for declarative host proof flows.
+pub const HOST_PROOF_FLOWS_TOOL: &str = "host:proof_flows";
+/// Device serial identifier recorded for declarative host proof flows.
+pub const HOST_PROOF_FLOWS_DEVICE: &str = "host-proof-flows";
 
 pub(crate) use capture::{GateProofCheck, finalize_gate_proof, load_gate_base_capture_cmd};
 pub use capture::{
     HOST_CAPTURE_DEVICE, HOST_CAPTURE_TOOL, capture_and_record_proof, captured_proof_image_path,
     load_base_proof_capture_cmd, proof_triggered,
 };
+pub use flows::{
+    load_base_flows, run_flows_and_record_proof_with_env, run_single_flow_with_timeout,
+};
+pub(crate) use flows::{load_gate_base_flows, verify_gate_pre_proof};
 pub use png::is_likely_blank_png;
 
 use std::env;
@@ -18,7 +29,7 @@ use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
 
 use aaf_domain::config::ProofConfig;
-use aaf_domain::proof::{PROOF_SCHEMA_VERSION, ProofRecord};
+use aaf_domain::proof::{PROOF_SCHEMA_VERSION, PROOF_SCHEMA_VERSION_V2, ProofRecord};
 
 const MAX_PROOF_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_POLICY_FILE_BYTES: u64 = 64 * 1024;
@@ -80,9 +91,32 @@ pub fn record_proof(
         device_serial: input.device_serial.trim().to_string(),
         task_id: input.task_id.clone(),
         recorded_at: input.now,
+        base_sha: None,
+        flows: Vec::new(),
     };
     let proof_path = aaf_fp::write_proof(data_dir, &record)?;
     Ok(RecordedProof { record, proof_path })
+}
+
+/// Returns the first flow name in `record` flagged with `needs_human = true`.
+pub fn proof_needs_human(record: &ProofRecord) -> Option<String> {
+    record
+        .flows
+        .iter()
+        .find(|f| f.needs_human)
+        .map(|f| f.name.clone())
+}
+
+/// Loads and verifies the signed proof for `(repo_root, tree_fp)` and returns a
+/// human-review blocking reason when any flow has `needs_human = true`.
+pub fn verified_proof_needs_human_reason(
+    repo_root: &Path,
+    data_dir: &Path,
+    cfg: &ProofConfig,
+    tree_fp: &str,
+) -> Option<String> {
+    let record = verify_proof(repo_root, data_dir, cfg, Some(tree_fp)).ok()?;
+    proof_needs_human(&record).map(|name| format!("proof flow {name} needs human review"))
 }
 
 /// Verifies the signed proof artifact for `repo_root` and current (or expected)
@@ -142,11 +176,27 @@ fn verify_proof_inner(
 ) -> Result<ProofRecord, ProofError> {
     let record = aaf_fp::read_proof(data_dir, proof_root, tree_fp)?;
 
-    if record.schema_version != PROOF_SCHEMA_VERSION {
+    if !matches!(
+        record.schema_version,
+        PROOF_SCHEMA_VERSION | PROOF_SCHEMA_VERSION_V2
+    ) {
         return Err(ProofError::Invalid(format!(
             "unsupported proof schema_version {}",
             record.schema_version
         )));
+    }
+    if record.schema_version == PROOF_SCHEMA_VERSION_V2 {
+        if record.flows.is_empty() {
+            return Err(ProofError::Invalid(
+                "proof schema v2 must record at least one flow".to_string(),
+            ));
+        }
+        if let Some(failed) = record.flows.iter().find(|f| !f.passed) {
+            return Err(ProofError::Invalid(format!(
+                "proof flow {} did not pass",
+                failed.name
+            )));
+        }
     }
     let expected_repo = proof_root.to_string_lossy();
     if record.repo_root != expected_repo || record.tree_fp != tree_fp {
@@ -154,7 +204,10 @@ fn verify_proof_inner(
             "proof does not match repository or tree fingerprint".to_string(),
         ));
     }
-    let is_host_capture = record.source_tool == HOST_CAPTURE_TOOL;
+    let is_host_capture = matches!(
+        record.source_tool.as_str(),
+        HOST_CAPTURE_TOOL | HOST_PROOF_FLOWS_TOOL
+    );
     if is_host_capture {
         validate_host_capture_device(policy_root, cfg, &record.device_serial)?;
     } else {
@@ -280,7 +333,7 @@ fn validate_host_capture_device(
             "serial {serial:?} is listed in global adb-denylist"
         )));
     }
-    if serial != HOST_CAPTURE_DEVICE {
+    if !matches!(serial, HOST_CAPTURE_DEVICE | HOST_PROOF_FLOWS_DEVICE) {
         check_repo_allowlist(canon_root, serial)?;
         check_global_allowlist(serial)?;
     }

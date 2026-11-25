@@ -18,6 +18,9 @@ pub const DEFAULT_MAX_PR_REWORK_ROUNDS: u32 = 2;
 pub const DEFAULT_ESCALATE_IMPLEMENTER_AFTER_REWORKS: u32 = 1;
 /// Hard byte cap on a serialized [`PlanContract`] JSON payload (32 KiB).
 pub const MAX_PLAN_CONTRACT_BYTES: usize = 32 * 1024;
+/// Default hourly spike multiplier applied when `daily_token_cap > 0` and
+/// neither Tier 1 nor Tier 2 explicitly sets `spike_factor`.
+pub const DEFAULT_SPIKE_FACTOR: u32 = 4;
 
 /// Maximum length of a [`ReviewerConfig::id`] in bytes.
 const MAX_REVIEWER_ID_LEN: usize = 64;
@@ -173,6 +176,22 @@ pub struct GlobalPipelineConfig {
     pub implementer_escalated: Option<StageModelConfig>,
 }
 
+/// Machine-wide 24h token cap and 1h spike freeze guard (`[unblocker.cost_guard]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CostGuardConfig {
+    pub daily_token_cap: u64,
+    pub spike_factor: u32,
+}
+
+/// Tier-1 machine-wide `[unblocker.cost_guard]` defaults/caps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GlobalCostGuardConfig {
+    pub daily_token_cap: Option<u64>,
+    pub spike_factor: Option<u32>,
+}
+
 /// Tier-1 machine-wide `[unblocker]` defaults/floors.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -180,6 +199,7 @@ pub struct GlobalUnblockerConfig {
     pub max_token_budget: Option<u64>,
     pub max_wall_clock_secs: Option<u64>,
     pub max_unblock_cycles: Option<u32>,
+    pub cost_guard: GlobalCostGuardConfig,
 }
 
 /// Deterministic task complexity tier used for plan-debate skipping and implementer routing.

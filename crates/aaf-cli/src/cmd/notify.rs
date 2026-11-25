@@ -84,13 +84,50 @@ pub(crate) fn alert_for(event: &FactoryEvent, title: &dyn Fn(&str) -> String) ->
             .unwrap_or_default()
     };
     let (kind, text) = match event.kind {
-        EventKind::FactoryFrozen => (
-            "frozen",
+        EventKind::FactoryFrozen => {
+            if payload["reason"].as_str() == Some("token_spike") {
+                (
+                    "frozen",
+                    format!(
+                        "aaf: factory frozen: token spike {} tokens in the last hour \
+                         (limit {}); check for a runaway agent, then `aaf board unfreeze`",
+                        payload["tokens_last_hour"].as_u64().unwrap_or(0),
+                        payload["limit_last_hour"].as_u64().unwrap_or(0),
+                    ),
+                )
+            } else {
+                (
+                    "frozen",
+                    format!(
+                        "aaf: factory frozen after {} failed root task(s) in a row (last: {}); \
+                         nothing starts until `aaf board unfreeze`",
+                        payload["consecutive_fails"].as_u64().unwrap_or(0),
+                        name(&task)
+                    ),
+                )
+            }
+        }
+        EventKind::CostPaused => {
+            let resume = payload["resume_at"]
+                .as_i64()
+                .map(fmt_utc)
+                .unwrap_or_else(|| "unknown".to_string());
+            (
+                "paused",
+                format!(
+                    "aaf: daily token cap reached ({}/{} in 24h); \
+                     new work resumes automatically around {resume}",
+                    payload["tokens_24h"].as_u64().unwrap_or(0),
+                    payload["cap"].as_u64().unwrap_or(0),
+                ),
+            )
+        }
+        EventKind::CostResumed => (
+            "resumed",
             format!(
-                "aaf: factory frozen after {} failed root task(s) in a row (last: {}); \
-                 nothing starts until `aaf board unfreeze`",
-                payload["consecutive_fails"].as_u64().unwrap_or(0),
-                name(&task)
+                "aaf: daily token cap window cleared ({}/{} in 24h); new work resumes",
+                payload["tokens_24h"].as_u64().unwrap_or(0),
+                payload["cap"].as_u64().unwrap_or(0),
             ),
         ),
         EventKind::FactoryHalted => {
@@ -123,6 +160,26 @@ pub(crate) fn alert_for(event: &FactoryEvent, title: &dyn Fn(&str) -> String) ->
         text,
         created_at: event.created_at,
     })
+}
+
+/// Formats a Unix timestamp in seconds as `YYYY-MM-DD HH:MM UTC` using
+/// Howard Hinnant's civil-from-days algorithm (zero dependencies).
+fn fmt_utc(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let secs_of_day = unix.rem_euclid(86_400);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
 }
 
 struct Pass {
@@ -340,5 +397,98 @@ pub fn run(args: &NotifyArgs, ctx: &Ctx) -> CmdResult {
             eprintln!("aaf notify: not sent: {err_line}");
         }
         thread::sleep(Duration::from_secs(args.interval.max(1)));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn event(kind: EventKind, payload: Value, task_id: Option<&str>) -> FactoryEvent {
+        let mut ev = FactoryEvent::new(kind, payload.to_string(), 1_700_000_000);
+        ev.id = Some(42);
+        if let Some(id) = task_id {
+            ev = ev.for_task(id);
+        }
+        ev
+    }
+
+    #[test]
+    fn fmt_utc_formats_epoch_and_leap_years() {
+        assert_eq!(fmt_utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(fmt_utc(951_827_400), "2000-02-29 12:30 UTC");
+        assert_eq!(fmt_utc(1_709_251_140), "2024-02-29 23:59 UTC");
+        assert_eq!(fmt_utc(1_709_251_200), "2024-03-01 00:00 UTC");
+    }
+
+    #[test]
+    fn alert_for_factory_frozen_formats_token_spike_and_preserves_legacy_text() {
+        let spike = event(
+            EventKind::FactoryFrozen,
+            json!({
+                "reason": "token_spike",
+                "tokens_last_hour": 5000,
+                "limit_last_hour": 4000,
+                "consecutive_fails": 0,
+                "threshold": 0
+            }),
+            None,
+        );
+        let alert = alert_for(&spike, &|_| String::new()).unwrap();
+        assert_eq!(alert.kind, "frozen");
+        assert_eq!(
+            alert.text,
+            "aaf: factory frozen: token spike 5000 tokens in the last hour (limit 4000); \
+             check for a runaway agent, then `aaf board unfreeze`"
+        );
+
+        let legacy = event(
+            EventKind::FactoryFrozen,
+            json!({ "root_id": "t-9", "consecutive_fails": 3, "threshold": 3 }),
+            Some("t-9"),
+        );
+        let legacy_alert = alert_for(&legacy, &|id| format!("Title {id}")).unwrap();
+        assert_eq!(legacy_alert.kind, "frozen");
+        assert_eq!(
+            legacy_alert.text,
+            "aaf: factory frozen after 3 failed root task(s) in a row (last: t-9 (Title t-9)); \
+             nothing starts until `aaf board unfreeze`"
+        );
+    }
+
+    #[test]
+    fn alert_for_cost_paused_and_cost_resumed() {
+        let paused = event(
+            EventKind::CostPaused,
+            json!({
+                "tokens_24h": 1200,
+                "cap": 1000,
+                "resume_at": 1_709_251_140
+            }),
+            None,
+        );
+        let paused_alert = alert_for(&paused, &|_| String::new()).unwrap();
+        assert_eq!(paused_alert.kind, "paused");
+        assert_eq!(
+            paused_alert.text,
+            "aaf: daily token cap reached (1200/1000 in 24h); \
+             new work resumes automatically around 2024-02-29 23:59 UTC"
+        );
+
+        let resumed = event(
+            EventKind::CostResumed,
+            json!({
+                "tokens_24h": 0,
+                "cap": 1000
+            }),
+            None,
+        );
+        let resumed_alert = alert_for(&resumed, &|_| String::new()).unwrap();
+        assert_eq!(resumed_alert.kind, "resumed");
+        assert_eq!(
+            resumed_alert.text,
+            "aaf: daily token cap window cleared (0/1000 in 24h); new work resumes"
+        );
     }
 }

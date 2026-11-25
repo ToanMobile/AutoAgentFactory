@@ -399,6 +399,9 @@ fn collect_missing(
     if ctx.proof_required && ctx.proof.is_none() {
         missing.push("missing verified device proof (proof.required = true)".into());
     }
+    if let Some(flow) = ctx.proof.and_then(crate::proof::proof_needs_human) {
+        missing.push(format!("proof flow {flow} needs human review"));
+    }
     if let Some(v) = ctx.audit_verdict {
         let lower = v.trim().to_ascii_lowercase();
         if lower == "fail" || lower.starts_with("fail:") {

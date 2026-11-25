@@ -372,6 +372,9 @@ max_concurrent_per_account = 1                 # default
 [accounts.aliases]
 "~/.claude-work" = "work"                      # display name for a config dir; never changes an account id
 
+[accounts.billing]
+"~/.claude-api" = "api"                        # subscription (default: tokens only) | api (approximate USD, Claude only)
+
 [safety]
 owner_github_allowlist = ["your-github-login"] # whose GitHub issues may become tasks; empty = nobody
 
@@ -380,7 +383,17 @@ webhook_url = ""                               # generic JSON POST target; empty
 
 [run]
 env_pass = ["NPM_TOKEN"]                       # extra env vars for agents of every repo (see below)
+
+[unblocker.cost_guard]
+daily_token_cap = 0                            # 0 = off; machine-wide 24h rolling token cap across all repos in this data dir
+spike_factor = 4                               # 0 = off; default 4 when daily_token_cap > 0; 1h freeze limit = max(1, spike_factor * cap / 24)
 ```
+
+**Machine-wide 24h token cap & spike freeze (`[unblocker.cost_guard]`):**
+
+- **Scope & tier rules:** `daily_token_cap` counts total tokens (`tokens_in + tokens_out`) across every run on the machine (shared data dir, all repos and accounts) over a rolling 24-hour window (`0` = off), filtered by `COALESCE(ended_at, started_at)`. Set the machine cap in tier 1; a repository (tier 2) may enable or tighten it (`min`) but never loosen or disable a positive tier-1 cap or tier-1's default `spike_factor = 4` (only tier-1 `spike_factor = 0` disables spike detection for a tier-1 cap; a repo may disable spike detection only for a cap it enables itself); tier 3 (`config.local.toml`) is ignored with a warning.
+- **Auto-resuming pause vs hard spike freeze:** When 24h usage reaches `daily_token_cap`, the scheduler pauses starting new work (`cost_paused`), persists the pause marker in dedicated meta `cost_paused_until` (preventing duplicate `cost_paused` alerts across separate `aaf run` processes) without touching `factory_frozen`, and resumes automatically (`cost_resumed`) once the 24h window rolls past enough tokens. When usage since `max(now - 3600, factory_unfrozen_at)` exceeds `max(1, spike_factor × daily_token_cap / 24)` (counting long-running jobs that finish within the window via `COALESCE(ended_at, started_at)`), the factory hard-freezes (`factory_frozen` with `reason = "token_spike"`) until a human inspects for a runaway agent and runs `aaf board unfreeze` (which records `factory_unfrozen_at = now` so the prior spike does not immediately re-freeze the factory).
+- **Known accounting limits:** Runs using the `custom` executor always report `0` tokens and are therefore not counted. Tokens are recorded only when a run finishes (`end_run`), so in-flight runs can overshoot `daily_token_cap` by the tokens consumed before they finish.
 
 **Account selection** (`[accounts] selection`):
 
@@ -391,6 +404,11 @@ env_pass = ["NPM_TOKEN"]                       # extra env vars for agents of ev
   - While the bound account is in cooldown or busy, the task **waits**. `aaf run` prints which account it is waiting for and until when.
 - **`sticky`**: a task and its repo keep their account. When that account hits a limit or is busy, they move to a free account and keep the new one.
 - **`least_used`**: every job takes the free account with the fewest tokens in the last 5 hours.
+
+**Account billing & USD estimates** (`[accounts.billing]`, tier 1 only):
+
+- Every account defaults to `subscription` (e.g. Claude Max/Pro): `aaf status`, `aaf board trace`, `aaf handover --summary`, `aaf telegram` and `aaf ui` report tokens only (`estimated_cost_usd: null`, `cost_basis: "none"`).
+- Mark pay-per-token Claude config directories with `"~/.claude-api" = "api"` under `[accounts.billing]` (or inline `billing = { "~/.claude-api" = "api" }` under `[accounts]`). USD figures are approximate estimates at default Anthropic token rates and apply only to Claude accounts marked `"api"`.
 
 ### Tier 2: repository config
 
@@ -581,11 +599,11 @@ How `[cross_audit]` merges:
 | `aaf board unfreeze` | Clear the factory freeze and the failure counter (**human only**) | — |
 | `aaf run` | Run Ready tasks through agent, gate and merge point | `--auto`, `--auto-merge`, `--max-parallel <N>`, `--unsandboxed`; **`v3`**: `--max-parallel auto`, `--auto-split` |
 | **`v3`** `aaf board rework <ID>` | Send a task in Review back to Gating, or to Ready with `--rerun` | `--reason "…"` (alias `--note`), `--rerun` |
-| **`v3`** `aaf board trace <ID>` | Chronological runs and events, with tokens, wall-clock and estimated cost | `--limit <N>` (default 100) |
+| **`v3`** `aaf board trace <ID>` | Chronological runs and events, with tokens, wall-clock and estimated cost (for `billing = "api"` Claude accounts) | `--limit <N>` (default 100) |
 | **`v3`** `aaf board split <ID>` | Split a Ready or Backlog root task into 2–4 subtasks with disjoint owned paths | `--max <2..4>` (default 4), `--dry-run`, `--unsandboxed` |
 | **`v3`** `aaf board import-issues` | Import open GitHub issues written by allow-listed logins | `--label <L>`, `--dry-run` |
 | **`v3`** `aaf board sync-github` | Map board states to Projects v2 Status columns or `status:*` labels | `--dry-run` |
-| **`v3`** `aaf status` | Read-only overview: task counts, blocked reasons, runs, tokens, estimated cost, accounts, throttle | `--all` |
+| **`v3`** `aaf status` | Read-only overview: task counts, blocked reasons, runs, tokens (and estimated USD for `billing = "api"` Claude accounts), accounts, throttle | `--all` |
 | **`v3`** `aaf watch` | Live read-only terminal dashboard | `--repo <path>`, `--all`, `--interval <SECS>` (default 2), `--once` |
 | **`v3`** `aaf plan "<goal>"` | Build a read-only planning prompt (no agent is launched) | `--file <path>` (repeatable), `--dry-run` |
 | **`v3`** `aaf proof record` / `verify` / `show` | Record, verify or print a signed device-screenshot proof | `record`: `--image`, `--device`, `--tool` (default `mobile-mcp:mobile_save_screenshot`), `--task-id`; `verify`/`show`: `--tree-fp` |
@@ -599,7 +617,7 @@ How `[cross_audit]` merges:
 | **`v3.2`** `aaf handover <ID>` | Read-only acceptance handover report (`md`, CSP `html` with verified PNG `<= 4 MiB`, or `json`) | `--format <md\|html\|json>`, `--out <path>`, `--open` (TTY + macOS) |
 | **`v3.2`** `aaf cockpit` | Synchronous interactive TTY cockpit (0 ports, 0 new crates, ANSI/OSC sanitized, **human TTY only**) | `--repo <path>`, `--all` |
 | **`v3.4`** `aaf telegram` | Zero-port outbound Telegram companion for status, handover, and opt-in two-step `/confirm` approvals (**human only**) | `--once`, `--all`, `--repo <path>`, `--send-test` |
-| `aaf notify` | Push "needs you" moments (factory frozen, factory halted, task blocked, ready for review) or a one-shot `--message` to webhook / Telegram (**human only**) | `--once`, `--all`, `--repo <path>`, `--interval <s>`, `--dry-run`, `--message <text>` |
+| `aaf notify` | Push "needs you" moments (factory frozen incl. token spike, cost cap paused/resumed, factory halted, task blocked, ready for review) or a one-shot `--message` to webhook / Telegram (**human only**) | `--once`, `--all`, `--repo <path>`, `--interval <s>`, `--dry-run`, `--message <text>` |
 | **`v3.5`** `aaf sop` | Declarative TOML SOP workflows (list, show, init, validate, runs, run/resume, approve, send-back) | `list`, `show`, `init`, `validate`, `runs`, `run`, `approve`, `send-back` |
 | **`v3.5`** `aaf executors` | 10-CLI inventory, fallback resolution preview, reusable role profiles, and read-only `.mcp.json` secret audit | `list`, `resolve`, `roles`, `mcp` |
 | **`v3.5`** `aaf ui` | Zero-dependency authenticated local/LAN Web & Mobile Cockpit with SSE live stream and QR pairing (**human only**) | `--host`, `--port`, `--key`, `--read-only`, `--qr`, `--open`, `--all` |
@@ -773,6 +791,8 @@ It then writes an HMAC-signed proof bound to the repository and the current `tre
 **Verify checks.** `verify` checks the signature and the policy again. It also confirms that the screenshot bytes on disk still match.
 
 `record` is refused inside an agent run.
+
+**Declarative proof flows (`[[proof.flows]]`).** Repositories may declare ordered proof flow scripts in Tier-2 `.autofactory/config.toml` under `[[proof.flows]]` (`name`, `script`, `timeout_secs` clamped to `10..=900`, `needs_human`, `secrets`). Both the flow list and each script blob are loaded strictly from `base_sha` (regular blobs `100644`/`100755` only; symlinks and `..` are rejected) into a private `0700` temp directory, run confined against `AAF_DATA_DIR` with a cleared minimal environment, and only receive host env secrets explicitly allowlisted in Tier-1 `[proof].secret_env_allowlist` (dangerous env vars and empty values fail closed; error tails and assertion fields are scrubbed). Each flow must write non-empty JSON assertions to `$AAF_PROOF_ASSERTIONS`; results and `base_sha` are persisted into an HMAC-signed `ProofRecord` v2 (fallback to `capture_cmd` if no flow wrote `$AAF_PROOF_OUT`). Any flow with `needs_human = true` blocks automatic merge/landing (`LandMode::Auto`, `LandMode::PrMerge`, and `aaf merge`) and routes the task to `Review` with a context note and handover entry. Remaining limits: proof flows are not yet network-restricted, do not parse JUnit XML, and do not go through the heavy-command throttle.
 
 ### `aaf skills` (`v3`)
 

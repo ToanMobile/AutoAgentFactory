@@ -8,8 +8,9 @@ use aaf_domain::config::{
     RepoConfig, UnblockerConfig,
 };
 use aaf_domain::pipeline::{
-    GlobalPipelineConfig, GlobalUnblockerConfig, MAX_PLAN_ROUNDS_CAP, MAX_PR_REWORK_ROUNDS_CAP,
-    StageModelConfig, distinct_real_reviewer_providers, validate_reviewers,
+    CostGuardConfig, DEFAULT_SPIKE_FACTOR, GlobalCostGuardConfig, GlobalPipelineConfig,
+    GlobalUnblockerConfig, MAX_PLAN_ROUNDS_CAP, MAX_PR_REWORK_ROUNDS_CAP, StageModelConfig,
+    distinct_real_reviewer_providers, validate_reviewers,
 };
 use serde::Deserialize;
 
@@ -27,6 +28,7 @@ pub(crate) struct RepoKeyPresence {
     pub max_token_budget: bool,
     pub max_wall_clock_secs: bool,
     pub max_unblock_cycles: bool,
+    pub cost_guard_spike_factor: bool,
     pub run_auto_merge: bool,
     pub run_land: bool,
 }
@@ -49,6 +51,7 @@ impl RepoKeyPresence {
             max_token_budget: true,
             max_wall_clock_secs: true,
             max_unblock_cycles: true,
+            cost_guard_spike_factor: false,
             run_auto_merge: false,
             run_land: false,
         }
@@ -69,6 +72,12 @@ impl RepoKeyPresence {
             max_token_budget: has_key(table, "unblocker", "max_token_budget"),
             max_wall_clock_secs: has_key(table, "unblocker", "max_wall_clock_secs"),
             max_unblock_cycles: has_key(table, "unblocker", "max_unblock_cycles"),
+            cost_guard_spike_factor: has_nested_key(
+                table,
+                "unblocker",
+                "cost_guard",
+                "spike_factor",
+            ),
             run_auto_merge: has_key(table, "run", "auto_merge"),
             run_land: has_key(table, "run", "land"),
         }
@@ -125,6 +134,15 @@ fn matches_auto_merge_repo(allowlist: &[String], repo_root: &Path) -> bool {
 fn has_key(table: &toml::Table, section: &str, key: &str) -> bool {
     table
         .get(section)
+        .and_then(toml::Value::as_table)
+        .is_some_and(|sub| sub.contains_key(key))
+}
+
+fn has_nested_key(table: &toml::Table, section: &str, subsection: &str, key: &str) -> bool {
+    table
+        .get(section)
+        .and_then(toml::Value::as_table)
+        .and_then(|sub| sub.get(subsection))
         .and_then(toml::Value::as_table)
         .is_some_and(|sub| sub.contains_key(key))
 }
@@ -331,6 +349,59 @@ fn merge_floor_u64(global: Option<u64>, repo: &mut u64, present: bool, floor_act
     }
 }
 
+fn tighten_cap_u64(global: Option<u64>, repo: u64) -> u64 {
+    match global {
+        Some(g) if g > 0 => {
+            if repo == 0 {
+                g
+            } else {
+                g.min(repo)
+            }
+        }
+        None | Some(_) => repo,
+    }
+}
+
+fn tighten_cap_u32(global: Option<u32>, repo: u32) -> u32 {
+    match global {
+        Some(g) if g > 0 => {
+            if repo == 0 {
+                g
+            } else {
+                g.min(repo)
+            }
+        }
+        None | Some(_) => repo,
+    }
+}
+
+/// Merges Tier-1 `[unblocker.cost_guard]` into Tier-2 with tighten-only (`min`)
+/// semantics: a repository may enable or lower a positive Tier-1 cap/factor,
+/// never loosen or disable it. When Tier 1 sets a positive `daily_token_cap`
+/// without `spike_factor`, the default spike guard (`DEFAULT_SPIKE_FACTOR`)
+/// applies regardless of repo presence; only Tier 1 `spike_factor = 0` can turn
+/// it off. A repo may disable spike detection only for a cap it enables itself.
+fn merge_cost_guard(
+    global: &GlobalCostGuardConfig,
+    repo: &mut CostGuardConfig,
+    presence: &RepoKeyPresence,
+) {
+    repo.daily_token_cap = tighten_cap_u64(global.daily_token_cap, repo.daily_token_cap);
+    let effective_global_spike = match global.spike_factor {
+        Some(s) => Some(s),
+        None if global.daily_token_cap.is_some_and(|c| c > 0) => Some(DEFAULT_SPIKE_FACTOR),
+        None => None,
+    };
+    repo.spike_factor = tighten_cap_u32(effective_global_spike, repo.spike_factor);
+    if repo.daily_token_cap > 0
+        && repo.spike_factor == 0
+        && global.spike_factor.is_none()
+        && !presence.cost_guard_spike_factor
+    {
+        repo.spike_factor = DEFAULT_SPIKE_FACTOR;
+    }
+}
+
 /// Merges Tier-1 `[unblocker]` defaults/floors into Tier-2 `[unblocker]`.
 /// When `dual_or_debate_active` is `true`, Tier 1 acts as a minimum floor
 /// (`repo.max(global)`) so `aaf init` defaults do not starve dual-frontier runs.
@@ -359,6 +430,7 @@ pub(crate) fn merge_unblocker(
             repo.max_unblock_cycles = repo.max_unblock_cycles.max(g);
         }
     }
+    merge_cost_guard(&global.cost_guard, &mut repo.cost_guard, presence);
 }
 
 fn tighten_true(

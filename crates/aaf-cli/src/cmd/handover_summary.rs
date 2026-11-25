@@ -1,6 +1,7 @@
 //! Multi-task overnight digest and summary rendering (`--since` / `--summary`)
 //! for `aaf handover`.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use aaf_domain::blocked::BlockedReason;
@@ -8,7 +9,7 @@ use aaf_domain::event::EventKind;
 use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::handover::CSP_META;
-use aaf_engine::telemetry::{CostRates, TaskCounts};
+use aaf_engine::telemetry::{CostBasis, CostPolicy, TaskCounts};
 use serde_json::{Value, json};
 
 use super::super::board::store::{err, open_db_read_only};
@@ -50,8 +51,11 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
     let mut completed = Vec::new();
     let mut blocked = Vec::new();
     let (mut tokens_in, mut tokens_out) = (0u64, 0u64);
+    let mut per_account: BTreeMap<Option<String>, (u64, u64)> = BTreeMap::new();
+    let mut cost_policy = CostPolicy::default();
 
     if let Some(db) = open_db_read_only(ctx)? {
+        cost_policy = ctx.cost_policy(&db);
         let tasks = db
             .list_tasks(repo.as_deref(), None)
             .map_err(|e| err("tasks", e))?;
@@ -73,6 +77,9 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
             for r in db.runs_for_task(&t.id).unwrap_or_default() {
                 tokens_in = tokens_in.saturating_add(r.tokens_in);
                 tokens_out = tokens_out.saturating_add(r.tokens_out);
+                let entry = per_account.entry(r.account_id).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(r.tokens_in);
+                entry.1 = entry.1.saturating_add(r.tokens_out);
             }
             if matches!(t.state, TaskState::Done | TaskState::Review) {
                 let pr_url = db
@@ -105,11 +112,17 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
             }
         }
     }
-    let cost = CostRates::default().estimate_usd(tokens_in, tokens_out);
+    let cost = cost_policy.estimate(
+        per_account
+            .iter()
+            .map(|(acct, &(t_in, t_out))| (acct.as_deref(), t_in, t_out)),
+    );
+    let cost_basis = CostBasis::from_estimate(cost);
     let digest_json = json!({
         "mode": "digest", "since_hours": args.since, "counts": counts,
         "completed": completed, "blocked": blocked,
-        "tokens_in": tokens_in, "tokens_out": tokens_out, "estimated_cost_usd": cost,
+        "tokens_in": tokens_in, "tokens_out": tokens_out,
+        "estimated_cost_usd": cost, "cost_basis": cost_basis,
     });
     let rendered = match format {
         HandoverFormat::Json => {
@@ -162,7 +175,7 @@ fn render_digest_md(
     blocked: &[Value],
     tokens_in: u64,
     tokens_out: u64,
-    cost: f64,
+    cost: Option<f64>,
 ) -> String {
     let mut out = match since {
         Some(h) => format!("# AAF Overnight Digest (last {h}h)\n\n"),
@@ -173,10 +186,17 @@ fn render_digest_md(
         "Counts: {} total (done={}, review={}, blocked={}, running={}, gating={}, ready={}, backlog={}, cancelled={})",
         c.total, c.done, c.review, c.blocked, c.running, c.gating, c.ready, c.backlog, c.cancelled
     );
-    let _ = writeln!(
-        out,
-        "Usage: {tokens_in} in + {tokens_out} out (~${cost:.4})\n"
-    );
+    match cost {
+        Some(usd) => {
+            let _ = writeln!(
+                out,
+                "Usage: {tokens_in} in + {tokens_out} out (~${usd:.4})\n"
+            );
+        }
+        None => {
+            let _ = writeln!(out, "Usage: {tokens_in} in + {tokens_out} out\n");
+        }
+    }
     out.push_str("## Completed / Review\n");
     if completed.is_empty() {
         out.push_str("- none\n");

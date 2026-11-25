@@ -352,6 +352,8 @@ fn pr_body_with_proof_sanitizes_markdown_and_prompt_includes_repo_env() {
         device_serial: "emu`1\r\nbad".to_string(),
         task_id: Some("t-env".to_string()),
         recorded_at: 1,
+        base_sha: None,
+        flows: Vec::new(),
     };
     let body = pr_body_with_proof(&req, Some(&proof));
     assert!(!body.contains("\n## Injected"), "{body}");

@@ -18,29 +18,7 @@ use serde_json::{Value, json};
 use crate::db::Db;
 use crate::factory::adapters::SystemClock;
 
-/// Per-million-token pricing used for approximate cost display.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CostRates {
-    pub input_per_million_usd: f64,
-    pub output_per_million_usd: f64,
-}
-
-impl Default for CostRates {
-    fn default() -> Self {
-        Self {
-            input_per_million_usd: 3.0,
-            output_per_million_usd: 15.0,
-        }
-    }
-}
-
-impl CostRates {
-    pub fn estimate_usd(self, tokens_in: u64, tokens_out: u64) -> f64 {
-        let input = (tokens_in as f64 / 1_000_000.0) * self.input_per_million_usd;
-        let output = (tokens_out as f64 / 1_000_000.0) * self.output_per_million_usd;
-        ((input + output) * 1_000_000.0).round() / 1_000_000.0
-    }
-}
+pub use crate::telemetry_cost::{CostBasis, CostPolicy, CostRates, cost_policy_for};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCounts {
@@ -97,7 +75,8 @@ pub struct TelemetrySummary {
     pub runs: RunCounts,
     pub tokens_in: u64,
     pub tokens_out: u64,
-    pub estimated_cost_usd: f64,
+    pub estimated_cost_usd: Option<f64>,
+    pub cost_basis: CostBasis,
     pub accounts: Vec<AccountSummary>,
     pub throttle: ThrottleSnapshot,
 }
@@ -209,7 +188,7 @@ pub struct StatusQuery<'a> {
     pub repo_root: Option<&'a str>,
     pub data_dir: Option<&'a Path>,
     pub now: i64,
-    pub rates: CostRates,
+    pub cost: &'a CostPolicy,
 }
 
 #[derive(Default)]
@@ -217,6 +196,7 @@ struct RunTotals {
     counts: RunCounts,
     tokens_in: u64,
     tokens_out: u64,
+    per_account: Vec<(Option<String>, u64, u64)>,
 }
 
 /// Collects global/repo status across generic trait stores.
@@ -229,13 +209,21 @@ pub fn collect_status(
 ) -> PortResult<TelemetrySummary> {
     let all_tasks = tasks.list_tasks(query.repo_root, None)?;
     let mut totals = RunTotals::default();
+    let mut by_account: BTreeMap<Option<String>, (u64, u64)> = BTreeMap::new();
     for task in &all_tasks {
         for run in runs.runs_for_task(&task.id)? {
             bump_run(&mut totals.counts, run.status, 1);
             totals.tokens_in = totals.tokens_in.saturating_add(run.tokens_in);
             totals.tokens_out = totals.tokens_out.saturating_add(run.tokens_out);
+            let entry = by_account.entry(run.account_id).or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(run.tokens_in);
+            entry.1 = entry.1.saturating_add(run.tokens_out);
         }
     }
+    totals.per_account = by_account
+        .into_iter()
+        .map(|(acct, (t_in, t_out))| (acct, t_in, t_out))
+        .collect();
     let groups: Vec<_> = all_tasks
         .iter()
         .map(|t| (t.state, t.blocked_reason.as_ref().map(|r| r.kind()), 1))
@@ -269,6 +257,7 @@ pub fn collect_status_from_db_with_throttle(
         totals.tokens_in = totals.tokens_in.saturating_add(t_in);
         totals.tokens_out = totals.tokens_out.saturating_add(t_out);
     }
+    totals.per_account = db.run_tokens_by_account(query.repo_root)?;
     assemble_status(&groups, totals, db, Some(db), query, throttle)
 }
 
@@ -304,9 +293,13 @@ fn assemble_status(
         Some(s) => summarize_accounts(&s.list_accounts()?, leases_dir.as_deref(), query.now),
         None => Vec::new(),
     };
-    let estimated_cost_usd = query
-        .rates
-        .estimate_usd(totals.tokens_in, totals.tokens_out);
+    let estimated_cost_usd = query.cost.estimate(
+        totals
+            .per_account
+            .iter()
+            .map(|(acct, t_in, t_out)| (acct.as_deref(), *t_in, *t_out)),
+    );
+    let cost_basis = CostBasis::from_estimate(estimated_cost_usd);
     Ok(TelemetrySummary {
         frozen,
         consecutive_root_fails,
@@ -317,6 +310,7 @@ fn assemble_status(
         tokens_in: totals.tokens_in,
         tokens_out: totals.tokens_out,
         estimated_cost_usd,
+        cost_basis,
         accounts: account_list,
         throttle,
     })
@@ -394,7 +388,8 @@ pub struct TaskTrace {
     pub total_tokens_in: u64,
     pub total_tokens_out: u64,
     pub total_wall_secs: u64,
-    pub estimated_cost_usd: f64,
+    pub estimated_cost_usd: Option<f64>,
+    pub cost_basis: CostBasis,
     pub events_truncated: bool,
     pub entries: Vec<TraceEntry>,
 }
@@ -405,11 +400,11 @@ pub fn collect_trace(
     runs: &dyn RunStore,
     events: &dyn EventSink,
     task_id: &str,
-    rates: CostRates,
+    cost: &CostPolicy,
     limit: u32,
 ) -> PortResult<TaskTrace> {
     let now = SystemClock.now();
-    collect_trace_at(tasks, runs, events, task_id, rates, limit, now)
+    collect_trace_at(tasks, runs, events, task_id, cost, limit, now)
 }
 
 /// Builds a chronological run + event timeline for `task_id` at timestamp `now`.
@@ -418,7 +413,7 @@ pub fn collect_trace_at(
     runs: &dyn RunStore,
     events: &dyn EventSink,
     task_id: &str,
-    rates: CostRates,
+    cost: &CostPolicy,
     limit: u32,
     now: i64,
 ) -> PortResult<TaskTrace> {
@@ -487,6 +482,12 @@ pub fn collect_trace_at(
         )
     });
 
+    let estimated_cost_usd = cost.estimate(
+        run_list
+            .iter()
+            .map(|r| (r.account_id.as_deref(), r.tokens_in, r.tokens_out)),
+    );
+    let cost_basis = CostBasis::from_estimate(estimated_cost_usd);
     Ok(TaskTrace {
         task_id: task.id,
         title: task.title,
@@ -495,7 +496,8 @@ pub fn collect_trace_at(
         total_tokens_in,
         total_tokens_out,
         total_wall_secs,
-        estimated_cost_usd: rates.estimate_usd(total_tokens_in, total_tokens_out),
+        estimated_cost_usd,
+        cost_basis,
         events_truncated,
         entries,
     })

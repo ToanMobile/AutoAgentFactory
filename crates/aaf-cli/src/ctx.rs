@@ -8,8 +8,10 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aaf_domain::ports::Clock;
+use aaf_domain::ports::{AccountStore, Clock};
 use aaf_engine::config::{self, ConfigInputs, ConfigOverlay, EffectiveConfig};
+use aaf_engine::db::Db;
+use aaf_engine::telemetry_cost::{CostPolicy, CostRates, cost_policy_for};
 
 use crate::output::CmdError;
 
@@ -122,6 +124,23 @@ impl Ctx {
             cli: ConfigOverlay::default(),
         })
         .map_err(|e| CmdError::new(format!("config: {e}")))
+    }
+
+    /// Builds a [`CostPolicy`] from tier-1 `[accounts.billing]` and persisted accounts.
+    /// Any config or DB error falls back to an empty policy (omitting USD safely).
+    pub fn cost_policy(&self, db: &Db) -> CostPolicy {
+        let Ok(global) = config::load_global(&self.config_dir) else {
+            return CostPolicy::default();
+        };
+        let Ok(accounts) = db.list_accounts() else {
+            return CostPolicy::default();
+        };
+        cost_policy_for(
+            &global.accounts,
+            &self.home,
+            &accounts,
+            CostRates::default(),
+        )
     }
 }
 

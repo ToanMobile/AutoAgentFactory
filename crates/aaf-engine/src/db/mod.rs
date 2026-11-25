@@ -10,6 +10,7 @@
 mod history;
 pub mod private;
 mod queries;
+mod queries_cost;
 mod queries_notify;
 mod queries_pr;
 mod schema;

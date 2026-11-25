@@ -171,10 +171,20 @@ pub fn run_gate_with_options(
     let common_repo_id = aaf_fp::repo_id(common_root);
     let cfg_hash = config_hash(cfg);
     let alt_config_hash = reuse::alt_config_hash(cfg, opts.require_independent_approval);
+    let base_flows = if cfg.proof.required {
+        crate::proof::load_gate_base_flows(repo_root, base.sha.as_deref())?
+    } else {
+        Vec::new()
+    };
     let pre_proof_err = if cfg.proof.required {
-        crate::proof::verify_proof(repo_root, data_dir, &cfg.proof, Some(&fp_before))
-            .err()
-            .map(|e| e.to_string())
+        crate::proof::verify_gate_pre_proof(
+            repo_root,
+            data_dir,
+            &cfg.proof,
+            &fp_before,
+            base.sha.as_deref(),
+            &base_flows,
+        )
     } else {
         None
     };
@@ -268,7 +278,8 @@ pub fn run_gate_with_options(
     let has_base_capture = proof_needed
         && pre_proof_err.is_some()
         && crate::proof::load_gate_base_capture_cmd(repo_root, base.sha.as_deref())?.is_some();
-    let pre_cmd_proof_block = (proof_needed && !has_base_capture)
+    let has_base_proof = has_base_capture || (proof_needed && !base_flows.is_empty());
+    let pre_cmd_proof_block = (proof_needed && !has_base_proof)
         .then_some(pre_proof_err.as_deref())
         .flatten();
 
@@ -380,6 +391,8 @@ pub fn run_gate_with_options(
         layout: &layout,
         cfg: &cfg.proof,
         base_sha: base.sha.as_deref(),
+        base_flows: &base_flows,
+        proof_secret_allowlist: opts.proof_secret_allowlist,
         fp_before: &fp_before,
         policy: opts.policy,
         release,
@@ -389,7 +402,7 @@ pub fn run_gate_with_options(
         &proof_ctx,
         proof_needed,
         pre_proof_err.as_deref(),
-        has_base_capture,
+        has_base_proof,
         pre_capture_status,
         &mut tree_fp,
         &mut hidden,

@@ -22,6 +22,9 @@ pub struct GateRunOptions<'a> {
     /// Strip compiler wrapper and shared cache env vars (`RUSTC_WRAPPER`,
     /// `SCCACHE_DIR`, etc.) from gate commands; set `true` by `aaf merge`.
     pub strip_compiler_wrappers: bool,
+    /// Optional Tier-1 `[proof].secret_env_allowlist` override; when `None`,
+    /// proof flows read it from the global config file.
+    pub proof_secret_allowlist: Option<&'a [String]>,
 }
 
 /// Trunks `auto` tries after `origin/HEAD`, as full ref names: a short

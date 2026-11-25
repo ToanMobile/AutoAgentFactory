@@ -207,6 +207,11 @@ pub fn load_over_repo_from_env(
     )
 }
 
+/// Reads only tier 1 (`config_dir/config.toml`), without touching tier 2, tier 3, or env.
+pub fn load_global(config_dir: &Path) -> Result<GlobalConfig, ConfigError> {
+    read_tier(&config_dir.join("config.toml"), &mut Vec::new()).map(Option::unwrap_or_default)
+}
+
 fn read_global(
     inputs: &ConfigInputs<'_>,
     sources: &mut Vec<String>,

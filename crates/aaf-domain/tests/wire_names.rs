@@ -145,6 +145,8 @@ fn event_kind() {
         (EventKind::ImplementerEscalated, "implementer_escalated"),
         (EventKind::FactoryHalted, "factory_halted"),
         (EventKind::PrFeedback, "pr_feedback"),
+        (EventKind::CostPaused, "cost_paused"),
+        (EventKind::CostResumed, "cost_resumed"),
     ];
     assert_eq!(cases.len(), EventKind::ALL.len());
     for (kind, name) in cases {

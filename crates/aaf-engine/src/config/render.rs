@@ -120,6 +120,9 @@ max_subtask_depth = {depth}
 max_token_budget = {tokens}
 max_wall_clock_secs = {wall_clock}
 global_freeze_consecutive_fails = {freeze}
+# [unblocker.cost_guard]   # 0 = off; the machine-wide cap lives in ~/.config/autofactory/config.toml; a repo may only tighten it
+# daily_token_cap = 0
+# spike_factor = 0
 
 [run]
 # claude, codex, antigravity, opencode or custom.
