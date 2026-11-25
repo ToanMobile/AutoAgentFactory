@@ -154,7 +154,7 @@ Thứ tự ưu tiên: (1) Chỉ số xấu đi → (2) Nguyên nhân đầu `blo
    - **Kênh A (`[CH-A]`):** Low → ghi `giả thuyết`, không chọn sửa. `≥ Medium` → Bước 4b.
    - **Kênh B — Strategic RFC hoặc lỗi chạm Vùng cấm (`[CH-B]`, `RFC-<NNN>` hoặc `<CAT>-<NNN>` gắn `[Kênh B]`):** KHÔNG vào Bước 4b test đỏ. Nếu có `>= 1` mục Kênh B, PM đọc [channel-b-redteam.md](channel-b-redteam.md) và chạy **Red-Team Sanity Check** (10 điểm Security + 5 điểm State-Machine). Đạt `PASS` → ghi ledger với trạng thái `chờ User`, cột `Oracle` = `— (Kênh B RFC)`, cột `Ghi chú` = `[Kênh B] <Impact × Effort + tóm tắt>`. Bị `REJECT` → `loại (red-team: <lý do>)` (không tính vào `Precision` Kênh A).
 3. **Bước 4b — Xác minh chéo Kênh A (Mẫu V, model KHÁC thợ quét):**
-   - `GATE/SEC/COR/RES/AUTO/TST` (và Kênh A `DOC` ở `templates/skills/**/*.md` qua `E/skills_tests.rs`): viết test trên worktree `aaf-verify-<ID>` (chỉ sửa file test), phải **ĐỎ ở assertion** (lỗi biên dịch không tính).
+   - `GATE/SEC/COR/RES/AUTO/TST` (và Kênh A `DOC` ở `templates/skills/**/*.md` qua `E/skills/tests.rs`): viết test trên worktree `aaf-verify-<ID>` (chỉ sửa file test), phải **ĐỎ ở assertion** (lỗi biên dịch không tính).
    - `FAST/PERF`: PM đo 1 làm nóng + 5 lần, lấy trung vị.
    - `DEL`: `git grep -nw <symbol>` không còn caller + `cargo check --workspace --all-targets` xanh khi xoá thử.
    - `OBS/DOC` khác: output lệnh thực tế chứng minh.

@@ -366,5 +366,4 @@ pub fn run(args: &NotifyArgs, ctx: &Ctx) -> CmdResult {
 }
 
 #[cfg(test)]
-#[path = "notify/tests_alert.rs"]
 mod tests_alert;

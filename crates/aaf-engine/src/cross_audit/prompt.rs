@@ -2,8 +2,6 @@
 //! agent under review, so they are embedded as inert, delimited data.
 
 use std::fmt::Write as _;
-
-#[path = "lockfile_summary.rs"]
 pub(crate) mod lockfile_summary;
 
 use super::AuditInput;

@@ -1,6 +1,4 @@
 //! GitHub issue intake (allowlisted + 72h dedup) and Super-Board column sync.
-
-#[path = "github_board_v2.rs"]
 mod project_v2;
 
 use std::collections::HashMap;

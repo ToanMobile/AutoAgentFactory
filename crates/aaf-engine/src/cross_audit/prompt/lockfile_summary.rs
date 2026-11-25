@@ -9,8 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::neutralise;
-
-#[path = "lockfile_summary_parsers.rs"]
 mod parsers;
 
 /// Exact allowlisted lockfile basenames eligible for deterministic summarization.

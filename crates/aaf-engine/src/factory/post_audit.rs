@@ -10,7 +10,6 @@ use aaf_domain::ports::{InfraKind, PortError, PortResult};
 use serde_json::json;
 
 #[allow(dead_code)]
-#[path = "post_audit_helpers.rs"]
 mod helpers;
 
 pub use helpers::is_large_diff;

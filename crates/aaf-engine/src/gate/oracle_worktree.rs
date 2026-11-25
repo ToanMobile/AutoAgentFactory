@@ -19,8 +19,6 @@ use crate::git::warm_slot::{
     SlotKind, WarmSlot, base_snapshots_dir, promote_from_pure_base_slot,
     restore_clean_base_snapshot,
 };
-
-#[path = "oracle_worktree_lexer.rs"]
 mod lexer;
 
 pub(super) use lexer::inline_cfg_test_spans;

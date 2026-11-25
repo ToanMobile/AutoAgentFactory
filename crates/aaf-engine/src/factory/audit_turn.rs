@@ -9,8 +9,6 @@ use aaf_domain::ports::{
 };
 use aaf_domain::run::RunStatus;
 use aaf_domain::task::{Task, TaskState};
-
-#[path = "audit_turn_watch.rs"]
 mod watch;
 
 pub(super) use watch::InfraWatch;

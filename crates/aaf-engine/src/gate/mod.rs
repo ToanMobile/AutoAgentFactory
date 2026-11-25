@@ -7,6 +7,7 @@ pub mod changes;
 pub mod confine;
 pub mod docs_fast;
 pub mod head_lock;
+mod helpers;
 pub mod hidden;
 pub mod oracle;
 pub mod oracle_classify;
@@ -18,9 +19,6 @@ pub mod runner;
 pub mod static_checks;
 #[cfg(test)]
 mod tests;
-
-#[path = "gate_helpers.rs"]
-mod helpers;
 
 use std::path::Path;
 use std::time::Duration;

@@ -7,8 +7,6 @@ use aaf_domain::ports::AgentOutcome;
 use serde_json::Value;
 
 use crate::gate::REASON_TREE_CHANGED;
-
-#[path = "classifier_diag.rs"]
 mod diag;
 
 pub(crate) use diag::failure_error_count;

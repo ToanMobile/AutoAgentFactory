@@ -9,10 +9,7 @@ use aaf_domain::ports::{PortError, PortResult};
 use aaf_domain::task::Task;
 use aaf_fp::{PartialAuditKey, PartialAuditRecord};
 use serde_json::json;
-
-#[path = "dual_audit_matrix.rs"]
 mod matrix;
-#[path = "dual_audit_turn.rs"]
 mod turn;
 
 pub use matrix::{

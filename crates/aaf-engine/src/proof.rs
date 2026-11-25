@@ -1,8 +1,5 @@
 //! Mobile MCP device proof validation and HMAC-signed proof persistence.
-
-#[path = "proof_capture.rs"]
 mod capture;
-#[path = "proof_png.rs"]
 mod png;
 
 pub(crate) use capture::{GateProofCheck, finalize_gate_proof, load_gate_base_capture_cmd};
