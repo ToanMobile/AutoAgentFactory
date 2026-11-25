@@ -197,6 +197,7 @@ pub(crate) fn bookmark_url(port: u16, token: &str) -> String {
     format!("http://127.0.0.1:{port}/#token={token}")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn plist_path(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents")
         .join(format!("{SERVICE_LABEL}.plist"))
@@ -206,6 +207,7 @@ pub(crate) fn log_path(home: &Path) -> PathBuf {
     home.join("Library/Logs/aaf-ui.log")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -214,6 +216,7 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Deduplicates colon-separated `PATH` entries while preserving order, preventing plist churn.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn normalize_path_var(raw: &str) -> String {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -228,6 +231,7 @@ pub(crate) fn normalize_path_var(raw: &str) -> String {
 
 /// Launchd agent definition that runs `<exe> ui --service` at login and keeps it alive.
 /// The bearer token is NEVER embedded in the plist (argv/env are exposed via `ps`/`launchctl`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn plist_xml(
     exe: &Path,
     home: &Path,
