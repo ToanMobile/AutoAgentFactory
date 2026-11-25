@@ -6,107 +6,201 @@
 <title>AAF Studio</title>
 <style>
 :root{
-  --bg:#FAF8F5;--surface:#FFFFFF;--surface2:#F3EFE8;--ink:#1F1D1A;--muted:#6E685F;
-  --border:#E6E1D9;--accent:#B45309;--ok:#0F766E;--ok-bg:#ECFDF5;
-  --warn:#B45309;--warn-bg:#FEF3C7;--err:#B91C1C;--err-bg:#FEE2E2;--info:#3730A3;--info-bg:#EEF2FF;
-  --bar:#B45309;--bar2:#E7C9A0;
-  --shadow:0 1px 2px rgba(31,29,26,.06),0 8px 24px rgba(31,29,26,.06);
+  --bg:#F7F5F1;--surface:#FFFFFF;--surface2:#F1EDE6;--ink:#1A1814;--ink2:#3A362F;--muted:#5C564C;
+  --border:#E2DCD2;--accent:#B45309;--accent-ink:#FFFFFF;
+  --ok:#0B6B5F;--ok-bg:#E3F7EF;--warn:#92400E;--warn-bg:#FDEFC7;--err:#A61B1B;--err-bg:#FDE3E3;--info:#3730A3;--info-bg:#E8ECFE;
+  --bar:#C2620C;--bar2:#EBCFA6;
+  --shadow:0 1px 2px rgba(26,24,20,.05),0 6px 18px rgba(26,24,20,.06);
   --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
 }
 [data-theme="dark"]{
-  --bg:#151412;--surface:#1F1D1A;--surface2:#292622;--ink:#F4F1EA;--muted:#A49D92;
-  --border:#35312B;--accent:#F59E0B;--ok:#2DD4BF;--ok-bg:#102D2A;
-  --warn:#FBBF24;--warn-bg:#382811;--err:#F87171;--err-bg:#3A1818;--info:#A5B4FC;--info-bg:#1E2042;
-  --bar:#F59E0B;--bar2:#5A4423;
-  --shadow:0 1px 2px rgba(0,0,0,.35),0 10px 28px rgba(0,0,0,.45);
+  --bg:#12110F;--surface:#1C1A17;--surface2:#272420;--ink:#F5F2EC;--ink2:#DDD7CC;--muted:#B5AC9F;
+  --border:#38332C;--accent:#F59E0B;--accent-ink:#1A1206;
+  --ok:#4ADEC4;--ok-bg:#0F2E29;--warn:#FCD34D;--warn-bg:#3A2A0F;--err:#FCA5A5;--err-bg:#3D1717;--info:#B4BEFE;--info-bg:#1E2146;
+  --bar:#F59E0B;--bar2:#5E4824;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.4);
 }
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
 button,input,select{font:inherit;color:inherit}
-button,select{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:6px 11px}
+button{cursor:pointer;border:1px solid var(--border);background:var(--surface);border-radius:9px;padding:7px 12px;font-weight:500}
 button:hover{background:var(--surface2)}
-a{color:var(--accent)}
-header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border)}
-.brand{font-weight:700;font-size:16px}.brand small{font-weight:400;color:var(--muted);margin-left:8px}
+button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+a{color:var(--accent);font-weight:500}
+h1,h2,h3{margin:0}
+header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--surface);border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand h1{font-size:18px;font-weight:700;white-space:nowrap}
+.brand .scope{color:var(--muted);font-size:14px;overflow-wrap:anywhere}
 .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.seg button{border:0;border-radius:0;padding:6px 10px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:9px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:7px 11px}
 .seg button.on{background:var(--ink);color:var(--bg)}
-main{max-width:1240px;margin:0 auto;padding:18px 20px 60px;display:grid;gap:16px}
-.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
-.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr))}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
-.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 10px;font-weight:600}
-.kpi .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
-.kpi .l{color:var(--muted);font-size:12px}.kpi .s{color:var(--muted);font-size:12px;margin-top:2px}
+.needbtn{display:inline-flex;align-items:center;gap:8px;font-weight:600}
+.needbtn.hot{background:var(--err-bg);border-color:transparent;color:var(--err)}
+.badge{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 7px;border-radius:999px;font-size:13px;font-weight:700;background:var(--surface2);color:var(--ink)}
+.hot .badge{background:var(--err);color:var(--surface)}
+main{max-width:1240px;margin:0 auto;padding:20px 24px 64px;display:grid;gap:18px}
+.banner{display:none;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 16px;border-radius:12px;background:var(--err-bg);color:var(--err);font-weight:600}
+.banner button{background:var(--surface);color:var(--ink)}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(6,minmax(0,1fr))}
+@media (max-width:1100px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:560px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.two{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(min(420px,100%),1fr))}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
+.card>h2,.head h2{font-size:16px;font-weight:650;color:var(--ink)}
+.card>h2{margin-bottom:12px}
+.card>.sub,.head .sub{color:var(--muted);font-size:13.5px;margin:-8px 0 12px}
+.head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.head .sub{margin:2px 0 0}
+.kpi{display:flex;flex-direction:column;gap:2px;text-align:left;width:100%;font-weight:400}
+.kpi .l{color:var(--muted);font-size:13.5px;font-weight:600}
+.kpi .v{font-size:28px;font-weight:750;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.kpi .s{color:var(--muted);font-size:13.5px;overflow-wrap:anywhere}
+button.kpi{border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);background:var(--surface)}
+button.kpi.hot{border-color:var(--err);background:var(--err-bg)}
+button.kpi.hot .v,button.kpi.hot .l{color:var(--err)}
+button.kpi .s::after{content:" →"}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--border);vertical-align:top}
-th{font-size:12px;color:var(--muted);font-weight:600}
-td.n,th.n{text-align:right}
-.tablewrap{overflow-x:auto}
-.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--surface2)}
+th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+th{font-size:13px;color:var(--muted);font-weight:600;white-space:nowrap}
+td.n,th.n{text-align:right;white-space:nowrap}
+td.wrap{overflow-wrap:anywhere}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600;background:var(--surface2);color:var(--ink2);white-space:nowrap}
 .ok{background:var(--ok-bg);color:var(--ok)}.warn{background:var(--warn-bg);color:var(--warn)}
 .err{background:var(--err-bg);color:var(--err)}.info{background:var(--info-bg);color:var(--info)}
-.muted{color:var(--muted)}.mono{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
-.card{overflow-x:auto}
-@media (max-width:600px){header,main{padding-left:16px;padding-right:16px}}
-.bar{position:relative;height:16px;background:var(--surface2);border-radius:4px;overflow:hidden;min-width:80px}
-.bar i{position:absolute;left:0;top:0;bottom:0;background:var(--bar2)}
-.bar b{position:absolute;left:0;top:0;bottom:0;background:var(--bar)}
-.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:8px}
-.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:var(--bar)}
+.muted{color:var(--muted)}
+.mono{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+.bar{position:relative;height:14px;background:var(--surface2);border-radius:7px;overflow:hidden;min-width:70px}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:var(--bar2);border-radius:7px}
+.bar b{position:absolute;left:0;top:0;bottom:0;background:var(--bar);border-radius:7px}
+.legend{display:flex;gap:16px;font-size:13px;color:var(--muted);margin-top:10px}
+.legend span::before{content:"";display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px;background:var(--bar)}
 .legend span.p90::before{background:var(--bar2)}
-details summary{cursor:pointer}
-ul.ac{margin:6px 0 0;padding-left:18px}
-.empty{color:var(--muted);padding:10px 0}
-#auth{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+.empty{color:var(--muted);padding:12px 0}
+.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.chips button{border-radius:999px;padding:5px 12px;font-size:14px}
+.chips button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.chips button .c{opacity:.75;margin-left:4px;font-variant-numeric:tabular-nums}
+.search{flex:1 1 200px;max-width:300px;padding:7px 12px;border:1px solid var(--border);border-radius:9px;background:var(--bg)}
+.tasks{display:grid;gap:0}
+.trow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 14px;align-items:start;padding:12px 6px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:8px}
+.trow:last-child{border-bottom:0}
+.trow:hover{background:var(--surface2)}
+.trow .t{font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+.trow .meta{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:13.5px;margin-top:3px}
+.trow .why{grid-column:1/-1;font-size:14px;color:var(--err);background:var(--err-bg);padding:6px 10px;border-radius:8px;overflow-wrap:anywhere}
+.trow .side{display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-size:13.5px;color:var(--muted);white-space:nowrap}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;align-items:center}
+.kv dt{color:var(--muted);font-size:14px}.kv dd{margin:0;text-align:right;font-weight:600}
+.sect{margin-top:16px;font-size:14px;font-weight:650;color:var(--ink2)}
+.cmd{display:flex;align-items:center;gap:8px;margin-top:8px;background:var(--surface2);border-radius:9px;padding:6px 6px 6px 12px}
+.cmd code{flex:1;font-family:var(--mono);font-size:13.5px;overflow-wrap:anywhere}
+.cmd button{padding:4px 10px;font-size:13px}
+#drawer{position:fixed;inset:0;z-index:30;display:none}
+#drawer.open{display:block}
+#drawer .scrim{position:absolute;inset:0;background:rgba(10,9,8,.5)}
+#drawer .panel{position:absolute;top:0;right:0;bottom:0;width:min(560px,100%);background:var(--bg);border-left:1px solid var(--border);box-shadow:var(--shadow);display:flex;flex-direction:column}
+#drawer .ph{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border);background:var(--surface)}
+#drawer .ph h2{font-size:18px;overflow-wrap:anywhere}
+#drawer .pb{overflow-y:auto;padding:16px 20px 40px;display:grid;gap:14px;align-content:start}
+.need{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+.need .t{font-weight:650;overflow-wrap:anywhere}
+.need .r{margin-top:6px;font-size:14px;color:var(--ink2);overflow-wrap:anywhere}
+.need .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+ul.ac{margin:6px 0 0;padding-left:20px}
+ul.ac li{margin:3px 0;overflow-wrap:anywhere}
+.tl{list-style:none;margin:0;padding:0}
+.tl li{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:14px}
+.tl li:last-child{border-bottom:0}
+.tl time{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+#auth{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:40;padding:16px}
 #auth .card{max-width:440px;width:100%}
-#auth input{width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);margin:8px 0}
+#auth input{width:100%;padding:9px;border:1px solid var(--border);border-radius:9px;background:var(--bg);margin:10px 0}
 #err{display:none}
+#toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:9px;font-size:14px;display:none;z-index:50}
+@media (max-width:640px){
+  header,main{padding-left:16px;padding-right:16px}
+  .hide-sm{display:none}
+  .kpi .v{font-size:24px}
+  .search{max-width:none}
+}
 </style>
 </head>
 <body>
 <header>
-  <div class="brand">AAF Studio<small id="scope"></small></div>
+  <div class="brand"><h1>AAF Studio</h1><span class="scope" id="scope"></span><span class="pill" id="factory">…</span></div>
   <div class="controls">
-    <div class="seg" id="period">
+    <button id="needBtn" class="needbtn" title="Tasks that are blocked or waiting for your review">Needs you <span class="badge" id="needCount">0</span></button>
+    <div class="seg" id="period" aria-label="Period">
       <button data-h="24">24h</button><button data-h="168" class="on">7 days</button><button data-h="720">30 days</button><button data-h="">All</button>
     </div>
-    <button id="refresh" title="Refresh now">Refresh</button>
-    <button id="theme" title="Toggle theme">Theme</button>
+    <button id="refresh" title="Refresh now">↻<span class="hide-sm"> Refresh</span></button>
+    <button id="theme" title="Toggle light / dark">◐<span class="hide-sm"> Theme</span></button>
     <a href="/" title="Board, approvals and live logs">Cockpit →</a>
   </div>
 </header>
 <main>
   <div class="card err" id="err"></div>
+  <div class="banner" id="banner"><span id="bannerText"></span><button id="bannerBtn">Show list</button></div>
   <section class="grid" id="kpis"></section>
+  <section class="card">
+    <div class="head">
+      <div><h2>Tasks</h2><div class="sub">Click a task to see its criteria, runs and what to do next.</div></div>
+      <input class="search" id="search" type="search" placeholder="Search title or id…" aria-label="Search tasks">
+    </div>
+    <div class="chips" id="filters"></div>
+    <div class="tasks" id="tasks" style="margin-top:8px"></div>
+  </section>
   <section class="two">
-    <div class="card"><h2>Time per stage</h2><div id="stages"></div>
+    <div class="card"><h2>Time per stage</h2><div class="sub">How long tasks stay in each stage (p50 = typical, p90 = slow)</div><div id="stages"></div>
       <div class="legend"><span>p50</span><span class="p90">p90</span></div></div>
-    <div class="card"><h2>Executors and cost</h2><div class="tablewrap" id="executors"></div></div>
+    <div class="card"><h2>Agents and cost</h2><div class="sub">Runs, tokens and estimated cost per agent CLI</div><div id="executors"></div></div>
   </section>
   <section class="two">
     <div class="card"><h2>Why tasks are blocked</h2><div id="blocked"></div></div>
     <div class="card"><h2>Live factory</h2><div id="live"></div></div>
   </section>
-  <section class="card"><h2>Tasks and acceptance criteria</h2><div class="tablewrap" id="tasks"></div></section>
-  <section class="card"><h2>Machine and repo health <button id="runDoctor" style="float:right">Run checks</button></h2><div id="doctor" class="empty">Press “Run checks” to run aaf doctor here.</div></section>
+  <section class="card">
+    <div class="head"><div><h2>Machine and repo health</h2><div class="sub">Runs <span class="mono">aaf doctor</span> on this machine</div></div><button id="runDoctor">Run checks</button></div>
+    <div id="doctor" class="empty">Press “Run checks” to run aaf doctor here.</div>
+  </section>
   <p class="muted" id="foot"></p>
 </main>
+<div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+  <div class="scrim" id="scrim"></div>
+  <div class="panel">
+    <div class="ph"><div><h2 id="drawerTitle"></h2><div class="muted" id="drawerSub"></div></div><button id="drawerClose" aria-label="Close">✕</button></div>
+    <div class="pb" id="drawerBody"></div>
+  </div>
+</div>
 <div id="auth"><div class="card">
   <h2>Session token</h2>
   <p class="muted">Open the Studio link that <span class="mono">aaf ui</span> prints, or paste its token.</p>
   <input id="tok" type="password" placeholder="Bearer token…">
   <button id="tokOk">Unlock</button>
 </div></div>
+<div id="toast" role="status"></div>
 <script>
 (() => {
   const TOKEN_KEY = "aaf_ui_token", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period";
   const STATE_CLASS = { done:"ok", running:"info", gating:"info", review:"warn", blocked:"err", ready:"", backlog:"", cancelled:"" };
+  const STATE_LABEL = { done:"Done", running:"Running", gating:"Checking", review:"Review", blocked:"Blocked", ready:"Ready", backlog:"Backlog", cancelled:"Cancelled" };
+  const REASON_LABEL = {
+    gate_failed:"Gate failed", needs_human:"Needs a human", dependency:"Waiting on another task", merge_conflict:"Merge conflict",
+    flaky_test:"Flaky test", stuck:"Agent stuck", budget_exceeded:"Budget used up", infra:"Infrastructure problem", quota:"Account quota used up",
+  };
+  const FILTERS = [
+    ["need", "Needs you", (t) => t.state === "blocked" || t.state === "review"],
+    ["active", "In progress", (t) => t.state === "running" || t.state === "gating" || t.state === "ready"],
+    ["done", "Done", (t) => t.state === "done"],
+    ["all", "All", () => true],
+  ];
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-  let token = "", hours = "168", timer = null;
+  let token = "", hours = "168", timer = null, tasks = [], filter = "need", query = "", lastStatus = null;
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
@@ -115,12 +209,26 @@ ul.ac{margin:6px 0 0;padding-left:18px}
     s = Number(s) || 0;
     if (s < 60) return s + "s";
     if (s < 3600) return Math.floor(s / 60) + "m";
-    if (s < 86400) return Math.floor(s / 3600) + "h" + String(Math.floor((s % 3600) / 60)).padStart(2, "0");
-    return Math.floor(s / 86400) + "d" + String(Math.floor((s % 86400) / 3600)).padStart(2, "0") + "h";
+    if (s < 86400) return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+    return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
   }
-  const pct = (v) => v == null ? "n/a" : Number(v).toFixed(1) + "%";
+  function ago(ts) {
+    if (!ts) return "";
+    const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+    return s < 45 ? "just now" : dur(s) + " ago";
+  }
+  const pct = (v) => v == null ? "n/a" : Number(v).toFixed(0) + "%";
   const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
   const num = (v) => (Number(v) || 0).toLocaleString();
+  function compact(v) {
+    v = Number(v) || 0;
+    if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + "M";
+    if (v >= 1e4) return Math.round(v / 1e3) + "k";
+    return v.toLocaleString();
+  }
+  const reasonLabel = (k) => REASON_LABEL[k] || String(k || "").replace(/_/g, " ");
+  const stateLabel = (s) => STATE_LABEL[s] || s;
+  const pill = (s) => `<span class="pill ${STATE_CLASS[s] || ""}">${esc(stateLabel(s))}</span>`;
 
   function hashToken() {
     const m = (location.hash || "").match(/(?:^#|&)token=([^&]+)/);
@@ -140,81 +248,200 @@ ul.ac{margin:6px 0 0;padding-left:18px}
     return data;
   }
 
-  function kpi(label, value, sub, cls) {
-    return `<div class="card kpi"><div class="l">${esc(label)}</div><div class="v ${cls || ""}">${esc(value)}</div><div class="s">${esc(sub || "")}</div></div>`;
+  function toast(msg) {
+    const t = $("toast"); t.textContent = msg; t.style.display = "block";
+    clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.display = "none"; }, 1600);
+  }
+  async function copy(text) {
+    try { await navigator.clipboard.writeText(text); toast("Copied"); }
+    catch (_) {
+      const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); toast("Copied"); } catch (_) { toast("Copy failed"); }
+      ta.remove();
+    }
+  }
+  const cmd = (c) => `<div class="cmd"><code>${esc(c)}</code><button data-copy="${esc(c)}">Copy</button></div>`;
+
+  // ---------- Needs you ----------
+  const needs = () => tasks.filter(FILTERS[0][2]).sort((a, b) =>
+    (a.state === "blocked" ? 0 : 1) - (b.state === "blocked" ? 0 : 1) || String(a.priority).localeCompare(String(b.priority)) || (b.updated_at || 0) - (a.updated_at || 0));
+
+  function nextSteps(t) {
+    if (t.state === "review") return { text: "The gate passed. Review the pull request, then merge it.", cmds: [`aaf board show ${t.id}`] };
+    if (t.state !== "blocked") return { text: "", cmds: [] };
+    const k = t.blocked_reason, d = String(t.blocked_detail || "");
+    if (k === "needs_human" && /lock|approv/i.test(d))
+      return { text: "A protected file changed. Check the change, then sign the approval in a terminal: the task is checked again by itself.", cmds: [`aaf board show ${t.id}`, `aaf approve --task ${t.id} --reviewer <your-name>`] };
+    if (k === "dependency") return { text: "It starts by itself once the task it waits on is done.", cmds: [`aaf board show ${t.id}`] };
+    if (k === "quota") return { text: "It retries when the account quota resets.", cmds: [`aaf accounts`] };
+    return { text: "Read why it stopped, fix the cause, then put it back in the queue.", cmds: [`aaf board show ${t.id}`, `aaf board unblock ${t.id}`] };
   }
 
-  function renderKpis(r, st) {
+  function renderNeedBadge() {
+    const list = needs(), n = list.length, blocked = list.filter((t) => t.state === "blocked").length;
+    $("needCount").textContent = n;
+    $("needBtn").classList.toggle("hot", n > 0);
+    $("banner").style.display = n ? "flex" : "none";
+    if (n) {
+      const parts = [];
+      if (blocked) parts.push(`${blocked} blocked`);
+      if (n - blocked) parts.push(`${n - blocked} waiting for review`);
+      $("bannerText").textContent = `${n} task${n > 1 ? "s" : ""} need${n > 1 ? "" : "s"} you: ${parts.join(", ")}`;
+    }
+  }
+
+  function openNeeds() {
+    const list = needs();
+    openDrawer("Needs you", list.length ? `${list.length} task${list.length > 1 ? "s" : ""} waiting on you` : "Nothing is waiting on you",
+      list.length ? list.map((t) => {
+        const step = nextSteps(t);
+        const reason = t.state === "blocked" ? `<b>${esc(reasonLabel(t.blocked_reason))}</b>${t.blocked_detail ? ": " + esc(t.blocked_detail) : ""}` : "";
+        return `<div class="need"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div class="t">${esc(t.title)}</div>${pill(t.state)}</div>` +
+          `<div class="meta muted" style="font-size:13.5px;margin-top:2px"><span class="mono">${esc(t.id)}</span> · ${esc(t.priority || "")} · ${esc(ago(t.updated_at))}</div>` +
+          (reason ? `<div class="r">${reason}</div>` : "") +
+          (step.text ? `<div class="r muted">${esc(step.text)}</div>` : "") + step.cmds.map(cmd).join("") +
+          `<div class="acts"><button data-task="${esc(t.id)}">Details</button><a href="/" style="align-self:center">Open in Cockpit →</a></div></div>`;
+      }).join("") : `<div class="empty">🎉 All clear. Nothing is blocked and nothing waits for review.</div>`);
+  }
+
+  // ---------- Drawer ----------
+  function openDrawer(title, sub, html) {
+    $("drawerTitle").textContent = title; $("drawerSub").textContent = sub || "";
+    $("drawerBody").innerHTML = html; $("drawer").classList.add("open");
+    document.body.style.overflow = "hidden"; $("drawerClose").focus();
+  }
+  function closeDrawer() { $("drawer").classList.remove("open"); document.body.style.overflow = ""; }
+
+  async function openTask(id) {
+    const t = tasks.find((x) => x.id === id);
+    if (!t) return;
+    const step = nextSteps(t);
+    const ac = t.acceptance || [];
+    let html = `<div>${pill(t.state)} <span class="pill">${esc(t.priority || "")}</span> <span class="muted" style="font-size:14px">updated ${esc(ago(t.updated_at))}</span></div>`;
+    if (t.state === "blocked") html += `<div class="need" style="border-color:var(--err)"><div class="t" style="color:var(--err)">${esc(reasonLabel(t.blocked_reason))}</div>${t.blocked_detail ? `<div class="r">${esc(t.blocked_detail)}</div>` : ""}</div>`;
+    if (step.text || step.cmds.length) html += `<div><div class="sect" style="margin-top:0">What to do next</div>${step.text ? `<div class="muted" style="font-size:14px">${esc(step.text)}</div>` : ""}${step.cmds.map(cmd).join("")}</div>`;
+    if (t.spec_description) html += `<div><div class="sect" style="margin-top:0">Spec</div><div style="font-size:14.5px;overflow-wrap:anywhere;white-space:pre-wrap">${esc(t.spec_description)}</div></div>`;
+    if (ac.length) html += `<div><div class="sect" style="margin-top:0">Acceptance criteria (${ac.length})</div><ul class="ac">${ac.map((c) => `<li>${t.state === "done" ? "✓ " : ""}${esc(c)}</li>`).join("")}</ul></div>`;
+    html += `<div id="taskMore" class="muted">Loading runs…</div>`;
+    openDrawer(t.title, t.id, html);
+    try {
+      const d = await api("/api/task/" + encodeURIComponent(id));
+      const runs = (d.runs || []).slice(-8).reverse(), ev = (d.events || []).slice(0, 12);
+      let more = "";
+      if (runs.length) more += `<div class="sect" style="margin-top:0">Agent runs</div><table>` + runs.map((r) =>
+        `<tr><td>${esc(r.executor || "")}</td><td>${runPill(r.status)}</td><td class="n muted">${r.started_at && r.ended_at ? dur(r.ended_at - r.started_at) : (r.started_at ? "running" : "")}</td><td class="n muted">${esc(ago(r.started_at))}</td></tr>`).join("") + `</table>`;
+      if (ev.length) more += `<div class="sect">History</div><ul class="tl">` + ev.map((e) =>
+        `<li><time>${esc(ago(e.created_at))}</time><span style="overflow-wrap:anywhere"><b>${esc(String(e.kind || "").replace(/_/g, " "))}</b>${eventDetail(e.payload_json)}</span></li>`).join("") + `</ul>`;
+      const box = $("taskMore"); if (box) { box.className = ""; box.innerHTML = more || `<div class="empty">No run yet.</div>`; }
+    } catch (e) { const box = $("taskMore"); if (box) box.textContent = "Could not load runs: " + e.message; }
+  }
+  function eventDetail(raw) {
+    if (!raw) return "";
+    let text = String(raw);
+    try {
+      const v = JSON.parse(raw);
+      if (v && typeof v === "object") {
+        const parts = Object.entries(v).filter(([, x]) => x !== null && x !== "" && typeof x !== "object").slice(0, 4).map(([k, x]) => `${k}: ${x}`);
+        text = parts.join(" · ");
+      } else if (v != null) text = String(v);
+    } catch (_) {}
+    if (text.length > 220) text = text.slice(0, 220) + "…";
+    return text ? ` <span class="muted">· ${esc(text)}</span>` : "";
+  }
+  function runPill(s) {
+    const cls = s === "succeeded" ? "ok" : s === "running" ? "info" : (s === "failed" || s === "crashed") ? "err" : "";
+    return `<span class="pill ${cls}">${esc(s || "")}</span>`;
+  }
+
+  // ---------- Sections ----------
+  function kpi(label, value, sub, opts) {
+    opts = opts || {};
+    const tag = opts.action ? "button" : "div";
+    const attrs = opts.action ? ` data-action="${esc(opts.action)}"` : "";
+    return `<${tag} class="${opts.action ? "" : "card "}kpi ${opts.hot ? "hot" : ""}"${attrs}><span class="l">${esc(label)}</span><span class="v">${esc(value)}</span><span class="s">${esc(sub || "")}</span></${tag}>`;
+  }
+
+  function renderKpis(r) {
     const c = r.counts || {}, a = r.autonomy || {}, lt = r.lead_time || {};
-    const active = (c.ready || 0) + (c.running || 0) + (c.gating || 0) + (c.review || 0);
+    const n = needs().length;
     $("kpis").innerHTML = [
-      kpi("Tasks done", num(r.tasks_done), `${num(c.total)} touched in period`),
+      kpi("Needs you", num(n), n ? "show the list" : "nothing waiting", { action: "needs", hot: n > 0 }),
+      kpi("Tasks done", num(r.tasks_done), `${num(c.total)} tasks touched`),
       kpi("Autonomy", pct(a.autonomy_rate_pct), `${num(a.done_without_human)} of ${num(a.done_tasks)} done without you`),
-      kpi("Gate first pass", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `avg gate ${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : ""),
-      kpi("Estimated cost", usd(r.estimated_cost_usd), `${num(r.total_tokens_in)} in / ${num(r.total_tokens_out)} out tokens`),
-      kpi("Lead time p50", lt.samples ? dur(lt.p50_secs) : "n/a", lt.samples ? `p90 ${dur(lt.p90_secs)} · max ${dur(lt.max_secs)}` : "created → done"),
-      kpi("In progress", num(active), `${num(c.blocked)} blocked`),
-      kpi("Factory", st && st.frozen ? "Frozen" : "Running", st && st.frozen ? "run aaf board unfreeze or use Cockpit" : "accepting work"),
+      kpi("Gate first pass", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `gate takes ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : "share passing first try"),
+      kpi("Lead time", lt.samples ? dur(lt.p50_secs) : "n/a", lt.samples ? `typical · slow ${dur(lt.p90_secs)}` : "created → done"),
+      kpi("Cost", usd(r.estimated_cost_usd), `${compact(r.total_tokens_in)} in · ${compact(r.total_tokens_out)} out tokens`),
     ].join("");
+  }
+
+  function renderFilters() {
+    $("filters").innerHTML = FILTERS.map(([key, label, fn]) =>
+      `<button data-filter="${key}" class="${filter === key ? "on" : ""}">${esc(label)}<span class="c">${tasks.filter(fn).length}</span></button>`).join("");
+  }
+
+  function renderTasks() {
+    renderFilters();
+    const fn = (FILTERS.find((f) => f[0] === filter) || FILTERS[3])[2];
+    const q = query.trim().toLowerCase();
+    const rows = tasks.filter(fn).filter((t) => !q || String(t.title).toLowerCase().includes(q) || String(t.id).toLowerCase().includes(q))
+      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).slice(0, 80);
+    if (!tasks.length) { $("tasks").innerHTML = `<div class="empty">No task yet. Add one with <span class="mono">aaf board add</span> or from the Cockpit.</div>`; return; }
+    if (!rows.length) { $("tasks").innerHTML = `<div class="empty">${filter === "need" && !q ? "🎉 Nothing needs you right now." : "No task matches."}</div>`; return; }
+    $("tasks").innerHTML = rows.map((t) => {
+      const ac = t.acceptance || [];
+      const why = t.state === "blocked" ? `<div class="why"><b>${esc(reasonLabel(t.blocked_reason))}</b>${t.blocked_detail ? ": " + esc(t.blocked_detail) : ""}</div>` : "";
+      return `<div class="trow" data-task="${esc(t.id)}" tabindex="0" role="button">` +
+        `<div><div class="t">${esc(t.title)}</div><div class="meta"><span class="mono">${esc(t.id)}</span>${t.priority ? `<span>${esc(t.priority)}</span>` : ""}${ac.length ? `<span>${t.state === "done" ? "✓ " : ""}${ac.length} criteria</span>` : ""}</div></div>` +
+        `<div class="side">${pill(t.state)}<span>${esc(ago(t.updated_at))}</span></div>${why}</div>`;
+    }).join("");
   }
 
   function renderStages(stages) {
     if (!stages || !stages.length) { $("stages").innerHTML = `<div class="empty">No stage data in this period yet.</div>`; return; }
     const max = Math.max(1, ...stages.map((s) => s.durations.p90_secs || 0));
-    $("stages").innerHTML = `<table><tr><th>Stage</th><th>Distribution</th><th class="n">p50</th><th class="n">p90</th><th class="n">Stays</th><th class="n">Now</th></tr>` +
+    $("stages").innerHTML = `<table><tr><th>Stage</th><th style="width:40%"></th><th class="n">p50</th><th class="n">p90</th><th class="n">Now</th></tr>` +
       stages.map((s) => {
         const d = s.durations;
         const w50 = (100 * (d.p50_secs || 0) / max).toFixed(1), w90 = (100 * (d.p90_secs || 0) / max).toFixed(1);
-        return `<tr><td>${esc(s.stage)}</td><td><div class="bar" title="p50 ${dur(d.p50_secs)}, p90 ${dur(d.p90_secs)}, max ${dur(d.max_secs)}"><i style="width:${w90}%"></i><b style="width:${w50}%"></b></div></td>` +
-          `<td class="n">${d.samples ? dur(d.p50_secs) : "—"}</td><td class="n">${d.samples ? dur(d.p90_secs) : "—"}</td><td class="n">${num(d.samples)}</td><td class="n">${num(s.open_now)}</td></tr>`;
+        return `<tr><td>${esc(stateLabel(s.stage))}</td><td><div class="bar" title="p50 ${dur(d.p50_secs)}, p90 ${dur(d.p90_secs)}, max ${dur(d.max_secs)}, ${num(d.samples)} stays"><i style="width:${w90}%"></i><b style="width:${w50}%"></b></div></td>` +
+          `<td class="n">${d.samples ? dur(d.p50_secs) : "—"}</td><td class="n">${d.samples ? dur(d.p90_secs) : "—"}</td><td class="n">${num(s.open_now)}</td></tr>`;
       }).join("") + `</table>`;
   }
 
   function renderExecutors(list, total) {
     if (!list || !list.length) { $("executors").innerHTML = `<div class="empty">No agent run in this period yet.</div>`; return; }
-    $("executors").innerHTML = `<table><tr><th>Executor</th><th class="n">Runs</th><th class="n">OK</th><th class="n">Failed</th><th class="n">Time</th><th class="n">Tokens in/out</th><th class="n">Cost</th></tr>` +
-      list.map((e) => `<tr><td>${esc(e.executor)}</td><td class="n">${num(e.runs)}</td><td class="n">${num(e.succeeded)}</td><td class="n">${num(e.failed)}${e.running ? ` <span class="pill info">${num(e.running)} live</span>` : ""}</td>` +
-        `<td class="n">${dur(e.wall_secs)}</td><td class="n">${num(e.tokens_in)} / ${num(e.tokens_out)}</td><td class="n">${usd(e.estimated_cost_usd)}</td></tr>`).join("") +
-      `<tr><th>Total</th><td></td><td></td><td></td><td></td><td></td><th class="n">${usd(total)}</th></tr></table>`;
+    $("executors").innerHTML = `<table><tr><th>Agent</th><th class="n">Runs</th><th class="n">Failed</th><th class="n">Time</th><th class="n">Tokens</th><th class="n">Cost</th></tr>` +
+      list.map((e) => `<tr><td><b>${esc(e.executor)}</b>${e.running ? ` <span class="pill info">${num(e.running)} live</span>` : ""}</td><td class="n">${num(e.runs)}</td>` +
+        `<td class="n">${e.failed ? `<span class="pill err">${num(e.failed)}</span>` : "0"}</td><td class="n">${dur(e.wall_secs)}</td>` +
+        `<td class="n" title="${num(e.tokens_in)} in / ${num(e.tokens_out)} out">${compact(e.tokens_in)} / ${compact(e.tokens_out)}</td><td class="n">${usd(e.estimated_cost_usd)}</td></tr>`).join("") +
+      `<tr><td><b>Total</b></td><td></td><td></td><td></td><td></td><td class="n"><b>${usd(total)}</b></td></tr></table>`;
   }
 
   function renderBlocked(top) {
-    if (!top || !top.length) { $("blocked").innerHTML = `<div class="empty">Nothing is blocked.</div>`; return; }
+    if (!top || !top.length) { $("blocked").innerHTML = `<div class="empty">Nothing is blocked. 🎉</div>`; return; }
     const max = Math.max(1, ...top.map((t) => t[1]));
     $("blocked").innerHTML = `<table>` + top.map(([kind, n]) =>
-      `<tr><td>${esc(kind)}</td><td style="width:55%"><div class="bar"><b style="width:${(100 * n / max).toFixed(1)}%"></b></div></td><td class="n">${num(n)}</td></tr>`).join("") + `</table>`;
+      `<tr><td>${esc(reasonLabel(kind))}</td><td style="width:45%"><div class="bar"><b style="width:${(100 * n / max).toFixed(1)}%"></b></div></td><td class="n">${num(n)}</td></tr>`).join("") +
+      `</table><div style="margin-top:10px"><button data-action="needs">See blocked tasks →</button></div>`;
   }
 
   function renderLive(st) {
     if (!st) { $("live").innerHTML = `<div class="empty">No status yet.</div>`; return; }
+    const titleOf = (id) => (tasks.find((t) => t.id === id) || {}).title || id || "";
     const runs = (st.recent_runs || []).slice(0, 6);
     const accounts = st.accounts || [];
     const t = st.throttle || {};
-    let html = `<table><tr><th>Heavy slots in use</th><td class="n">${num(t.throttle_slots)}</td></tr>` +
-      `<tr><th>Drain lock</th><td class="n">${t.drain_lock_present ? `<span class="pill warn">held</span>` : "free"}</td></tr></table>`;
+    let html = `<dl class="kv"><dt>Heavy build slots in use</dt><dd>${num(t.throttle_slots)}</dd>` +
+      `<dt>Drain lock</dt><dd>${t.drain_lock_present ? `<span class="pill warn">held</span>` : "free"}</dd></dl>`;
     if (accounts.length) {
-      html += `<h2 style="margin-top:14px">Accounts</h2><table>` + accounts.map((a) =>
-        `<tr><td>${esc(a.name)}</td><td>${esc(a.provider)}</td><td><span class="pill ${a.status === "available" || a.status === "ready" ? "ok" : "warn"}">${esc(a.status)}</span></td></tr>`).join("") + `</table>`;
+      html += `<div class="sect">Accounts</div><table>` + accounts.map((a) =>
+        `<tr><td class="wrap">${esc(a.name)}</td><td class="muted">${esc(a.provider)}</td><td class="n"><span class="pill ${a.status === "available" || a.status === "ready" ? "ok" : "warn"}">${esc(a.status)}</span></td></tr>`).join("") + `</table>`;
     }
     if (runs.length) {
-      html += `<h2 style="margin-top:14px">Recent runs</h2><table>` + runs.map((r) =>
-        `<tr><td class="mono">${esc(r.task_id || r.id || "")}</td><td>${esc(r.executor || "")}</td><td><span class="pill">${esc(r.status || "")}</span></td></tr>`).join("") + `</table>`;
+      html += `<div class="sect">Recent runs</div><table>` + runs.map((r) =>
+        `<tr data-task="${esc(r.task_id || "")}" style="cursor:pointer"><td class="wrap">${esc(titleOf(r.task_id))}</td><td class="muted">${esc(r.executor || "")}</td><td class="n">${runPill(r.status)}</td></tr>`).join("") + `</table>`;
     }
     $("live").innerHTML = html;
-  }
-
-  function renderTasks(tasks) {
-    if (!tasks || !tasks.length) { $("tasks").innerHTML = `<div class="empty">No task yet. Add one with aaf board add or from the Cockpit.</div>`; return; }
-    const rows = tasks.slice().sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).slice(0, 60);
-    $("tasks").innerHTML = `<table><tr><th>Task</th><th>State</th><th class="n">Criteria</th><th class="n">Updated</th></tr>` +
-      rows.map((t) => {
-        const ac = t.acceptance || [];
-        const list = ac.length ? `<details><summary>${esc(t.title)}</summary><ul class="ac">${ac.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></details>` : esc(t.title);
-        const when = t.updated_at ? new Date(t.updated_at * 1000).toLocaleString() : "";
-        const why = t.state === "blocked" && t.blocked_reason ? ` <span class="muted">(${esc(t.blocked_reason)})</span>` : "";
-        return `<tr><td>${list}<div class="mono muted">${esc(t.id)}</div></td><td><span class="pill ${STATE_CLASS[t.state] || ""}">${esc(t.state)}</span>${why}</td>` +
-          `<td class="n">${ac.length ? (t.state === "done" ? `✓ ${ac.length}/${ac.length}` : `${ac.length}`) : "—"}</td><td class="n muted">${esc(when)}</td></tr>`;
-      }).join("") + `</table>`;
   }
 
   async function runDoctor() {
@@ -224,9 +451,9 @@ ul.ac{margin:6px 0 0;padding-left:18px}
       const checks = (d.checks || []).filter((c) => c.applicable !== false);
       const bad = checks.filter((c) => !c.ok);
       $("doctor").className = "";
-      $("doctor").innerHTML = `<p>${bad.length ? `<span class="pill err">${bad.length} problem(s)</span>` : `<span class="pill ok">All checks pass</span>`}</p><table>` +
+      $("doctor").innerHTML = `<p style="margin-top:0">${bad.length ? `<span class="pill err">${bad.length} problem${bad.length > 1 ? "s" : ""}</span>` : `<span class="pill ok">All checks pass</span>`}</p><table>` +
         checks.sort((a, b) => Number(a.ok) - Number(b.ok)).map((c) =>
-          `<tr><td>${c.ok ? `<span class="pill ok">ok</span>` : `<span class="pill ${c.required ? "err" : "warn"}">${c.required ? "fail" : "advice"}</span>`}</td><td>${esc(c.name)}</td><td class="mono">${esc(c.detail)}</td></tr>`).join("") + `</table>`;
+          `<tr><td style="width:1%">${c.ok ? `<span class="pill ok">ok</span>` : `<span class="pill ${c.required ? "err" : "warn"}">${c.required ? "fail" : "advice"}</span>`}</td><td style="white-space:nowrap"><b>${esc(c.name)}</b></td><td class="wrap muted" style="font-size:14px">${esc(c.detail)}</td></tr>`).join("") + `</table>`;
     } catch (e) { $("doctor").textContent = "Checks failed: " + e.message; }
   }
 
@@ -237,21 +464,27 @@ ul.ac{margin:6px 0 0;padding-left:18px}
     const errors = [rep, st, meta, board].filter((p) => p.status === "rejected").map((p) => p.reason.message);
     $("err").style.display = errors.length ? "block" : "none";
     $("err").textContent = errors.length ? "Some data could not load: " + [...new Set(errors)].join("; ") : "";
-    const status = st.status === "fulfilled" ? st.value : null;
+    lastStatus = st.status === "fulfilled" ? st.value : null;
+    if (board.status === "fulfilled") tasks = board.value.tasks || [];
     if (meta.status === "fulfilled") $("scope").textContent = `${meta.value.repo_name || meta.value.scope || ""} · v${meta.value.version || "?"}`;
+    const frozen = (lastStatus && lastStatus.frozen) || (board.status === "fulfilled" && board.value.frozen);
+    $("factory").className = "pill " + (frozen ? "err" : "ok");
+    $("factory").textContent = frozen ? "Frozen" : "Running";
+    $("factory").title = frozen ? "Run aaf board unfreeze, or unfreeze from the Cockpit" : "The factory accepts work";
+    renderNeedBadge();
     if (rep.status === "fulfilled") {
       const r = rep.value.report || {};
-      renderKpis(r, status);
+      renderKpis(r);
       renderStages(r.stages);
       renderExecutors(r.executors, r.estimated_cost_usd);
       renderBlocked(r.top_blocked);
     }
-    renderLive(status);
-    if (board.status === "fulfilled") renderTasks(board.value.tasks);
+    renderTasks();
+    renderLive(lastStatus);
     $("foot").textContent = "Updated " + new Date().toLocaleTimeString() + " · refreshes every 15 s";
   }
 
-  function schedule() { clearInterval(timer); timer = setInterval(() => { if (!document.hidden) refresh(); }, 15000); }
+  function schedule() { clearInterval(timer); timer = setInterval(() => { if (!document.hidden && !$("drawer").classList.contains("open")) refresh(); }, 15000); }
 
   function init() {
     const theme = load(localStorage, THEME_KEY);
@@ -273,6 +506,23 @@ ul.ac{margin:6px 0 0;padding-left:18px}
     });
     $("refresh").onclick = refresh;
     $("runDoctor").onclick = runDoctor;
+    $("needBtn").onclick = openNeeds;
+    $("bannerBtn").onclick = openNeeds;
+    $("drawerClose").onclick = closeDrawer;
+    $("scrim").onclick = closeDrawer;
+    $("search").oninput = (e) => { query = e.target.value; renderTasks(); };
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeDrawer();
+      if ((e.key === "Enter" || e.key === " ") && e.target.classList && e.target.classList.contains("trow")) { e.preventDefault(); openTask(e.target.dataset.task); }
+    });
+    document.addEventListener("click", (e) => {
+      const el = e.target.closest("[data-copy],[data-filter],[data-action],[data-task]");
+      if (!el) return;
+      if (el.dataset.copy != null) return copy(el.dataset.copy);
+      if (el.dataset.filter) { filter = el.dataset.filter; return renderTasks(); }
+      if (el.dataset.action === "needs") return openNeeds();
+      if (el.dataset.task) { if ($("drawer").classList.contains("open")) closeDrawer(); return openTask(el.dataset.task); }
+    });
     $("tokOk").onclick = () => {
       const t = $("tok").value.trim(); if (!t) return;
       token = t; store(sessionStorage, TOKEN_KEY, t); $("auth").style.display = "none"; refresh();

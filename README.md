@@ -99,12 +99,23 @@ Keep both `aaf` and `aaf-hook` on your `PATH`. Details: [Quickstart](docs/QUICKS
 aaf ui --open        # → http://127.0.0.1:4317/studio
 ```
 
-![aaf Studio](docs/images/studio.png)
+![aaf Studio: KPIs and the task list](docs/images/studio.png)
 
-- **Needs you**: one click lists every blocked task and every task waiting for review, with the reason
+- **Needs you**: one click lists every blocked task and every task waiting for review, with the reason and the exact command to fix it
+- **Tasks**: filter (needs you · in progress · done · all), search, and click any task for its spec, criteria, agent runs and history
 - **KPIs**: tasks done, autonomy, gate first-pass rate, lead time, tokens and cost
-- **Time per stage** (p50 / p90) and **cost per agent**
-- **Running now** and **health checks** with one click (`aaf doctor`)
+- **Time per stage** (p50 / p90), **cost per agent**, **live factory** and **health checks** (`aaf doctor`)
+
+<details>
+<summary>More screenshots: the "Needs you" panel and dark mode</summary>
+
+![Needs you panel](docs/images/studio-needs.png)
+
+![Studio in dark mode](docs/images/studio-dark.png)
+
+</details>
+
+<sub>Screenshots use demo data.</sub>
 
 It refreshes every 15 seconds and works on your phone. The same report is in
 the terminal with `aaf report --since 24`.
