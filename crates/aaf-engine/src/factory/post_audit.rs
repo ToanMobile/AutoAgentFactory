@@ -442,6 +442,16 @@ fn execute_post_gate_audit(
             return Ok(next);
         }
     }
+    let inconclusive = matches!(verdict, AuditVerdict::Inconclusive { .. });
+    if super::infra_retry::block_inconclusive_audit(
+        deps,
+        &task,
+        inconclusive,
+        diff_truncated,
+        &event_verdict,
+    )? {
+        return Ok(Next::Blocked);
+    }
     let summary = rework_filter::fallback_verdict_summary(&verdict, &event_verdict);
     reject_post_audit(deps, task.id, job.worktree, &summary)
 }

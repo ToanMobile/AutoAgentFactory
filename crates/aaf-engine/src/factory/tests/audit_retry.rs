@@ -75,10 +75,17 @@ fn the_retry_is_once_per_fingerprint_and_never_a_pass() {
 
     let first = run_once(&world, &auditor);
 
-    // Two audit jobs of three turns each (initial + up to 2 inconclusive retries), then back to the implementer.
+    // Two audit jobs of three turns each (initial + up to 2 inconclusive retries).
     assert_eq!(*auditor.1.lock().unwrap(), 6);
-    assert_eq!(first.requeued, vec!["t1"], "{first:?}");
-    assert_eq!(world.state("t1"), TaskState::Ready);
+    // RFC-032: a verdict the auditor never gave is not the implementer's
+    // fault: no rework round (no T3/T4 burn), no freeze count. The task
+    // waits as an infra block and comes back on its own (RFC-033).
+    assert!(first.requeued.is_empty(), "{first:?}");
+    let task = world.task("t1");
+    assert_eq!(task.state, TaskState::Blocked, "{first:?}");
+    assert!(task.retry_after.is_some(), "{task:?}");
+    assert!(task.context_notes.is_empty(), "no rework note: {task:?}");
+    assert_eq!(world.notifier.0.lock().unwrap().len(), 0);
     assert!(
         !aaf_fp::approval_path(
             world.tmp.path(),
@@ -87,11 +94,6 @@ fn the_retry_is_once_per_fingerprint_and_never_a_pass() {
         )
         .exists()
     );
-
-    // Same locked changes again: no second retry for this fingerprint.
-    let second = run_once(&world, &auditor);
-    assert_eq!(*auditor.1.lock().unwrap(), 9, "{second:?}");
-    assert_ne!(world.state("t1"), TaskState::Review);
 }
 
 #[test]

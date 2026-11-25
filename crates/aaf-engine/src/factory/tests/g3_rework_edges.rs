@@ -329,15 +329,12 @@ fn fallback_rejection_note_never_leaks_unverified_findings() {
     world.runner.0.lock().unwrap().audit_text = Some(json!({ "answers": answers }).to_string());
 
     let _ = world.once();
-    let notes = world.task("t1").context_notes;
-    assert!(
-        notes.iter().any(|n| {
-            n.contains("unverified findings dropped")
-                || n.contains("lack concrete file:line evidence")
-                || n.contains("(inconclusive:")
-        }),
-        "{notes:?}"
-    );
+    let task = world.task("t1");
+    let notes = task.context_notes;
+    // RFC-032: an unbacked "yes" leaves the audit without a verdict, which
+    // parks the task as an infra block instead of sending a rework note.
+    assert_eq!(task.state, aaf_domain::task::TaskState::Blocked, "{notes:?}");
+    assert!(notes.is_empty(), "{notes:?}");
     assert!(
         !notes.iter().any(|n| n.contains("hallucinated prose")),
         "raw unverified finding leaked into context_notes: {notes:?}"

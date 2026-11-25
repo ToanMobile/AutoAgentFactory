@@ -490,6 +490,16 @@ pub(crate) fn execute_audit(
     {
         return Ok(next);
     }
+    let inconclusive = matches!(report.verdict, AuditVerdict::Inconclusive { .. });
+    if super::infra_retry::block_inconclusive_audit(
+        deps,
+        &task,
+        inconclusive,
+        report.diff_truncated,
+        &text,
+    )? {
+        return Ok(Next::Blocked);
+    }
     let summary = rework_filter::fallback_verdict_summary(&report.verdict, &text);
     let note = format!("cross-audit rejected the changes to locked files ({summary})");
     deps.store
