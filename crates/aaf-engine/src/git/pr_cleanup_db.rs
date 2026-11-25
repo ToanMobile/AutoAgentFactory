@@ -16,7 +16,10 @@ use crate::db::SCHEMA_VERSION;
 const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
 pub(super) enum DbDecision {
-    Proceed { marked_done: bool },
+    Proceed {
+        marked_done: bool,
+        found_in_db: bool,
+    },
     Stop(String),
 }
 
@@ -63,10 +66,16 @@ pub(super) fn transition_review_task_done(
         .optional()
         .map_err(|e| e.to_string())?;
     let Some((state_str, root_id, task_repo_root, fingerprint)) = row else {
-        return Ok(DbDecision::Proceed { marked_done: false });
+        return Ok(DbDecision::Proceed {
+            marked_done: false,
+            found_in_db: false,
+        });
     };
     if !same_repo(&task_repo_root, main_repo) {
-        return Ok(DbDecision::Proceed { marked_done: false });
+        return Ok(DbDecision::Proceed {
+            marked_done: false,
+            found_in_db: false,
+        });
     }
     match TaskState::parse(&state_str) {
         Some(TaskState::Review) => {
@@ -129,9 +138,15 @@ pub(super) fn transition_review_task_done(
                 .map_err(|e| e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())?;
-            Ok(DbDecision::Proceed { marked_done: true })
+            Ok(DbDecision::Proceed {
+                marked_done: true,
+                found_in_db: true,
+            })
         }
-        Some(TaskState::Done) => Ok(DbDecision::Proceed { marked_done: false }),
+        Some(TaskState::Done) => Ok(DbDecision::Proceed {
+            marked_done: false,
+            found_in_db: true,
+        }),
         Some(other) => Ok(DbDecision::Stop(format!(
             "task `{task_id}` is in state `{}`; skipped local cleanup",
             other.as_str()

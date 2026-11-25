@@ -44,10 +44,12 @@ pub(super) fn clean_expired_artifacts(
                 continue;
             };
             let ext = path.extension().and_then(|e| e.to_str());
-            if !meta.is_file()
-                || meta.file_type().is_symlink()
-                || !matches!(ext, Some("jsonl" | "html"))
-            {
+            let allowed_ext = match subdir {
+                "streams" => matches!(ext, Some("jsonl")),
+                "reports" => matches!(ext, Some("html" | "md")),
+                _ => false,
+            };
+            if !meta.is_file() || meta.file_type().is_symlink() || !allowed_ext {
                 continue;
             }
             if ext == Some("jsonl")

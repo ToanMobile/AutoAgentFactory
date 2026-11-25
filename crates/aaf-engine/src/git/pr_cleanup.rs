@@ -36,6 +36,8 @@ pub struct PrCleanupReport {
     pub remote_branch_deleted: bool,
     pub snapshots_deleted: usize,
     pub task_marked_done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -326,7 +328,15 @@ fn cleanup_merged_pr_local_into(
                 &req.expect_head,
                 clock.now(),
             ) {
-                Ok(DbDecision::Proceed { marked_done }) => report.task_marked_done = marked_done,
+                Ok(DbDecision::Proceed {
+                    marked_done,
+                    found_in_db,
+                }) => {
+                    report.task_marked_done = marked_done;
+                    if found_in_db {
+                        report.task_id = Some(task_id.to_string());
+                    }
+                }
                 Ok(DbDecision::Stop(reason)) => {
                     report.warnings.push(reason);
                     return;

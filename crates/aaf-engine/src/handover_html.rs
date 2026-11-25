@@ -103,7 +103,7 @@ pub fn escape_html(input: &str) -> String {
     out
 }
 
-fn format_scores_line(data: &HandoverData) -> (String, String, String) {
+pub(crate) fn format_scores_line(data: &HandoverData) -> (String, String, String) {
     let fmt = |v: Option<u8>, tag: &str| match v {
         Some(s) if tag.is_empty() => format!("{s}/100"),
         Some(s) => format!("{s}/100 {tag}"),
@@ -116,7 +116,7 @@ fn format_scores_line(data: &HandoverData) -> (String, String, String) {
     )
 }
 
-fn standard_name(id: &str) -> &'static str {
+pub(crate) fn standard_name(id: &str) -> &'static str {
     GOLDEN_STANDARDS
         .iter()
         .find(|(gid, _)| *gid == id)
@@ -125,159 +125,14 @@ fn standard_name(id: &str) -> &'static str {
 
 /// Renders a standalone, offline-safe HTML handover report.
 pub fn render_html(data: &HandoverData, data_dir: &Path) -> String {
-    let mut html = String::with_capacity(4096);
-    let cls = if data.status == "XONG" { "ok" } else { "warn" };
-    let _ = writeln!(
-        html,
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  \
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  {CSP_META}\n  \
-         <title>AAF Handover — {} ({})</title>\n{INLINE_STYLE}</head>\n<body>\n<main class=\"wrap\">",
-        escape_html(&data.task_id),
-        escape_html(&data.status)
-    );
-    let _ = writeln!(
-        html,
-        "  <header class=\"hero\"><span class=\"badge {cls}\">{}</span><h1>{}</h1>\
-         <p class=\"meta\">Task <code>{}</code> &middot; State <code>{}</code> &middot; Tree <code>{}</code></p>",
-        escape_html(&data.status),
-        escape_html(&data.title),
-        escape_html(&data.task_id),
-        escape_html(&data.state),
-        escape_html(data.tree_fp.as_deref().unwrap_or("n/a"))
-    );
-    if data.same_account_warning {
-        let _ = writeln!(
-            html,
-            "    <p class=\"solo-badge\">{}</p>",
-            escape_html(SOLO_DEV_BADGE)
-        );
-    }
-    let _ = writeln!(html, "  </header>");
-    if !data.missing.is_empty() {
-        let _ = writeln!(
-            html,
-            "  <section class=\"card alert\"><h2>Missing / Blocking</h2><ul>"
-        );
-        for item in &data.missing {
-            let _ = writeln!(html, "    <li>{}</li>", escape_html(item));
-        }
-        let _ = writeln!(html, "  </ul></section>");
-    }
-    let _ = writeln!(
-        html,
-        "  <section class=\"card\"><h2>Acceptance Report</h2><ol>"
-    );
-    for (label, value) in [
-        ("1. Đã làm gì / Đã fix gì", &data.what_done),
-        ("2. Chặn bug cũ", &data.prevent_old_bug),
-        ("3. Nguy cơ bug mới", &data.new_bug_risk),
-        ("4. An toàn mã nguồn", &data.code_safety),
-        ("5. Còn hở / chưa kiểm", &data.unverified),
-    ] {
-        let _ = writeln!(
-            html,
-            "    <li><strong>{}:</strong> {}</li>",
-            escape_html(label),
-            escape_html(value)
-        );
-    }
-    let _ = writeln!(html, "  </ol></section>");
-    render_scoring_html(&mut html, data);
-    if !data.reviewers.is_empty() {
-        html.push_str(&crate::handover_dual::render_dual_reviewers_html(
-            &data.reviewers,
-            data.adjudicated,
-        ));
-    }
-    render_proof_html(&mut html, data, data_dir);
-    let _ = writeln!(html, "</main>\n</body>\n</html>");
-    html
-}
-
-fn render_scoring_html(html: &mut String, data: &HandoverData) {
-    let (mech, llm, eff) = format_scores_line(data);
-    let _ = writeln!(
-        html,
-        "  <section class=\"card\"><h2>Quality &amp; 7 Golden Standards</h2>\
-         <p class=\"meta\">MechanicalScore: <strong>{}</strong> &middot; LLM Avg: <strong>{}</strong> &middot; Effective: <strong>{}</strong></p>",
-        escape_html(&mech),
-        escape_html(&llm),
-        escape_html(&eff)
-    );
-    if !data.scores.is_empty() {
-        let _ = writeln!(
-            html,
-            "    <table><thead><tr><th>ID</th><th>Standard</th><th>Score</th><th>Source</th><th>Deduction</th></tr></thead><tbody>"
-        );
-        for s in &data.scores {
-            let reason = if s.deduction_reason.trim().is_empty() {
-                "—"
-            } else {
-                &s.deduction_reason
-            };
-            let _ = writeln!(
-                html,
-                "      <tr><td><code>{}</code></td><td>{}</td><td>{}/100</td><td>[agent báo]</td><td>{}</td></tr>",
-                escape_html(&s.id),
-                escape_html(standard_name(&s.id)),
-                s.score,
-                escape_html(reason)
-            );
-        }
-        let _ = writeln!(html, "    </tbody></table>");
-    }
-    let _ = writeln!(html, "  </section>");
-}
-
-fn render_proof_html(html: &mut String, data: &HandoverData, data_dir: &Path) {
-    let _ = writeln!(
-        html,
-        "  <section class=\"card\"><h2>Verification Proof</h2>"
-    );
-    let Some(proof) = &data.proof else {
-        let msg = if data.proof_required {
-            "Missing verified device proof (proof.required = true)."
-        } else {
-            "No device proof attached."
-        };
-        let _ = writeln!(
-            html,
-            "    <p class=\"meta\">{}</p>\n  </section>",
-            escape_html(msg)
-        );
-        return;
-    };
-    let _ = writeln!(
-        html,
-        "    <p class=\"meta\">Device: <code>{}</code> &middot; Summary: {} &middot; SHA-256: <code>{}</code> &middot; Captured: <code>{}</code></p>",
-        escape_html(&proof.device_serial),
-        escape_html(&proof.summary),
-        escape_html(&proof.image_sha256),
-        proof.captured_at
-    );
-    match load_verified_proof_png(proof, data, data_dir) {
-        Ok(b64) => {
-            let _ = writeln!(
-                html,
-                "    <figure class=\"proof\"><img src=\"data:image/png;base64,{b64}\" alt=\"Verified proof screenshot\"></figure>"
-            );
-        }
-        Err(reason) => {
-            let _ = writeln!(
-                html,
-                "    <p class=\"notice\">Proof image omitted: {}</p>",
-                escape_html(&reason)
-            );
-        }
-    }
-    let _ = writeln!(html, "  </section>");
+    crate::handover_devkit::render_devkit_html(data, data_dir)
 }
 
 /// Re-verifies HMAC + policy + live image SHA-256 via
 /// [`crate::proof::verify_proof_for_archived_root`], opens the image safely as a
 /// regular non-symlink file `<= 4 MiB`, confirms its digest again, and
 /// base64-encodes it.
-fn load_verified_proof_png(
+pub(crate) fn load_verified_proof_png(
     proof: &HandoverProof,
     data: &HandoverData,
     data_dir: &Path,
@@ -345,71 +200,7 @@ fn load_verified_proof_png(
 
 /// Renders [`HandoverData`] as concise GitHub-flavored Markdown.
 pub fn render_markdown(data: &HandoverData) -> String {
-    let mut out = String::with_capacity(1024);
-    let _ = writeln!(
-        out,
-        "# {} — {} (`{}`)\n",
-        data.status, data.title, data.task_id
-    );
-    let _ = writeln!(
-        out,
-        "- State: `{}` | Tree: `{}`",
-        data.state,
-        data.tree_fp.as_deref().unwrap_or("n/a")
-    );
-    if data.same_account_warning {
-        let _ = writeln!(out, "- Warning: **{SOLO_DEV_BADGE}**");
-    }
-    if !data.missing.is_empty() {
-        let _ = writeln!(out, "\n## Missing / Blocking\n");
-        for item in &data.missing {
-            let _ = writeln!(out, "- {item}");
-        }
-    }
-    let _ = writeln!(
-        out,
-        "\n## Acceptance Report\n\n\
-         1. **Đã làm gì / Đã fix gì:** {}\n\
-         2. **Chặn bug cũ:** {}\n\
-         3. **Nguy cơ bug mới:** {}\n\
-         4. **An toàn mã nguồn:** {}\n\
-         5. **Còn hở / chưa kiểm:** {}",
-        data.what_done, data.prevent_old_bug, data.new_bug_risk, data.code_safety, data.unverified
-    );
-    let (mech, llm, eff) = format_scores_line(data);
-    let _ = writeln!(
-        out,
-        "\n## Scores\n\n- MechanicalScore: {mech} | LLM Average: {llm} | Effective: {eff}"
-    );
-    if !data.scores.is_empty() {
-        let _ = writeln!(
-            out,
-            "\n| ID | Standard | Score | Source | Deduction |\n|---|---|---|---|---|"
-        );
-        for s in &data.scores {
-            let reason = if s.deduction_reason.trim().is_empty() {
-                "—"
-            } else {
-                &s.deduction_reason
-            };
-            let _ = writeln!(
-                out,
-                "| `{}` | {} | {}/100 | [agent báo] | {} |",
-                s.id,
-                standard_name(&s.id),
-                s.score,
-                reason
-            );
-        }
-    }
-    if let Some(p) = &data.proof {
-        let _ = writeln!(
-            out,
-            "\n## Verification Proof\n\n- Tool: `{}`\n- Device: `{}`\n- Summary: {}\n- Image SHA-256: `{}`\n- Tree: `{}`",
-            p.source_tool, p.device_serial, p.summary, p.image_sha256, p.tree_fp
-        );
-    }
-    out
+    crate::handover_devkit::render_devkit_markdown(data)
 }
 
 /// Serializes [`HandoverData`] to a JSON [`Value`].
@@ -558,19 +349,3 @@ fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
     out.push_str(suffix);
     out
 }
-
-const INLINE_STYLE: &str = "  <style>\n\
-    :root{color-scheme:light dark}\n\
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:24px;background:#f6f7f9;color:#1a202c;line-height:1.5}\n\
-    .wrap{max-width:920px;margin:0 auto}.hero{margin-bottom:20px}\n\
-    .badge{display:inline-block;padding:4px 10px;border-radius:6px;font-weight:700;font-size:.85rem}\n\
-    .badge.ok{background:#dcfce7;color:#166534}.badge.warn,.solo-badge,.notice{background:#fef3c7;color:#92400e}\n\
-    .solo-badge{display:inline-block;margin-top:8px;padding:4px 10px;border-radius:6px;font-size:.85rem}\n\
-    .card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:18px 20px;margin-bottom:16px}\n\
-    .card.alert{border-color:#f59e0b;background:#fffbeb}.meta{color:#475569;font-size:.9rem}\n\
-    .notice{padding:10px 12px;border-radius:6px}table{width:100%;border-collapse:collapse;margin-top:12px;font-size:.9rem}\n\
-    th,td{text-align:left;padding:8px;border-bottom:1px solid #e2e8f0}code{background:#eef2f6;padding:2px 5px;border-radius:4px;font-size:.88em}\n\
-    .proof img{max-width:100%;height:auto;border:1px solid #cbd5e1;border-radius:6px}\n\
-    @media(prefers-color-scheme:dark){body{background:#0f172a;color:#e2e8f0}.card{background:#1e293b;border-color:#334155}\
-    .card.alert{background:#2d2310;border-color:#b45309}.meta{color:#94a3b8}code{background:#334155}th,td{border-color:#334155}}\n\
-  </style>\n";
