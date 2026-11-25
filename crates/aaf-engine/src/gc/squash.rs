@@ -122,6 +122,45 @@ pub(crate) fn verify_squash_merges_with_warnings(
     if candidates.is_empty() {
         return Ok(HashMap::new());
     }
+    let branch_candidates: Vec<(String, String)> = candidates
+        .iter()
+        .map(|(id, oid)| (format!("{BRANCH_PREFIX}{id}"), oid.clone()))
+        .collect();
+    let verified_branches = verify_branch_squash_merges_with_warnings(
+        repo_root,
+        base_branch,
+        base_start,
+        &branch_candidates,
+        fetch_base,
+        runner,
+        on_warning,
+    )?;
+    Ok(verified_branches
+        .into_iter()
+        .filter_map(|(branch, oid)| {
+            branch
+                .strip_prefix(BRANCH_PREFIX)
+                .map(|id| (id.to_string(), oid))
+        })
+        .collect())
+}
+
+/// Verifies squash-merged PRs for full branch names `(branch_name, local_head_oid)`
+/// in one batched `gh pr list` call plus local `git merge-base --is-ancestor` checks.
+///
+/// Offline or failing `gh` calls return an empty map and emit deduplicated warnings.
+pub(crate) fn verify_branch_squash_merges_with_warnings(
+    repo_root: &Path,
+    base_branch: &str,
+    base_start: &str,
+    candidates: &[(String, String)],
+    fetch_base: &dyn Fn() -> Result<(), GitError>,
+    runner: &dyn CommandRunner,
+    on_warning: &mut dyn FnMut(String),
+) -> Result<HashMap<String, String>, GitError> {
+    if candidates.is_empty() {
+        return Ok(HashMap::new());
+    }
     let mut seen_warnings = HashSet::new();
     let args = [
         "pr",
@@ -167,28 +206,27 @@ pub(crate) fn verify_squash_merges_with_warnings(
     };
     let saturated = rows.len() >= BULK_PR_LIMIT;
 
-    let by_ref: HashMap<String, (&str, &str)> = candidates
+    let by_ref: HashMap<&str, &str> = candidates
         .iter()
-        .map(|(id, oid)| (format!("{BRANCH_PREFIX}{id}"), (id.as_str(), oid.as_str())))
+        .map(|(branch, oid)| (branch.as_str(), oid.as_str()))
         .collect();
 
     let mut matched: HashMap<String, (String, String)> = HashMap::new();
     for row in rows {
-        let Some(&(task_id, local_head_oid)) = by_ref.get(&row.head_ref_name) else {
+        let Some(&local_head_oid) = by_ref.get(row.head_ref_name.as_str()) else {
             continue;
         };
-        let expected_head = format!("{BRANCH_PREFIX}{task_id}");
+        let expected_head = row.head_ref_name.clone();
         if let Some(merge_oid) = match_row(row, base_branch, &expected_head, local_head_oid) {
-            matched.insert(task_id.to_string(), (local_head_oid.to_string(), merge_oid));
+            matched.insert(expected_head, (local_head_oid.to_string(), merge_oid));
         }
     }
 
     if saturated {
-        for (task_id, local_head_oid) in candidates {
-            if matched.contains_key(task_id) {
+        for (head_branch, local_head_oid) in candidates {
+            if matched.contains_key(head_branch) {
                 continue;
             }
-            let head_branch = format!("{BRANCH_PREFIX}{task_id}");
             let per_args = [
                 "pr",
                 "list",
@@ -230,8 +268,8 @@ pub(crate) fn verify_squash_merges_with_warnings(
                 continue;
             };
             for row in per_rows {
-                if let Some(merge_oid) = match_row(row, base_branch, &head_branch, local_head_oid) {
-                    matched.insert(task_id.clone(), (local_head_oid.clone(), merge_oid));
+                if let Some(merge_oid) = match_row(row, base_branch, head_branch, local_head_oid) {
+                    matched.insert(head_branch.clone(), (local_head_oid.clone(), merge_oid));
                     break;
                 }
             }
@@ -246,14 +284,14 @@ pub(crate) fn verify_squash_merges_with_warnings(
     }
 
     let mut verified = HashMap::new();
-    for (task_id, (local_head_oid, merge_oid)) in matched {
+    for (branch_name, (local_head_oid, merge_oid)) in matched {
         let ok = git_raw(
             repo_root,
             &["merge-base", "--is-ancestor", &merge_oid, base_start],
         )
         .is_ok_and(|res| res.code == Some(0));
         if ok {
-            verified.insert(task_id, local_head_oid);
+            verified.insert(branch_name, local_head_oid);
         }
     }
     Ok(verified)

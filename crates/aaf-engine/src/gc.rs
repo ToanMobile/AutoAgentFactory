@@ -20,6 +20,7 @@ use crate::git::{GitError, path_str};
 
 mod archive;
 mod expired;
+mod merged_branches;
 mod oracle_scratch;
 #[cfg(test)]
 mod orphan_lock_tests;
@@ -65,6 +66,9 @@ pub struct GcOptions {
     pub include_cancelled: bool,
     pub force: bool,
     pub older_than_days: u64,
+    pub cwd: Option<PathBuf>,
+    pub merged_branches: bool,
+    pub base: Option<String>,
 }
 
 impl Default for GcOptions {
@@ -76,6 +80,9 @@ impl Default for GcOptions {
             include_cancelled: false,
             force: false,
             older_than_days: DEFAULT_OLDER_THAN_DAYS,
+            cwd: None,
+            merged_branches: false,
+            base: None,
         }
     }
 }
@@ -98,6 +105,12 @@ pub struct GcReport {
     pub proofs_removed: usize,
     #[serde(default)]
     pub events_archived: usize,
+    #[serde(default)]
+    pub merged_branches_base: Option<String>,
+    #[serde(default)]
+    pub merged_branches_deleted: Vec<String>,
+    #[serde(default)]
+    pub merged_worktrees_removed: Vec<PathBuf>,
 }
 
 struct RepoLockGuard {
@@ -331,6 +344,10 @@ fn clean_repo(
             continue;
         }
         clean_task_artifacts(repo, worktrees_dir, task, &registered, &refs, opts, report)?;
+    }
+
+    if opts.merged_branches {
+        merged_branches::sweep_merged_branches(repo, opts, report);
     }
 
     // 3. `worktree::prune` + `aaf_fp::sweep_stale`.
