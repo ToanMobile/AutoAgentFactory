@@ -338,6 +338,15 @@ fn tree_fp_with_layout_using(call: &GitCall<'_>, layout: &GitLayout) -> Result<S
         if layout.index.exists() {
             // Start from the real index so unchanged files are not re-hashed.
             fs::copy(&layout.index, &temp)?;
+            // Keep the real index's mtime. Git re-hashes an entry ("racily
+            // clean") only when its mtime is not older than the index file's
+            // own; a fresh mtime (Linux `fs::copy`) would trust the stat of a
+            // same-size edit made in the second of the last index write.
+            let mtime = fs::metadata(&layout.index)?.modified()?;
+            fs::File::options()
+                .write(true)
+                .open(&temp)?
+                .set_modified(mtime)?;
         }
         let env = [
             ("GIT_INDEX_FILE", temp.as_os_str()),
