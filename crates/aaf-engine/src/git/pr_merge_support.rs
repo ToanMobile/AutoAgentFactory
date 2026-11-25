@@ -342,9 +342,12 @@ pub(super) fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str)
         );
     }
     let target = format!("{remote}/{base_branch}");
+    // Full refname: a short `origin/main` resolves `refs/tags/origin/main`
+    // first, so a planted tag could fast-forward the base (SEC-035).
+    let target_ref = format!("refs/remotes/{remote}/{base_branch}");
     match git_raw(
         repo_root,
-        &["merge", "--ff-only", "--no-overwrite-ignore", &target],
+        &["merge", "--ff-only", "--no-overwrite-ignore", &target_ref],
     ) {
         Ok(st) if st.success() => format!("fast-forwarded local `{base_branch}` to `{target}`"),
         _ => format!(

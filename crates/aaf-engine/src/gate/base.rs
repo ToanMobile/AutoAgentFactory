@@ -168,6 +168,47 @@ fn commit_of(repo_root: &Path, name: &str, timeout: Duration) -> Result<Option<S
     Ok(aaf_fp::git_or_none(repo_root, &args, timeout)?)
 }
 
+/// Resolves an explicit `gate.base_ref` without letting a tag shadow a
+/// branch (SEC-034). Short names try `refs/heads/<name>` then
+/// `refs/remotes/<name>`; a name that only exists as a tag must be spelled
+/// `refs/tags/<name>`. Full refs and other revisions (a SHA, `HEAD~2`)
+/// resolve as git spells them.
+fn explicit_base_commit(
+    repo_root: &Path,
+    wanted: &str,
+    timeout: Duration,
+) -> Result<String, GateError> {
+    let unresolved = || {
+        GateError::Config(format!(
+            "gate.base_ref {wanted:?} does not resolve to a commit"
+        ))
+    };
+    if wanted.starts_with("refs/") {
+        return commit_of(repo_root, wanted, timeout)?.ok_or_else(unresolved);
+    }
+    for full in [
+        format!("refs/heads/{wanted}"),
+        format!("refs/remotes/{wanted}"),
+    ] {
+        if let Some(sha) = commit_of(repo_root, &full, timeout)? {
+            return Ok(sha);
+        }
+    }
+    let tag = format!("refs/tags/{wanted}");
+    if aaf_fp::git_or_none(
+        repo_root,
+        &["rev-parse", "--verify", "--quiet", &tag],
+        timeout,
+    )?
+    .is_some()
+    {
+        return Err(GateError::Config(format!(
+            "gate.base_ref {wanted:?} only names a tag; write {tag:?} to use it"
+        )));
+    }
+    commit_of(repo_root, wanted, timeout)?.ok_or_else(unresolved)
+}
+
 /// `HEAD` commit for the receipt; `None` in a repository with no commit
 /// yet, an error when git could not answer.
 pub fn head(repo_root: &Path, timeout: Duration) -> Result<Option<String>, GateError> {
@@ -234,11 +275,7 @@ pub fn resolve(repo_root: &Path, base_ref: &str, timeout: Duration) -> Result<Ba
                 "invalid gate.base_ref {wanted:?}"
             )));
         }
-        let target = commit_of(repo_root, wanted, timeout)?.ok_or_else(|| {
-            GateError::Config(format!(
-                "gate.base_ref {wanted:?} does not resolve to a commit"
-            ))
-        })?;
+        let target = explicit_base_commit(repo_root, wanted, timeout)?;
         // Unrelated histories have no merge-base (git says so with exit 1
         // and no message): fall back to HEAD. A failed git is an error.
         aaf_fp::git_or_none(repo_root, &["merge-base", &target, &head], timeout)?
