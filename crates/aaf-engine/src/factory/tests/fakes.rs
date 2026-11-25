@@ -110,13 +110,15 @@ impl GateRunner for FakeGate {
             let mut state = self.state.lock().unwrap();
             state.runs.push(ids.clone());
             if let Some(ran) = &state.ran {
-                ran.send(ids.clone()).unwrap();
+                let _ = ran.send(ids.clone());
             }
             state.latch.take()
         };
         if let Some(latch) = latch {
-            latch.entered.send(()).unwrap();
-            latch.release.recv().unwrap();
+            // A test that already failed dropped its ends: go on, so the
+            // run can finish and the failure is reported instead of hanging.
+            let _ = latch.entered.send(());
+            let _ = latch.release.recv();
         }
         let state = self.state.lock().unwrap();
         // A rebased worktree also holds what landed before it; `runs` keeps
@@ -295,7 +297,7 @@ impl AgentRunner for FakeRunner {
                     return Err(PortError::Io("executor crashed".to_string()));
                 }
                 if let Some(started) = &state.started {
-                    started.send(task_id.clone()).unwrap();
+                    let _ = started.send(task_id.clone());
                 }
                 state
                     .outcomes
@@ -311,7 +313,8 @@ impl AgentRunner for FakeRunner {
         // Not under the lock: other runs go on while this one is held.
         drop(state);
         if let Some(hold) = hold {
-            hold.recv().unwrap();
+            // Dropped sender (failed test): stop holding.
+            let _ = hold.recv();
         }
         Ok(outcome)
     }

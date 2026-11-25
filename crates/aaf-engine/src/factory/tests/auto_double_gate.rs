@@ -100,6 +100,9 @@ fn a_late_worker_outcome_does_not_gate_its_task_twice_in_auto_mode() {
         reap: &|_| Ok(()),
     };
     let summary = std::thread::scope(|scope| {
+        // Owned here so a failed check drops it and t2's hold ends (see
+        // `World::once_with_queued_batch`).
+        let go = go;
         let handle = scope.spawn(|| run(&deps, Mode::Auto, &hooks).unwrap());
         // t1's worker is past `move_to(Gating)`, its outcome not yet sent.
         entered.recv_timeout(HANG).unwrap();

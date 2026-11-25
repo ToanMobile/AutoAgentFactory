@@ -410,3 +410,23 @@ fn auto_mode_asks_the_idle_hook_and_stops_when_it_says_so() {
     assert_eq!(summary.review, vec!["t1", "t2"]);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// A failing harness check must fail the test, not hang it: the scoped
+/// scheduler thread is still parked on the gate latch when the check panics,
+/// and the scope joins it before re-raising the panic.
+#[test]
+fn a_failed_batch_harness_check_fails_fast_instead_of_hanging() {
+    let (done_tx, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut world = World::new();
+        world.auto_merge = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.once_with_queued_batch(|| panic!("harness check failed"))
+        }));
+        let _ = done_tx.send(result.is_err());
+    });
+    let panicked = done
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the batch harness hung after a failed check");
+    assert!(panicked, "the failed check must fail the test");
+}

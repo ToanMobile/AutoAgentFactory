@@ -155,6 +155,10 @@ impl World {
             runner.hold.insert("t4".to_string(), go_rx);
         }
         std::thread::scope(|scope| {
+            // Owned here so a failed check below drops them while unwinding:
+            // the held run and the latched gate then go on, and the scope's
+            // join returns instead of waiting on them forever.
+            let (release, go) = (release, go);
             let handle = scope.spawn(|| self.once());
             assert_eq!(started.recv_timeout(HANG).unwrap(), "t1");
             entered.recv_timeout(HANG).unwrap();
