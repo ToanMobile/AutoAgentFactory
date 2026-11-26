@@ -146,7 +146,8 @@ fn write_receipt_for(data_dir: &Path, repo_root: &Path, tree_fp: &str) {
 
 #[test]
 fn schema_v5_to_v6_conditional_delete_trigger_and_index() {
-    assert_eq!(SCHEMA_VERSION, 6);
+    // Later migrations stack on v6; the v6 trigger and index must survive them.
+    assert!(SCHEMA_VERSION >= 6);
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("aaf.db");
 
@@ -188,12 +189,12 @@ fn schema_v5_to_v6_conditional_delete_trigger_and_index() {
     assert_eq!(ro_v5.list_tasks(None, None).unwrap().len(), 8);
     drop(ro_v5);
 
-    // Read-write open upgrades v5 -> v6; read-only open reads v6 cleanly.
+    // Read-write open upgrades v5 -> current; read-only open reads it cleanly.
     let rw = Db::open(&db_path).unwrap();
-    assert_eq!(rw.schema_version(), 6);
+    assert_eq!(rw.schema_version(), SCHEMA_VERSION);
     drop(rw);
     let ro_v6 = Db::open_read_only(&db_path).unwrap();
-    assert_eq!(ro_v6.schema_version(), 6);
+    assert_eq!(ro_v6.schema_version(), SCHEMA_VERSION);
     drop(ro_v6);
 
     let conn = Connection::open(&db_path).unwrap();

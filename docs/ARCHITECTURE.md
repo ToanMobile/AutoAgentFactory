@@ -105,6 +105,7 @@ re-introduces a module cycle fails `module_layers::no_cycles_in_engine_module_gr
 - `gc -> gate, telemetry` (garbage collection checks gate receipts/locks and reads telemetry snapshots)
 - `hook_settings -> gate` (hook configuration references gate policies)
 - `executors -> process` (agent runners manage subprocesses and process groups)
+- `git -> config` (worktree hydration reads the configured base ref to decide which denied paths to restore)
 - `telegram -> watch` (Telegram bot queries live watch status)
 
 ## 6. House rules

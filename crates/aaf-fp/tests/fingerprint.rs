@@ -248,11 +248,13 @@ fn git_returns_output_larger_than_a_pipe_buffer() {
 #[test]
 fn git_still_times_out_and_reports_failures() {
     let repo = repo_with_commit();
+    // A git that is certainly still running at the deadline: `cat-file
+    // --batch` reads a null stdin and can exit before the first check.
     let err = aaf_fp::git(
         repo.path(),
-        &["cat-file", "--batch"],
+        &["-c", "alias.wait=!sleep 2", "wait"],
         &[],
-        std::time::Duration::ZERO,
+        std::time::Duration::from_millis(100),
     )
     .unwrap_err();
     assert!(err.to_string().contains("timed out"), "{err}");
