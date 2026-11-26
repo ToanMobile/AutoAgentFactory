@@ -45,6 +45,33 @@ impl Lease {
         }
     }
 
+    /// Blocking exclusive lock under `leases_dir` used to serialize multi-slot
+    /// check-and-acquire operations (e.g. `next_where_keeping_one`) across
+    /// concurrent `aaf run` processes so two repos cannot both observe the same
+    /// spare slot and drain the pool to zero.
+    pub fn acquire_blocking(
+        leases_dir: &Path,
+        lock_name: &str,
+    ) -> Result<Lease, AccountsError> {
+        if !is_safe_file_stem(lock_name) {
+            return Err(AccountsError::InvalidAccountId(lock_name.to_string()));
+        }
+        let path = leases_dir.join(format!("{lock_name}.lock"));
+        let io = |source| AccountsError::Io {
+            path: path.display().to_string(),
+            source,
+        };
+        private::create_dir(leases_dir).map_err(io)?;
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(AccountsError::SymlinkLease {
+                path: path.display().to_string(),
+            });
+        }
+        let file = private::open_file(&path).map_err(io)?;
+        file.lock().map_err(io)?;
+        Ok(Lease { path, file })
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

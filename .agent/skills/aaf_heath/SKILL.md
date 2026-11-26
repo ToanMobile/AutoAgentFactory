@@ -103,7 +103,8 @@ Nếu chưa có, gọi tool `schedule`:
    - Unblock/sync lại các task bị ảnh hưởng để board chạy tiếp tự động.
    - Báo cáo ngắn gọn cho user về lỗi/nút thắt vừa phát hiện + bản fix vừa cài.
 3. Nếu không có factory bug (hoặc chỉ dừng hợp lệ vì `needs_human`, `aaf approve`, máy thật ADB, PR đã mở, tài khoản cooldown): báo cáo gọn đủ 4 nhóm chỉ số (Board/Chất lượng, Tốc độ/Slot, Token/Hiệu quả, RAM/FD/WAL) + nêu rõ nếu có task mới sang `review`/`done`, nút thắt tốc độ, hoặc cảnh báo `WARN:` cần tối ưu.
-4. Khi toàn bộ các task tự động hoá được trên board chạy mượt 100% đạt chất lượng, tốc độ và hiệu quả token tốt không còn lỗi/rò rỉ AAF, báo cáo tổng kết cho user và đề xuất tắt lịch monitor.
+4. **Quy tắc trình bày cảnh báo bắt buộc:** Mọi vấn đề, rủi ro hoặc bất thường phát hiện được (bug/race scheduler, acc mất login/quarantine, dung lượng đĩa tụt/thấp, root budget sát trần, task kẹt `gating`/`running`, v.v.) **BẮT BUỘC** phải luôn chủ động báo rõ nguyên nhân + hướng xử lý (không đợi người dùng hỏi, không giấu vào ghi chú phụ) trong khối riêng với icon đỏ nguy hiểm **`🚨 VẤN ĐỀ PHÁT HIỆN`** đặt ở **DÒNG CUỐI CÙNG** của báo cáo.
+5. Khi toàn bộ các task tự động hoá được trên board chạy mượt 100% đạt chất lượng, tốc độ và hiệu quả token tốt không còn lỗi/rò rỉ AAF, báo cáo tổng kết cho user và đề xuất tắt lịch monitor.
 ```
 
 ---

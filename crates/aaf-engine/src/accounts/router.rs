@@ -134,6 +134,10 @@ impl<'a> Router<'a> {
             return Ok(None);
         }
         candidates.sort_by(|a, b| (a.0, &a.1.id).cmp(&(b.0, &b.1.id)));
+        // Serialize the acquire + spare-slot probe across concurrent processes
+        // so two repos starting simultaneously cannot both claim the last two
+        // slots while each observing the other's slot as still free.
+        let _reserve_guard = Lease::acquire_blocking(&self.leases_dir, "_reserve")?;
         for (_, profile) in candidates {
             if let Some(lease) = self.acquire_slot(&profile.id)? {
                 let has_spare = ready_ids
@@ -198,5 +202,84 @@ impl<'a> Router<'a> {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::{Arc, Barrier};
+
+    use aaf_domain::account::{AccountProfile, ProviderKind};
+    use aaf_domain::ports::{AccountStore, Clock};
+    use tempfile::tempdir;
+
+    use super::Router;
+    use crate::db::Db;
+
+    struct FixedClock(i64);
+    impl Clock for FixedClock {
+        fn now(&self) -> i64 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn next_where_keeping_one_is_atomic_under_concurrent_callers() {
+        let dir = tempdir().unwrap();
+        let db = Db::open(&dir.path().join("aaf.db")).unwrap();
+        for id in ["claude-a", "claude-b"] {
+            let cfg = dir.path().join(format!("cfg-{id}"));
+            fs::create_dir_all(&cfg).unwrap();
+            db.upsert_account(&AccountProfile {
+                id: id.to_string(),
+                provider: ProviderKind::ClaudeCode,
+                config_dir: cfg.to_string_lossy().into_owned(),
+                name: id.to_string(),
+            })
+            .unwrap();
+        }
+        let leases_dir = dir.path().join("leases");
+        let db_path = dir.path().join("aaf.db");
+
+        // Race two callers across 16 rounds: strictly one gets a lease and one
+        // yields so the second slot stays free for Purpose::Audit.
+        for _ in 0..16 {
+            let barrier = Arc::new(Barrier::new(2));
+            let (g1, g2) = std::thread::scope(|scope| {
+                let spawn_one = |b: Arc<Barrier>| {
+                    let db_path = db_path.clone();
+                    let leases_dir = leases_dir.clone();
+                    scope.spawn(move || {
+                        let store = Db::open(&db_path).unwrap();
+                        let clock = FixedClock(10_000);
+                        let router = Router::new(&store, &store, &clock, leases_dir, 1);
+                        b.wait();
+                        router.next_where_keeping_one(&|_| true).unwrap()
+                    })
+                };
+                let h1 = spawn_one(barrier.clone());
+                let h2 = spawn_one(barrier);
+                (h1.join().unwrap(), h2.join().unwrap())
+            });
+            let acquired = usize::from(g1.is_some()) + usize::from(g2.is_some());
+            assert_eq!(
+                acquired, 1,
+                "concurrent next_where_keeping_one must never drain both slots"
+            );
+            // Verify the reserved slot is immediately available for Audit (`next()`).
+            let clock = FixedClock(10_000);
+            let router = Router::new(&db, &db, &clock, &leases_dir, 1);
+            let audit = router
+                .next()
+                .unwrap()
+                .expect("reserved audit slot must remain free");
+            assert_ne!(
+                g1.as_ref().or(g2.as_ref()).unwrap().0.id,
+                audit.0.id,
+                "audit must receive the spare slot"
+            );
+            drop((g1, g2, audit));
+        }
     }
 }
