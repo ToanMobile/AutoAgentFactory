@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use super::Sleeper;
 use super::heavy::HeavyTool;
-use super::paths::{ensure_closed_dir, guest_dir, is_guest, open_guest_file, read_guest_file};
+use super::paths::{
+    ensure_closed_dir, guest_dir, is_guest, open_guest_file, read_guest_file, throttle_dir,
+};
 use aaf_fp::fs_private as private;
 
 /// Runs remembered per command; the admission figure is their p75 (2nd
@@ -25,6 +27,7 @@ use aaf_fp::fs_private as private;
 pub const KEEP_RUNS: usize = 5;
 
 const FILE: &str = "heavy_stats.json";
+const MIRROR_FILE: &str = "stats.json";
 const LOCK: &str = "heavy_stats.lock";
 const LOCK_ATTEMPTS: u32 = 40;
 const LOCK_RETRY: Duration = Duration::from_millis(25);
@@ -46,19 +49,56 @@ pub fn stats_path(data_dir: &Path) -> PathBuf {
     data_dir.join(FILE)
 }
 
+/// Read-only mirror of host [`stats_path`] placed in `<data_dir>/throttle/stats.json`
+/// so sandboxed guests (`aaf slot`) inherit measured peaks without opening the
+/// closed data dir or letting guests write host stats.
+pub fn host_mirror_path(data_dir: &Path) -> PathBuf {
+    throttle_dir(data_dir).join(MIRROR_FILE)
+}
+
 fn key(repo_id: &str, label: &str) -> String {
     format!("{repo_id}/{label}")
 }
 
-fn load(data_dir: &Path, guest: bool) -> StatsFile {
-    let bytes = if guest {
-        Some(read_guest_file(&guest_dir(data_dir).join(FILE)).into_bytes())
-    } else {
-        fs::read(stats_path(data_dir)).ok()
-    };
-    bytes
+fn load_path(path: &Path) -> StatsFile {
+    fs::read(path)
+        .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
+}
+
+fn load(data_dir: &Path, guest: bool) -> StatsFile {
+    if guest {
+        let bytes = read_guest_file(&guest_dir(data_dir).join(FILE)).into_bytes();
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    } else {
+        load_path(&stats_path(data_dir))
+    }
+}
+
+/// Mirrors the host's `heavy_stats.json` atomically into `<data_dir>/throttle/stats.json`.
+/// No-op for guests or when the host stats file does not exist yet.
+pub fn mirror_host_stats(data_dir: &Path) {
+    if is_guest(data_dir) {
+        return;
+    }
+    let Ok(body) = fs::read(stats_path(data_dir)) else {
+        return;
+    };
+    let _ = write_mirror_bytes(data_dir, &body);
+}
+
+fn write_mirror_bytes(data_dir: &Path, body: &[u8]) -> io::Result<()> {
+    let dir = throttle_dir(data_dir);
+    private::create_dir(data_dir)?;
+    private::create_dir(&dir)?;
+    let path = host_mirror_path(data_dir);
+    let temp = dir.join(format!("{MIRROR_FILE}.tmp-{}", std::process::id()));
+    let mut file = private::open_file(&temp)?;
+    file.set_len(0)?;
+    file.write_all(body)?;
+    drop(file);
+    fs::rename(&temp, &path)
 }
 
 /// Remembered runs of one command, oldest first; empty when never measured
@@ -106,9 +146,36 @@ fn max_peak_in(stats: &StatsFile, repo_id: &str, label: &str) -> Option<u64> {
 /// the single highest outlier (p75 / 2nd highest) once 4 or more runs are
 /// recorded so one anomalous cold-build spike does not over-reserve memory for
 /// the next 5 runs.
+fn peak_for_in(
+    stats: &StatsFile,
+    repo_id: &str,
+    label: &str,
+    tool: Option<HeavyTool>,
+    cmd_family: Option<&str>,
+) -> Option<u64> {
+    peak_in(stats, repo_id, label).or_else(|| match tool {
+        Some(t) => max_peak_in(stats, repo_id, &tool_label(t)),
+        None => cmd_family.and_then(|f| max_peak_in(stats, repo_id, &cmd_label(f))),
+    })
+}
+
+fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
 pub fn recorded_peak(data_dir: &Path, repo_id: &str, label: &str) -> Option<u64> {
-    let stats = load(data_dir, is_guest(data_dir));
-    peak_in(&stats, repo_id, label)
+    let guest = is_guest(data_dir);
+    let own = peak_in(&load(data_dir, guest), repo_id, label);
+    if guest {
+        let host = peak_in(&load_path(&host_mirror_path(data_dir)), repo_id, label);
+        max_opt(host, own)
+    } else {
+        own
+    }
 }
 
 /// Shared tool-level stats label so runs with custom `--label` (e.g. `red`)
@@ -153,11 +220,20 @@ pub fn recorded_peak_for(
     tool: Option<HeavyTool>,
     cmd_family: Option<&str>,
 ) -> Option<u64> {
-    let stats = load(data_dir, is_guest(data_dir));
-    peak_in(&stats, repo_id, label).or_else(|| match tool {
-        Some(t) => max_peak_in(&stats, repo_id, &tool_label(t)),
-        None => cmd_family.and_then(|f| max_peak_in(&stats, repo_id, &cmd_label(f))),
-    })
+    let guest = is_guest(data_dir);
+    let own = peak_for_in(&load(data_dir, guest), repo_id, label, tool, cmd_family);
+    if guest {
+        let host = peak_for_in(
+            &load_path(&host_mirror_path(data_dir)),
+            repo_id,
+            label,
+            tool,
+            cmd_family,
+        );
+        max_opt(host, own)
+    } else {
+        own
+    }
 }
 
 fn lock_file(data_dir: &Path, guest: bool, sleeper: &dyn Sleeper) -> io::Result<Option<File>> {
@@ -223,5 +299,9 @@ fn append(data_dir: &Path, guest: bool, key: &str, sample: HeavySample) -> io::R
     file.set_len(0)?;
     file.write_all(&body)?;
     drop(file);
-    fs::rename(&temp, &path)
+    fs::rename(&temp, &path)?;
+    if !guest {
+        let _ = write_mirror_bytes(data_dir, &body);
+    }
+    Ok(())
 }

@@ -27,6 +27,7 @@ use super::{Backoff, Budget, Sleeper};
 #[derive(Debug, Default)]
 pub struct CorrectnessGuards {
     unity: Option<File>,
+    gradle: Option<File>,
     worktree: Option<File>,
     waited: bool,
 }
@@ -38,6 +39,7 @@ impl Drop for CorrectnessGuards {
         // this moment has exec'ed, and the next build of this checkout,
         // or one with `--timeout 0`, would find it still taken.
         unlock_all(self.worktree.as_slice());
+        unlock_all(self.gradle.as_slice());
         unlock_all(self.unity.as_slice());
     }
 }
@@ -58,10 +60,9 @@ fn try_lock_one(data_dir: &Path, filename: &str) -> io::Result<Option<File>> {
     }
 }
 
-fn try_lock_unity(data_dir: &Path, max_unity: u32) -> io::Result<Option<File>> {
-    let cap = max_unity.max(1);
+fn try_lock_pool(data_dir: &Path, prefix: &str, cap: u32) -> io::Result<Option<File>> {
     for idx in 0..cap {
-        let filename = format!("tool.unity.{idx}.lock");
+        let filename = format!("tool.{prefix}.{idx}.lock");
         if let Some(file) = try_lock_one(data_dir, &filename)? {
             return Ok(Some(file));
         }
@@ -94,14 +95,16 @@ pub fn acquire_correctness(
     sleeper: &dyn Sleeper,
 ) -> io::Result<Option<CorrectnessGuards>> {
     let mut budget = Budget::new(ask.wait_limit_secs, clock.now());
-    acquire_correctness_within(data_dir, ask, clock, sleeper, &mut budget)
+    acquire_correctness_within(data_dir, ask, 0, clock, sleeper, &mut budget)
 }
 
 /// [`acquire_correctness`] spending `budget` (its limit, not
 /// `ask.wait_limit_secs`), which the Layer-2 wait goes on spending.
+/// Lock acquisition order: `UnityPool -> GradlePool -> Worktree -> Layer-2`.
 pub(super) fn acquire_correctness_within(
     data_dir: &Path,
     ask: &CorrectnessAsk<'_>,
+    max_gradle_parallel: u32,
     clock: &dyn Clock,
     sleeper: &dyn Sleeper,
     budget: &mut Budget,
@@ -115,10 +118,10 @@ pub(super) fn acquire_correctness_within(
     // 1. Unity pool lock (Unity only).
     let unity = if tool == HeavyTool::Unity {
         loop {
-            if let Some(file) = try_lock_unity(data_dir, ask.max_unity_parallel)? {
+            if let Some(file) = try_lock_pool(data_dir, "unity", ask.max_unity_parallel.max(1))? {
                 break Some(file);
             }
-            if budget.expired(clock.now()) {
+            if budget.parent_exited() || budget.expired(clock.now()) {
                 return Ok(None);
             }
             waited = true;
@@ -128,13 +131,29 @@ pub(super) fn acquire_correctness_within(
         None
     };
 
-    // 2. Per-worktree lock (any heavy build tool).
+    // 2. Gradle pool lock (Gradle only, when capped).
+    let gradle = if tool == HeavyTool::Gradle && max_gradle_parallel > 0 {
+        loop {
+            if let Some(file) = try_lock_pool(data_dir, "gradle", max_gradle_parallel)? {
+                break Some(file);
+            }
+            if budget.parent_exited() || budget.expired(clock.now()) {
+                return Ok(None);
+            }
+            waited = true;
+            budget.sleep(sleeper, backoff.next_delay());
+        }
+    } else {
+        None
+    };
+
+    // 3. Per-worktree lock (any heavy build tool).
     let wt_name = worktree_lock_name(ask.cwd);
     let worktree = loop {
         if let Some(file) = try_lock_one(data_dir, &wt_name)? {
             break Some(file);
         }
-        if budget.expired(clock.now()) {
+        if budget.parent_exited() || budget.expired(clock.now()) {
             return Ok(None);
         }
         waited = true;
@@ -143,6 +162,7 @@ pub(super) fn acquire_correctness_within(
 
     Ok(Some(CorrectnessGuards {
         unity,
+        gradle,
         worktree,
         waited,
     }))

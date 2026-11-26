@@ -101,6 +101,18 @@ pub trait TaskStore: Send + Sync {
 pub trait BudgetStore: Send + Sync {
     fn put_budget(&self, budget: &RootBudget) -> PortResult<()>;
     fn get_budget(&self, root_id: &str) -> PortResult<RootBudget>;
+    /// Atomically inserts `budget` only if missing, returning the existing or
+    /// newly inserted row without clobbering concurrent `add_usage` writes.
+    fn ensure_budget_if_missing(&self, budget: &RootBudget) -> PortResult<RootBudget> {
+        match self.get_budget(&budget.root_id) {
+            Ok(existing) => Ok(existing),
+            Err(PortError::NotFound(_)) => {
+                self.put_budget(budget)?;
+                Ok(budget.clone())
+            }
+            Err(err) => Err(err),
+        }
+    }
     /// Atomically adds usage and returns the updated budget.
     fn add_usage(
         &self,

@@ -6,16 +6,17 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod budget;
 mod dag;
+pub(crate) use budget::{reset_budget_for_unblock, reset_exhausted_budget};
 pub(crate) use dag::compute_critical_path;
 
 use aaf_domain::blocked::BlockedReason;
-use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::config::RepoConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::gate::{Approval, HeadLockReport};
 use aaf_domain::pipeline::PlanContract;
-use aaf_domain::ports::{BudgetStore, EventSink, PortError, RunStore, TaskStore};
+use aaf_domain::ports::{EventSink, PortError, RunStore, TaskStore};
 use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::Db;
 use aaf_engine::factory::prompt::PLAN_APPROVED_PREFIX;
@@ -113,23 +114,6 @@ pub(crate) fn parse_rework_reason(raw: &str) -> (bool, &str) {
     }
 }
 
-pub(crate) fn reset_exhausted_budget(db: &Db, root_id: &str) -> Result<bool, PortError> {
-    match db.get_budget(root_id) {
-        Ok(budget) if budget.check() != BudgetCheck::Ok => {
-            db.put_budget(&RootBudget {
-                tokens_used: 0,
-                wall_secs_used: 0,
-                cycles_used: 0,
-                frozen: false,
-                ..budget
-            })?;
-            Ok(true)
-        }
-        Ok(_) | Err(PortError::NotFound(_)) => Ok(false),
-        Err(other) => Err(other),
-    }
-}
-
 pub(crate) fn clear_stale_receipts(db: &impl RunStore, task: &Task, ctx: &Ctx) {
     let main_root = Path::new(&task.repo_root);
     let _ = fs::remove_file(aaf_fp::receipt_path(&ctx.data_dir, main_root));
@@ -138,6 +122,11 @@ pub(crate) fn clear_stale_receipts(db: &impl RunStore, task: &Task, ctx: &Ctx) {
     let main_approvals_dir = ctx.data_dir.join("approvals").join(&main_id);
 
     let mut wt_roots = Vec::new();
+    if let Ok(Some((wt, _))) =
+        worktree::existing_registered(main_root, &ctx.worktrees_dir, &task.id)
+    {
+        wt_roots.push(wt.path);
+    }
     if let Ok(wt) = worktree_path(main_root, &ctx.worktrees_dir, &task.id) {
         wt_roots.push(wt);
     }
@@ -292,6 +281,11 @@ fn maybe_approve_on_unblock(
 }
 
 pub(crate) fn resolve_task_tree(db: &Db, task: &Task, ctx: &Ctx) -> PathBuf {
+    if let Ok(Some((wt, _))) =
+        worktree::existing_registered(Path::new(&task.repo_root), &ctx.worktrees_dir, &task.id)
+    {
+        return wt.path;
+    }
     if let Ok(wt) = worktree_path(Path::new(&task.repo_root), &ctx.worktrees_dir, &task.id)
         && wt.is_dir()
     {
@@ -400,7 +394,7 @@ pub(crate) fn unblock_task(
             expected: TaskState::Blocked,
         });
     }
-    let budget_reset = reset_exhausted_budget(db, &task.root_id)?;
+    let budget_reset = reset_budget_for_unblock(db, &task.root_id, &task.repo_root)?;
     let (plan_approved, converged_plan) = maybe_approve_on_unblock(db, &task, now)?;
     db.append_context_note(task_id, &format!("unblocked: {why}"), now)?;
     db.set_state(task_id, TaskState::Ready, None, now)?;
@@ -452,7 +446,7 @@ pub(crate) fn rework_task(
             expected: TaskState::Review,
         });
     }
-    let budget_reset = reset_exhausted_budget(db, &task.root_id)?;
+    let budget_reset = reset_budget_for_unblock(db, &task.root_id, &task.repo_root)?;
     clear_stale_receipts(db, &task, ctx);
     let flat = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     db.append_context_note(task_id, &format!("rework: {flat}"), now)?;
@@ -523,8 +517,8 @@ pub(crate) fn approve_and_regate(
 
     let mut transitioned_to = None;
     if task.state == TaskState::Blocked && registered_wt.is_some() {
-        let budget_reset =
-            reset_exhausted_budget(db, &task.root_id).map_err(ApproveOpError::Port)?;
+        let budget_reset = reset_exhausted_budget(db, &task.root_id, &task.repo_root)
+            .map_err(ApproveOpError::Port)?;
         db.append_context_note(&task.id, "unblocked: head-lock approved", now)
             .map_err(ApproveOpError::Port)?;
         db.set_state(&task.id, TaskState::Gating, None, now)

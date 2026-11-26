@@ -83,6 +83,8 @@ struct Launch<'a> {
     tool: Option<HeavyTool>,
     command: Command,
     timeout: Duration,
+    idle_timeout: Option<Duration>,
+    watch_parent_pid: Option<u32>,
     output: Output,
 }
 
@@ -115,6 +117,8 @@ impl Throttle<'_> {
             tool,
             mut command,
             timeout,
+            idle_timeout,
+            watch_parent_pid,
             output,
         } = launch;
         // Before the wait for a slot: a stopped orphan may keep memory that
@@ -123,10 +127,11 @@ impl Throttle<'_> {
         let total_started = clock.now();
         // One limit for both layers, kept to the millisecond: the Layer-2
         // wait gets what the Layer-1 wait left of it.
-        let mut budget = Budget::new(ask.wait_limit_secs, total_started);
+        let mut budget =
+            Budget::with_parent_watch(ask.wait_limit_secs, total_started, watch_parent_pid);
         // Layer 1: when `exclusive_build_tools = false` allows concurrent heavy
         // builds to share Layer-2 capacity slots by RAM, acquire correctness locks
-        // (Unity pool -> Worktree lock) strictly BEFORE Layer 2 capacity slots.
+        // (Unity pool -> Gradle pool -> Worktree lock) strictly BEFORE Layer 2 slots.
         // When `exclusive_build_tools = true`, Layer-2 already serializes every
         // build tool exclusively across the machine.
         let correctness = if !self.machine.exclusive_build_tools {
@@ -146,6 +151,7 @@ impl Throttle<'_> {
             let Some(guard) = pools::acquire_correctness_within(
                 data_dir,
                 &correctness_ask,
+                self.machine.max_gradle_parallel,
                 clock,
                 self.sleeper,
                 &mut budget,
@@ -199,21 +205,25 @@ impl Throttle<'_> {
             self.sample_every,
         );
         let done = match output {
-            Output::Tail(bytes) => {
-                proc::capture_supervised(command, timeout, Some(bytes), true, &mut dog).map(
-                    |done| {
-                        (
-                            proc::Waited {
-                                status: done.status,
-                                timed_out: done.timed_out,
-                                duration: done.duration,
-                                paused: done.paused,
-                            },
-                            done.output,
-                        )
+            Output::Tail(bytes) => proc::capture_supervised_with_idle(
+                command,
+                timeout,
+                idle_timeout,
+                Some(bytes),
+                true,
+                &mut dog,
+            )
+            .map(|done| {
+                (
+                    proc::Waited {
+                        status: done.status,
+                        timed_out: done.timed_out,
+                        duration: done.duration,
+                        paused: done.paused,
                     },
+                    done.output,
                 )
-            }
+            }),
             Output::Passed => {
                 proc::run_supervised(command, timeout, &mut dog).map(|(done, unkilled)| {
                     // Nothing is captured, so the caller's stream is where this
@@ -348,12 +358,27 @@ impl Throttle<'_> {
         extra_env: &[(&str, &str)],
         env_remove: &[&str],
     ) -> io::Result<(HeavyRun, ConfineMode)> {
+        self.run_heavy_confined_with_idle(data_dir, clock, job, None, extra_env, env_remove)
+    }
+
+    /// [`Throttle::run_heavy_confined_with_env_and_removals`] with an optional
+    /// unpaused output-silence timeout (`idle_timeout_secs`).
+    pub fn run_heavy_confined_with_idle(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &HeavyJob<'_>,
+        idle_timeout: Option<Duration>,
+        extra_env: &[(&str, &str)],
+        env_remove: &[&str],
+    ) -> io::Result<(HeavyRun, ConfineMode)> {
         let (inner_argv, mode) = confine::shell_argv(job.command, job.cwd, Some(data_dir))?;
         let argv = watchdog::priority_argv(&inner_argv, self.machine.low_priority, &self.tools);
         let run = self.run_heavy_argv_with_all(
             data_dir,
             clock,
             job,
+            idle_timeout,
             &argv,
             &Inherited::from_process_env(),
             extra_env,
@@ -384,7 +409,7 @@ impl Throttle<'_> {
     ) -> io::Result<HeavyRun> {
         let argv = watchdog::heavy_argv(job.command, self.machine.low_priority, &self.tools);
         self.run_heavy_argv_with_all(
-            data_dir, clock, job, &argv, inherited, extra_env, env_remove,
+            data_dir, clock, job, None, &argv, inherited, extra_env, env_remove,
         )
     }
 
@@ -394,6 +419,7 @@ impl Throttle<'_> {
         data_dir: &Path,
         clock: &dyn Clock,
         job: &HeavyJob<'_>,
+        idle_timeout: Option<Duration>,
         argv: &[OsString],
         inherited: &Inherited,
         extra_env: &[(&str, &str)],
@@ -441,6 +467,8 @@ impl Throttle<'_> {
             tool,
             command,
             timeout: job.timeout,
+            idle_timeout,
+            watch_parent_pid: None,
             output: Output::Tail(job.log_tail_bytes),
         };
         let run = self
@@ -471,15 +499,45 @@ impl Throttle<'_> {
         clock: &dyn Clock,
         job: &SlotJob<'_>,
     ) -> io::Result<Option<SlotRun>> {
-        self.run_slot_with(data_dir, clock, job, &Inherited::from_process_env())
+        self.run_slot_watching_parent(data_dir, clock, job, None)
     }
 
+    /// [`Throttle::run_slot`] that aborts the admission wait if `watch_parent_pid`
+    /// exits (preventing orphaned `aaf slot` processes from holding `drain.lock`).
+    pub fn run_slot_watching_parent(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &SlotJob<'_>,
+        watch_parent_pid: Option<u32>,
+    ) -> io::Result<Option<SlotRun>> {
+        self.run_slot_with_parent(
+            data_dir,
+            clock,
+            job,
+            &Inherited::from_process_env(),
+            watch_parent_pid,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn run_slot_with(
         &self,
         data_dir: &Path,
         clock: &dyn Clock,
         job: &SlotJob<'_>,
         inherited: &Inherited,
+    ) -> io::Result<Option<SlotRun>> {
+        self.run_slot_with_parent(data_dir, clock, job, inherited, None)
+    }
+
+    fn run_slot_with_parent(
+        &self,
+        data_dir: &Path,
+        clock: &dyn Clock,
+        job: &SlotJob<'_>,
+        inherited: &Inherited,
+        watch_parent_pid: Option<u32>,
     ) -> io::Result<Option<SlotRun>> {
         if job.argv.is_empty() {
             return Err(io::Error::new(
@@ -514,6 +572,8 @@ impl Throttle<'_> {
             tool,
             command,
             timeout: job.exec_timeout.unwrap_or(Duration::MAX),
+            idle_timeout: None,
+            watch_parent_pid,
             output: Output::Passed,
         };
         let run = self.supervise(data_dir, clock, launch, inherited)?;

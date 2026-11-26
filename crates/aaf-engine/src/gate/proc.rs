@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::GateError;
+#[allow(unused_imports)]
 pub(crate) use crate::confine_core::proc::capture;
 #[cfg(test)]
 pub(crate) use crate::confine_core::proc::{Supervise, run_supervised};

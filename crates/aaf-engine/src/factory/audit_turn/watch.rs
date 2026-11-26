@@ -16,6 +16,7 @@ pub(in crate::factory) struct InfraWatch<'a> {
     limit_hit: Mutex<Option<LimitHit>>,
     failed_tail: Mutex<Option<String>>,
     last_succeeded: Mutex<bool>,
+    last_timed_out: Mutex<bool>,
     last_final_text: Mutex<String>,
 }
 
@@ -27,12 +28,13 @@ impl<'a> InfraWatch<'a> {
             limit_hit: Mutex::new(None),
             failed_tail: Mutex::new(None),
             last_succeeded: Mutex::new(false),
+            last_timed_out: Mutex::new(false),
             last_final_text: Mutex::new(String::new()),
         }
     }
 
     pub(in crate::factory) fn take(self) -> (Option<InfraFailure>, Option<LimitHit>) {
-        let (infra, hit, _, _, _) = self.take_all();
+        let (infra, hit, _, _, _, _) = self.take_all();
         (infra, hit)
     }
 
@@ -42,6 +44,7 @@ impl<'a> InfraWatch<'a> {
         Option<InfraFailure>,
         Option<LimitHit>,
         Option<String>,
+        bool,
         bool,
         String,
     ) {
@@ -56,6 +59,9 @@ impl<'a> InfraWatch<'a> {
                 .into_inner()
                 .unwrap_or_else(PoisonError::into_inner),
             self.last_succeeded
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner),
+            self.last_timed_out
                 .into_inner()
                 .unwrap_or_else(PoisonError::into_inner),
             self.last_final_text
@@ -73,6 +79,10 @@ impl AgentRunner for InfraWatch<'_> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = outcome.succeeded();
         *self
+            .last_timed_out
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = outcome.timed_out;
+        *self
             .last_final_text
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = outcome.final_text.clone();
@@ -86,6 +96,7 @@ impl AgentRunner for InfraWatch<'_> {
                 .unwrap_or_else(PoisonError::into_inner) = Some(hit.clone());
         }
         if !outcome.succeeded()
+            && !outcome.timed_out
             && outcome.infra.is_none()
             && outcome.limit_hit.is_none()
             && !outcome.log_tail.trim().is_empty()

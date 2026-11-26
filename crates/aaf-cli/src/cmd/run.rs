@@ -399,6 +399,8 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     )?;
 
     let (mut deps, pool) = build_deps(ctx, &repo, &cfg, &db, sandboxed, args.max_parallel)?;
+    db.sync_repo_budget_limits(&deps.settings.repo_root, &cfg.repo.unblocker)
+        .map_err(|e| err("budget sync", e))?;
     let router = stage_wiring::build_stage_router(
         ctx,
         &repo,

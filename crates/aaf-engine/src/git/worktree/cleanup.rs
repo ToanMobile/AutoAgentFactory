@@ -85,10 +85,11 @@ fn ensure_no_conflicting_worktree(
     expected_path: &Path,
     branch: &str,
 ) -> Result<(), GitError> {
+    let entries = list(repo_root)?;
     let expected_res = resolved(expected_path);
-    for entry in list(repo_root)? {
+    for entry in &entries {
         if entry.branch.as_deref() == Some(branch) {
-            if entry.path.exists() {
+            if entry.path.exists() || fs::symlink_metadata(&entry.path).is_ok() {
                 return Err(GitError::Invalid(format!(
                     "branch {branch} is still checked out at {}",
                     entry.path.display()
@@ -100,7 +101,10 @@ fn ensure_no_conflicting_worktree(
                     entry.path.display()
                 )));
             }
-        } else if resolved(&entry.path) == expected_res && (entry.path.exists() || entry.locked) {
+        } else if (resolved(&entry.path) == expected_res
+            || super::is_aaf_managed_worktree_path(&entry.path, expected_path, &entries))
+            && (entry.path.exists() || fs::symlink_metadata(&entry.path).is_ok() || entry.locked)
+        {
             return Err(GitError::Invalid(format!(
                 "worktree at {} is detached or locked",
                 entry.path.display()
@@ -296,12 +300,32 @@ pub fn cleanup_verified_merged_task(
             "invalid expected head oid {expected_head:?}"
         )));
     }
-    let path = worktree_path(repo_root, worktrees_dir, task_id)?;
+    let path = match super::existing_registered(repo_root, worktrees_dir, task_id)? {
+        Some((wt, _)) => wt.path,
+        None => worktree_path(repo_root, worktrees_dir, task_id)?,
+    };
     let branch = format!("{BRANCH_PREFIX}{task_id}");
     if path.exists() || fs::symlink_metadata(&path).is_ok() {
+        if !super::is_non_symlink_dir(&path) {
+            return Err(GitError::Invalid(format!(
+                "{} is not a worktree directory of branch {branch}",
+                path.display()
+            )));
+        }
         let wanted = fs::canonicalize(&path)?;
-        let reg_entry = list(repo_root)?.into_iter().find(|entry| {
+        let entries = list(repo_root)?;
+        if entries
+            .first()
+            .is_some_and(|main| fs::canonicalize(&main.path).is_ok_and(|p| p == wanted))
+        {
+            return Err(GitError::Invalid(format!(
+                "{} is the main worktree, refusing removal",
+                path.display()
+            )));
+        }
+        let reg_entry = entries.iter().skip(1).find(|entry| {
             entry.branch.as_deref() == Some(branch.as_str())
+                && super::is_non_symlink_dir(&entry.path)
                 && fs::canonicalize(&entry.path).is_ok_and(|p| p == wanted)
         });
         let Some(entry) = reg_entry else {

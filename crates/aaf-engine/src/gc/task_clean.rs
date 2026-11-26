@@ -228,14 +228,7 @@ pub(super) fn clean_task_artifacts_by_id(
 ) -> Result<(), GcError> {
     let branch = format!("{BRANCH_PREFIX}{task_id}");
     let expected_path = worktree::worktree_path(repo, worktrees_dir, task_id)?;
-    let expected_res = resolved_path(&expected_path);
-    let branch_entry = registered
-        .iter()
-        .find(|e| e.branch.as_deref() == Some(branch.as_str()));
-    let path_entry = registered
-        .iter()
-        .find(|e| resolved_path(&e.path) == expected_res);
-    let reg_entry = branch_entry.or(path_entry);
+    let reg_entry = worktree::find_registered_for_task(registered, &expected_path, &branch);
 
     if let Some(warning) =
         reg_entry.and_then(|e| worktree::foreign_checkout(task_id, e, registered, &expected_path))

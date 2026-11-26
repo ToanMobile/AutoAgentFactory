@@ -473,11 +473,12 @@ fn clean_repo(
             let require_verified_merge = task.state == TaskState::Done && !opts.force;
             let branch = format!("{}{}", worktree::BRANCH_PREFIX, task.id);
             let branch_ref = format!("refs/heads/{branch}");
+            let expected_wt = worktree::worktree_path(repo, worktrees_dir, &task.id).ok();
             let has_artifacts = refs.has_branch(&branch_ref)
-                || registered
-                    .iter()
-                    .any(|e| e.branch.as_deref() == Some(branch.as_str()))
-                || worktree::worktree_path(repo, worktrees_dir, &task.id).is_ok_and(|p| p.exists());
+                || expected_wt.as_deref().is_some_and(|exp| {
+                    exp.exists()
+                        || worktree::find_registered_for_task(registered, exp, &branch).is_some()
+                });
             let expected_head = if require_verified_merge && has_artifacts {
                 let db_opt = ro_db.get_or_insert_with(|| {
                     let db_path = data_dir.join("aaf.db");

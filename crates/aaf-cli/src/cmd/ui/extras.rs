@@ -249,7 +249,26 @@ pub(super) fn do_create_task(
     }))
 }
 
+pub(super) fn allowed_task_worktree_roots(ctx: &Ctx, task: &Task) -> Vec<PathBuf> {
+    let mut roots = vec![ctx.worktrees_dir.clone(), PathBuf::from(&task.repo_root)];
+    if let Ok(Some((wt, _))) = aaf_engine::git::worktree::existing_registered(
+        Path::new(&task.repo_root),
+        &ctx.worktrees_dir,
+        &task.id,
+    ) {
+        roots.push(wt.path);
+    }
+    roots
+}
+
 pub(super) fn resolve_task_worktree(db: &Db, ctx: &Ctx, task: &Task) -> Option<(PathBuf, String)> {
+    if let Ok(Some((wt, _))) = aaf_engine::git::worktree::existing_registered(
+        Path::new(&task.repo_root),
+        &ctx.worktrees_dir,
+        &task.id,
+    ) {
+        return Some((wt.path, wt.branch));
+    }
     let runs = db.runs_for_task(&task.id).unwrap_or_default();
     if let Some(latest) = runs.last() {
         let wt = PathBuf::from(&latest.worktree_path);
@@ -337,7 +356,7 @@ pub(super) fn read_task_diff(db: &Db, ctx: &Ctx, task_id: &str) -> Result<Value,
     let base_cfg = cfg.as_ref().map(|c| c.repo.gate.base_ref.as_str());
     let (diff, stat, truncated, branch, wt_disp) =
         if let Some((wt, branch)) = resolve_task_worktree(db, ctx, &task) {
-            let allowed = vec![ctx.worktrees_dir.clone(), PathBuf::from(&task.repo_root)];
+            let allowed = allowed_task_worktree_roots(ctx, &task);
             let Some(canon_wt) = canonical_under_allowed_roots(&wt, &allowed) else {
                 return Err("refused: worktree path outside allowed roots".into());
             };

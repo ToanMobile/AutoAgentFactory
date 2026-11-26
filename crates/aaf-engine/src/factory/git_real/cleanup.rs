@@ -7,7 +7,8 @@ use std::path::Path;
 use aaf_domain::ports::PortResult;
 
 use super::{GitOps, RealGit, err};
-use crate::git::worktree::{self, BRANCH_PREFIX};
+use crate::git::cmd::git;
+use crate::git::worktree;
 use crate::git::{GitError, TaskWorktree};
 use crate::process::CommandRunner;
 
@@ -44,23 +45,42 @@ impl RealGit {
         )
     }
 
-    /// The task's worktree when git has it registered on the task's branch.
+    /// The task's worktree when git has it registered on the task's branch
+    /// (in `worktrees_dir` or an AAF-managed `<repo_id>/<task_id>` path from a
+    /// previous `AAF_WORKTREE_DIR`).
     pub(super) fn existing(&self, task_id: &str) -> PortResult<Option<TaskWorktree>> {
-        let path =
-            worktree::worktree_path(&self.repo_root, &self.worktrees_dir, task_id).map_err(err)?;
-        let branch = format!("{BRANCH_PREFIX}{task_id}");
-        // Git lists resolved paths; the configured directory may be a link.
-        let Ok(resolved) = std::fs::canonicalize(&path) else {
+        let found = worktree::existing_registered(&self.repo_root, &self.worktrees_dir, task_id)
+            .map_err(err)?;
+        Ok(found.map(|(wt, _)| wt))
+    }
+
+    /// Re-attaches an existing unattached `aaf/<task_id>` branch into
+    /// `worktrees_dir` and hydrates it from the trusted base commit.
+    pub(super) fn reattach_existing_branch(
+        &self,
+        task_id: &str,
+    ) -> PortResult<Option<TaskWorktree>> {
+        let base_spec = format!("{}^{{commit}}", self.start());
+        let base_sha = git(&self.repo_root, &["rev-parse", "--verify", &base_spec]).map_err(err)?;
+        let Some(wt) = worktree::attach_existing_branch(
+            &self.repo_root,
+            &self.worktrees_dir,
+            task_id,
+            Some(&base_sha),
+        )
+        .map_err(err)?
+        else {
             return Ok(None);
         };
-        let registered = worktree::list(&self.repo_root)
-            .map_err(err)?
-            .into_iter()
-            .any(|entry| {
-                entry.branch.as_deref() == Some(branch.as_str())
-                    && std::fs::canonicalize(&entry.path).is_ok_and(|p| p == resolved)
-            });
-        Ok(registered.then_some(TaskWorktree { path, branch }))
+        let data_dir = self.locks_dir.parent();
+        crate::git::hydration::hydrate_reattached_worktree_with_data_dir(
+            &self.repo_root,
+            &wt,
+            &base_sha,
+            data_dir,
+        )
+        .map_err(err)?;
+        Ok(Some(wt))
     }
 
     pub(super) fn cleanup_impl(&self, task_id: &str) -> PortResult<()> {

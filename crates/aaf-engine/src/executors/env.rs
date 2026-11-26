@@ -426,13 +426,16 @@ pub fn validate_writable_caches(caches: &[String], env: &ExecEnv) -> PortResult<
             forbidden_overlap.push(("AAF_DATA_DIR".to_string(), p));
         }
     }
-    let wt_root = env.worktrees_root.clone().or_else(|| {
-        env.home
-            .as_deref()
-            .filter(|h| !h.is_empty())
-            .map(|h| format!("{}/{DEFAULT_WORKTREES_REL}", h.trim_end_matches('/')))
-    });
-    if let Some(wt) = wt_root.as_deref().filter(|s| !s.is_empty()) {
+    let default_wt = env
+        .home
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("{}/{DEFAULT_WORKTREES_REL}", h.trim_end_matches('/')));
+    for wt in [env.worktrees_root.as_deref(), default_wt.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+    {
         for p in raw_and_canon(wt) {
             forbidden_overlap.push(("worktrees_root".to_string(), p));
         }

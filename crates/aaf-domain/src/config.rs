@@ -90,6 +90,10 @@ pub struct MachineConfig {
     /// `exclusive_build_tools = false`. Default 1 prevents Unity License/Library
     /// contention without blocking Gradle or other build tools.
     pub max_unity_parallel: u32,
+    /// Machine-wide cap on concurrent Gradle builds when
+    /// `exclusive_build_tools = false`. Default 2 permits cross-repo builds
+    /// (e.g. two Android repos) without triggering 3+ JVM storms. `0` = uncapped.
+    pub max_gradle_parallel: u32,
     /// Load percentage ceiling (100 = 1.0x CPU count) used by `aaf gate --when-idle`.
     /// 0 disables the load check in idle mode.
     pub idle_max_load_percent: u32,
@@ -108,6 +112,7 @@ impl Default for MachineConfig {
             low_priority: true,
             exclusive_build_tools: true,
             max_unity_parallel: 1,
+            max_gradle_parallel: 2,
             idle_max_load_percent: 100,
             writable_caches: Vec::new(),
         }
@@ -352,6 +357,10 @@ pub struct GateConfig {
     pub store_compliance: StoreMode,
     pub min_android_target_sdk: u32,
     pub command_timeout_secs: u64,
+    /// Output-silence timeout per gate command (seconds). Kills hung/GC-thrashing
+    /// commands that emit no stdout/stderr for this long (`0` disables; time spent
+    /// `SIGSTOP`-paused under memory pressure is not counted).
+    pub idle_timeout_secs: u64,
     /// Skip `lint` and `test_scoped` in `--scoped` mode when every changed
     /// path is a safe documentation file (still runs hidden-file, static,
     /// head-lock, store-compliance, and proof checks).
@@ -387,6 +396,7 @@ impl Default for GateConfig {
             store_compliance: StoreMode::Auto,
             min_android_target_sdk: DEFAULT_MIN_ANDROID_TARGET_SDK,
             command_timeout_secs: 1800,
+            idle_timeout_secs: 600,
             docs_fast_path: true,
             docs_fast_path_exclude_globs: Vec::new(),
             red_green_oracle: OracleMode::Off,

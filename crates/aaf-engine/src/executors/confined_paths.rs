@@ -161,11 +161,43 @@ pub(super) fn build_sandbox_paths(
     {
         writable.push(vol_tmp.to_string_lossy().into_owned());
     }
-    let worktrees_root = env.worktrees_root.clone().or_else(|| {
-        env.home
-            .as_ref()
-            .map(|home| format!("{home}/{DEFAULT_WORKTREES_REL}"))
-    });
+    let default_wt_root = env
+        .home
+        .as_ref()
+        .map(|home| format!("{home}/{DEFAULT_WORKTREES_REL}"));
+    let worktrees_root = env
+        .worktrees_root
+        .clone()
+        .or_else(|| default_wt_root.clone());
+    let mut extra_worktrees_roots = Vec::new();
+    if let Some(def_wt) = default_wt_root
+        && worktrees_root.as_deref() != Some(def_wt.as_str())
+    {
+        push_unique(&mut extra_worktrees_roots, def_wt);
+    }
+    // If running inside a relocated AAF task worktree `<old_root>/<repo_id>/<task_id>`,
+    // also close `<old_root>/<repo_id>` so sibling worktrees there stay non-writable even
+    // when `<old_root>` lies under a writable ancestor (e.g. `$TMPDIR` or `/tmp`),
+    // never enclosing any of the run's own `git_dirs`.
+    if !read_only && !git_dirs.is_empty() {
+        let cwd_path = Path::new(&request.cwd);
+        if cwd_path.join(".git").is_file()
+            && let Some(repo_wt_dir) = cwd_path.parent()
+            && repo_wt_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit()))
+            && !git_dirs
+                .iter()
+                .any(|gd| Path::new(gd).starts_with(repo_wt_dir))
+            && let Some(repo_wt_str) = repo_wt_dir.to_str()
+            && worktrees_root
+                .as_deref()
+                .is_none_or(|r| !cwd_path.starts_with(Path::new(r)))
+        {
+            push_unique(&mut extra_worktrees_roots, repo_wt_str.to_string());
+        }
+    }
     if !read_only {
         for path in &request.sandbox.writable_paths {
             push_unique(&mut writable, path.clone());
@@ -262,6 +294,7 @@ pub(super) fn build_sandbox_paths(
         worktree,
         git_dirs,
         worktrees_root,
+        extra_worktrees_roots,
         path_dirs,
         run_mark,
         deny_keychain_dir,

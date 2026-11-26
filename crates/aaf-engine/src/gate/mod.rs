@@ -21,7 +21,6 @@ pub mod static_checks;
 mod tests;
 
 use std::path::Path;
-use std::time::Duration;
 
 use aaf_domain::config::{MachineConfig, RepoConfig};
 use aaf_domain::gate::{CommandResult, GateMode, GateStatus, RECEIPT_SCHEMA_VERSION, Receipt};
@@ -30,6 +29,7 @@ use aaf_domain::ports::Clock;
 use crate::throttle::{Progress, SystemProbe, Throttle};
 use aaf_fp::fs_private as private;
 pub use base::GateRunOptions;
+pub use helpers::CommandTimeouts;
 pub(crate) use helpers::{Evidence, decide};
 pub use hidden::HiddenPolicy;
 use hidden::When;
@@ -331,7 +331,6 @@ pub fn run_gate_with_options(
         ));
         Some(Vec::new())
     } else if unblocked {
-        let timeout = Duration::from_secs(cfg.gate.command_timeout_secs);
         let heavy = runner::HeavyContext {
             data_dir,
             stats_repo_id: &common_repo_id,
@@ -360,11 +359,15 @@ pub fn run_gate_with_options(
         {
             return Err(GateError::Io(err));
         }
-        let run = runner::run_all_throttled_with_options(
+        let timeouts = helpers::CommandTimeouts::from_secs(
+            cfg.gate.command_timeout_secs,
+            cfg.gate.idle_timeout_secs,
+        );
+        let run = runner::run_all_throttled_with_timeouts(
             repo_root,
             &cfg.commands,
             mode,
-            timeout,
+            timeouts,
             &heavy,
             &env_refs,
             env_remove,

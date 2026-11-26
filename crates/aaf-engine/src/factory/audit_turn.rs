@@ -114,9 +114,16 @@ fn classify_auditor_log_tail(
         "etimedout",
         "econnreset",
         "enotfound",
+        "eai_again",
         "ehostunreach",
+        "enetunreach",
         "connection refused",
         "connection timed out",
+        "connection dropped",
+        "can't reach the api server",
+        "unable to connect to api",
+        "could not resolve host",
+        "no internet route",
         "503 service unavailable",
         "529 overloaded",
     ]) || ["502", "503", "504", "529"]
@@ -189,13 +196,29 @@ pub(crate) fn run_auditor_turn(
     ) {
         Ok(report) => report,
         Err(err) => {
-            worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0), false)?;
+            worker::end_run(
+                deps,
+                task,
+                &run,
+                RunStatus::Failed,
+                None,
+                (0, 0),
+                false,
+                false,
+            )?;
             return Err(err);
         }
     };
-    let (mut infra, mut limit_hit, failed_tail, last_succeeded, mut last_final_text) =
-        watch.take_all();
-    if limit_hit.is_none()
+    let (
+        mut infra,
+        mut limit_hit,
+        failed_tail,
+        last_succeeded,
+        mut any_timed_out,
+        mut last_final_text,
+    ) = watch.take_all();
+    if !any_timed_out
+        && limit_hit.is_none()
         && infra.is_none()
         && let Some(tail) = failed_tail.as_deref()
     {
@@ -247,6 +270,10 @@ pub(crate) fn run_auditor_turn(
             infra = Some(inf);
             break;
         }
+        if repair_out.timed_out {
+            any_timed_out = true;
+            break;
+        }
         if !repair_out.succeeded() {
             if !repair_out.log_tail.trim().is_empty() {
                 classify_auditor_log_tail(
@@ -290,7 +317,18 @@ pub(crate) fn run_auditor_turn(
         RunStatus::Failed
     };
     let tokens = (report.tokens_in, report.tokens_out);
-    worker::end_run(deps, task, &run, status, None, tokens, tokens_measured)?;
+    let charge_wall =
+        any_timed_out || (infra.is_none() && limit_hit.is_none()) || tokens.0 > 0 || tokens.1 > 0;
+    worker::end_run(
+        deps,
+        task,
+        &run,
+        status,
+        None,
+        tokens,
+        tokens_measured,
+        charge_wall,
+    )?;
     Ok((report, infra, limit_hit))
 }
 

@@ -195,19 +195,17 @@ fn collect_batch_candidates(
             candidates.insert(id.to_string());
         }
     }
-    let resolved_wt_dir = resolved(repo_wt_dir);
     for entry in registered {
         if let Some(id) = entry.task_id()
             && id.starts_with(BATCH_PREFIX)
             && !active_task_ids.contains(id)
         {
             candidates.insert(id.to_string());
-        } else if let Some(parent) = resolved(&entry.path).parent()
-            && parent == resolved_wt_dir
-            && let Some(id) = entry.path.file_name().and_then(|n| n.to_str())
+        } else if let Some(id) = entry.path.file_name().and_then(|n| n.to_str())
             && id.starts_with(BATCH_PREFIX)
             && validate_task_id(id).is_ok()
             && !active_task_ids.contains(id)
+            && super::is_aaf_managed_worktree_path(&entry.path, &repo_wt_dir.join(id), registered)
         {
             candidates.insert(id.to_string());
         }
@@ -367,7 +365,6 @@ pub(crate) fn remove_orphan_batch_worktrees_prepared(
             continue;
         }
         let expected_path = repo_wt_dir.join(&id);
-        let expected_res = resolved(&expected_path);
         let branch_entry = registered
             .iter()
             .find(|e| e.branch.as_deref() == Some(branch.as_str()));
@@ -377,10 +374,7 @@ pub(crate) fn remove_orphan_batch_worktrees_prepared(
             sweep.warnings.push(warning);
             continue;
         }
-        let path_entry = registered
-            .iter()
-            .find(|e| resolved(&e.path) == expected_res);
-        let reg_entry = branch_entry.or(path_entry);
+        let reg_entry = super::find_registered_for_task(registered, &expected_path, &branch);
 
         let keep = match reg_entry {
             Some(entry) => !clean_registered_batch(

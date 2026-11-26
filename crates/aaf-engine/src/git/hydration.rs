@@ -12,10 +12,12 @@ use std::path::{Component, Path, PathBuf};
 use aaf_domain::config::RepoConfig;
 use aaf_domain::worktree_config::{WorktreeConfig, is_secret_file};
 mod cleanup;
+mod denied;
 pub mod device;
 pub mod seed;
 pub mod stage;
 
+pub use denied::{worktree_write_denied_for_cwd, worktree_write_denied_strings};
 pub use device::{MountEntry, same_cow_device};
 pub(crate) use stage::stage_for_gate_from_base;
 pub use stage::{CloneSkip, GateSecretStage, remove_partial_dst, stage_for_gate};
@@ -24,7 +26,7 @@ use stage::{cow_clone_dir, run_setup_cmd};
 use super::cmd::{self, git, git_raw};
 use super::worktree::{self, TaskWorktree};
 use super::{GitError, path_str};
-use crate::confine_core::git_refs::{AUTO_FALLBACKS, origin_head_branch, stats_repo_id};
+use crate::confine_core::git_refs::stats_repo_id;
 use aaf_domain::engine_contracts::REPO_CONFIG_REL;
 
 /// Paths materialized into a task worktree that must remain read-only
@@ -343,6 +345,8 @@ pub fn hydrate_for_agent(
         data_dir.as_deref(),
         false,
         &seed::RealSeedBackend,
+        true,
+        false,
     )
 }
 
@@ -356,14 +360,22 @@ fn hydrate_for_agent_inner(
     data_dir: Option<&Path>,
     seed_enabled: bool,
     seed_backend: &dyn seed::SeedBackend,
+    run_setup: bool,
+    strict_reattach: bool,
 ) -> Result<HydratedPaths, GitError> {
     let mut write_denied = Vec::new();
     if !cfg.is_empty() {
         for entry in &cfg.clone_dirs {
             let rel = validate_relative_entry(entry)?;
             assert_tracked_gitignore_inner(repo_root, &rel, true)?;
+            if strict_reattach {
+                assert_tracked_gitignore_inner(wt_root, &rel, true)?;
+            }
             assert_no_escaping_wt_prefix(wt_root, &rel)?;
             let dst = wt_root.join(&rel);
+            if strict_reattach && fs::symlink_metadata(&dst).is_ok() {
+                return Err(GitError::AlreadyExists(dst.display().to_string()));
+            }
             let main_missing = matches!(
                 fs::symlink_metadata(repo_root.join(&rel)),
                 Err(err) if err.kind() == io::ErrorKind::NotFound
@@ -406,7 +418,13 @@ fn hydrate_for_agent_inner(
             if is_secret_file(path_str(&rel)?) {
                 return Err(secret_err());
             }
+            if strict_reattach {
+                assert_tracked_gitignore_inner(wt_root, &rel, false)?;
+            }
             let (src, dst) = resolve_entry(repo_root, wt_root, entry, false, "copy_files")?;
+            if strict_reattach && fs::symlink_metadata(&dst).is_ok() {
+                return Err(GitError::AlreadyExists(dst.display().to_string()));
+            }
             if fs::symlink_metadata(&dst).is_err() {
                 if let Some(parent) = dst.parent() {
                     fs::create_dir_all(parent)?;
@@ -416,7 +434,7 @@ fn hydrate_for_agent_inner(
             write_denied.push(dst);
         }
         let setup_cmd = cfg.setup_cmd.trim();
-        if !setup_cmd.is_empty() {
+        if run_setup && !setup_cmd.is_empty() {
             if !git(wt_root, &["status", "--porcelain"])?.is_empty() {
                 return Err(GitError::Dirty(wt_root.to_path_buf()));
             }
@@ -461,6 +479,31 @@ pub fn hydrate_fresh_worktree_with_seed_options(
     seed_enabled: bool,
     seed_backend: &dyn seed::SeedBackend,
 ) -> Result<HydratedPaths, GitError> {
+    hydrate_worktree_with_seed_options_inner(
+        repo_root,
+        worktree,
+        base_sha,
+        snaps,
+        seed_enabled,
+        seed_backend,
+        true,
+        true,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hydrate_worktree_with_seed_options_inner(
+    repo_root: &Path,
+    worktree: &TaskWorktree,
+    base_sha: &str,
+    snaps: Option<(&Path, &str)>,
+    seed_enabled: bool,
+    seed_backend: &dyn seed::SeedBackend,
+    delete_branch_on_err: bool,
+    run_setup: bool,
+    strict_reattach: bool,
+) -> Result<HydratedPaths, GitError> {
     let default_data_dir = snaps.is_none().then(|| aaf_fp::data_dir().ok()).flatten();
     let result = load_base_worktree_config(repo_root, base_sha).and_then(|cfg| {
         let rev = format!("{base_sha}^{{commit}}");
@@ -478,10 +521,12 @@ pub fn hydrate_fresh_worktree_with_seed_options(
             data_dir,
             seed_enabled,
             seed_backend,
+            run_setup,
+            strict_reattach,
         )
     });
     if result.is_err()
-        && let Err(rm_err) = worktree::remove(repo_root, worktree, true, true)
+        && let Err(rm_err) = worktree::remove(repo_root, worktree, delete_branch_on_err, true)
     {
         eprintln!(
             "aaf: warning: failed to remove worktree {} after hydration error: {rm_err}",
@@ -518,76 +563,36 @@ pub fn hydrate_fresh_worktree(
     )
 }
 
-/// Resolves all `clone_dirs` + `copy_files` destinations inside `worktree` from
-/// the immutable base commit so sandboxed agent turns cannot mutate them.
-pub fn worktree_write_denied_for_cwd(worktree: &Path) -> Result<Vec<PathBuf>, GitError> {
-    let top = git_raw(worktree, &["rev-parse", "--show-toplevel"])?;
-    let raw_top = top.stdout.trim();
-    if !top.success() || raw_top.is_empty() {
-        return Ok(Vec::new());
-    }
-    let wt_root = fs::canonicalize(raw_top).unwrap_or_else(|_| PathBuf::from(raw_top));
-    let Some(base_sha) = resolve_base_sha_for_worktree(&wt_root)? else {
-        return Ok(Vec::new());
-    };
-    let cfg = load_base_worktree_config(&wt_root, &base_sha)?;
-    let mut denied = Vec::new();
-    for entry in cfg.clone_dirs.iter().chain(&cfg.copy_files) {
-        let full = wt_root.join(validate_relative_entry(entry)?);
-        if !denied.contains(&full) {
-            denied.push(full);
-        }
-    }
-    Ok(denied)
-}
-
-/// UTF-8 string variant of [`worktree_write_denied_for_cwd`] for sandbox profiles.
-pub fn worktree_write_denied_strings(worktree: &Path) -> Result<Vec<String>, GitError> {
-    worktree_write_denied_for_cwd(worktree)?
-        .into_iter()
-        .map(|p| path_str(&p).map(str::to_string))
-        .collect()
-}
-
-fn resolve_base_sha_for_worktree(wt_root: &Path) -> Result<Option<String>, GitError> {
-    let head_out = git_raw(
-        wt_root,
-        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-    )?;
-    let head = head_out.stdout.trim().to_string();
-    if !head_out.success() || head.is_empty() {
-        return Ok(None);
-    }
-    let mut candidates = Vec::new();
-    let origin_head = git_raw(
-        wt_root,
-        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    )?;
-    let sym = origin_head.stdout.trim().to_string();
-    if origin_head.success() && origin_head_branch(&sym).is_some() {
-        candidates.push(sym);
-    }
-    candidates.extend(AUTO_FALLBACKS.map(String::from));
-    for target in candidates {
-        let spec = format!("{target}^{{commit}}");
-        let rev = git_raw(wt_root, &["rev-parse", "--verify", "--quiet", &spec])?;
-        if !rev.success() {
-            continue;
-        }
-        let mb = git_raw(wt_root, &["merge-base", rev.stdout.trim(), &head])?;
-        if mb.success() && !mb.stdout.trim().is_empty() {
-            return Ok(Some(mb.stdout.trim().to_string()));
-        }
-    }
-    if let Ok(entries) = worktree::list(wt_root)
-        && let Some(main_wt) = entries.first()
-        && let Some(main_head) = &main_wt.head
-        && fs::canonicalize(&main_wt.path).ok().as_deref() != Some(wt_root)
-    {
-        let mb = git_raw(wt_root, &["merge-base", main_head, &head])?;
-        if mb.success() && !mb.stdout.trim().is_empty() {
-            return Ok(Some(mb.stdout.trim().to_string()));
-        }
-    }
-    Ok(Some(head))
+/// Loads `[worktree]` from trusted `base_sha` and hydrates a worktree re-attached
+/// to an existing task branch: never executes `setup_cmd`, checks `wt_root`
+/// `.gitignore`, refuses pre-existing targets, and removes only the worktree
+/// (preserving the branch and its commits) if hydration fails.
+pub fn hydrate_reattached_worktree_with_data_dir(
+    repo_root: &Path,
+    worktree: &TaskWorktree,
+    base_sha: &str,
+    data_dir: Option<&Path>,
+) -> Result<HydratedPaths, GitError> {
+    let env_dir = data_dir
+        .is_none()
+        .then(|| {
+            std::env::var_os("AAF_DATA_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .flatten();
+    let effective = data_dir.or(env_dir.as_deref());
+    let common_id = effective.map(|_| stats_repo_id(repo_root));
+    let snaps = effective.zip(common_id.as_deref());
+    hydrate_worktree_with_seed_options_inner(
+        repo_root,
+        worktree,
+        base_sha,
+        snaps,
+        seed::seed_cache_enabled(),
+        &seed::RealSeedBackend,
+        false,
+        false,
+        true,
+    )
 }

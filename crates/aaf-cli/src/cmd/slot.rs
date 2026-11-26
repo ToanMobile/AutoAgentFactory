@@ -49,6 +49,9 @@ pub struct SlotArgs {
     /// Kill the command's process group with exit 124 if it runs longer than this.
     #[arg(long, value_name = "SECS")]
     exec_timeout: Option<u64>,
+    /// Keep waiting for a slot even if the spawning parent process exits.
+    #[arg(long)]
+    detach: bool,
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     command: Vec<OsString>,
@@ -262,8 +265,23 @@ fn run_command(args: &SlotArgs, ctx: &Ctx) -> Result<i32, CmdError> {
         exec_timeout: args.exec_timeout.map(Duration::from_secs),
         inherit_stdin: !ctx.stdin_is_tty,
     };
-    match throttle.run_slot(&ctx.data_dir, &SystemClock, &job) {
+    let watch_parent_pid = if args.detach {
+        None
+    } else {
+        let ppid = std::os::unix::process::parent_id();
+        (ppid > 1).then_some(ppid)
+    };
+    match throttle.run_slot_watching_parent(&ctx.data_dir, &SystemClock, &job, watch_parent_pid) {
         Ok(Some(run)) => {
+            if run.waited_secs > 0 {
+                notice(
+                    "slot",
+                    &format!(
+                        "{label}: waited {}s for heavy slot {} before running",
+                        run.waited_secs, run.slot
+                    ),
+                );
+            }
             for daemon in &run.leftover_daemons {
                 notice(
                     "slot",
@@ -287,13 +305,24 @@ fn run_command(args: &SlotArgs, ctx: &Ctx) -> Result<i32, CmdError> {
             Ok(exit_code(run.status))
         }
         Ok(None) => {
-            notice(
-                "slot",
-                &format!(
-                    "{label}: no heavy slot within {}s; the command was not started",
-                    args.timeout.unwrap_or(0)
-                ),
-            );
+            if let Some(initial) = watch_parent_pid
+                && std::os::unix::process::parent_id() != initial
+            {
+                notice(
+                    "slot",
+                    &format!(
+                        "{label}: parent process {initial} exited while waiting for a heavy slot; aborting"
+                    ),
+                );
+            } else {
+                notice(
+                    "slot",
+                    &format!(
+                        "{label}: no heavy slot within {}s; the command was not started",
+                        args.timeout.unwrap_or(0)
+                    ),
+                );
+            }
             Ok(EXIT_NO_SLOT)
         }
         Err(err) => start_failure(&label, &err),
@@ -397,6 +426,7 @@ mod tests {
             label: Some("sleep-test".into()),
             timeout: None,
             exec_timeout: Some(1),
+            detach: false,
             command: vec![
                 program.clone(),
                 OsString::from("-c"),
@@ -410,6 +440,7 @@ mod tests {
             label: Some("fast-test".into()),
             timeout: None,
             exec_timeout: Some(5),
+            detach: false,
             command: vec![
                 program.clone(),
                 OsString::from("-c"),

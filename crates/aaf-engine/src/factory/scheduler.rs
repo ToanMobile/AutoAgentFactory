@@ -2,6 +2,7 @@
 //! that needs an account, and one gate thread for the repository.
 
 mod cost_guard;
+mod dispatch;
 pub(super) mod dual_coord;
 mod halt;
 mod outcome;
@@ -11,7 +12,6 @@ mod outcome;
 mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::Scope;
@@ -24,7 +24,6 @@ use super::audit_backend::AuditBackend;
 use super::dual_audit::DualReviewCoord;
 use super::finish::Resolution;
 pub(super) use super::finish::{GateStats, judge_round};
-use super::ports::Grant;
 use super::schedule_order;
 pub use super::schedule_order::{
     MAX_TRANSIENT_BACKOFF_SECS, MAX_TRANSIENT_RETRIES, transient_backoff_secs,
@@ -35,7 +34,7 @@ pub use super::sweep::recover;
 use super::worker::{self, GateJob, Job, Outcome, PreGateAudit};
 use super::{Deps, Mode, RunSummary, is_frozen};
 use cost_guard::CostGate;
-use dual_coord::JobDispatch;
+use dispatch::WorkerLane;
 use outcome::gate_loop;
 
 const MAX_GATE_RETRIES: u32 = 3;
@@ -50,7 +49,7 @@ pub struct Hooks<'a> {
 }
 
 enum Msg {
-    Worker(Outcome),
+    Worker(WorkerLane, Outcome),
     Gate(GateJob, Result<Resolution, String>),
 }
 
@@ -143,7 +142,9 @@ pub fn run_with_router_and_stop(
 #[derive(Default)]
 pub(super) struct LoopState {
     pub(super) jobs: VecDeque<Job>,
-    active: usize,
+    pub(super) coding_active: usize,
+    pub(super) aux_active: usize,
+    pub(super) in_flight_tasks: HashMap<String, usize>,
     in_gate: usize,
     pub(super) started: HashSet<String>,
     pub(super) restarts: HashMap<(String, ProviderKey), usize>,
@@ -160,14 +161,20 @@ pub(super) struct LoopState {
     pub(super) cost_cached_paused: bool,
 }
 
+impl LoopState {
+    pub(super) fn total_active(&self) -> usize {
+        self.coding_active + self.aux_active
+    }
+}
+
 pub(super) struct TickBoard {
     pub(super) candidates: Vec<Task>,
     pub(super) open_review: usize,
     pub(super) active_scopes: Vec<Vec<String>>,
-    has_review_dep_waiter: bool,
+    pub(super) has_review_dep_waiter: bool,
 }
 
-fn next_runnable(board: &TickBoard) -> Option<usize> {
+pub(super) fn next_runnable(board: &TickBoard) -> Option<usize> {
     board.candidates.iter().position(|t| {
         !board
             .active_scopes
@@ -238,13 +245,15 @@ impl<'a> Scheduler<'a> {
                 }
                 self.start_jobs(scope)?;
             }
-            let limit = self.deps.settings.max_parallel.max(1) as usize;
-            if self.state.active > 0 || self.state.in_gate > 0 {
+            let coding_limit = self.coding_parallel_limit();
+            let aux_limit = self.aux_parallel_limit();
+            if self.state.total_active() > 0 || self.state.in_gate > 0 {
                 let msg = if self.mode == Mode::Auto
                     && !frozen
                     && !halted
                     && !stopping
-                    && self.state.active < limit
+                    && (self.state.coding_active < coding_limit
+                        || self.state.aux_active < aux_limit)
                 {
                     match self.msg_rx.recv_timeout(self.next_wake_duration()) {
                         Ok(msg) => Some(msg),
@@ -255,7 +264,7 @@ impl<'a> Scheduler<'a> {
                     Some(self.msg_rx.recv().map_err(|_| closed())?)
                 };
                 match msg {
-                    Some(Msg::Worker(outcome)) => {
+                    Some(Msg::Worker(lane, outcome)) => {
                         self.state.cost_checked_at = None;
                         if matches!(
                             outcome.next,
@@ -270,7 +279,7 @@ impl<'a> Scheduler<'a> {
                                 .restarts
                                 .remove(&(outcome.task_id.clone(), outcome.provider.clone()));
                         }
-                        self.handle_worker(outcome)?;
+                        self.handle_worker(lane, outcome)?;
                     }
                     Some(Msg::Gate(job, resolution)) => {
                         if matches!(resolution, Ok(Resolution::Settled(_))) {
@@ -367,7 +376,7 @@ impl<'a> Scheduler<'a> {
         self.queue_gates(jobs)
     }
 
-    fn review_cap(&self) -> Option<usize> {
+    pub(super) fn review_cap(&self) -> Option<usize> {
         (!self.deps.settings.effective_land().auto_lands()
             && self.deps.settings.repo.run.max_open_review > 0)
             .then_some(self.deps.settings.repo.run.max_open_review as usize)
@@ -375,7 +384,7 @@ impl<'a> Scheduler<'a> {
 
     /// Single-snapshot board view: ready candidates (deps Done, priority + critical
     /// path order), open-review count, and active (`Running | Gating`) scopes.
-    fn load_tick_board(&mut self) -> PortResult<TickBoard> {
+    pub(super) fn load_tick_board(&mut self) -> PortResult<TickBoard> {
         self.expire_waits();
         let now = self.deps.now();
         let stopping = self.is_stopping();
@@ -413,6 +422,8 @@ impl<'a> Scheduler<'a> {
                     .is_some_and(|&u| u > now);
                 if (self.mode == Mode::Once && self.state.started.contains(&task.id))
                     || self.parked.contains_key(&task.id)
+                    || self.state.in_flight_tasks.contains_key(&task.id)
+                    || self.gating_in_flight.contains(&task.id)
                     || waiting
                 {
                     continue;
@@ -443,120 +454,6 @@ impl<'a> Scheduler<'a> {
                 });
             }
         }
-    }
-
-    pub(super) fn spawn_worker<'scope>(
-        &mut self,
-        scope: &'scope Scope<'scope, '_>,
-        job: Job,
-        provider: ProviderKey,
-        grant: Grant,
-    ) where
-        'a: 'scope,
-    {
-        self.state.active += 1;
-        let (deps, audit, router, tx) = (self.deps, self.audit, self.router, self.msg_tx.clone());
-        scope.spawn(move || {
-            let task_id = job.task_id().to_string();
-            let provider_key = provider.clone();
-            let mut outcome = catch_unwind(AssertUnwindSafe(|| {
-                worker::run_job(deps, audit, router, provider, job, &grant)
-            }))
-            .unwrap_or_else(|_| worker::block_infra(deps, &task_id, "the worker panicked"));
-            outcome.provider = provider_key;
-            drop(grant);
-            let _ = tx.send(Msg::Worker(outcome));
-        });
-    }
-
-    fn start_jobs<'scope>(&mut self, scope: &'scope Scope<'scope, '_>) -> PortResult<()>
-    where
-        'a: 'scope,
-    {
-        let limit = self.deps.settings.max_parallel.max(1) as usize;
-        let now = self.deps.now();
-        let mut exhausted: HashSet<ProviderKey> = self
-            .state
-            .default_wait_until
-            .iter()
-            .filter(|(_, deadline)| now < **deadline)
-            .map(|(provider, _)| provider.clone())
-            .collect();
-        let mut deferred: VecDeque<Job> = VecDeque::new();
-        while self.state.active < limit
-            && let Some(job) = self.state.jobs.pop_front()
-        {
-            let (provider, pool, purpose) = match self.resolve_job_dispatch(&job) {
-                JobDispatch::Ready {
-                    provider,
-                    pool,
-                    purpose,
-                } => (provider, pool, purpose),
-                JobDispatch::DropAndAbort {
-                    task_id,
-                    message,
-                    is_dual_sibling,
-                } => {
-                    self.abort_missing_reviewer_target(
-                        task_id,
-                        &message,
-                        is_dual_sibling,
-                        &mut deferred,
-                    )?;
-                    continue;
-                }
-            };
-            let grant = if exhausted.contains(&provider) {
-                None
-            } else {
-                pool.acquire_for(job.task_id(), purpose)?
-            };
-            let Some(grant) = grant else {
-                exhausted.insert(provider);
-                deferred.push_back(job);
-                continue;
-            };
-            self.spawn_worker(scope, job, provider, grant);
-        }
-        let (mut board_slot, mut swept_for_cap) = (None, false);
-        while self.state.active < limit {
-            if board_slot.is_none() {
-                board_slot = Some(self.load_tick_board()?);
-            }
-            let Some(board) = board_slot.as_mut() else {
-                break;
-            };
-            if next_runnable(board).is_none() {
-                if self.mode == Mode::Auto
-                    && board.has_review_dep_waiter
-                    && self.maybe_sweep_review(&mut swept_for_cap)?
-                {
-                    *board = self.load_tick_board()?;
-                }
-                if next_runnable(board).is_none() {
-                    break;
-                }
-            }
-            if let Some(cap) = self.review_cap()
-                && board.open_review >= cap
-            {
-                if self.maybe_sweep_review(&mut swept_for_cap)? {
-                    *board = self.load_tick_board()?;
-                }
-                if board.open_review >= cap {
-                    self.summary.waiting_for_review_cap =
-                        self.summary.waiting_for_review_cap.saturating_add(1);
-                    break;
-                }
-            }
-            if !self.try_start_board_candidate(scope, board, &mut exhausted)? {
-                break;
-            }
-        }
-        while let Some(job) = deferred.pop_back() {
-            self.state.jobs.push_front(job);
-        }
-        Ok(())
     }
 
     pub(super) fn queue_gate(&mut self, job: GateJob) -> PortResult<()> {

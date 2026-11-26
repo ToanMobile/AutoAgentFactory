@@ -130,6 +130,7 @@ pub fn is_guest(data_dir: &Path) -> bool {
 pub(super) fn prepare(data_dir: &Path) -> io::Result<()> {
     locks_dir(data_dir)?;
     ensure_pools_dir(data_dir)?;
+    super::stats::mirror_host_stats(data_dir);
     private::open_file(&drain_path(data_dir)).map(|_| ())
 }
 

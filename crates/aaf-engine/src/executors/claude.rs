@@ -1,7 +1,4 @@
 //! Runs Claude Code headless and reads its `stream-json` output.
-//!
-//! Flags and event shapes were checked against `claude --help` and a real run
-//! of Claude Code 2.1.330 (fixtures in `tests/fixtures/exec`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,7 +15,6 @@ use serde_json::Value;
 use super::pty::CommandSpec;
 use super::{AccountPaths, ExecEnv, open_stream_log, run_confined};
 
-/// Longest provider message kept in [`LimitHit::raw`].
 const RAW_LIMIT_CHARS: usize = 500;
 
 pub struct ClaudeCodeRunner {
@@ -26,13 +22,9 @@ pub struct ClaudeCodeRunner {
     env: ExecEnv,
     model: String,
     effort: String,
-    /// Non-persistent CLI opt-in permitting `--permission-mode bypassPermissions`
-    /// when `request.sandbox.enabled == false`. Always defaults to `false`.
     allow_unsandboxed_bypass: bool,
 }
 
-/// A value for `--model` or `--effort` from the repo config: one word that
-/// cannot be read as another flag.
 fn flag_value(key: &str, value: &str) -> PortResult<()> {
     if value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(PortError::Invalid(format!(
@@ -43,9 +35,8 @@ fn flag_value(key: &str, value: &str) -> PortResult<()> {
 }
 
 impl ClaudeCodeRunner {
-    /// `bin` is the absolute path of the `claude` binary.
     pub fn new(bin: impl Into<String>, env: ExecEnv) -> Self {
-        ClaudeCodeRunner {
+        Self {
             bin: bin.into(),
             env,
             model: String::new(),
@@ -54,7 +45,6 @@ impl ClaudeCodeRunner {
         }
     }
 
-    /// `run.model` and `run.effort`: passed as `--model` and `--effort`. Empty leaves the flag out.
     #[must_use]
     pub fn with_model_and_effort(mut self, model: &str, effort: &str) -> Self {
         self.model = model.to_string();
@@ -234,16 +224,26 @@ impl AgentRunner for ClaudeCodeRunner {
             summary.tokens_in,
             summary.tokens_out,
         );
+        let mut limit_hit = summary.limit_hit.filter(|_| !output.timed_out);
+        let mut infra = summary.infra.filter(|_| !output.timed_out);
+        if exit_code != Some(0)
+            && !output.timed_out
+            && !summary.saw_result
+            && summary.final_text.is_empty()
+            && limit_hit.is_none()
+            && infra.is_none()
+        {
+            (limit_hit, infra) =
+                super::generic::classify_generic_failure(exit_code, false, &output.tail);
+        }
         Ok(AgentOutcome {
             exit_code,
             timed_out: output.timed_out,
             final_text: summary.final_text,
             tokens_in: summary.tokens_in,
             tokens_out: summary.tokens_out,
-            // A run that timed out was cut off by aaf: whatever it said last
-            // is not why it ended.
-            limit_hit: summary.limit_hit.filter(|_| !output.timed_out),
-            infra: summary.infra.filter(|_| !output.timed_out),
+            limit_hit,
+            infra,
             log_tail: output.tail,
         })
     }
@@ -353,7 +353,10 @@ impl StreamParser {
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
                     || subtype == Some("error_max_structured_output_retries");
-                let infra = structured_infra(&event, raw_result);
+                let api_err = is_error
+                    && event.get("terminal_reason").and_then(Value::as_str) == Some("api_error");
+                let infra = structured_infra(&event, raw_result)
+                    .or_else(|| network_wording_infra(api_err, raw_result));
                 self.result = Some(ResultEvent {
                     text,
                     is_error,
@@ -473,13 +476,12 @@ const TRANSIENT_SERVER_ERRORS: [&str; 3] = ["server_error", "overloaded", "overl
 /// (read from the binary's connection-error messages; never observed
 /// live). Matched only in a message the CLI flags as its own API error,
 /// never in the agent's words.
-const NETWORK_WORDING: [&str; 6] = [
-    "unable to connect to api",
-    "can't reach the api server",
-    "no internet route",
-    "a firewall or proxy may be blocking it",
-    "couldn't connect through your proxy",
-    "connection dropped",
+#[rustfmt::skip]
+const NETWORK_WORDING: [&str; 13] = [
+    "unable to connect to api", "can't reach the api server", "no internet route",
+    "a firewall or proxy may be blocking it", "couldn't connect through your proxy",
+    "connection dropped", "enotfound", "eai_again", "etimedout", "econnrefused",
+    "econnreset", "enetunreach", "ehostunreach",
 ];
 
 fn structured_infra(

@@ -144,7 +144,7 @@ impl<'a> RoOverlay<'a> {
             for rel in ["HEAD", "index", "refs/heads/main", "refs/heads/master"] {
                 self.protect_existing(&git_dir.join(rel))?;
             }
-            for rel in ["refs/heads/develop", "refs/heads/release"] {
+            for rel in ["refs/heads/develop", "refs/heads/release", "refs/remotes"] {
                 self.protect_existing(&git_dir.join(rel))?;
             }
         }

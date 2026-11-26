@@ -45,8 +45,16 @@ pub fn build_bwrap_args(
         .split_whitespace()
         .map(str::to_string)
         .collect();
-    let worktrees_root = paths.worktrees_root.as_deref().map(Path::new);
-    let worktrees_root_canon = worktrees_root.map(canonical_or_self);
+    let worktrees_roots: Vec<&Path> = paths
+        .worktrees_root
+        .iter()
+        .chain(&paths.extra_worktrees_roots)
+        .map(Path::new)
+        .collect();
+    let worktrees_roots_canon: Vec<PathBuf> = worktrees_roots
+        .iter()
+        .map(|root| canonical_or_self(root))
+        .collect();
     let read_denied_canon: Vec<PathBuf> = paths
         .read_denied
         .iter()
@@ -55,9 +63,9 @@ pub fn build_bwrap_args(
     let mut bound_rw: BTreeSet<String> = BTreeSet::new();
     let tmp_canon = canonical_or_self(Path::new("/tmp"));
     let is_excluded = |canon: &Path| {
-        worktrees_root_canon
-            .as_ref()
-            .is_some_and(|root| canon.starts_with(root))
+        worktrees_roots_canon
+            .iter()
+            .any(|root| canon.starts_with(root))
             || read_denied_canon.iter().any(|d| canon.starts_with(d))
     };
     // 1. Existing writable caches, SDKs, account dirs, and non-/tmp temp dirs.
@@ -83,24 +91,25 @@ pub fn build_bwrap_args(
         }
     }
 
-    // 2. Protect `worktrees_root` before opening a task worktree inside it.
+    // 2. Protect every worktrees root before opening a task worktree inside it.
     let (mut bound_ro, mut pinned) = (BTreeSet::new(), BTreeSet::new());
     let worktree_canon = paths
         .worktree
         .as_deref()
         .map(|wt| canonical_or_self(Path::new(wt)));
-    let own_is_task_worktree = match (worktree_canon.as_ref(), worktrees_root_canon.as_ref()) {
-        (Some(wt), Some(root)) => wt != root && wt.starts_with(root),
-        _ => false,
-    };
+    let own_is_task_worktree = worktree_canon.as_ref().is_some_and(|wt| {
+        worktrees_roots_canon
+            .iter()
+            .any(|root| wt != root && wt.starts_with(root))
+    });
     if !own_is_task_worktree && let Some(worktree) = &paths.worktree {
         push_flag_pair(&mut argv, &mut bound_rw, "--bind", worktree);
     }
     let mut ro = RoOverlay::new(&mut argv, &mut bound_rw, &mut bound_ro, &mut pinned);
-    if let Some(root) = worktrees_root
-        && root.exists()
-    {
-        ro.bind_with_target(&leaf_resolved(root))?;
+    for root in &worktrees_roots {
+        if root.exists() {
+            ro.bind_with_target(&leaf_resolved(root))?;
+        }
     }
     if own_is_task_worktree && let Some(worktree) = &paths.worktree {
         ro.bind_rw(worktree);

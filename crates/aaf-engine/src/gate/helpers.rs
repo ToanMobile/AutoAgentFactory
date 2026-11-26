@@ -1,11 +1,29 @@
 //! Pure verdict reduction helpers for the verification gate.
 
+use std::time::Duration;
+
 use aaf_domain::gate::{
     CommandResult, GateMode, GateStatus, HeadLockReport, LockStatus, StoreComplianceReport,
     StoreStatus,
 };
 
 use super::REASON_TREE_CHANGED;
+
+/// Wall-clock and optional unpaused output-silence deadlines for one gate command.
+#[derive(Debug, Clone, Copy)]
+pub struct CommandTimeouts {
+    pub wall: Duration,
+    pub idle: Option<Duration>,
+}
+
+impl CommandTimeouts {
+    pub fn from_secs(wall_secs: u64, idle_secs: u64) -> Self {
+        Self {
+            wall: Duration::from_secs(wall_secs),
+            idle: (idle_secs > 0).then(|| Duration::from_secs(idle_secs)),
+        }
+    }
+}
 
 fn mode_name(mode: GateMode) -> &'static str {
     match mode {
@@ -98,4 +116,37 @@ pub(crate) fn decide(evidence: &Evidence<'_>) -> (GateStatus, Vec<String>) {
         GateStatus::Clear
     };
     (status, reasons)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use aaf_domain::gate::{ChangeKind, GateMode};
+
+    use super::super::changes::Change;
+    use super::super::runner::DiffEnvFiles;
+
+    #[test]
+    fn diff_env_files_unique_nonce_and_cleanup() {
+        let changes = vec![
+            Change {
+                path: "src/a.rs".into(),
+                kind: ChangeKind::Modified,
+                old_path: None,
+            },
+            Change {
+                path: "src/old.rs".into(),
+                kind: ChangeKind::Deleted,
+                old_path: None,
+            },
+        ];
+        let first = DiffEnvFiles::write(GateMode::Scoped, Some("abc"), &changes).unwrap();
+        let second = DiffEnvFiles::write(GateMode::Scoped, Some("abc"), &changes).unwrap();
+        assert_ne!(first.changed_path, second.changed_path);
+        assert_ne!(first.deleted_path, second.deleted_path);
+        let (p1, p2) = (first.changed_path.clone(), first.deleted_path.clone());
+        assert!(p1.exists() && p2.exists());
+        drop(first);
+        assert!(!p1.exists() && !p2.exists());
+    }
 }

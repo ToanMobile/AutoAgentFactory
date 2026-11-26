@@ -89,6 +89,10 @@ impl BudgetStore for Db {
         self.read(move |conn| load_budget(conn, &root_id))
     }
 
+    fn ensure_budget_if_missing(&self, budget: &RootBudget) -> PortResult<RootBudget> {
+        self.ensure_budget_if_missing_tx(budget)
+    }
+
     fn add_usage(
         &self,
         root_id: &str,

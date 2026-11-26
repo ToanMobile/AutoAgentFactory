@@ -16,6 +16,7 @@ use aaf_domain::ports::{PortError, PortResult};
 use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
+use super::dispatch::WorkerLane;
 use super::{GateStats, MAX_GATE_RETRIES, Msg, Scheduler, TickBoard, judge_round};
 use crate::factory::finish::Resolution;
 use crate::factory::ports::{AccountPool, Purpose};
@@ -70,8 +71,21 @@ impl Scheduler<'_> {
         self.state.pre_audits.remove(task_id);
     }
 
-    pub(super) fn handle_worker(&mut self, mut outcome: Outcome) -> PortResult<()> {
-        self.state.active -= 1;
+    pub(super) fn handle_worker(
+        &mut self,
+        lane: WorkerLane,
+        mut outcome: Outcome,
+    ) -> PortResult<()> {
+        match lane {
+            WorkerLane::Coding => self.state.coding_active -= 1,
+            WorkerLane::Aux => self.state.aux_active -= 1,
+        }
+        if let Some(count) = self.state.in_flight_tasks.get_mut(&outcome.task_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.state.in_flight_tasks.remove(&outcome.task_id);
+            }
+        }
         self.summary.errors.extend(outcome.error.take());
         if self
             .state
@@ -120,7 +134,7 @@ impl Scheduler<'_> {
                 if stopping {
                     self.clear_gating(&task_id);
                 } else {
-                    self.state.jobs.push_back(Job::Unblock {
+                    self.state.jobs.push_front(Job::Unblock {
                         job: GateJob {
                             task_id,
                             worktree,
@@ -128,6 +142,7 @@ impl Scheduler<'_> {
                             cached_receipt: None,
                         },
                         signal,
+                        needs_account: false,
                     });
                 }
             }
@@ -230,7 +245,11 @@ impl Scheduler<'_> {
                 if stopping {
                     self.clear_gating(&job.task_id);
                 } else {
-                    self.state.jobs.push_back(Job::Unblock { job, signal });
+                    self.state.jobs.push_front(Job::Unblock {
+                        job,
+                        signal,
+                        needs_account: false,
+                    });
                 }
             }
             Ok(Resolution::Retry) => {
@@ -294,7 +313,9 @@ impl Scheduler<'_> {
         };
         self.deps
             .move_to(&task.id, TaskState::Blocked, Some(&reason), &detail)?;
-        unblock::ladder(self.deps).record_root_result(&task.root_id, false)?;
+        if !budget.frozen {
+            unblock::ladder(self.deps).record_root_result(&task.root_id, false)?;
+        }
         self.summary.blocked.push(task.id.clone());
         Ok(())
     }
@@ -420,13 +441,15 @@ impl<'a> Scheduler<'a> {
                     self.summary.requeued.retain(|id| id != &task.id);
                     self.spawn_worker(
                         scope,
+                        WorkerLane::Coding,
                         Job::PlanTurn {
                             task_id: task.id,
                             role,
                             round,
                         },
                         provider,
-                        grant,
+                        Some(grant),
+                        false,
                     );
                     return Ok(true);
                 }
@@ -496,7 +519,14 @@ impl<'a> Scheduler<'a> {
         self.parked.remove(&task.id);
         self.summary.requeued.retain(|id| id != &task.id);
         self.summary.agent_runs += 1;
-        self.spawn_worker(scope, Job::Agent { task_id: task.id }, provider, grant);
+        self.spawn_worker(
+            scope,
+            WorkerLane::Coding,
+            Job::Agent { task_id: task.id },
+            provider,
+            Some(grant),
+            false,
+        );
         Ok(true)
     }
 }

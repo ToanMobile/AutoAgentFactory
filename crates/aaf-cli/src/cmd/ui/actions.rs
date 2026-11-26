@@ -328,7 +328,7 @@ pub(super) fn do_approve_plan(db: &Db, task_id: &str) -> Result<Value, String> {
     let note = format_approved_plan_note(&plan);
     db.append_context_note(task_id, &note, now).map_err(s_err)?;
     emit_human_plan_converged(db, task_id, &plan, now).map_err(s_err)?;
-    let budget_reset = reset_exhausted_budget(db, &task.root_id).map_err(s_err)?;
+    let budget_reset = reset_exhausted_budget(db, &task.root_id, &task.repo_root).map_err(s_err)?;
     db.set_state(task_id, TaskState::Ready, None, now)
         .map_err(s_err)?;
     let payload = json!({

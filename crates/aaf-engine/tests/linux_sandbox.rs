@@ -133,6 +133,7 @@ fn build_bwrap_args_enforces_least_privilege_mounts_and_hides_data_dir() {
         worktree: Some(wt_str.clone()),
         git_dirs: vec![git_str.clone()],
         worktrees_root: Some(wt_root_str),
+        extra_worktrees_roots: vec![],
         path_dirs: vec![],
         run_mark: None,
         deny_keychain_dir: None,

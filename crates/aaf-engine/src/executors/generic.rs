@@ -448,29 +448,18 @@ const AUTH_NEEDLES: [&str; 19] = [
     "login required",
 ];
 
-const NET_NEEDLES: [&str; 22] = [
-    "http 500",
-    "http 502",
-    "http 503",
-    "http 504",
-    "status 500",
-    "status 502",
-    "status 503",
-    "status 504",
-    "502 bad gateway",
-    "503 service unavailable",
-    "504 gateway timeout",
-    "bad gateway",
-    "service unavailable",
-    "gateway timeout",
-    "overloaded_error",
-    "server_error",
-    "connection refused",
-    "connection reset",
-    "econnrefused",
-    "econnreset",
-    "could not resolve host",
-    "network unreachable",
+#[rustfmt::skip]
+const NET_NEEDLES: [&str; 31] = [
+    "http 500", "http 502", "http 503", "http 504",
+    "status 500", "status 502", "status 503", "status 504",
+    "502 bad gateway", "503 service unavailable", "504 gateway timeout",
+    "bad gateway", "service unavailable", "gateway timeout",
+    "overloaded_error", "server_error",
+    "connection refused", "connection reset", "connection timed out",
+    "econnrefused", "econnreset", "enotfound", "eai_again", "etimedout", "ehostunreach",
+    "can't reach the api server", "unable to connect to api",
+    "could not resolve host", "dns lookup failed",
+    "temporary failure in name resolution", "network unreachable",
 ];
 
 /// Classifies a failed generic CLI run's output tail into a quota/rate-limit

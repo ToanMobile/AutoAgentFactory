@@ -36,6 +36,7 @@ pub struct GateOverlay {
     pub store_compliance: Option<StoreMode>,
     pub min_android_target_sdk: Option<u32>,
     pub command_timeout_secs: Option<u64>,
+    pub idle_timeout_secs: Option<u64>,
     pub docs_fast_path: Option<bool>,
     pub docs_fast_path_exclude_globs: Option<Vec<String>>,
     pub red_green_oracle: Option<OracleMode>,
@@ -480,6 +481,9 @@ pub(crate) fn apply_overlay(
     }
     if let Some(timeout) = gate.command_timeout_secs {
         current.command_timeout_secs = timeout;
+    }
+    if let Some(idle) = gate.idle_timeout_secs {
+        current.idle_timeout_secs = idle;
     }
     match gate.docs_fast_path {
         Some(false) => current.docs_fast_path = false,

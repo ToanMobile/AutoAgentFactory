@@ -143,6 +143,9 @@ impl GitOps for RealGit {
         if let Some(existing) = self.existing(task_id)? {
             return Ok(existing);
         }
+        if let Some(wt) = self.reattach_existing_branch(task_id)? {
+            return Ok(wt);
+        }
         let wt = worktree::create(&self.repo_root, &self.worktrees_dir, task_id, &self.start())
             .map_err(err)?;
         // Hydrate from the commit the tree was actually cut from, not a

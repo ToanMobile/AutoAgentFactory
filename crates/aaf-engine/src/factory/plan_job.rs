@@ -386,10 +386,12 @@ fn execute_runner(
                 None,
                 (0, 0),
                 false,
+                false,
             )?;
             return Err(err);
         }
     };
+    let charge_wall = worker::should_charge_wall(&outcome);
     worker::end_run(
         ctx.deps,
         ctx.task,
@@ -398,6 +400,7 @@ fn execute_runner(
         outcome.exit_code,
         (outcome.tokens_in, outcome.tokens_out),
         ctx.target.runner.reports_tokens(),
+        charge_wall,
     )?;
     Ok((run.request.run_id, outcome))
 }

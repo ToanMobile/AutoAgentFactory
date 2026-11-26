@@ -151,15 +151,15 @@ pub fn clean_repo_offline_unlocked_with_heads(
                     .push(format!("skipped invalid task id {task_id:?}"));
                 continue;
             }
-            let branch_ref = format!("refs/heads/{}{task_id}", worktree::BRANCH_PREFIX);
+            let branch = format!("{}{task_id}", worktree::BRANCH_PREFIX);
+            let branch_ref = format!("refs/heads/{branch}");
+            let expected_wt = worktree::worktree_path(&repo, worktrees_dir, task_id).ok();
             let needs_base = expected_head.is_none()
                 && (refs.has_branch(&branch_ref)
-                    || worktree::worktree_path(&repo, worktrees_dir, task_id)
-                        .is_ok_and(|p| p.exists())
-                    || registered.iter().any(|e| {
-                        e.branch
-                            .as_deref()
-                            .is_some_and(|b| b == format!("{}{task_id}", worktree::BRANCH_PREFIX))
+                    || expected_wt.as_deref().is_some_and(|exp| {
+                        exp.exists()
+                            || worktree::find_registered_for_task(registered, exp, &branch)
+                                .is_some()
                     }));
             let base = if needs_base {
                 let res = cached_base.get_or_insert_with(|| resolve_repo_base(&repo));

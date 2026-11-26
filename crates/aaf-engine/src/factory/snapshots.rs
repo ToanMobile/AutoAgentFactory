@@ -124,33 +124,40 @@ fn verify_registered_worktree(
     worktrees_root: &Path,
     task_id: &str,
 ) -> Result<PathBuf, String> {
+    if let Some((wt, _)) = worktree::existing_registered(repo_root, worktrees_root, task_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(wt.path);
+    }
     let wt_path =
         worktree::worktree_path(repo_root, worktrees_root, task_id).map_err(|e| e.to_string())?;
-    let resolved = fs::canonicalize(&wt_path).map_err(|e| {
-        format!(
-            "worktree for task {task_id} not found at {}: {e}",
-            wt_path.display()
-        )
-    })?;
     let expected_branch = format!("{BRANCH_PREFIX}{task_id}");
-    let registered = worktree::list(repo_root)
-        .map_err(|e| format!("list worktrees: {e}"))?
-        .into_iter()
-        .any(|entry| {
-            entry.branch.as_deref() == Some(expected_branch.as_str())
-                && fs::canonicalize(&entry.path).is_ok_and(|p| p == resolved)
-        });
-    if !registered {
+    if !wt_path.exists() {
         return Err(format!(
-            "{} is not a registered git worktree for branch {expected_branch}",
+            "worktree for task {task_id} not found at {}",
             wt_path.display()
         ));
     }
-    Ok(wt_path)
+    Err(format!(
+        "{} is not a registered git worktree for branch {expected_branch}",
+        wt_path.display()
+    ))
 }
 
-fn clear_stale_receipts(db: &Db, data_dir: &Path, wt_path: &Path, task_id: &str) {
+fn clear_stale_receipts(
+    db: &Db,
+    data_dir: &Path,
+    repo_root: &Path,
+    worktrees_root: &Path,
+    wt_path: &Path,
+    task_id: &str,
+) {
+    let main_id = aaf_fp::repo_id(repo_root);
+    let main_approvals_dir = data_dir.join("approvals").join(&main_id);
     let mut roots = vec![wt_path.to_path_buf()];
+    if let Ok(expected) = worktree::worktree_path(repo_root, worktrees_root, task_id) {
+        roots.push(expected);
+    }
     if let Ok(runs) = db.runs_for_task(task_id) {
         for run in runs {
             if !run.worktree_path.is_empty() {
@@ -161,8 +168,20 @@ fn clear_stale_receipts(db: &Db, data_dir: &Path, wt_path: &Path, task_id: &str)
     for root in roots {
         let rid = aaf_fp::repo_id(&root);
         let _ = fs::remove_file(aaf_fp::receipt_path(data_dir, &root));
-        let _ = fs::remove_dir_all(data_dir.join("approvals").join(&rid));
         let _ = fs::remove_dir_all(data_dir.join("audits").join(&rid));
+        if rid == main_id {
+            continue;
+        }
+        let wt_approvals = data_dir.join("approvals").join(&rid);
+        if let Ok(entries) = fs::read_dir(&wt_approvals) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().ends_with(".json") {
+                    let _ = fs::remove_file(main_approvals_dir.join(name));
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(wt_approvals);
     }
 }
 
@@ -183,8 +202,17 @@ pub fn undo_latest_turn(
     let task = db.get_task(task_id).map_err(|e| e.to_string())?;
     let wt_path = verify_registered_worktree(repo_root, worktrees_root, task_id)?;
 
-    git(&wt_path, &["reset", "--hard", &snap.commit_oid])
-        .map_err(|e| format!("git reset --hard {}: {e}", snap.commit_oid))?;
+    git(
+        &wt_path,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "reset",
+            "--hard",
+            &snap.commit_oid,
+        ],
+    )
+    .map_err(|e| format!("git reset --hard {}: {e}", snap.commit_oid))?;
     git(&wt_path, &["clean", "-fd"]).map_err(|e| format!("git clean -fd: {e}"))?;
 
     git(repo_root, &["update-ref", "-d", &snap.ref_name])
@@ -192,7 +220,7 @@ pub fn undo_latest_turn(
     db.delete_snapshot(snap.id)
         .map_err(|e| format!("delete snapshot row: {e}"))?;
 
-    clear_stale_receipts(db, data_dir, &wt_path, task_id);
+    clear_stale_receipts(db, data_dir, repo_root, worktrees_root, &wt_path, task_id);
 
     if task.state != TaskState::Ready {
         db.set_state(task_id, TaskState::Ready, None, now)

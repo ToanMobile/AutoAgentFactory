@@ -44,17 +44,40 @@ pub struct RealGate {
 pub type GateProgress = Box<dyn Fn(&Path, &Progress<'_>) + Send + Sync>;
 
 impl RealGate {
-    /// True when `tree` is strictly below the directory the factory creates
-    /// its worktrees in. Both paths are resolved first; one that cannot be
-    /// resolved is not the factory's.
+    /// True when `tree` is strictly below `self.worktrees_dir` OR is a
+    /// verified non-symlink AAF-managed worktree registered on an `aaf/<id>`
+    /// branch of its repository (e.g. reused after `AAF_WORKTREE_DIR` changed).
     fn made_by_the_factory(&self, tree: &Path) -> bool {
-        let (Ok(tree), Ok(root)) = (
-            std::fs::canonicalize(tree),
-            std::fs::canonicalize(&self.worktrees_dir),
-        ) else {
+        let Ok(canon_tree) = std::fs::canonicalize(tree) else {
             return false;
         };
-        tree != root && tree.starts_with(&root)
+        if let Ok(root) = std::fs::canonicalize(&self.worktrees_dir)
+            && canon_tree != root
+            && canon_tree.starts_with(&root)
+        {
+            return true;
+        }
+        if !crate::git::worktree::is_non_symlink_dir(tree) {
+            return false;
+        }
+        let main_repo = crate::git::main_work_tree(&canon_tree);
+        let Ok(entries) = crate::git::worktree::list(&main_repo) else {
+            return false;
+        };
+        entries.iter().skip(1).any(|entry| {
+            let Some(task_id) = entry.task_id() else {
+                return false;
+            };
+            std::fs::canonicalize(&entry.path).is_ok_and(|p| p == canon_tree)
+                && crate::git::worktree::worktree_path(&main_repo, &self.worktrees_dir, task_id)
+                    .is_ok_and(|expected| {
+                        crate::git::worktree::is_aaf_managed_worktree_path(
+                            &entry.path,
+                            &expected,
+                            &entries,
+                        )
+                    })
+        })
     }
 }
 

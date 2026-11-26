@@ -189,6 +189,17 @@ impl Backoff {
     }
 }
 
+fn current_parent_pid() -> u32 {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::parent_id()
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 /// A wait limit (admission and the Layer-1 locks), kept to the millisecond.
 /// Whole-second clock readings alone ended a 1 s limit a few milliseconds
 /// in when the second turned, and a backoff sleep overshot the limit by up
@@ -199,16 +210,35 @@ struct Budget {
     began: Instant,
     /// What was asked of the sleeper: the elapsed time of an injected one.
     slept: Duration,
+    /// When `Some(pid)` (with `pid > 1`), aborts the wait if the current parent
+    /// PID changes (indicating the parent process died and we were reparented).
+    watch_parent_pid: Option<u32>,
+    ppid_fn: fn() -> u32,
 }
 
 impl Budget {
     fn new(limit_secs: Option<u64>, started_secs: i64) -> Budget {
+        Self::with_parent_watch(limit_secs, started_secs, None)
+    }
+
+    fn with_parent_watch(
+        limit_secs: Option<u64>,
+        started_secs: i64,
+        watch_parent_pid: Option<u32>,
+    ) -> Budget {
         Budget {
             limit_secs,
             started_secs,
             began: Instant::now(),
             slept: Duration::ZERO,
+            watch_parent_pid: watch_parent_pid.filter(|&pid| pid > 1),
+            ppid_fn: current_parent_pid,
         }
+    }
+
+    fn parent_exited(&self) -> bool {
+        self.watch_parent_pid
+            .is_some_and(|initial| (self.ppid_fn)() != initial)
     }
 
     fn elapsed(&self) -> Duration {

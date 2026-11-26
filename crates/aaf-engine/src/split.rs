@@ -346,11 +346,9 @@ fn has_existing_subtasks(store: &dyn Store, parent: &Task) -> PortResult<bool> {
 }
 
 fn ensure_root_budget(store: &dyn Store, root_id: &str, cfg: &UnblockerConfig) -> PortResult<()> {
-    match store.get_budget(root_id) {
-        Ok(_) => Ok(()),
-        Err(PortError::NotFound(_)) => store.put_budget(&RootBudget::new(root_id, cfg)),
-        Err(err) => Err(err),
-    }
+    store
+        .ensure_budget_if_missing(&RootBudget::new(root_id, cfg))
+        .map(|_| ())
 }
 
 fn id_exists(store: &dyn Store, id: &str) -> PortResult<bool> {

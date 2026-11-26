@@ -3,7 +3,6 @@
 //! R3-CONC-1, R3-CONC-4, R3-PROTO-3).
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 use aaf_domain::budget::BudgetCheck;
 use aaf_domain::gate::Receipt;
@@ -16,24 +15,10 @@ use super::Scheduler;
 use crate::factory::dual_audit::{
     self, DeferredSiblingOutcome, DualFinalizeResult, DualReviewCoord, PartialTurnResult,
 };
-use crate::factory::ports::{AccountPool, Grant, Purpose};
+use crate::factory::ports::Grant;
 use crate::factory::stage_router::{ProviderKey, StageRouter};
 use crate::factory::worker::{self, GateJob, Job, Next, Outcome};
 use crate::factory::{Deps, plan_job};
-
-/// Provider/pool resolution for queued jobs in [`Scheduler::start_jobs`].
-pub(super) enum JobDispatch {
-    Ready {
-        provider: ProviderKey,
-        pool: Arc<dyn AccountPool>,
-        purpose: Purpose,
-    },
-    DropAndAbort {
-        task_id: String,
-        message: String,
-        is_dual_sibling: bool,
-    },
-}
 
 fn missing_target_err(kind: &str, id: &str) -> PortError {
     PortError::Invalid(format!(
@@ -195,57 +180,6 @@ impl Scheduler<'_> {
             return false;
         }
         true
-    }
-
-    fn reviewer_dispatch(
-        &self,
-        task_id: &str,
-        reviewer_id: &str,
-        kind: &str,
-        is_dual_sibling: bool,
-    ) -> JobDispatch {
-        match self.router.and_then(|r| r.reviewer(reviewer_id)) {
-            Some(target) => JobDispatch::Ready {
-                provider: target.provider_key.clone(),
-                pool: Arc::clone(&target.accounts),
-                purpose: Purpose::Audit,
-            },
-            None => JobDispatch::DropAndAbort {
-                task_id: task_id.to_string(),
-                message: format!(
-                    "{kind} reviewer {reviewer_id:?} is not configured in StageRouter"
-                ),
-                is_dual_sibling,
-            },
-        }
-    }
-
-    pub(super) fn resolve_job_dispatch(&self, job: &Job) -> JobDispatch {
-        match job {
-            Job::DualReviewTurn { job, reviewer, .. } => {
-                self.reviewer_dispatch(&job.task_id, &reviewer.id, "dual review", true)
-            }
-            Job::AdjudicateTurn {
-                job,
-                pass_reviewer_id,
-                ..
-            } => self.reviewer_dispatch(&job.task_id, pass_reviewer_id, "adjudication", false),
-            _ => {
-                let is_audit = matches!(job, Job::Audit { .. } | Job::PostAudit { .. });
-                let provider = self.provider_key_for(is_audit);
-                let pool = self.pool_for_provider(&provider, is_audit);
-                let purpose = if is_audit {
-                    Purpose::Audit
-                } else {
-                    Purpose::Work
-                };
-                JobDispatch::Ready {
-                    provider,
-                    pool,
-                    purpose,
-                }
-            }
-        }
     }
 
     pub(super) fn abort_missing_reviewer_target(
@@ -550,7 +484,7 @@ impl Scheduler<'_> {
                 worktree,
                 signal,
             }) => {
-                self.state.jobs.push_back(Job::Unblock {
+                self.state.jobs.push_front(Job::Unblock {
                     job: GateJob {
                         task_id: uid,
                         worktree,
@@ -558,6 +492,7 @@ impl Scheduler<'_> {
                         cached_receipt: None,
                     },
                     signal,
+                    needs_account: false,
                 });
             }
             DualFinalizeResult::Done(_) => {

@@ -60,6 +60,10 @@ pub struct SandboxPaths {
     /// (`<root>/<repo_id>/<task_id>`). Nothing below it is writable except
     /// `worktree`.
     pub worktrees_root: Option<String>,
+    /// Additional task-worktree roots (e.g. default `~/.cache/autofactory/worktrees`
+    /// or a previous `AAF_WORKTREE_DIR` when reusing a relocated worktree) whose
+    /// sibling worktrees must also remain closed.
+    pub extra_worktrees_roots: Vec<String>,
     /// Directories commands are looked up in outside the sandbox: the `PATH`
     /// of the process that starts the agent. One that lies inside a writable
     /// subtree is closed, because a file called `git` there is what aaf and
@@ -92,15 +96,22 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     let git_dirs = canonical_paths(extra.git_dirs.iter())?;
     let denied = canonical_paths(policy.read_denied_paths.iter().chain(&extra.read_denied))?;
     let worktree = extra.worktree.as_deref().map(canonical).transpose()?;
-    let worktrees_root = extra.worktrees_root.as_deref().map(canonical).transpose()?;
+    let mut worktrees_roots = canonical_paths(
+        extra
+            .worktrees_root
+            .iter()
+            .chain(&extra.extra_worktrees_roots),
+    )?;
+    worktrees_roots.sort();
+    worktrees_roots.dedup();
     let deny_keychain = extra
         .deny_keychain_dir
         .as_deref()
         .map(canonical)
         .transpose()?;
-    if let Some(root) = &worktrees_root {
+    if !worktrees_roots.is_empty() {
         // Another task's worktree is never writable, whoever listed it.
-        writable.retain(|path| !path.starts_with(root));
+        writable.retain(|path| !worktrees_roots.iter().any(|root| path.starts_with(root)));
     }
 
     let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
@@ -119,13 +130,14 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
         profile.push_str(&format!("(allow file-write* (regex {regex}))\n"));
     }
     // A writable ancestor (a temp dir, the main checkout) must not open
-    // sibling task worktrees: close the whole directory, and reopen only this
-    // run's own worktree when it is one of them. A worktree that is not below
-    // the root is opened first, so that it cannot re-open the root.
-    let own_is_task_worktree = match (&worktree, &worktrees_root) {
-        (Some(own), Some(root)) => own != root && own.starts_with(root),
-        _ => false,
-    };
+    // sibling task worktrees: close every worktrees root, and reopen only this
+    // run's own worktree when it lies below one of them. A worktree that is
+    // not below any root is opened first, so it cannot re-open a root.
+    let own_is_task_worktree = worktree.as_ref().is_some_and(|own| {
+        worktrees_roots
+            .iter()
+            .any(|root| own != root && own.starts_with(root))
+    });
     let open_own = match &worktree {
         Some(own) => format!("(allow file-write* (subpath {}))\n", sbpl_string(own)?),
         None => String::new(),
@@ -133,7 +145,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     if !own_is_task_worktree {
         profile.push_str(&open_own);
     }
-    if let Some(root) = &worktrees_root {
+    for root in &worktrees_roots {
         let root = sbpl_string(root)?;
         profile.push_str(&format!("(deny file-write* (subpath {root}))\n"));
     }
@@ -222,7 +234,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // Everything a rule closes, as written by the caller. Each is only as
     // closed as the directories that lead to it (see `entries_to`).
     let mut closed: Vec<PathBuf> = denied.clone();
-    closed.extend(worktrees_root.clone());
+    closed.extend(worktrees_roots.clone());
     // The obeyed files of every git dir, submodules included: renaming a
     // directory on the way to one would carry it out of its rules (F7-R4-2).
     for root in git_dirs.iter().chain(&submodules) {

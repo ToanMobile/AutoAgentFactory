@@ -201,7 +201,7 @@ impl Throttle<'_> {
                         }
                     }
                 };
-                if budget.expired(now) {
+                if budget.parent_exited() || budget.expired(now) {
                     return Ok(None);
                 }
                 ever_waited = true;
@@ -307,7 +307,7 @@ impl Throttle<'_> {
                         } else {
                             orphan_tracker.clear();
                         }
-                        if budget.expired(now) {
+                        if budget.parent_exited() || budget.expired(now) {
                             return Ok(None);
                         }
                         if admission != Admission::Unmeasured {

@@ -308,4 +308,100 @@ impl Db {
             append_note_tx(tx, &parent_id, parent_note, now)
         })
     }
+
+    /// Atomically inserts `budget` only when no row exists for `budget.root_id`,
+    /// then reads and returns the stored row inside the same write transaction.
+    pub fn ensure_budget_if_missing_tx(&self, budget: &RootBudget) -> PortResult<RootBudget> {
+        let budget = budget.clone();
+        let tokens_used = to_i64(budget.tokens_used, "tokens_used")?;
+        let token_limit = to_i64(budget.token_limit, "token_limit")?;
+        let wall_secs_used = to_i64(budget.wall_secs_used, "wall_secs_used")?;
+        let wall_secs_limit = to_i64(budget.wall_secs_limit, "wall_secs_limit")?;
+        self.write(move |tx| {
+            tx.prepare_cached(
+                "INSERT OR IGNORE INTO root_budgets (root_id, tokens_used, token_limit, \
+                 wall_secs_used, wall_secs_limit, cycles_used, cycles_limit, frozen) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )
+            .and_then(|mut stmt| {
+                stmt.execute(params![
+                    budget.root_id,
+                    tokens_used,
+                    token_limit,
+                    wall_secs_used,
+                    wall_secs_limit,
+                    budget.cycles_used,
+                    budget.cycles_limit,
+                    budget.frozen,
+                ])
+            })
+            .map_err(sql_err)?;
+            let mut stmt = tx
+                .prepare_cached(
+                    "SELECT tokens_used, token_limit, wall_secs_used, wall_secs_limit, \
+                     cycles_used, cycles_limit, frozen FROM root_budgets WHERE root_id = ?1",
+                )
+                .map_err(sql_err)?;
+            stmt.query_row(params![budget.root_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u32>(4)?,
+                    row.get::<_, u32>(5)?,
+                    row.get::<_, bool>(6)?,
+                ))
+            })
+            .map_err(sql_err)
+            .and_then(|(tu, tl, wu, wl, cu, cl, frozen)| {
+                Ok(RootBudget {
+                    root_id: budget.root_id,
+                    tokens_used: super::to_u64(tu, "root_budgets.tokens_used")?,
+                    token_limit: super::to_u64(tl, "root_budgets.token_limit")?,
+                    wall_secs_used: super::to_u64(wu, "root_budgets.wall_secs_used")?,
+                    wall_secs_limit: super::to_u64(wl, "root_budgets.wall_secs_limit")?,
+                    cycles_used: cu,
+                    cycles_limit: cl,
+                    frozen,
+                })
+            })
+        })
+    }
+
+    /// Atomically synchronizes `token_limit`, `wall_secs_limit`, and `cycles_limit`
+    /// from `cfg` into all non-frozen active root budgets of `repo_root` without
+    /// touching `*_used` or `frozen`.
+    pub fn sync_repo_budget_limits(
+        &self,
+        repo_root: &str,
+        cfg: &aaf_domain::config::UnblockerConfig,
+    ) -> PortResult<usize> {
+        let token_limit = to_i64(cfg.max_token_budget, "token_limit")?;
+        let wall_secs_limit = to_i64(cfg.max_wall_clock_secs, "wall_secs_limit")?;
+        let cycles_limit = cfg.max_unblock_cycles;
+        let repo_root = repo_root.to_string();
+        self.write(move |tx| {
+            tx.prepare_cached(
+                "UPDATE root_budgets \
+                 SET token_limit = ?1, wall_secs_limit = ?2, cycles_limit = ?3 \
+                 WHERE frozen = 0 \
+                   AND (token_limit != ?1 OR wall_secs_limit != ?2 OR cycles_limit != ?3) \
+                   AND root_id IN ( \
+                       SELECT DISTINCT root_id FROM tasks \
+                       WHERE repo_root = ?4 \
+                         AND state IN ('backlog', 'ready', 'running', 'gating', 'review') \
+                   )",
+            )
+            .and_then(|mut stmt| {
+                stmt.execute(params![
+                    token_limit,
+                    wall_secs_limit,
+                    cycles_limit,
+                    repo_root
+                ])
+            })
+            .map_err(sql_err)
+        })
+    }
 }

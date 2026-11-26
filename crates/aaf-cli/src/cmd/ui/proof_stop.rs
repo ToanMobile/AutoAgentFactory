@@ -13,22 +13,22 @@ use aaf_engine::executors::reaper;
 use aaf_engine::proof::show_proof;
 use serde_json::{Value, json};
 
-use super::extras::{canonical_under_allowed_roots, resolve_task_worktree};
+use super::extras::{
+    allowed_task_worktree_roots, canonical_under_allowed_roots, resolve_task_worktree,
+};
 use crate::ctx::Ctx;
 
 const MAX_PROOF_PNG_BYTES: u64 = 10 * 1024 * 1024;
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 fn allowed_proof_roots(ctx: &Ctx, task: &Task) -> Vec<PathBuf> {
-    vec![
-        ctx.data_dir.join("proofs"),
-        ctx.worktrees_dir.clone(),
-        PathBuf::from(&task.repo_root),
-    ]
+    let mut roots = vec![ctx.data_dir.join("proofs")];
+    roots.extend(allowed_task_worktree_roots(ctx, task));
+    roots
 }
 
 fn find_proof_record(db: &Db, ctx: &Ctx, task: &Task) -> Option<ProofRecord> {
-    let wt_roots = vec![ctx.worktrees_dir.clone(), PathBuf::from(&task.repo_root)];
+    let wt_roots = allowed_task_worktree_roots(ctx, task);
     if let Some((wt, _)) = resolve_task_worktree(db, ctx, task)
         && let Some(canon_wt) = canonical_under_allowed_roots(&wt, &wt_roots)
         && let Ok(rec) = show_proof(&canon_wt, &ctx.data_dir, None)
@@ -147,7 +147,7 @@ pub(super) fn do_stop_run(db: &Db, ctx: &Ctx, run_id: &str) -> Result<Value, Str
         .ok_or_else(|| format!("not found: active running run '{run_id}'"))?;
     let task = db.get_task(&run.task_id).map_err(|e| e.to_string())?;
     let wt = PathBuf::from(&run.worktree_path);
-    let allowed = vec![ctx.worktrees_dir.clone(), PathBuf::from(&task.repo_root)];
+    let allowed = allowed_task_worktree_roots(ctx, &task);
     if canonical_under_allowed_roots(&wt, &allowed).is_none() {
         return Err("refused: worktree outside allowed roots".into());
     }

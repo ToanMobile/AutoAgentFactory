@@ -15,7 +15,7 @@ use aaf_domain::ports::Clock;
 use super::GateError;
 use super::changes::Change;
 use super::confine::{self, ConfineError, ConfineMode};
-use super::proc::capture;
+use super::helpers::CommandTimeouts;
 use crate::throttle::{HeavyJob, Throttle, heavy_tool};
 
 static DIFF_ENV_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -27,8 +27,8 @@ const DIFF_ENV_MAX_ATTEMPTS: usize = 16;
 pub struct DiffEnvFiles {
     mode: String,
     base_sha: String,
-    changed_path: PathBuf,
-    deleted_path: PathBuf,
+    pub(super) changed_path: PathBuf,
+    pub(super) deleted_path: PathBuf,
 }
 
 impl DiffEnvFiles {
@@ -247,7 +247,10 @@ pub fn run_command_with_env_and_removals(
         repo_root,
         name,
         command,
-        timeout,
+        CommandTimeouts {
+            wall: timeout,
+            idle: None,
+        },
         extra_env,
         env_remove,
         fallback_data.as_deref(),
@@ -259,7 +262,7 @@ fn run_command_confined(
     repo_root: &Path,
     name: &str,
     command: &str,
-    timeout: Duration,
+    timeouts: CommandTimeouts,
     extra_env: &[(&str, &str)],
     env_remove: &[&str],
     data_dir: Option<&Path>,
@@ -289,7 +292,13 @@ fn run_command_confined(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let done = capture(cmd, timeout, Some(LOG_TAIL_BYTES), true)?;
+    let done = crate::confine_core::proc::capture_with_idle(
+        cmd,
+        timeouts.wall,
+        timeouts.idle,
+        Some(LOG_TAIL_BYTES),
+        true,
+    )?;
     Ok((
         CommandResult {
             name: name.to_string(),
@@ -376,11 +385,12 @@ struct CommandEnv<'a> {
     remove: &'a [&'a str],
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_heavy(
     repo_root: &Path,
     name: &str,
     command: &str,
-    timeout: Duration,
+    timeouts: CommandTimeouts,
     heavy: &HeavyContext<'_>,
     env: CommandEnv<'_>,
     notes: &mut Vec<String>,
@@ -390,7 +400,7 @@ fn run_heavy(
         label: name,
         command,
         cwd: repo_root,
-        timeout,
+        timeout: timeouts.wall,
         log_tail_bytes: LOG_TAIL_BYTES,
     };
     let filtered_remove: Vec<&str> = env
@@ -401,10 +411,11 @@ fn run_heavy(
         .collect();
     let (run, mode) = heavy
         .throttle
-        .run_heavy_confined_with_env_and_removals(
+        .run_heavy_confined_with_idle(
             heavy.data_dir,
             heavy.clock,
             &job,
+            timeouts.idle,
             env.extra,
             &filtered_remove,
         )
@@ -491,6 +502,25 @@ pub fn run_all_throttled_with_options(
     extra_env: &[(&str, &str)],
     env_remove: &[&str],
 ) -> Result<ThrottledRun, GateError> {
+    let timeouts = CommandTimeouts {
+        wall: timeout,
+        idle: None,
+    };
+    run_all_throttled_with_timeouts(
+        repo_root, commands, mode, timeouts, heavy, extra_env, env_remove,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_all_throttled_with_timeouts(
+    repo_root: &Path,
+    commands: &CommandsConfig,
+    mode: GateMode,
+    timeouts: CommandTimeouts,
+    heavy: &HeavyContext<'_>,
+    extra_env: &[(&str, &str)],
+    env_remove: &[&str],
+) -> Result<ThrottledRun, GateError> {
     let mut run = ThrottledRun {
         results: Vec::new(),
         notes: Vec::new(),
@@ -506,7 +536,7 @@ pub fn run_all_throttled_with_options(
                 repo_root,
                 name,
                 &command,
-                timeout,
+                timeouts,
                 heavy,
                 env,
                 &mut run.notes,
@@ -516,7 +546,7 @@ pub fn run_all_throttled_with_options(
                 repo_root,
                 name,
                 &command,
-                timeout,
+                timeouts,
                 extra_env,
                 env_remove,
                 Some(heavy.data_dir),
@@ -546,36 +576,9 @@ pub fn run_one_heavy(
         extra: extra_env,
         remove: &[],
     };
-    run_heavy(repo_root, name, command, timeout, heavy, env, &mut notes).map(|(res, _)| res)
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn diff_env_files_unique_nonce_and_cleanup() {
-        let changes = vec![
-            Change {
-                path: "src/a.rs".to_string(),
-                kind: ChangeKind::Modified,
-                old_path: None,
-            },
-            Change {
-                path: "src/old.rs".to_string(),
-                kind: ChangeKind::Deleted,
-                old_path: None,
-            },
-        ];
-        let first = DiffEnvFiles::write(GateMode::Scoped, Some("abc"), &changes).unwrap();
-        let second = DiffEnvFiles::write(GateMode::Scoped, Some("abc"), &changes).unwrap();
-        assert_ne!(first.changed_path, second.changed_path);
-        assert_ne!(first.deleted_path, second.deleted_path);
-        let p1 = first.changed_path.clone();
-        let p2 = first.deleted_path.clone();
-        assert!(p1.exists() && p2.exists());
-        drop(first);
-        assert!(!p1.exists() && !p2.exists());
-    }
+    let timeouts = CommandTimeouts {
+        wall: timeout,
+        idle: None,
+    };
+    run_heavy(repo_root, name, command, timeouts, heavy, env, &mut notes).map(|(res, _)| res)
 }

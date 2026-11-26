@@ -278,3 +278,43 @@ fn bwrap_argv_pins_ancestors_shallow_to_deep_before_tmpfs_and_rejects_symlinks()
         }
     );
 }
+
+#[test]
+fn idle_timeout_ignores_supervisor_paused_duration() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    struct PauseSupervisor {
+        pause_for: Duration,
+        started: Instant,
+    }
+    impl super::proc::Supervise for PauseSupervisor {
+        fn tick(&mut self, _pgid: u32, _elapsed: Duration) -> bool {
+            self.started.elapsed() < self.pause_for
+        }
+    }
+
+    // Command sleeps 0.9s with no output. Supervisor reports paused for 0.8s,
+    // so unpaused silent duration (~0.1s) stays far under the 0.5s idle timeout.
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", "sleep 0.9; echo done"]);
+    let mut sup = PauseSupervisor {
+        pause_for: Duration::from_millis(800),
+        started: Instant::now(),
+    };
+    let done = super::proc::capture_supervised_with_idle(
+        cmd,
+        Duration::from_secs(10),
+        Some(Duration::from_millis(500)),
+        Some(1024),
+        true,
+        &mut sup,
+    )
+    .unwrap();
+    assert!(
+        !done.timed_out,
+        "paused silence must not trigger idle timeout"
+    );
+    assert_eq!(done.exit_code, Some(0));
+    assert!(String::from_utf8_lossy(&done.output).contains("done"));
+}

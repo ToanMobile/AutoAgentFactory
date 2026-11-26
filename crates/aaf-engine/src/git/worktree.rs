@@ -8,6 +8,7 @@ use super::{GitError, path_str};
 
 mod batch;
 mod cleanup;
+mod reattach;
 mod submodules;
 
 pub(crate) use batch::remove_orphan_batch_worktrees_prepared;
@@ -20,6 +21,7 @@ pub use cleanup::{
     cleanup_missing_worktree, cleanup_verified_merged_task, delete_snapshot_refs,
     is_operation_in_progress, remove_verified_merged,
 };
+pub use reattach::{attach_existing_branch, attach_existing_branch_with_warning};
 
 pub use aaf_domain::engine_contracts::BRANCH_PREFIX;
 pub const SNAPSHOT_REF_PREFIX: &str = "refs/aaf/snapshots/";
@@ -165,9 +167,27 @@ pub fn remove(
     force: bool,
 ) -> Result<(), GitError> {
     let task_id = worktree.task_id()?;
+    if !is_non_symlink_dir(&worktree.path) {
+        return Err(GitError::Invalid(format!(
+            "{} is not a worktree directory of branch {}",
+            worktree.path.display(),
+            worktree.branch
+        )));
+    }
     let wanted = fs::canonicalize(&worktree.path)?;
-    let registered = list(repo_root)?.into_iter().any(|entry| {
+    let entries = list(repo_root)?;
+    if entries
+        .first()
+        .is_some_and(|main| fs::canonicalize(&main.path).is_ok_and(|p| p == wanted))
+    {
+        return Err(GitError::Invalid(format!(
+            "{} is the main worktree, refusing removal",
+            worktree.path.display()
+        )));
+    }
+    let registered = entries.iter().skip(1).any(|entry| {
         entry.branch.as_deref() == Some(worktree.branch.as_str())
+            && is_non_symlink_dir(&entry.path)
             && fs::canonicalize(&entry.path).is_ok_and(|p| p == wanted)
     });
     if !registered {
@@ -238,29 +258,56 @@ pub fn remove_merged(repo_root: &Path, worktree: &TaskWorktree) -> Result<(), Gi
     remove(repo_root, worktree, true, false)
 }
 
+/// True when `path` is an actual directory on disk and NOT a symlink.
+pub(crate) fn is_non_symlink_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
 /// Returns the task's registered worktree and its `HEAD` oid only when the
-/// worktree directory actually exists on disk (`path.is_dir()`). Unlike
-/// [`existing_head`], never falls back to a branch-only ref when the directory
-/// has been removed.
+/// worktree directory actually exists on disk as a real (non-symlink) directory.
+/// Checks `worktrees_dir` first, then falls back to an AAF-managed worktree
+/// matching `<repo_id>/<task_id>` outside the main checkout (e.g. when
+/// `AAF_WORKTREE_DIR` changed between runs). Never adopts symlinks, main
+/// checkouts, or foreign checkouts.
 pub fn existing_registered(
     repo_root: &Path,
     worktrees_dir: &Path,
     task_id: &str,
 ) -> Result<Option<(TaskWorktree, String)>, GitError> {
-    let path = worktree_path(repo_root, worktrees_dir, task_id)?;
-    if !path.is_dir() {
-        return Ok(None);
-    }
+    let expected = worktree_path(repo_root, worktrees_dir, task_id)?;
     let branch = format!("{BRANCH_PREFIX}{task_id}");
-    if let Ok(resolved) = fs::canonicalize(&path) {
-        let registered = list(repo_root)?.into_iter().any(|entry| {
+    let entries = list(repo_root)?;
+    if is_non_symlink_dir(&expected)
+        && let Ok(resolved_expected) = fs::canonicalize(&expected)
+        && entries.iter().any(|entry| {
             entry.branch.as_deref() == Some(branch.as_str())
-                && fs::canonicalize(&entry.path).is_ok_and(|p| p == resolved)
-        });
-        if registered {
-            let head = git(&path, &["rev-parse", "HEAD"])?;
-            return Ok(Some((TaskWorktree { path, branch }, head)));
-        }
+                && is_non_symlink_dir(&entry.path)
+                && fs::canonicalize(&entry.path).is_ok_and(|p| p == resolved_expected)
+                && is_aaf_managed_worktree_path(&entry.path, &expected, &entries)
+        })
+    {
+        let head = git(&expected, &["rev-parse", "HEAD"])?;
+        return Ok(Some((
+            TaskWorktree {
+                path: expected,
+                branch,
+            },
+            head,
+        )));
+    }
+    if let Some(entry) = entries.iter().find(|entry| {
+        entry.branch.as_deref() == Some(branch.as_str())
+            && is_non_symlink_dir(&entry.path)
+            && is_aaf_managed_worktree_path(&entry.path, &expected, &entries)
+    }) {
+        let head = git(&entry.path, &["rev-parse", "HEAD"])?;
+        return Ok(Some((
+            TaskWorktree {
+                path: entry.path.clone(),
+                branch,
+            },
+            head,
+        )));
     }
     Ok(None)
 }
@@ -291,10 +338,88 @@ pub fn existing_head(
     Ok(None)
 }
 
+fn path_eq_or_under(path: &Path, ancestor: &Path) -> bool {
+    if path == ancestor || path.starts_with(ancestor) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let p_comps: Vec<_> = path.components().collect();
+        let a_comps: Vec<_> = ancestor.components().collect();
+        if a_comps.len() <= p_comps.len()
+            && a_comps.iter().zip(&p_comps).all(|(a, p)| {
+                a.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&p.as_os_str().to_string_lossy())
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when `entry_path` is an AAF-managed worktree for the same `(repo_id, task_id)`
+/// as `expected`: never the main checkout, never inside any registered worktree,
+/// and either equal to `expected` or matching its exact trailing `<repo_id>/<task_id>`
+/// components (so worktrees created under a previous `AAF_WORKTREE_DIR` remain
+/// recognized while human checkouts stay protected as foreign).
+pub(crate) fn is_aaf_managed_worktree_path(
+    entry_path: &Path,
+    expected: &Path,
+    registered: &[WorktreeEntry],
+) -> bool {
+    let entry_res = resolved(entry_path);
+    if let Some(main) = registered.first() {
+        let main_res = resolved(&main.path);
+        if path_eq_or_under(&entry_res, &main_res) {
+            return false;
+        }
+    }
+    if registered.iter().skip(1).any(|other| {
+        let other_res = resolved(&other.path);
+        other_res != entry_res && path_eq_or_under(&entry_res, &other_res)
+    }) {
+        return false;
+    }
+    let expected_res = resolved_leaf_no_follow(expected);
+    if entry_res == expected_res {
+        return true;
+    }
+    match (
+        entry_res.file_name(),
+        expected_res.file_name(),
+        entry_res.parent().and_then(Path::file_name),
+        expected_res.parent().and_then(Path::file_name),
+    ) {
+        (Some(ef), Some(xf), Some(ep), Some(xp)) => ef == xf && ep == xp,
+        _ => false,
+    }
+}
+
+/// Finds the registered worktree entry for a task (by branch, exact path, or
+/// relocated AAF-managed `<repo_id>/<task_id>` path, including detached HEAD).
+pub(crate) fn find_registered_for_task<'a>(
+    entries: &'a [WorktreeEntry],
+    expected: &Path,
+    branch: &str,
+) -> Option<&'a WorktreeEntry> {
+    let expected_res = resolved(expected);
+    entries
+        .iter()
+        .find(|e| e.branch.as_deref() == Some(branch))
+        .or_else(|| entries.iter().find(|e| resolved(&e.path) == expected_res))
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|e| is_aaf_managed_worktree_path(&e.path, expected, entries))
+        })
+}
+
 /// `"<id>: branch is checked out in <where>: kept"` when `entry` (the
 /// registered tree holding task `id`'s branch) is not the factory's own
-/// worktree at `expected` (see [`worktree_path`]); `None` when it is. git
-/// lists the main worktree first.
+/// worktree at `expected` (or an AAF-managed `<repo_id>/<id>` worktree from a
+/// previous `AAF_WORKTREE_DIR`); `None` when it is. git lists the main worktree first.
 pub(crate) fn foreign_checkout(
     id: &str,
     entry: &WorktreeEntry,
@@ -303,13 +428,13 @@ pub(crate) fn foreign_checkout(
 ) -> Option<String> {
     if registered
         .first()
-        .is_some_and(|main| main.path == entry.path)
+        .is_some_and(|main| resolved(&main.path) == resolved(&entry.path))
     {
         return Some(format!(
             "{id}: branch is checked out in the main worktree: kept"
         ));
     }
-    (resolved(&entry.path) != resolved(expected)).then(|| {
+    (!is_aaf_managed_worktree_path(&entry.path, expected, registered)).then(|| {
         format!(
             "{id}: branch is checked out in {}, not its aaf worktree: kept",
             entry.path.display()
@@ -317,18 +442,38 @@ pub(crate) fn foreign_checkout(
     })
 }
 
-/// The canonical path; a missing one through its canonical parent, so a
-/// tree whose directory is gone still matches across symlinked prefixes.
+/// Resolves `path`'s ancestors without following a symlink at `path` itself,
+/// so a symlink planted at `<worktrees_dir>/<repo_id>/<task_id>` pointing to a
+/// foreign checkout cannot spoof `expected_res == entry_res`.
+fn resolved_leaf_no_follow(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => resolved(parent).join(name),
+        _ => resolved(path),
+    }
+}
+
+/// Resolves `path` through its deepest existing canonical ancestor so missing
+/// paths under symlinked roots (e.g. `/tmp` -> `/private/tmp`) still match.
 pub(super) fn resolved(path: &Path) -> PathBuf {
     if let Ok(real) = fs::canonicalize(path) {
         return real;
     }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => {
-            fs::canonicalize(parent).map_or_else(|_| path.to_path_buf(), |dir| dir.join(name))
+    let mut tail = Vec::new();
+    let mut cur = path;
+    while let Some(name) = cur.file_name() {
+        tail.push(name.to_os_string());
+        let Some(parent) = cur.parent() else {
+            break;
+        };
+        if let Ok(real_parent) = fs::canonicalize(parent) {
+            return tail
+                .into_iter()
+                .rev()
+                .fold(real_parent, |acc, seg| acc.join(seg));
         }
-        _ => path.to_path_buf(),
+        cur = parent;
     }
+    path.to_path_buf()
 }
 
 pub use super::worktree_inspect::{

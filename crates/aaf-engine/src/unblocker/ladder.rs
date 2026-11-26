@@ -265,15 +265,8 @@ impl<'a> Ladder<'a> {
     }
 
     fn ensure_budget(&self, root_id: &str) -> PortResult<RootBudget> {
-        match self.budgets.get_budget(root_id) {
-            Ok(budget) => Ok(budget),
-            Err(PortError::NotFound(_)) => {
-                let budget = RootBudget::new(root_id, self.cfg);
-                self.budgets.put_budget(&budget)?;
-                Ok(budget)
-            }
-            Err(err) => Err(err),
-        }
+        self.budgets
+            .ensure_budget_if_missing(&RootBudget::new(root_id, self.cfg))
     }
 
     fn charge_cycle(&self, root_id: &str) -> PortResult<RootBudget> {
@@ -281,7 +274,7 @@ impl<'a> Ladder<'a> {
             // A root that never ran has no budget row yet.
             Err(PortError::NotFound(_)) => {
                 self.budgets
-                    .put_budget(&RootBudget::new(root_id, self.cfg))?;
+                    .ensure_budget_if_missing(&RootBudget::new(root_id, self.cfg))?;
                 self.budgets.add_usage(root_id, 0, 0, 1)
             }
             other => other,
@@ -415,6 +408,13 @@ impl<'a> Ladder<'a> {
         let plans = match proposer.propose(task, &reason, digest) {
             // Proposers are untrusted too: re-validate whatever they return.
             Ok(plans) => validate_plans(plans),
+            Err(PortError::Io(msg)) if msg == "account_busy" => {
+                return Ok(WalkOutcome::ProposerTransient(
+                    t2,
+                    BlockedReason::Quota { reset_at: None },
+                    UnblockAction::WaitForAccount { until: None },
+                ));
+            }
             Err(PortError::Io(msg)) if msg.starts_with("infra:") => {
                 let raw = msg.trim_start_matches("infra:").trim();
                 let detail = if raw.is_empty() {

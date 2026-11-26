@@ -32,8 +32,8 @@ const LINKED_PROTECTED_REFS: [&str; 7] = [
     "refs/heads/release.lock",
 ];
 
-/// Primary git-dir subpaths write-denied for linked worktrees (`release/*`).
-const LINKED_PROTECTED_SUBPATHS: [&str; 1] = ["refs/heads/release"];
+/// Primary git-dir subpaths write-denied for linked worktrees (`release/*`, `refs/remotes/*`).
+const LINKED_PROTECTED_SUBPATHS: [&str; 2] = ["refs/heads/release", "refs/remotes"];
 
 /// More directories than this below the `modules` dirs of one git dir is
 /// refused rather than half walked: a submodule left out would lose its
@@ -120,6 +120,7 @@ pub(super) fn protected_closed_paths(git_dir: &Path, worktree: Option<&Path>) ->
             "refs/heads/master",
             "refs/heads/develop",
             "refs/heads/release",
+            "refs/remotes",
         ] {
             paths.push(git_dir.join(rel));
         }

@@ -15,18 +15,16 @@ use super::audit_turn::InfraWatch;
 use super::ports::{AccountPool, Grant};
 use super::rework_filter::is_valid_rework_finding;
 use super::stage_router::StageTarget;
-use super::worker::{
-    GateJob, Next, ensure_budget, halt_on_infra_with, hook_problem_if, request_with,
-};
+use super::worker::{GateJob, Job, Next, ensure_budget, halt_on_infra_with, hook_problem_if};
 use super::{Deps, Store};
 use crate::cross_audit::Finding;
 use crate::git::TaskWorktree;
 use crate::git::worktree::validate_task_id;
-use crate::unblocker::{AgentSubtaskProposer, FailureSignal, Ladder, QuotaRoute, failure_digest};
+use crate::unblocker::{FailureSignal, Ladder, QuotaRoute, failure_digest};
 use crate::webhook::WebhookEvent;
 
 mod proposer;
-use proposer::ProposerRecorder;
+use proposer::LazyProposer;
 
 /// Records an account rate-limit cooldown on `accounts` and emits `AccountCooldown`.
 pub(super) fn report_limit_on(
@@ -189,9 +187,23 @@ pub(crate) fn handle_with(
     deps: &Deps,
     task_id: &str,
     worktree: Option<&TaskWorktree>,
-    mut signal: FailureSignal,
+    signal: FailureSignal,
     grant: &Grant,
     stage: Option<&StageTarget>,
+) -> PortResult<Next> {
+    handle_with_opt(deps, task_id, worktree, signal, Some(grant), stage, false)
+}
+
+/// Like [`handle_with`], but accepts `grant: None` for deterministic unblocks
+/// so T2/T3/Freeze/Escalate run without holding an account lease and T4 acquires lazily.
+pub(crate) fn handle_with_opt(
+    deps: &Deps,
+    task_id: &str,
+    worktree: Option<&TaskWorktree>,
+    mut signal: FailureSignal,
+    grant: Option<&Grant>,
+    stage: Option<&StageTarget>,
+    provider_cooling: bool,
 ) -> PortResult<Next> {
     let (runner, accounts, provider_kind, hook_req): (&dyn AgentRunner, &dyn AccountPool, _, bool) =
         match stage {
@@ -227,41 +239,58 @@ pub(crate) fn handle_with(
             task = deps.store.get_task(task_id)?;
         }
         signal.budget = ensure_budget(deps, &task.root_id)?.check();
+        let was_frozen = signal.budget == BudgetCheck::Frozen;
         signal.same_failure_count = prior_same(deps, task_id, &failure_digest(&signal))? + 1;
         let watch = InfraWatch::new(runner);
-        let recorder = ProposerRecorder {
+        let proposer = LazyProposer::new(
             deps,
-            task: &task,
-            branch: branch.clone(),
-            account_id: grant.account_id(),
-            inner: &watch,
-        };
-        let mut proposer_base = request_with(deps, &cwd, grant, provider_kind, hook_req, accounts)?;
-        proposer_base.sandbox.read_only = true;
-        let proposer = AgentSubtaskProposer {
-            runner: &recorder,
-            budgets: &*deps.store as &dyn Store,
-            base: proposer_base,
-        };
+            &task,
+            &cwd,
+            &branch,
+            provider_kind,
+            hook_req,
+            accounts,
+            &watch,
+            grant,
+            provider_cooling,
+        );
         // Asked after the limit was reported, so the account that hit it
         // already counts as cooling down.
         let route = accounts.after_limit()?;
         let decision = ladder(deps).next_action_routed(task_id, &signal, Some(&proposer), route)?;
+        let account_busy = proposer.was_account_busy();
+        let lazy_grant = proposer.take_grant();
         drop(proposer);
-        drop(recorder);
+        let effective_grant = grant.or(lazy_grant.as_ref());
         let (proposer_infra, proposer_limit) = watch.take();
-        if let Some(hit) = proposer_limit {
-            report_limit_on(deps, task_id, grant, accounts, &hit)?;
+        if let Some(hit) = proposer_limit
+            && let Some(active_grant) = effective_grant
+        {
+            report_limit_on(deps, task_id, active_grant, accounts, &hit)?;
             deps.move_to(
                 task_id,
                 TaskState::Ready,
                 None,
                 "subtask proposer hit usage limit; waiting for account",
             )?;
-            return route_limit_hit_on(grant, accounts, &hit);
+            return route_limit_hit_on(active_grant, accounts, &hit);
         }
-        if let Some(infra) = proposer_infra {
-            return halt_on_infra_with(deps, task_id, grant, accounts, &infra);
+        if let Some(infra) = proposer_infra
+            && let Some(active_grant) = effective_grant
+        {
+            return halt_on_infra_with(deps, task_id, active_grant, accounts, &infra);
+        }
+        if account_busy && let Some(wt) = worktree {
+            return Ok(Next::RetryAudit(Box::new(Job::Unblock {
+                job: GateJob {
+                    task_id: task_id.to_string(),
+                    worktree: wt.clone(),
+                    audited: false,
+                    cached_receipt: None,
+                },
+                signal: Box::new(signal),
+                needs_account: true,
+            })));
         }
         let why = format!(
             "unblock {}: {}",
@@ -273,7 +302,7 @@ pub(crate) fn handle_with(
             // was hit). Back in Ready the task starts on another account.
             UnblockAction::SwitchAccount => {
                 deps.move_to(task_id, TaskState::Ready, None, &why)?;
-                if grant.account_id().is_none() {
+                if effective_grant.and_then(Grant::account_id).is_none() {
                     let until = match decision.reason {
                         BlockedReason::Quota { reset_at } => reset_at,
                         _ => None,
@@ -337,7 +366,7 @@ pub(crate) fn handle_with(
                 let reason = BlockedReason::BudgetExceeded {
                     detail: why.clone(),
                 };
-                block(deps, &task, &reason, "budget_frozen", &why, true)?;
+                block(deps, &task, &reason, "budget_frozen", &why, !was_frozen)?;
                 return Ok(Next::Blocked);
             }
         }

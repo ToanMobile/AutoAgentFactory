@@ -135,7 +135,7 @@ fn apply_plan_approval(db: &Db, task: &Task, plan: &LatestPlan, now: i64) -> Res
     let note = format_approved_plan_note(plan);
     db.append_context_note(&task.id, &note, now).map_err(port)?;
     emit_human_plan_converged(db, &task.id, plan, now).map_err(port)?;
-    let budget_reset = reset_exhausted_budget(db, &task.root_id).map_err(port)?;
+    let budget_reset = reset_exhausted_budget(db, &task.root_id, &task.repo_root).map_err(port)?;
     db.set_state(&task.id, TaskState::Ready, None, now)
         .map_err(port)?;
     let payload = json!({

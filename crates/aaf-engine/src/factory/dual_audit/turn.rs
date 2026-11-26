@@ -71,12 +71,22 @@ fn run_clean_turn(
     let out = match target.runner.run(&run.request) {
         Ok(o) => o,
         Err(err) => {
-            worker::end_run(deps, task, &run, RunStatus::Failed, None, (0, 0), false)?;
+            worker::end_run(
+                deps,
+                task,
+                &run,
+                RunStatus::Failed,
+                None,
+                (0, 0),
+                false,
+                false,
+            )?;
             return Err(err);
         }
     };
     let tok = (out.tokens_in, out.tokens_out);
     let measured = target.runner.reports_tokens();
+    let charge_wall = worker::should_charge_wall(&out);
     worker::end_run(
         deps,
         task,
@@ -85,6 +95,7 @@ fn run_clean_turn(
         out.exit_code,
         tok,
         measured,
+        charge_wall,
     )?;
     if let Some(hit) = out.limit_hit {
         report_audit_limit(deps, &*target.accounts, &task.id, grant, &hit)?;

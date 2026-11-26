@@ -2,17 +2,17 @@
 //! its locked changes, and the unblocker ladder after a gate failure. Each
 //! runs on its own thread and ends by saying where the task goes next.
 
+mod types;
+pub(crate) use types::{GateJob, Job, Next, Outcome, PreGateAudit};
+
 use std::path::Path;
 
 use aaf_domain::account::ProviderKind;
 use aaf_domain::budget::{BudgetCheck, RootBudget};
 use aaf_domain::event::EventKind;
-use aaf_domain::gate::{GoldenScore, Receipt};
-use aaf_domain::pipeline::{ReviewIssue, ReviewerConfig};
 use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
 use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
 use aaf_domain::task::{Task, TaskState};
-use aaf_fp::PartialAuditRecord;
 use serde_json::json;
 
 use super::adapters::provider_for;
@@ -34,143 +34,21 @@ use crate::unblocker::{FailureSignal, PROPOSER_EXECUTOR};
 
 const NO_CHANGE: &str = "the agent run ended without changing anything on the branch";
 
-/// Pre-gate head-lock audit outcome bound to `(tree_fp, base_sha)` for post-gate reuse.
-#[derive(Debug, Clone)]
-pub(crate) struct PreGateAudit {
-    pub tree_fp: String,
-    pub base_sha: Option<String>,
-    pub audit_provider: String,
-    pub reviewer: String,
-    pub same_account: bool,
-    pub scores: Vec<GoldenScore>,
-}
-
-/// A task waiting for the gate.
-#[derive(Debug, Clone)]
-pub(crate) struct GateJob {
-    pub task_id: String,
-    pub worktree: TaskWorktree,
-    /// The cross-audit already ran for the current locked changes.
-    pub audited: bool,
-    /// Verified `Clear` receipt from before post-gate audit; re-verified before reuse.
-    pub cached_receipt: Option<Box<Receipt>>,
-}
-
-pub(crate) enum Job {
-    Agent {
-        task_id: String,
-    },
-    PlanTurn {
-        task_id: String,
-        role: DebateRole,
-        round: u32,
-    },
-    Audit {
-        job: GateJob,
-        lock_fp: String,
-    },
-    PostAudit {
-        job: GateJob,
-        receipt: Box<Receipt>,
-        pre_audit: Option<Box<PreGateAudit>>,
-    },
-    DualReviewTurn {
-        job: GateJob,
-        receipt: Box<Receipt>,
-        reviewer: ReviewerConfig,
-        plan_hash: String,
-    },
-    AdjudicateTurn {
-        job: GateJob,
-        receipt: Box<Receipt>,
-        pass_reviewer_id: String,
-        findings: Vec<ReviewIssue>,
-        partials: Vec<PartialAuditRecord>,
-        plan_hash: String,
-    },
-    Unblock {
-        job: GateJob,
-        signal: Box<FailureSignal>,
-    },
-}
-
-impl Job {
-    /// A post-gate audit of `receipt` that audits afresh: no pre-gate
-    /// verdict is reused (a retry, or a switch to another account).
-    pub(crate) fn fresh_post_audit(job: GateJob, receipt: Receipt) -> Box<Job> {
-        Box::new(Job::PostAudit {
-            job,
-            receipt: Box::new(receipt),
-            pre_audit: None,
-        })
-    }
-
-    pub(crate) fn task_id(&self) -> &str {
-        match self {
-            Job::Agent { task_id } | Job::PlanTurn { task_id, .. } => task_id,
-            Job::Audit { job, .. }
-            | Job::PostAudit { job, .. }
-            | Job::DualReviewTurn { job, .. }
-            | Job::AdjudicateTurn { job, .. }
-            | Job::Unblock { job, .. } => &job.task_id,
-        }
-    }
-}
-
-/// Where the task is after a job.
-pub(crate) enum Next {
-    Gate(GateJob),
-    GateAudited(GateJob, Box<PreGateAudit>),
-    Ready,
-    /// Usage limit hit on one account; another account may take over.
-    Switch,
-    /// Re-queue an in-flight audit/review job on another account without re-gating.
-    SwitchJob(Box<Job>),
-    /// Audit ended without a verdict; run the same audit job once more.
-    RetryAudit(Box<Job>),
-    /// Cooldown wait when no other account can take over.
-    Wait {
-        until: Option<i64>,
-    },
-    /// Transient network failure: backoff in `Mode::Auto`, halt in `Mode::Once`.
-    RetryAfter {
-        until: i64,
-        attempt: u32,
-        detail: String,
-    },
-    /// Unrecoverable account/CLI infrastructure error; stops the run.
-    Halt(String),
-    /// Audit rejected changes; hand to scheduler for `Purpose::Work` unblock.
-    Unblock {
-        task_id: String,
-        worktree: TaskWorktree,
-        signal: Box<FailureSignal>,
-    },
-    /// One blind sibling dual-review turn finished.
-    DualReviewPartial {
-        reviewer_id: String,
-    },
-    Blocked,
-}
-
-pub(crate) struct Outcome {
-    pub task_id: String,
-    pub provider: ProviderKey,
-    pub next: Next,
-    pub error: Option<String>,
-}
-
 pub(crate) fn run_job(
     deps: &Deps,
     audit_backend: Option<&AuditBackend>,
     router: Option<&StageRouter>,
     provider: ProviderKey,
     job: Job,
-    grant: &Grant,
+    grant: Option<&Grant>,
+    provider_cooling: bool,
 ) -> Outcome {
     let task_id = job.task_id().to_string();
+    let missing_grant = || PortError::Invalid("worker job requires an account grant".to_string());
     let result = match job {
-        Job::Agent { task_id } => agent(deps, router, &task_id, grant),
+        Job::Agent { task_id } => grant
+            .ok_or_else(missing_grant)
+            .and_then(|g| agent(deps, router, &task_id, g)),
         Job::PlanTurn {
             task_id,
             role,
@@ -185,37 +63,37 @@ pub(crate) fn run_job(
                     "plan debate turn requires a configured StageRouter".to_string(),
                 )),
             };
-            target.and_then(|t| plan_job::run_plan_turn(deps, t, &task_id, role, round, grant))
+            grant.ok_or_else(missing_grant).and_then(|g| {
+                target.and_then(|t| plan_job::run_plan_turn(deps, t, &task_id, role, round, g))
+            })
         }
-        Job::Audit { job, lock_fp } => {
-            audit_backend::execute_audit(deps, audit_backend, job, &lock_fp, grant)
-        }
+        Job::Audit { job, lock_fp } => grant
+            .ok_or_else(missing_grant)
+            .and_then(|g| audit_backend::execute_audit(deps, audit_backend, job, &lock_fp, g)),
         Job::PostAudit {
             job,
             receipt,
             pre_audit,
         } => {
-            let mut outcome = post_audit::run_post_gate_audit(
-                deps,
-                audit_backend,
-                job,
-                *receipt,
-                pre_audit,
-                grant,
-            );
+            let Some(g) = grant else {
+                return block_infra(deps, &task_id, "post-audit job requires an account grant");
+            };
+            let mut outcome =
+                post_audit::run_post_gate_audit(deps, audit_backend, job, *receipt, pre_audit, g);
             outcome.provider = provider;
             return outcome;
         }
-        Job::DualReviewTurn { .. } | Job::AdjudicateTurn { .. } => {
-            dual_coord::run_dual_job(deps, router, job, grant)
-        }
-        Job::Unblock { job, signal } => unblock::handle_with(
+        Job::DualReviewTurn { .. } | Job::AdjudicateTurn { .. } => grant
+            .ok_or_else(missing_grant)
+            .and_then(|g| dual_coord::run_dual_job(deps, router, job, g)),
+        Job::Unblock { job, signal, .. } => unblock::handle_with_opt(
             deps,
             &job.task_id,
             Some(&job.worktree),
             *signal,
             grant,
             router.map(|r| &r.default_implementer),
+            provider_cooling,
         ),
     };
     let mut outcome = match result {
@@ -231,14 +109,10 @@ pub(crate) fn run_job(
     outcome
 }
 
-/// An error of the factory's own machinery (git, store, executor) is not
-/// something an agent retry fixes: the task waits for a human, without
-/// freezing unrelated tasks across the factory.
 pub(crate) fn block_infra(deps: &Deps, task_id: &str, error: &str) -> Outcome {
     let why = format!("factory error: {error}");
     let mut message = format!("{task_id}: {error}");
     if let Err(second) = unblock::block_untried(deps, task_id, &why) {
-        // The store itself is failing; the summary is the only place left.
         message.push_str(&format!(" (and the task could not be blocked: {second})"));
     }
     Outcome {
@@ -250,18 +124,10 @@ pub(crate) fn block_infra(deps: &Deps, task_id: &str, error: &str) -> Outcome {
 }
 
 pub(crate) fn ensure_budget(deps: &Deps, root_id: &str) -> PortResult<RootBudget> {
-    match deps.store.get_budget(root_id) {
-        Err(PortError::NotFound(_)) => {
-            let budget = RootBudget::new(root_id, &deps.settings.repo.unblocker);
-            deps.store.put_budget(&budget)?;
-            Ok(budget)
-        }
-        other => other,
-    }
+    deps.store
+        .ensure_budget_if_missing(&RootBudget::new(root_id, &deps.settings.repo.unblocker))
 }
 
-/// The request of a run on `grant`'s account in `cwd`; the prompt is filled
-/// in by the caller.
 pub(super) fn request_with(
     deps: &Deps,
     cwd: &str,
@@ -374,8 +240,14 @@ pub(super) fn begin_run_with(
     Ok(OpenRun { request, started })
 }
 
-/// Closes the run and charges the root budget: tokens are input + output +
-/// cache creation (`tokens_in` already includes cache creation).
+pub(super) fn should_charge_wall(outcome: &AgentOutcome) -> bool {
+    outcome.timed_out
+        || (outcome.infra.is_none() && outcome.limit_hit.is_none())
+        || outcome.tokens_in > 0
+        || outcome.tokens_out > 0
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn end_run(
     deps: &Deps,
     task: &Task,
@@ -384,20 +256,29 @@ pub(super) fn end_run(
     exit_code: Option<i32>,
     tokens: (u64, u64),
     tokens_measured: bool,
+    charge_wall: bool,
 ) -> PortResult<()> {
     let ended = deps.now();
-    let finish = RunFinish {
-        status,
-        exit_code,
-        tokens_in: tokens.0,
-        tokens_out: tokens.1,
-        ended_at: ended,
+    deps.store.finish_run(
+        &run.request.run_id,
+        &RunFinish {
+            status,
+            exit_code,
+            tokens_in: tokens.0,
+            tokens_out: tokens.1,
+            ended_at: ended,
+        },
+    )?;
+    let wall = if charge_wall {
+        u64::try_from(ended - run.started).unwrap_or(0)
+    } else {
+        0
     };
-    deps.store.finish_run(&run.request.run_id, &finish)?;
-    let wall = u64::try_from(ended - run.started).unwrap_or(0);
+    let tok_total = tokens.0.saturating_add(tokens.1);
     ensure_budget(deps, &task.root_id)?;
-    deps.store
-        .add_usage(&task.root_id, tokens.0.saturating_add(tokens.1), wall, 0)?;
+    if tok_total > 0 || wall > 0 {
+        deps.store.add_usage(&task.root_id, tok_total, wall, 0)?;
+    }
     let payload = json!({ "run_id": run.request.run_id, "status": status.as_str(), "tokens_in": tokens.0, "tokens_out": tokens.1, "tokens_measured": tokens_measured });
     deps.emit(EventKind::RunFinished, &task.id, payload)
 }
@@ -476,7 +357,7 @@ fn agent(
         accounts,
     )?;
     if let Err(err) = snapshot_turn(deps, &task.id, &worktree, &run.request.run_id) {
-        let _ = end_run(deps, &task, &run, RunStatus::Failed, None, (0, 0), false);
+        let _ = fail_run(deps, &task, &run);
         return Err(err);
     }
     let profile = crate::config::effective_profile(&deps.settings.repo, &worktree.path);
@@ -559,6 +440,19 @@ fn snapshot_turn(deps: &Deps, task_id: &str, wt: &TaskWorktree, run_id: &str) ->
     Ok(())
 }
 
+fn fail_run(deps: &Deps, task: &Task, run: &OpenRun) -> PortResult<()> {
+    end_run(
+        deps,
+        task,
+        run,
+        RunStatus::Failed,
+        None,
+        (0, 0),
+        false,
+        false,
+    )
+}
+
 pub(super) fn invoke_runner_with(
     deps: &Deps,
     runner: &dyn AgentRunner,
@@ -568,11 +462,12 @@ pub(super) fn invoke_runner_with(
     let outcome = match runner.run(&run.request) {
         Ok(outcome) => outcome,
         Err(err) => {
-            end_run(deps, task, run, RunStatus::Failed, None, (0, 0), false)?;
+            fail_run(deps, task, run)?;
             return Err(err);
         }
     };
     let tok = (outcome.tokens_in, outcome.tokens_out);
+    let charge_wall = should_charge_wall(&outcome);
     end_run(
         deps,
         task,
@@ -581,6 +476,7 @@ pub(super) fn invoke_runner_with(
         outcome.exit_code,
         tok,
         runner.reports_tokens(),
+        charge_wall,
     )?;
     Ok(outcome)
 }

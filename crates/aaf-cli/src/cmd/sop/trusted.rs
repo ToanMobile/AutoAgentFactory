@@ -187,8 +187,14 @@ pub(super) fn ensure_sop_worktree(
     let base_info = resolve_base(repo_root, base_ref)
         .map_err(|e| CmdError::new(format!("base branch: {e}")))?;
     let start_point = base_info.start_point();
-    let wt = worktree::create(repo_root, &ctx.worktrees_dir, &wt_task_id, &start_point)
-        .map_err(|e| CmdError::new(format!("create SOP worktree: {e}")))?;
+    let wt =
+        match worktree::attach_existing_branch(repo_root, &ctx.worktrees_dir, &wt_task_id, None)
+            .map_err(|e| CmdError::new(format!("attach SOP worktree: {e}")))?
+        {
+            Some(attached) => attached,
+            None => worktree::create(repo_root, &ctx.worktrees_dir, &wt_task_id, &start_point)
+                .map_err(|e| CmdError::new(format!("create SOP worktree: {e}")))?,
+        };
     cp.worktree_path = Some(wt.path.to_string_lossy().into_owned());
     cp.branch = Some(wt.branch.clone());
     Ok(wt)

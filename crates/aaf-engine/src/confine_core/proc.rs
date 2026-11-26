@@ -88,6 +88,8 @@ fn drain(
     sink: Arc<Mutex<Sink>>,
     done: mpsc::Sender<()>,
     stop: Arc<AtomicBool>,
+    started: Instant,
+    last_output_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -101,6 +103,8 @@ fn drain(
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
+                    let ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    last_output_ms.store(ms.max(1), Ordering::Relaxed);
                     // A poisoned lock means another reader panicked; the
                     // caller then sees whatever was collected before.
                     if let Ok(mut sink) = sink.lock() {
@@ -244,13 +248,32 @@ fn unkilled_note(pgid: u32) -> String {
 
 /// Runs `cmd` in its own process group with a deadline, draining its output
 /// on threads so a chatty child cannot fill the pipe and stall.
+#[allow(dead_code)]
 pub(crate) fn capture(
     cmd: Command,
     timeout: Duration,
     cap: Option<usize>,
     with_stderr: bool,
 ) -> io::Result<Captured> {
-    capture_supervised(cmd, timeout, cap, with_stderr, &mut Unsupervised)
+    capture_with_idle(cmd, timeout, None, cap, with_stderr)
+}
+
+/// [`capture`] with an optional output-silence deadline.
+pub(crate) fn capture_with_idle(
+    cmd: Command,
+    timeout: Duration,
+    idle_timeout: Option<Duration>,
+    cap: Option<usize>,
+    with_stderr: bool,
+) -> io::Result<Captured> {
+    capture_supervised_with_idle(
+        cmd,
+        timeout,
+        idle_timeout,
+        cap,
+        with_stderr,
+        &mut Unsupervised,
+    )
 }
 
 /// How a supervised child ended.
@@ -272,22 +295,32 @@ fn next_poll(elapsed: Duration) -> Duration {
     }
 }
 
+fn idle_killed_note(limit: Duration) -> String {
+    format!(
+        "\n[aaf] command produced no output for {}s (idle_timeout_secs) and was terminated\n",
+        limit.as_secs()
+    )
+}
+
 /// Waits for `child`, the leader of its own process group, under
-/// `supervisor`; kills the group once it has run for `timeout`, and on a
-/// normal exit kills the members the leader left in its group. Besides how
-/// it ended: the group, when the timeout or normal-exit kill gave up with
-/// members left.
+/// `supervisor`; kills the group once it has run for `timeout` (or stays silent
+/// for `idle_timeout` unpaused), and on a normal exit kills the members the
+/// leader left in its group.
 fn wait_supervised(
     child: &mut Child,
     started: Instant,
     timeout: Duration,
+    idle: Option<(Duration, &std::sync::atomic::AtomicU64)>,
     supervisor: &mut dyn Supervise,
-) -> io::Result<(Waited, Option<u32>)> {
+) -> io::Result<(Waited, Option<u32>, Option<Duration>)> {
     let mut timed_out = false;
+    let mut idle_killed = None;
     let mut unkilled = None;
     let mut paused = false;
     let mut paused_total = Duration::ZERO;
     let mut last = started;
+    let mut seen_output_ms = 0u64;
+    let mut idle_elapsed = Duration::ZERO;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -306,13 +339,29 @@ fn wait_supervised(
             }
         }
         let now = Instant::now();
+        let delta = now.saturating_duration_since(last);
         if paused {
-            paused_total += now - last;
+            paused_total += delta;
+        }
+        if let Some((_, tracker)) = idle {
+            let current_out = tracker.load(Ordering::Relaxed);
+            if current_out != seen_output_ms {
+                seen_output_ms = current_out;
+                idle_elapsed = Duration::ZERO;
+            } else if !paused {
+                idle_elapsed = idle_elapsed.saturating_add(delta);
+            }
         }
         last = now;
         paused = supervisor.tick(child.id(), now - started);
-        if !paused && (now - started).saturating_sub(paused_total) >= timeout {
+        let hit_wall = (now - started).saturating_sub(paused_total) >= timeout;
+        let hit_idle =
+            idle.and_then(|(lim, _)| (!lim.is_zero() && idle_elapsed >= lim).then_some(lim));
+        if !paused && (hit_wall || hit_idle.is_some()) {
             timed_out = true;
+            if !hit_wall {
+                idle_killed = hit_idle;
+            }
             supervisor.before_kill(child.id());
             // Kill before reaping: the pid still names our group.
             if !kill_group(child.id()) {
@@ -338,7 +387,7 @@ fn wait_supervised(
     if !timed_out && !kill_left_members(child.id(), KILL_LIMIT) {
         unkilled = Some(child.id());
     }
-    Ok((waited, unkilled))
+    Ok((waited, unkilled, idle_killed))
 }
 
 /// Runs `cmd` in its own process group under `supervisor` with the output
@@ -355,16 +404,30 @@ pub(crate) fn run_supervised(
     cmd.process_group(0);
     let started = Instant::now();
     let mut child = cmd.spawn()?;
-    wait_supervised(&mut child, started, timeout, supervisor)
+    let (waited, unkilled, _) = wait_supervised(&mut child, started, timeout, None, supervisor)?;
+    Ok((waited, unkilled))
 }
 
 /// [`capture`] with a supervisor. Time during which the supervisor reports
 /// the group stopped is not charged to `timeout`: a command paused to
 /// protect the machine must not be killed for the pause. On a normal exit,
 /// kills the members the leader left in its group.
+#[allow(dead_code)]
 pub(crate) fn capture_supervised(
+    cmd: Command,
+    timeout: Duration,
+    cap: Option<usize>,
+    with_stderr: bool,
+    supervisor: &mut dyn Supervise,
+) -> io::Result<Captured> {
+    capture_supervised_with_idle(cmd, timeout, None, cap, with_stderr, supervisor)
+}
+
+/// [`capture_supervised`] with an optional unpaused output-silence timeout.
+pub(crate) fn capture_supervised_with_idle(
     mut cmd: Command,
     timeout: Duration,
+    idle_timeout: Option<Duration>,
     cap: Option<usize>,
     with_stderr: bool,
     supervisor: &mut dyn Supervise,
@@ -398,7 +461,18 @@ pub(crate) fn capture_supervised(
     }));
     let (done_tx, done_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
-    drain(reader, Arc::clone(&sink), done_tx, Arc::clone(&stop));
+    let last_output_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    drain(
+        reader,
+        Arc::clone(&sink),
+        done_tx,
+        Arc::clone(&stop),
+        started,
+        Arc::clone(&last_output_ms),
+    );
+    let idle = idle_timeout
+        .filter(|d| !d.is_zero())
+        .map(|d| (d, last_output_ms.as_ref()));
 
     let (
         Waited {
@@ -408,7 +482,8 @@ pub(crate) fn capture_supervised(
             paused: paused_total,
         },
         unkilled,
-    ) = match wait_supervised(&mut child, started, timeout, supervisor) {
+        idle_killed,
+    ) = match wait_supervised(&mut child, started, timeout, idle, supervisor) {
         Ok(res) => res,
         Err(err) => {
             stop.store(true, Ordering::Relaxed);
@@ -431,6 +506,9 @@ pub(crate) fn capture_supervised(
         }
     };
     let mut output = sink.lock().map(|mut s| s.take()).unwrap_or_default();
+    if let Some(lim) = idle_killed {
+        output.extend_from_slice(idle_killed_note(lim).as_bytes());
+    }
     // The log is where a person reads what the timeout or a normal exit left behind.
     if let Some(pgid) = unkilled {
         output.extend_from_slice(unkilled_note(pgid).as_bytes());
@@ -492,43 +570,4 @@ pub(crate) fn git_bytes(repo: &Path, args: &[&str], timeout: Duration) -> Result
         return Err(format!("{label}: output still arriving after git exited"));
     }
     Ok(done.output)
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    struct EndlessReader;
-    impl Read for EndlessReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            thread::sleep(Duration::from_millis(5));
-            buf[0] = b'x';
-            Ok(1)
-        }
-    }
-
-    #[test]
-    fn drain_exits_when_stop_is_set() {
-        let sink = Arc::new(Mutex::new(Sink {
-            data: Vec::new(),
-            cap: Some(64),
-        }));
-        let (tx, rx) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        drain(EndlessReader, sink, tx, Arc::clone(&stop));
-        stop.store(true, Ordering::Relaxed);
-        assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
-    }
-
-    #[test]
-    fn next_poll_is_fast_while_young() {
-        let ms = Duration::from_millis;
-        for elapsed in [0, 1, 8, 49] {
-            assert_eq!(next_poll(ms(elapsed)), ms(1));
-        }
-        for elapsed in [50, 51, 5_000] {
-            assert_eq!(next_poll(ms(elapsed)), POLL);
-        }
-    }
 }

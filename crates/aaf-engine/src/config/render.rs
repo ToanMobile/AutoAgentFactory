@@ -107,6 +107,8 @@ store_compliance = {store}
 min_android_target_sdk = {min_sdk}
 # Per gate command; the process group is killed when it expires.
 command_timeout_secs = {command_timeout}
+# Output-silence timeout per gate command (0 disables); pauses are excluded.
+idle_timeout_secs = {idle_timeout}
 # Skip lint/test_scoped in --scoped mode when only safe docs changed.
 docs_fast_path = {docs_fast_path}
 docs_fast_path_exclude_globs = []
@@ -183,6 +185,7 @@ allowed_tools = [
         store = quoted(store),
         min_sdk = gate.min_android_target_sdk,
         command_timeout = gate.command_timeout_secs,
+        idle_timeout = gate.idle_timeout_secs,
         docs_fast_path = gate.docs_fast_path,
         red_green_oracle = quoted(gate.red_green_oracle.as_str()),
         cycles = unblocker.max_unblock_cycles,
