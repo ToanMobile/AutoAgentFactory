@@ -136,14 +136,17 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .kcard-why-sub{margin-top:2px;font-size:11.5px;color:var(--ink2);font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .kcard-acts{display:flex;justify-content:flex-end;gap:5px;margin-top:6px;padding-top:5px;border-top:1px solid color-mix(in srgb,var(--border) 60%,transparent)}
 .kcard-acts button{padding:3px 8px;font-size:11.5px;border-radius:6px}
-.kcard-live{margin:5px 0 6px;padding:6px 8px;border-radius:7px;border:1px solid color-mix(in srgb,var(--warn) 34%,var(--border));border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 9%,var(--surface));display:flex;flex-direction:column;gap:3px;font-size:11.5px}
+.kcard-live{margin:5px 0 6px;padding:6px 8px;border-radius:7px;border:1px solid color-mix(in srgb,var(--ok) 34%,var(--border));border-left:3px solid var(--ok);background:color-mix(in srgb,var(--ok) 8%,var(--surface));display:flex;flex-direction:column;gap:3px;font-size:11.5px}
 .kcard-live.gating{border-color:color-mix(in srgb,var(--info) 36%,var(--border));border-left-color:var(--info);background:color-mix(in srgb,var(--info) 9%,var(--surface))}
+.kcard-live.stopped{border-color:color-mix(in srgb,var(--err) 34%,var(--border));border-left-color:var(--err);background:color-mix(in srgb,var(--err) 8%,var(--surface))}
 .kcard-live-top{display:flex;align-items:center;justify-content:space-between;gap:6px;font-weight:650;color:var(--ink)}
 .kcard-live-stage{display:inline-flex;align-items:center;gap:5px;min-width:0}
-.live-dot{width:6px;height:6px;border-radius:50%;background:var(--warn);flex:none;animation:pulse 1.6s infinite}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none;animation:pulse 1.6s infinite}
 .kcard-live.gating .live-dot{background:var(--info)}
-.kcard-live-clock{font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--warn);white-space:nowrap;font-variant-numeric:tabular-nums}
+.kcard-live.stopped .live-dot{background:var(--err);animation:none}
+.kcard-live-clock{font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--ok);white-space:nowrap;font-variant-numeric:tabular-nums}
 .kcard-live.gating .kcard-live-clock{color:var(--info)}
+.kcard-live.stopped .kcard-live-clock{color:var(--err)}
 .kcard-live-sub{display:flex;flex-wrap:wrap;gap:5px;align-items:center;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
 .kcard-dur{font-family:var(--mono);font-size:11px;color:var(--muted)}
 .kempty{color:var(--muted);font-size:12px;text-align:center;padding:16px 4px}
@@ -659,30 +662,54 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         return t.state === "gating" ? tr("stage.gatingQa") : tr("stage.coding");
     }
   }
-  function renderLiveRunBox(t, ro) {
+  function normRepoPath(p) {
+    return String(p || "").trim().replace(/\/+$/, "");
+  }
+  function isTaskRunnerLive(t) {
+    if (!statusData || !statusData.supervisor) return true;
+    const sup = statusData.supervisor;
+    const runningPaths = Array.isArray(sup.running_repo_paths)
+      ? sup.running_repo_paths
+      : (Array.isArray(sup.active_repo_paths) ? sup.active_repo_paths : null);
+    if (runningPaths) {
+      const target = normRepoPath(t.repo_root);
+      if (target && runningPaths.some((p) => normRepoPath(p) === target)) return true;
+      const names = Array.isArray(sup.active_repos) ? sup.active_repos : [];
+      if (t.repo_name && names.includes(t.repo_name)) return true;
+      return false;
+    }
+    return Boolean(sup.enabled);
+  }
+  function renderLiveRunBox(t, _ro) {
     if (t.state !== "running" && t.state !== "gating") return "";
     const run = t.latest_run || null;
+    const live = isTaskRunnerLive(t);
     const startTs = (run && Number(run.started_at)) || Number(t.updated_at) || 0;
     const elapsedText = startTs ? durLive(Math.max(0, Math.floor(Date.now() / 1000) - startTs)) : "—";
     const startClock = startTs ? fmtClock(startTs) : "";
-    const stage = formatLiveStage(t);
+    const stage = live ? formatLiveStage(t) : tr("live.stopped");
     const execPart = run && run.executor
       ? (run.account ? `${run.executor} · ${run.account}` : run.executor)
       : "";
     const runNo = (Number(t.run_count) || 0) > 1 ? tr("live.runNo", { n: t.run_count }) : "";
     const runId = (run && run.id) || t.latest_run_id || "";
-    const isGating = t.state === "gating";
-    const canStop = !ro && run && run.status === "running" && runId;
-    const acts = runId
-      ? `<div style="display:flex;gap:5px;margin-top:3px">
-          <button type="button" class="btn-sm" style="padding:2px 7px;font-size:11px" data-quick-stream="${esc(runId)}">${esc(tr("live.stream"))}</button>
-          ${canStop ? `<button type="button" class="btn-danger btn-sm" style="padding:2px 7px;font-size:11px" data-quick-stop="${esc(runId)}">${esc(tr("live.stop"))}</button>` : ""}
-        </div>`
+    const isGating = live && t.state === "gating";
+    const stateBadge = live
+      ? `<span class="pill pill-ok" style="font-size:10.5px;padding:1px 7px">${esc(tr("live.running"))}</span>`
+      : `<span class="pill pill-err" style="font-size:10.5px;padding:1px 7px">${esc(tr("live.stopped"))}</span>`;
+    const acts = `<div style="display:flex;gap:5px;align-items:center;margin-top:3px">
+      ${stateBadge}
+      ${runId ? `<button type="button" class="btn-sm" style="padding:2px 7px;font-size:11px" data-quick-stream="${esc(runId)}">${esc(tr("live.stream"))}</button>` : ""}
+    </div>`;
+    const clockHtml = startTs
+      ? (live
+          ? `<span class="kcard-live-clock" data-live-since="${esc(startTs)}" title="${esc(tr("live.elapsedTitle"))}">${esc(elapsedText)}</span>`
+          : `<span class="kcard-live-clock">${esc(tr("live.stopped"))}</span>`)
       : "";
-    return `<div class="kcard-live ${isGating ? "gating" : ""}">
+    return `<div class="kcard-live ${!live ? "stopped" : (isGating ? "gating" : "")}">
       <div class="kcard-live-top">
         <span class="kcard-live-stage"><span class="live-dot"></span><span>${esc(stage)}</span></span>
-        ${startTs ? `<span class="kcard-live-clock" data-live-since="${esc(startTs)}" title="${esc(tr("live.elapsedTitle"))}">${esc(elapsedText)}</span>` : ""}
+        ${clockHtml}
       </div>
       <div class="kcard-live-sub">
         ${startClock ? `<span>${esc(tr("live.started", { time: startClock }))}</span>` : ""}
@@ -1299,6 +1326,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   }
 
   let lastSupAllowedSig = null;
+  let lastRunningReposSig = null;
 
   function renderStatusChrome() {
     $("scopeLine").textContent = (metaLoaded || meta.repo_name || meta.scope || meta.version)
@@ -1315,6 +1343,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       syncRepoFilterOptions();
     } else {
       lastSupAllowedSig = supSig;
+    }
+    const runningSig = JSON.stringify([
+      Boolean(sup.enabled),
+      sup.running_repo_paths ?? sup.active_repo_paths ?? [],
+      sup.active_repos ?? [],
+    ]);
+    if (lastRunningReposSig !== null && runningSig !== lastRunningReposSig) {
+      lastRunningReposSig = runningSig;
+      if (boardLoaded) renderBoard();
+      if (drawerTaskId && drawerDetail && drawerTab === "overview") renderDrawerTab();
+    } else {
+      lastRunningReposSig = runningSig;
     }
     const knownRepos = getSupervisorKnownRepos();
     const supOn = Boolean(sup.enabled);
@@ -1589,9 +1629,6 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       $("boardList").querySelectorAll("[data-quick-stream]").forEach((btn) => {
         btn.onclick = (e) => { e.stopPropagation(); switchTab("stream"); followRun(btn.dataset.quickStream); };
       });
-      $("boardList").querySelectorAll("[data-quick-stop]").forEach((btn) => {
-        btn.onclick = (e) => { e.stopPropagation(); promptStopRun(btn.dataset.quickStop); };
-      });
       const blkUnblockAll = $("boardList").querySelector("[data-blk-unblock-all]");
       if (blkUnblockAll) {
         blkUnblockAll.onclick = () => {
@@ -1668,7 +1705,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             <span class="mono" style="font-weight:700">${esc(t.id)}</span>
             ${repoBadge}
             <span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>
-            <span class="pill pill-${esc(t.state)}">${esc(stateLabel(t.state))}</span>
+            <span class="pill pill-${esc((t.state === "running" || t.state === "gating") ? (isTaskRunnerLive(t) ? "ok" : "err") : t.state)}">${esc((t.state === "running" || t.state === "gating") ? (isTaskRunnerLive(t) ? tr("live.running") : tr("live.stopped")) : stateLabel(t.state))}</span>
             ${needYouBadge}
             ${planBadge}
             ${fpBadge}
@@ -1692,9 +1729,6 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     });
     $("boardList").querySelectorAll("[data-quick-stream]").forEach((btn) => {
       btn.onclick = (e) => { e.stopPropagation(); switchTab("stream"); followRun(btn.dataset.quickStream); };
-    });
-    $("boardList").querySelectorAll("[data-quick-stop]").forEach((btn) => {
-      btn.onclick = (e) => { e.stopPropagation(); promptStopRun(btn.dataset.quickStop); };
     });
     $("boardList").querySelectorAll(".task-row").forEach((el) => {
       el.onclick = () => openTaskDrawer(el.dataset.id);
@@ -1754,14 +1788,58 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function renderCompactSpec(specText) {
     const clean = String(specText || "").trim();
     if (!clean) return "";
-    const lines = clean.split("\n");
-    const isLong = clean.length > 360 || lines.length > 5;
+    const lines = clean.split("\n").filter((l) => l.trim());
+    const isLong = clean.length > 220 || lines.length > 3;
     if (!isLong) {
       return `<div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(clean)}</div>`;
     }
-    const preview = clean.length > 260 ? clean.slice(0, 260).trimEnd() + "…" : lines.slice(0, 4).join("\n") + "…";
+    const preview = clean.length > 200 ? clean.slice(0, 200).trimEnd() + "…" : lines.slice(0, 3).join("\n") + "…";
     return `<div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(preview)}</div>
       <details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:12px;font-weight:600">${esc(tr("drawer.showMore"))}</summary><div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${esc(clean)}</div></details>`;
+  }
+
+  function cleanLegacyPlanText(raw) {
+    const lines = String(raw || "").replace(/\r\n/g, "\n").split("\n");
+    const filtered = [];
+    for (const line of lines) {
+      const t = line.trim();
+      if (!filtered.length && (
+        /^Tôi (?:không lưu được file plan|đã có kế hoạch|chỉ đọc)/i.test(t) ||
+        /^I (?:only read the repo|cannot write|couldn't save)/i.test(t)
+      )) continue;
+      filtered.push(line);
+    }
+    return filtered.join("\n").trim();
+  }
+
+  function renderCompactPlanBody(raw) {
+    const clean = cleanLegacyPlanText(raw);
+    if (!clean) return "";
+    const lines = clean.split("\n");
+    const nonEmpty = lines.filter((l) => l.trim()).length;
+    if (lines.length <= 18 && clean.length <= 1100) {
+      return `<div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55">${esc(clean)}</div>`;
+    }
+    let preview = lines.slice(0, 16).join("\n").trimEnd();
+    if (preview.length > 1000) preview = preview.slice(0, 1000).trimEnd();
+    return `<div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55">${esc(preview)}…</div>
+      <details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px;font-weight:600">${esc(tr("drawer.showFullPlan", { n: nonEmpty }))}</summary><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12.5px;line-height:1.5;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${esc(clean)}</div></details>`;
+  }
+
+  function renderRunRow(r, runnerLive) {
+    const isRunningRow = r.status === "running" && !r.ended_at;
+    const isLiveRun = isRunningRow && runnerLive && r.started_at;
+    const elapsedHtml = isLiveRun
+      ? ` · <span style="color:var(--ok);font-weight:700" data-live-since="${esc(r.started_at)}">${esc(durLive(Math.max(0, Math.floor(Date.now() / 1000) - Number(r.started_at))))}</span>`
+      : (r.started_at && r.ended_at ? ` · ${esc(durLive(r.ended_at - r.started_at))}` : "");
+    const shortId = String(r.id || "").slice(0, 8);
+    const statusHtml = isRunningRow
+      ? `<span class="pill ${runnerLive ? "pill-ok" : "pill-err"}" style="font-size:10.5px;padding:1px 6px">${esc(runnerLive ? tr("live.running") : tr("live.stopped"))}</span>`
+      : `<strong>${esc(r.status)}</strong>`;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+      <span style="font-size:12.5px;overflow-wrap:anywhere"><span class="mono muted">${esc(shortId)}</span> · ${statusHtml} <span class="muted">(${esc(r.executor)})${elapsedHtml}</span></span>
+      <div style="display:flex;gap:5px;flex:none"><button class="btn-sm" data-run="${esc(r.id)}">${esc(tr("drawer.streamBtn"))}</button></div>
+    </div>`;
   }
 
   async function renderDrawerTab() {
@@ -1788,40 +1866,34 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const canCancel = ["backlog", "ready", "blocked", "review"].includes(t.state);
       const { steer, sys } = splitDrawerNotes(notes);
       const planShort = plan.summary || (plan.contract && plan.contract.summary) || "";
+      const revRuns = runs.slice().reverse();
+      const recentRuns = revRuns.slice(0, 2);
+      const olderRuns = revRuns.slice(2);
+      const runnerLive = isTaskRunnerLive(t);
+      const repoName = t.repo_root ? String(t.repo_root).split("/").filter(Boolean).pop() : "";
       $("drawerBody").innerHTML = `
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
           <span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>
-          <span class="pill pill-${esc(t.state||"backlog")}">${esc(stateLabel(t.state || "backlog"))}</span>
-          ${t.fingerprint ? `<span class="pill pill-slate mono">${esc(t.fingerprint)}</span>` : ""}
+          <span class="pill pill-${esc((t.state === "running" || t.state === "gating") ? (isTaskRunnerLive(t) ? "ok" : "err") : (t.state || "backlog"))}">${esc((t.state === "running" || t.state === "gating") ? (isTaskRunnerLive(t) ? tr("live.running") : tr("live.stopped")) : stateLabel(t.state || "backlog"))}</span>
+          ${repoName ? `<span class="pill pill-slate">${esc(repoName)}</span>` : ""}
           ${latestBranch ? `<span class="pill pill-slate mono">${esc(latestBranch)}</span>` : ""}
           ${t.updated_at ? `<span class="muted" style="font-size:12px">${esc(tr("drawer.updated", { time: ago(t.updated_at) }))}</span>` : ""}
         </div>
         <div style="font-weight:700;font-size:16px;word-break:break-word">${esc(t.title)}</div>
-        ${t.repo_root ? `<div class="mono" style="font-size:12px;color:var(--muted);overflow-wrap:anywhere">${esc(t.repo_root)}</div>` : ""}
         ${blkText ? `<div class="blocked-callout"><strong>${esc(tr("drawer.blockedPrefix"))}</strong> ${esc(blkText)}</div>` : ""}
         ${plan.needs_approval ? `<div class="plan-callout"><strong>${esc(tr("drawer.planWaiting"))}</strong> ${esc(planShort || tr("drawer.planWaitingFallback"))}</div>` : ""}
         ${plan.available && !plan.needs_approval ? `<div class="kv-section" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="min-width:0;font-size:13px"><strong style="margin-right:6px">${esc(tr("drawer.planSummary"))}:</strong><span class="muted">${esc(planShort)}</span></div><button type="button" class="btn-sm" id="drawerOpenPlanBtn" style="flex:none">${esc(tr("drawer.openPlan"))}</button></div>` : ""}
         <div class="kv-section"><div class="kv-title">${esc(tr("drawer.pipeline"))}</div><div id="drawerPipeBox" class="muted">${esc(tr("drawer.loadingPipeline"))}</div></div>
         ${specText ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.spec"))}</div>${renderCompactSpec(specText)}</div>` : ""}
-        ${acceptance.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.acceptance"))}</div>${acceptance.map((a)=>`<div style="margin-bottom:4px;font-size:13px;line-height:1.45">• ${esc(a)}</div>`).join("")}</div>` : ""}
-        ${deps.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.deps"))}</div><div class="mono">${esc(deps.join(", "))}</div></div>` : ""}
         ${steer.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.notes"))}</div>${steer.map((n)=>`<div style="margin-bottom:4px;font-size:13px;line-height:1.45">• ${esc(n)}</div>`).join("")}</div>` : ""}
-        ${sys.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.systemNotes", { n: sys.length }))}</summary><div style="margin-top:8px">${sys.map((item)=>`<div style="margin-bottom:6px;font-size:12.5px;line-height:1.45;overflow-wrap:anywhere">${item.label ? `<strong>${esc(item.label)}:</strong> ` : ""}<span class="muted">${esc(item.body.length > 260 ? item.body.slice(0, 260) + "…" : item.body)}</span></div>`).join("")}</div></details>` : ""}
         <div class="kv-section">
           <div class="kv-title">${esc(tr("drawer.runs", { n: runs.length }))}</div>
-          ${runs.length ? runs.slice().reverse().map((r) => {
-            const isLiveRun = r.status === "running" && !r.ended_at && r.started_at;
-            const elapsedHtml = isLiveRun
-              ? ` · <span style="color:var(--warn);font-weight:700" data-live-since="${esc(r.started_at)}">${esc(durLive(Math.max(0, Math.floor(Date.now() / 1000) - Number(r.started_at))))}</span>`
-              : (r.started_at && r.ended_at ? ` · ${esc(durLive(r.ended_at - r.started_at))}` : "");
-            const started = r.started_at ? ` · ${esc(tr("drawer.startedAt", { time: fmtClock(r.started_at) }))}` : "";
-            const stopBtn = r.status === "running" && !ro ? `<button class="btn-danger btn-sm" data-stop-run="${esc(r.id)}">${esc(tr("live.stop"))}</button>` : "";
-            return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
-              <span class="mono" style="overflow-wrap:anywhere">${esc(r.id)} · ${esc(r.status)} (${esc(r.executor)})${elapsedHtml}${started}</span>
-              <div style="display:flex;gap:5px;flex:none">${stopBtn}<button class="btn-sm" data-run="${esc(r.id)}">${esc(tr("drawer.streamBtn"))}</button></div>
-            </div>`;
-          }).join("") : `<div class="muted">${esc(tr("drawer.noRuns"))}</div>`}
+          ${recentRuns.length ? recentRuns.map((r) => renderRunRow(r, runnerLive)).join("") : `<div class="muted">${esc(tr("drawer.noRuns"))}</div>`}
+          ${olderRuns.length ? `<details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:12px;font-weight:600">${esc(tr("drawer.olderRuns", { n: olderRuns.length }))}</summary><div style="margin-top:4px">${olderRuns.map((r) => renderRunRow(r, runnerLive)).join("")}</div></details>` : ""}
         </div>
+        ${acceptance.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.acceptance"))} (${acceptance.length})</summary><div style="margin-top:8px">${acceptance.map((a)=>`<div style="margin-bottom:4px;font-size:12.5px;line-height:1.45">• ${esc(a)}</div>`).join("")}</div></details>` : ""}
+        ${deps.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.deps"))} (${deps.length})</summary><div class="mono" style="margin-top:6px;font-size:12px">${esc(deps.join(", "))}</div></details>` : ""}
+        ${sys.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.systemNotes", { n: sys.length }))}</summary><div style="margin-top:8px">${sys.map((item)=>`<div style="margin-bottom:6px;font-size:12.5px;line-height:1.45;overflow-wrap:anywhere">${item.label ? `<strong>${esc(item.label)}:</strong> ` : ""}<span class="muted">${esc(item.body.length > 220 ? item.body.slice(0, 220) + "…" : item.body)}</span></div>`).join("")}</div></details>` : ""}
         <details class="kv-section">
           <summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.recentEvents", { n: events.length }))}</summary>
           <div style="margin-top:6px">${events.map((e) => `<div class="mono" style="font-size:11.5px;padding:3px 0;border-bottom:1px solid var(--border)">${esc(String(e.kind || "").replace(/_/g, " "))} · <span class="muted">${esc(ago(e.created_at))}</span></div>`).join("") || `<div class="muted">${esc(tr("drawer.none"))}</div>`}</div>
@@ -1961,22 +2033,31 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const tierReasons = c && Array.isArray(c.tier_reasons) ? c.tier_reasons : [];
       const openQs = c && Array.isArray(c.open_questions) ? c.open_questions : [];
       const summaryText = plan.summary || (c && c.summary) || "";
-      const showNoteBody = !c && plan.note_body && plan.note_body.trim() !== summaryText.trim();
+      const cleanedBody = !c && plan.note_body ? cleanLegacyPlanText(plan.note_body) : "";
+      const showNoteBody = Boolean(cleanedBody && cleanedBody !== summaryText.trim());
+      const hasTechDetails = Boolean(
+        invariants.length || openQs.length || tierReasons.length || plan.hash ||
+        files.some((f) => f.risk) || tests.some((rt) => rt.red_condition || rt.green_condition)
+      );
       $("drawerBody").innerHTML = `
         <div class="plan-callout">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
             <span style="font-weight:700">${esc(plan.needs_approval ? tr("drawer.planWaitingTitle") : tr("drawer.planRecordedTitle"))}</span>
             ${c && c.tier_assessment ? `<span class="pill pill-slate">${esc(c.tier_assessment)}</span>` : ""}
           </div>
-          <div>${esc(summaryText || plan.note_body || "")}</div>
-          ${tierReasons.length ? `<div class="muted" style="font-size:12px;margin-top:5px">${tierReasons.map((r) => `• ${esc(r)}`).join(" ")}</div>` : ""}
-          ${plan.hash ? `<div class="mono muted" style="margin-top:6px">hash: ${esc(plan.hash)}</div>` : ""}
+          <div style="font-size:13.5px;line-height:1.5">${esc(summaryText || cleanedBody || "")}</div>
         </div>
-        ${files.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.filesToChange", { n: files.length }))}</div>${files.map((f) => `<div style="margin-bottom:6px"><span class="mono" style="font-weight:600">${esc(f.path || "")}</span>${f.responsibility ? ` — ${esc(f.responsibility)}` : ""}${f.risk ? `<div class="muted" style="font-size:12px">${esc(tr("drawer.risk"))} ${esc(f.risk)}</div>` : ""}</div>`).join("")}</div>` : ""}
-        ${invariants.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.invariants", { n: invariants.length }))}</div>${invariants.map((inv) => `<div style="margin-bottom:4px">• ${esc(inv)}</div>`).join("")}</div>` : ""}
-        ${tests.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.tests", { n: tests.length }))}</div>${tests.map((rt) => `<div style="margin-bottom:6px"><span class="mono" style="font-weight:600">${esc(rt.test_path || rt.ac_ref || "test")}</span>${rt.red_condition ? `<div class="muted" style="font-size:12px">RED: ${esc(rt.red_condition)}</div>` : ""}${rt.green_condition ? `<div class="muted" style="font-size:12px">GREEN: ${esc(rt.green_condition)}</div>` : ""}</div>`).join("")}</div>` : ""}
-        ${openQs.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.openQuestions", { n: openQs.length }))}</div>${openQs.map((q) => `<div style="margin-bottom:4px">• ${esc(q)}</div>`).join("")}</div>` : ""}
-        ${showNoteBody ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.planDetails"))}</div><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55">${esc(plan.note_body)}</div></div>` : ""}
+        ${files.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.filesToChange", { n: files.length }))}</div>${files.map((f) => `<div style="margin-bottom:5px;font-size:13px;line-height:1.45"><span class="mono" style="font-weight:600">${esc(f.path || "")}</span>${f.responsibility ? ` — ${esc(f.responsibility)}` : ""}</div>`).join("")}</div>` : ""}
+        ${tests.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.tests", { n: tests.length }))}</div>${tests.map((rt) => `<div style="margin-bottom:4px;font-size:13px">• <span class="mono">${esc(rt.test_path || rt.ac_ref || "test")}</span></div>`).join("")}</div>` : ""}
+        ${showNoteBody ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.planDetails"))}</div>${renderCompactPlanBody(cleanedBody)}</div>` : ""}
+        ${hasTechDetails ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.techDetails"))}</summary><div style="margin-top:8px;font-size:12.5px;line-height:1.5">
+          ${files.some((f) => f.risk) ? files.filter((f) => f.risk).map((f) => `<div style="margin-bottom:4px"><span class="mono">${esc(f.path)}</span> — <span class="muted">${esc(tr("drawer.risk"))} ${esc(f.risk)}</span></div>`).join("") : ""}
+          ${invariants.length ? `<div style="margin-top:6px"><strong>${esc(tr("drawer.invariants", { n: invariants.length }))}</strong>${invariants.map((inv) => `<div class="muted">• ${esc(inv)}</div>`).join("")}</div>` : ""}
+          ${tests.some((rt) => rt.red_condition || rt.green_condition) ? `<div style="margin-top:6px"><strong>${esc(tr("drawer.tests", { n: tests.length }))}</strong>${tests.map((rt) => `<div class="muted" style="margin-bottom:4px"><span class="mono">${esc(rt.test_path || rt.ac_ref || "test")}</span>${rt.red_condition ? ` · RED: ${esc(rt.red_condition)}` : ""}${rt.green_condition ? ` · GREEN: ${esc(rt.green_condition)}` : ""}</div>`).join("")}</div>` : ""}
+          ${openQs.length ? `<div style="margin-top:6px"><strong>${esc(tr("drawer.openQuestions", { n: openQs.length }))}</strong>${openQs.map((q) => `<div class="muted">• ${esc(q)}</div>`).join("")}</div>` : ""}
+          ${tierReasons.length ? `<div class="muted" style="margin-top:6px">${tierReasons.map((r) => `• ${esc(r)}`).join(" ")}</div>` : ""}
+          ${plan.hash ? `<div class="mono muted" style="margin-top:6px">hash: ${esc(plan.hash)}</div>` : ""}
+        </div></details>` : ""}
         ${plan.needs_approval ? `<div class="action-bar"><button class="btn-ok" id="planTabApproveBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.approvePlanReady"))}</button></div>` : ""}`;
       if ($("planTabApproveBtn")) {
         $("planTabApproveBtn").onclick = () => runQuickAction("approve_plan", taskId, $("planTabApproveBtn"), true);

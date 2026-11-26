@@ -144,6 +144,30 @@ pub(super) fn is_repo_lock_held(data_dir: &Path, repo_root: &str) -> bool {
     }
 }
 
+/// Collects every repository path currently running an `aaf run` process
+/// (either a live `UiSupervisor` worker or an external CLI runner holding the
+/// repo OS flock). Includes both raw DB paths and canonical keys so UI matching
+/// works across symlinks and trailing slashes.
+pub(super) fn collect_running_repo_paths(
+    data_dir: &Path,
+    active_paths: &[String],
+    known_repos: &[Value],
+) -> Vec<String> {
+    let active_set: BTreeSet<String> = active_paths.iter().map(|p| normalize_repo_key(p)).collect();
+    let mut running: BTreeSet<String> = active_paths.iter().cloned().collect();
+    for row in known_repos {
+        let Some(raw) = row.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let norm = normalize_repo_key(raw);
+        if active_set.contains(&norm) || is_repo_lock_held(data_dir, raw) {
+            running.insert(raw.to_string());
+            running.insert(norm);
+        }
+    }
+    running.into_iter().collect()
+}
+
 pub(super) fn spawn_repo_runner(
     exe: &Path,
     ctx: &Ctx,
@@ -351,8 +375,44 @@ mod tests {
         holder.try_lock().unwrap();
         assert!(is_repo_lock_held(&data_dir, &repo_str));
 
-        // 4. After dropping the holder, lock is released -> false again.
+        // 4. After unlocking and dropping the holder, lock is released -> false again.
+        holder.unlock().unwrap();
         drop(holder);
         assert!(!is_repo_lock_held(&data_dir, &repo_str));
+    }
+
+    #[test]
+    fn collect_running_repo_paths_includes_workers_and_locked_external_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let repo_ext = tmp.path().join("repo-ext");
+        let repo_idle = tmp.path().join("repo-idle");
+        fs::create_dir_all(&repo_ext).unwrap();
+        fs::create_dir_all(&repo_idle).unwrap();
+        let ext_str = repo_ext.to_string_lossy().into_owned();
+        let idle_str = repo_idle.to_string_lossy().into_owned();
+        let lock_path = crate::cmd::run::detach::run_lock_path(&data_dir, &repo_ext);
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let holder = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock().unwrap();
+
+        let known = vec![
+            serde_json::json!({ "path": ext_str }),
+            serde_json::json!({ "path": idle_str }),
+        ];
+        let running = collect_running_repo_paths(&data_dir, &[], &known);
+        assert!(running.contains(&ext_str));
+        assert!(!running.contains(&idle_str));
+
+        holder.unlock().unwrap();
+        drop(holder);
+        let after = collect_running_repo_paths(&data_dir, &[], &known);
+        assert!(after.is_empty());
     }
 }

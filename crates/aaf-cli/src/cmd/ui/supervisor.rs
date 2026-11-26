@@ -23,9 +23,9 @@ use serde_json::{Value, json};
 #[cfg(test)]
 pub(super) use super::supervisor_ops::runner_env;
 use super::supervisor_ops::{
-    PersistedState, WorkerSlot, is_repo_allowed, is_repo_lock_held, normalize_repo_key,
-    read_persisted, spawn_repo_runner, stop_children_unlocked, sync_caffeinate_child,
-    write_persisted,
+    PersistedState, WorkerSlot, collect_running_repo_paths, is_repo_allowed, is_repo_lock_held,
+    normalize_repo_key, read_persisted, spawn_repo_runner, stop_children_unlocked,
+    sync_caffeinate_child, write_persisted,
 };
 use crate::cmd::board::store::SharedRoDb;
 use crate::ctx::Ctx;
@@ -115,6 +115,8 @@ impl UiSupervisor {
             .map(|w| w.repo_name.clone())
             .collect();
         let active_paths: Vec<String> = guard.workers.keys().cloned().collect();
+        let running_paths =
+            collect_running_repo_paths(&self.ctx.data_dir, &active_paths, &known_repos);
         let allowed_list: Option<Vec<String>> = guard
             .allowed_repos
             .as_ref()
@@ -142,6 +144,7 @@ impl UiSupervisor {
             "enabled": guard.enabled,
             "active_repos": active,
             "active_repo_paths": active_paths,
+            "running_repo_paths": running_paths,
             "allowed_repos": allowed_list,
             "known_repos": known_repos,
             "backoff": backoff,

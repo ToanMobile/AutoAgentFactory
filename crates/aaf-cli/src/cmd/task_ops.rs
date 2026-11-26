@@ -232,16 +232,28 @@ pub(crate) fn latest_plan_info(db: &Db, task_id: &str) -> Result<Option<LatestPl
     }))
 }
 
+fn is_plan_meta_preamble(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.starts_with("tôi không lưu được file plan")
+        || lower.starts_with("tôi đã có kế hoạch")
+        || lower.starts_with("tôi chỉ đọc")
+        || lower.starts_with("i only read the repo")
+        || lower.starts_with("i cannot write")
+        || lower.starts_with("i couldn't save")
+}
+
 /// Extracts a concise single-line summary from free-form markdown plan text.
 pub(crate) fn plan_summary_one_line(plan: &str) -> String {
+    fn cleaned(l: &str) -> &str {
+        l.trim()
+            .trim_start_matches(['#', '-', '*', '•', ' '])
+            .trim()
+    }
     let first = plan
         .lines()
-        .map(|l| {
-            l.trim()
-                .trim_start_matches(['#', '-', '*', '•', ' '])
-                .trim()
-        })
-        .find(|l| !l.is_empty())
+        .map(cleaned)
+        .find(|l| !l.is_empty() && !is_plan_meta_preamble(l))
+        .or_else(|| plan.lines().map(cleaned).find(|l| !l.is_empty()))
         .unwrap_or("");
     let mut chars = first.chars();
     let short: String = chars.by_ref().take(140).collect();

@@ -365,8 +365,10 @@ fn plan_detail_falls_back_to_approved_context_note_after_human_unblock() {
         aaf_domain::task::Priority::P1,
         100,
     );
-    task.context_notes
-        .push("plan_approved: # Plan: Fix login\n- Update Login.kt\n- Add LoginTest".into());
+    task.context_notes.push(
+        "plan_approved: Tôi không lưu được file plan: quyền bị chặn.\n\n# Plan: Fix login\n- Update Login.kt\n- Add LoginTest"
+            .into(),
+    );
     db.insert_task(&task).unwrap();
     db.emit(
         &aaf_domain::event::FactoryEvent::new(

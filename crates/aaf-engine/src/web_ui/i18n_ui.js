@@ -114,6 +114,8 @@
       "live.started": "Started {time}",
       "live.stream": "Live Stream",
       "live.stop": "Stop",
+      "live.running": "Running",
+      "live.stopped": "Stopped",
       "live.runNo": "Run #{n}",
 
       // Board Cards & List
@@ -211,6 +213,9 @@
       "drawer.noteUnblock": "Retry",
       "drawer.noteUnblocked": "Unblocked",
       "drawer.showMore": "Show full description",
+      "drawer.techDetails": "Technical details",
+      "drawer.showFullPlan": "Show full plan ({n} lines)",
+      "drawer.olderRuns": "Older runs ({n})",
       "drawer.runs": "Runs ({n})",
       "drawer.startedAt": "started {time}",
       "drawer.streamBtn": "Stream",
@@ -594,6 +599,8 @@
       "live.started": "Bắt đầu {time}",
       "live.stream": "Live Stream",
       "live.stop": "Dừng",
+      "live.running": "Đang chạy",
+      "live.stopped": "Đã dừng",
       "live.runNo": "Run #{n}",
 
       // Board Cards & List
@@ -691,6 +698,9 @@
       "drawer.noteUnblock": "Thử lại",
       "drawer.noteUnblocked": "Đã mở khoá",
       "drawer.showMore": "Xem toàn bộ mô tả",
+      "drawer.techDetails": "Chi tiết kỹ thuật",
+      "drawer.showFullPlan": "Xem toàn bộ kế hoạch ({n} dòng)",
+      "drawer.olderRuns": "Lượt chạy cũ hơn ({n})",
       "drawer.runs": "Lượt chạy ({n})",
       "drawer.startedAt": "bắt đầu {time}",
       "drawer.streamBtn": "Stream",
