@@ -5,12 +5,19 @@
 //! Read from the manifests on disk without running Cargo. Anything this
 //! cannot account for widens to `--workspace`, never narrows: a `--full` or
 //! `--release` gate, a change to a manifest, `Cargo.lock`, a `build.rs`,
-//! `.cargo/`, the toolchain file or any path outside a member directory, a
+//! `.cargo/`, the toolchain file, any unnormalizable path, any path outside
+//! a member directory, any path owned by a root `[package]` outside its own
+//! `src/`, `tests/`, `benches/`, or `examples/` trees, any path under a
+//! deeper `Cargo.toml` than its owning member (such as an unlisted nested
+//! crate or fixture), a `path` dependency targeting a directory outside the
+//! listed workspace members (or unnormalizable), a root `[patch]` or
+//! `[replace]` entry with `path`, a `[patch]` or `paths` in the repo's
+//! `.cargo/config(.toml)` (or such a file that is unreadable or not TOML), a
 //! members glob other than `dir/*`, and an unreadable manifest.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use aaf_domain::config::CommandsConfig;
 use aaf_domain::gate::GateMode;
@@ -124,17 +131,24 @@ struct Member {
 pub fn affected_packages(repo_root: &Path, changes: &[Change]) -> Option<BTreeSet<String>> {
     let members = read_workspace(repo_root)?;
     let mut touched: BTreeSet<&str> = BTreeSet::new();
-    for path in changes
+    for raw_path in changes
         .iter()
         .flat_map(|c| std::iter::once(c.path.as_str()).chain(c.old_path.as_deref()))
     {
-        if widens(path) {
+        let path = normalize(raw_path)?;
+        if path.is_empty() || widens(&path) {
             return None;
         }
         let owner = members
             .iter()
             .filter(|m| m.dir.is_empty() || path.starts_with(&format!("{}/", m.dir)))
             .max_by_key(|m| m.dir.len())?;
+        if owner.dir.is_empty() && !is_root_package_source(&path) {
+            return None;
+        }
+        if has_deeper_manifest(repo_root, &owner.dir, &path) {
+            return None;
+        }
         touched.insert(owner.dir.as_str());
     }
     // Reverse dependencies, to a fixed point.
@@ -169,12 +183,73 @@ fn widens(path: &str) -> bool {
         || path.contains("/.cargo/")
 }
 
+/// For a root `[package]` (`dir == ""`), only paths inside its standard source
+/// trees narrow to the root package; everything else at the repo root (docs,
+/// shared fixtures, submodules/gitlinks, etc.) widens to the whole workspace.
+/// Note: `build.rs` is already widened unconditionally by [`widens`].
+fn is_root_package_source(path: &str) -> bool {
+    path.starts_with("src/")
+        || path.starts_with("tests/")
+        || path.starts_with("benches/")
+        || path.starts_with("examples/")
+}
+
+/// `true` if `path` itself (when it is a directory or gitlink) or any ancestor
+/// strictly deeper than `owner_dir` contains a regular `Cargo.toml` file.
+fn has_deeper_manifest(repo_root: &Path, owner_dir: &str, path: &str) -> bool {
+    let mut cur = path;
+    while cur.len() > owner_dir.len() {
+        if repo_root.join(cur).join("Cargo.toml").is_file() {
+            return true;
+        }
+        let Some((parent, _)) = cur.rsplit_once('/') else {
+            break;
+        };
+        cur = parent;
+    }
+    false
+}
+
+/// `true` if the root manifest declares a `[patch]` (for any registry) or
+/// `[replace]` entry with a `path`, or has an unexpected non-table section.
+fn has_path_patch_or_replace(root: &toml::Table) -> bool {
+    ["patch", "replace"].iter().any(|section| {
+        root.get(*section)
+            .is_some_and(|v| v.as_table().is_none_or(has_path_key))
+    })
+}
+
+fn has_path_key(table: &toml::Table) -> bool {
+    table.iter().any(|(k, v)| match v.as_table() {
+        Some(sub) => has_path_key(sub),
+        None => k == "path",
+    })
+}
+
 fn read_toml(path: &Path) -> Option<toml::Table> {
     fs::read_to_string(path).ok()?.parse::<toml::Table>().ok()
 }
 
+/// `true` if the repo's `.cargo/config.toml` and legacy `.cargo/config` are
+/// absent, or parse as TOML without a top-level `patch` or `paths` (either
+/// can override a dependency with a local crate). Any read error other than
+/// "not found", or a parse error, counts as `false`.
+fn cargo_config_allows_narrowing(repo_root: &Path) -> bool {
+    ["config.toml", "config"].iter().all(|name| {
+        match fs::read_to_string(repo_root.join(".cargo").join(name)) {
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            Ok(text) => text
+                .parse::<toml::Table>()
+                .is_ok_and(|cfg| !cfg.contains_key("patch") && !cfg.contains_key("paths")),
+        }
+    })
+}
+
 fn read_workspace(repo_root: &Path) -> Option<Vec<Member>> {
     let root = read_toml(&repo_root.join("Cargo.toml"))?;
+    if has_path_patch_or_replace(&root) || !cargo_config_allows_narrowing(repo_root) {
+        return None;
+    }
     let ws = root.get("workspace")?.as_table()?;
     let mut dirs: Vec<String> = Vec::new();
     for entry in ws.get("members")?.as_array()? {
@@ -210,34 +285,39 @@ fn read_workspace(repo_root: &Path) -> Option<Vec<Member>> {
     if root.contains_key("package") {
         dirs.push(String::new());
     }
-    let ws_deps: BTreeMap<String, String> = ws
-        .get("dependencies")
-        .and_then(toml::Value::as_table)
-        .map(|t| {
-            t.iter()
-                .filter_map(|(k, v)| {
-                    let p = v.as_table()?.get("path")?.as_str()?;
-                    Some((k.clone(), normalize(p)?))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let known_dirs: BTreeSet<String> = dirs.into_iter().collect();
+    let mut ws_deps: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(deps_val) = ws.get("dependencies") {
+        for (key, spec) in deps_val.as_table()? {
+            if let Some(path_val) = spec.as_table().and_then(|t| t.get("path")) {
+                let target = normalize(path_val.as_str()?)?;
+                if !known_dirs.contains(&target) {
+                    return None;
+                }
+                ws_deps.insert(key.clone(), target);
+            }
+        }
+    }
     let mut members = Vec::new();
-    for dir in dirs {
+    for dir in &known_dirs {
         let manifest = if dir.is_empty() {
             root.clone()
         } else {
-            read_toml(&repo_root.join(&dir).join("Cargo.toml"))?
+            read_toml(&repo_root.join(dir).join("Cargo.toml"))?
         };
         let name = manifest.get("package")?.as_table()?.get("name")?.as_str()?;
         let mut deps = BTreeSet::new();
-        for table in dependency_tables(&manifest) {
+        for table in dependency_tables(&manifest)? {
             for (key, spec) in table {
                 let Some(spec) = spec.as_table() else {
                     continue;
                 };
-                if let Some(p) = spec.get("path").and_then(toml::Value::as_str) {
-                    deps.insert(normalize(&join(&dir, p))?);
+                if let Some(path_val) = spec.get("path") {
+                    let target = resolve_rel(dir, path_val.as_str()?)?;
+                    if !known_dirs.contains(&target) {
+                        return None;
+                    }
+                    deps.insert(target);
                 } else if spec.get("workspace").and_then(toml::Value::as_bool) == Some(true)
                     && let Some(p) = ws_deps.get(key)
                 {
@@ -247,41 +327,58 @@ fn read_workspace(repo_root: &Path) -> Option<Vec<Member>> {
         }
         members.push(Member {
             name: name.to_string(),
-            dir,
+            dir: dir.clone(),
             deps,
         });
     }
     Some(members)
 }
 
-/// `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` and their
-/// `[target.'cfg(..)'.*]` forms.
-fn dependency_tables(manifest: &toml::Table) -> Vec<&toml::Table> {
-    const KINDS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
-    let mut out: Vec<&toml::Table> = KINDS
-        .iter()
-        .filter_map(|k| manifest.get(*k)?.as_table())
-        .collect();
-    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
-        for t in targets.values().filter_map(toml::Value::as_table) {
-            out.extend(KINDS.iter().filter_map(|k| t.get(*k)?.as_table()));
+/// `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, the
+/// underscore spellings Cargo still accepts (`[dev_dependencies]`,
+/// `[build_dependencies]`), and their `[target.'cfg(..)'.*]` forms.
+fn dependency_tables(manifest: &toml::Table) -> Option<Vec<&toml::Table>> {
+    const KINDS: [&str; 5] = [
+        "dependencies",
+        "dev-dependencies",
+        "build-dependencies",
+        "dev_dependencies",
+        "build_dependencies",
+    ];
+    let mut out: Vec<&toml::Table> = Vec::new();
+    for k in KINDS {
+        if let Some(v) = manifest.get(k) {
+            out.push(v.as_table()?);
         }
     }
-    out
+    if let Some(targets_val) = manifest.get("target") {
+        for t_val in targets_val.as_table()?.values() {
+            let t = t_val.as_table()?;
+            for k in KINDS {
+                if let Some(v) = t.get(k) {
+                    out.push(v.as_table()?);
+                }
+            }
+        }
+    }
+    Some(out)
 }
 
-fn join(dir: &str, rel: &str) -> String {
-    if dir.is_empty() {
-        rel.to_string()
-    } else {
-        format!("{dir}/{rel}")
+fn resolve_rel(dir: &str, rel: &str) -> Option<String> {
+    if Path::new(rel).is_absolute() {
+        return None;
     }
+    normalize_path(&Path::new(dir).join(rel))
 }
 
 /// `a/./b/../c/` -> `a/c`; `None` for an absolute path or one leaving the root.
 fn normalize(path: &str) -> Option<String> {
+    normalize_path(Path::new(path))
+}
+
+fn normalize_path(path: &Path) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    for c in PathBuf::from(path).components() {
+    for c in path.components() {
         match c {
             Component::Normal(s) => parts.push(s.to_str()?.to_string()),
             Component::CurDir => {}
@@ -296,179 +393,4 @@ fn normalize(path: &str) -> Option<String> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use aaf_domain::gate::ChangeKind;
-    use tempfile::TempDir;
-
-    fn write(root: &Path, rel: &str, body: &str) {
-        let p = root.join(rel);
-        fs::create_dir_all(p.parent().unwrap()).unwrap();
-        fs::write(p, body).unwrap();
-    }
-
-    /// domain <- engine <- cli; fp stands alone; engine uses domain through
-    /// `workspace = true`.
-    fn workspace() -> TempDir {
-        let t = TempDir::new().unwrap();
-        let r = t.path();
-        write(
-            r,
-            "Cargo.toml",
-            "[workspace]\nmembers = [\"crates/*\", \"tools/fp\"]\n\
-             [workspace.dependencies]\ndomain = { path = \"crates/domain\" }\n",
-        );
-        write(
-            r,
-            "crates/domain/Cargo.toml",
-            "[package]\nname = \"domain\"\n",
-        );
-        write(
-            r,
-            "crates/engine/Cargo.toml",
-            "[package]\nname = \"engine\"\n[dependencies]\ndomain = { workspace = true }\n",
-        );
-        write(
-            r,
-            "crates/cli/Cargo.toml",
-            "[package]\nname = \"cli\"\n[dev-dependencies]\nengine = { path = \"../engine\" }\n",
-        );
-        write(r, "tools/fp/Cargo.toml", "[package]\nname = \"fp\"\n");
-        t
-    }
-
-    fn modified(paths: &[&str]) -> Vec<Change> {
-        paths
-            .iter()
-            .map(|p| Change {
-                kind: ChangeKind::Modified,
-                path: (*p).to_string(),
-                old_path: None,
-            })
-            .collect()
-    }
-
-    fn names(set: Option<BTreeSet<String>>) -> Option<Vec<String>> {
-        set.map(|s| s.into_iter().collect())
-    }
-
-    #[test]
-    fn a_leaf_crate_selects_only_itself() {
-        let t = workspace();
-        let got = affected_packages(t.path(), &modified(&["crates/cli/src/main.rs"]));
-        assert_eq!(names(got), Some(vec!["cli".to_string()]));
-        let got = affected_packages(t.path(), &modified(&["tools/fp/src/lib.rs"]));
-        assert_eq!(names(got), Some(vec!["fp".to_string()]));
-    }
-
-    #[test]
-    fn a_base_crate_pulls_in_its_reverse_dependencies() {
-        let t = workspace();
-        let got = affected_packages(t.path(), &modified(&["crates/domain/src/lib.rs"]));
-        assert_eq!(
-            names(got),
-            Some(vec![
-                "cli".to_string(),
-                "domain".to_string(),
-                "engine".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn an_excluded_directory_is_no_member() {
-        let t = workspace();
-        write(
-            t.path(),
-            "Cargo.toml",
-            "[workspace]\nmembers = [\"crates/*\", \"tools/fp\"]\nexclude = [\"crates/bench\"]\n\
-             [workspace.dependencies]\ndomain = { path = \"crates/domain\" }\n",
-        );
-        write(
-            t.path(),
-            "crates/bench/Cargo.toml",
-            "[package]\nname = \"bench\"\n[dependencies]\ndomain = { path = \"../domain\" }\n",
-        );
-        let got = affected_packages(t.path(), &modified(&["crates/domain/src/lib.rs"]));
-        let got = names(got).unwrap();
-        assert!(!got.contains(&"bench".to_string()), "{got:?}");
-    }
-
-    #[test]
-    fn the_full_commands_are_expanded_too() {
-        let t = workspace();
-        let commands = CommandsConfig {
-            test_full: format!("cargo test {AFFECTED_PACKAGES}"),
-            ..CommandsConfig::default()
-        };
-        let (out, _) = expand(&commands, GateMode::Full, t.path(), &[]).unwrap();
-        assert_eq!(out.test_full, "cargo test --workspace");
-    }
-
-    #[test]
-    fn manifests_lockfile_build_scripts_and_outside_paths_widen() {
-        let t = workspace();
-        for p in [
-            "Cargo.lock",
-            "crates/cli/Cargo.toml",
-            "crates/engine/build.rs",
-            ".cargo/config.toml",
-            "rust-toolchain.toml",
-            "templates/prompt.md",
-        ] {
-            assert_eq!(affected_packages(t.path(), &modified(&[p])), None, "{p}");
-        }
-    }
-
-    #[test]
-    fn a_rename_counts_both_sides() {
-        let t = workspace();
-        let changes = vec![Change {
-            kind: ChangeKind::Renamed,
-            path: "crates/cli/src/x.rs".to_string(),
-            old_path: Some("tools/fp/src/x.rs".to_string()),
-        }];
-        assert_eq!(
-            names(affected_packages(t.path(), &changes)),
-            Some(vec!["cli".to_string(), "fp".to_string()])
-        );
-    }
-
-    #[test]
-    fn expand_narrows_scoped_only_and_never_the_full_commands() {
-        let t = workspace();
-        let cmds = CommandsConfig {
-            test_scoped: "cargo test {affected_packages}".to_string(),
-            test_full: "cargo test {affected_packages}".to_string(),
-            lint: "cargo clippy {affected_packages} --all-targets".to_string(),
-            ..CommandsConfig::default()
-        };
-        let ch = modified(&["crates/engine/src/lib.rs"]);
-        let (scoped, note) = expand(&cmds, GateMode::Scoped, t.path(), &ch).unwrap();
-        assert_eq!(scoped.test_scoped, "cargo test -p cli -p engine");
-        assert_eq!(scoped.lint, "cargo clippy -p cli -p engine --all-targets");
-        assert_eq!(scoped.test_full, "cargo test --workspace");
-        assert!(note.contains("2 of the workspace"), "{note}");
-        let (full, _) = expand(&cmds, GateMode::Full, t.path(), &ch).unwrap();
-        assert_eq!(full.test_scoped, "cargo test --workspace");
-    }
-
-    #[test]
-    fn expand_falls_back_to_the_workspace_and_ignores_commands_without_it() {
-        let t = workspace();
-        let cmds = CommandsConfig {
-            test_scoped: "cargo test {affected_packages}".to_string(),
-            ..CommandsConfig::default()
-        };
-        let (out, _) = expand(&cmds, GateMode::Scoped, t.path(), &[]).unwrap();
-        assert_eq!(out.test_scoped, "cargo test --workspace");
-        let (out, _) =
-            expand(&cmds, GateMode::Scoped, t.path(), &modified(&["README.md"])).unwrap();
-        assert_eq!(out.test_scoped, "cargo test --workspace");
-        let plain = CommandsConfig {
-            test_scoped: "cargo test".to_string(),
-            ..CommandsConfig::default()
-        };
-        assert!(expand(&plain, GateMode::Scoped, t.path(), &[]).is_none());
-    }
-}
+mod tests;
