@@ -71,6 +71,12 @@ pub(crate) struct Inventory {
     /// could not be stat-ed, skipped without following; merged into `unresolved` only after a mobile platform is
     /// detected.
     pub symlink_problems: Vec<(String, String)>,
+    /// Platforms named by a symlinked marker that identifies one by its name
+    /// alone (`AndroidManifest.xml`, `project.pbxproj`,
+    /// `ProjectSettings/ProjectSettings.asset`). The link is never read, so a
+    /// repo whose only marker is a link is still detected and its
+    /// `symlink_problems` are reported instead of silently dropped.
+    pub symlink_platforms: BTreeSet<&'static str>,
 }
 
 fn is_excluded_dir(name: &str, parent_is_unity: bool) -> bool {
@@ -124,6 +130,9 @@ pub(crate) fn walk(root: &Path) -> Inventory {
                 Ok(t) if t.is_file() => files.push(name),
                 Ok(t) if t.is_symlink() => {
                     if input_slot(&mut inv, &rel, &name).is_some() && !scanner_skips(&rel, &name) {
+                        if let Some(platform) = name_marker(&rel, &name) {
+                            inv.symlink_platforms.insert(platform);
+                        }
                         links.push((name, "symbolic link is not followed".to_string()));
                         continue;
                     }
@@ -264,6 +273,18 @@ fn input_slot<'a>(inv: &'a mut Inventory, dir: &Path, name: &str) -> Option<&'a 
     }
 }
 
+/// Platform identified by the file name alone, with the same conditions as
+/// `input_slot`. Content-based markers (`pubspec.yaml`, `package.json`,
+/// `app.json`) are absent: telling them apart needs reading the file.
+fn name_marker(dir: &Path, name: &str) -> Option<&'static str> {
+    match name {
+        "AndroidManifest.xml" => Some("android"),
+        "project.pbxproj" => Some("ios"),
+        "ProjectSettings.asset" if dir.ends_with("ProjectSettings") => Some("unity"),
+        _ => None,
+    }
+}
+
 fn classify(inv: &mut Inventory, dir: &Path, name: &str) {
     if let Some(slot) = input_slot(inv, dir, name) {
         slot.push(dir.join(name));
@@ -273,7 +294,7 @@ fn classify(inv: &mut Inventory, dir: &Path, name: &str) {
 /// Mobile platforms present in the inventory. An empty set means the repo is
 /// not a mobile project.
 pub(crate) fn platforms(root: &Path, inv: &Inventory) -> BTreeSet<&'static str> {
-    let mut found = BTreeSet::new();
+    let mut found = inv.symlink_platforms.clone();
     if !inv.manifests.is_empty() {
         found.insert("android");
     }
