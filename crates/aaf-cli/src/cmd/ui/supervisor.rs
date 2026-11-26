@@ -100,6 +100,10 @@ impl UiSupervisor {
         sup
     }
 
+    pub(super) fn is_enabled(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).enabled
+    }
+
     pub(super) fn status_json(&self) -> Value {
         let known_repos = self.collect_known_repos();
         self.reap_workers();
@@ -168,32 +172,18 @@ impl UiSupervisor {
         let Ok(Some(db)) = self.ro_db.get() else {
             return Vec::new();
         };
-        let tasks = db
-            .list_tasks(self.scoped_repo.as_deref(), None)
-            .unwrap_or_default();
-        let mut by_path: BTreeMap<String, (String, usize, usize)> = BTreeMap::new();
-        for t in tasks {
-            if t.repo_root.trim().is_empty() {
-                continue;
-            }
-            let name = Path::new(&t.repo_root)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&t.repo_root)
-                .to_string();
-            let entry = by_path
-                .entry(t.repo_root.clone())
-                .or_insert_with(|| (name, 0, 0));
-            if !t.state.is_terminal() {
-                entry.1 += 1;
-            }
-            if t.state == TaskState::Ready {
-                entry.2 += 1;
-            }
-        }
-        let mut rows: Vec<(String, String, usize, usize)> = by_path
+        let mut rows: Vec<(String, String, usize, usize)> = db
+            .repo_task_summary(self.scoped_repo.as_deref())
+            .unwrap_or_default()
             .into_iter()
-            .map(|(path, (name, active, ready))| (path, name, active, ready))
+            .map(|(path, active, ready)| {
+                let name = Path::new(&path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&path)
+                    .to_string();
+                (path, name, active, ready)
+            })
             .collect();
         rows.sort_by(|a, b| {
             a.1.to_lowercase()

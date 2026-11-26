@@ -143,6 +143,16 @@ fn classify_gate_reason(reason: &str) -> Option<&'static str> {
         Some("build")
     } else if lower.contains("static") || lower.contains("critical") {
         Some("static_critical")
+    } else if lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("timed_out")
+    {
+        Some("timeout")
+    } else if lower.contains("sandbox")
+        || lower.contains("seatbelt")
+        || lower.contains("permission denied")
+    {
+        Some("sandbox")
     } else if lower.contains("proof") || lower.contains("screenshot") {
         Some("missing_proof")
     } else {

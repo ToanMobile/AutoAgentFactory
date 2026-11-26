@@ -134,6 +134,32 @@ fn known_repo_roots(ctx: &Ctx) -> Vec<std::path::PathBuf> {
     roots.into_iter().collect()
 }
 
+pub(super) fn data_dir_check(data_dir: &Path) -> Result<String, String> {
+    match std::fs::metadata(data_dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(format!(
+            "{} does not exist yet; the first gate creates it",
+            data_dir.display()
+        )),
+        Err(e) => Err(format!("{}: {e}", data_dir.display())),
+        Ok(m) if !m.is_dir() => Err(format!("{} is not a directory", data_dir.display())),
+        Ok(_) => {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let probe = data_dir.join(format!(
+                ".doctor-probe-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe)
+                .and_then(|_| std::fs::remove_file(&probe))
+                .map(|()| format!("{} is writable", data_dir.display()))
+                .map_err(|e| format!("{} is not writable: {e}", data_dir.display()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::strip;

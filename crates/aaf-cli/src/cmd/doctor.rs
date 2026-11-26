@@ -209,29 +209,6 @@ fn hook_committed_check(repo_root: &Path, tracking: settings::Tracking) -> Resul
     }
 }
 
-/// Writable is proven by creating and removing one empty file; a data dir
-/// that does not exist yet is fine, the first gate creates it.
-fn data_dir_check(data_dir: &Path) -> Result<String, String> {
-    match fs::metadata(data_dir) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(format!(
-            "{} does not exist yet; the first gate creates it",
-            data_dir.display()
-        )),
-        Err(err) => Err(format!("{}: {err}", data_dir.display())),
-        Ok(meta) if !meta.is_dir() => Err(format!("{} is not a directory", data_dir.display())),
-        Ok(_) => {
-            let probe = data_dir.join(format!(".doctor-probe-{}", std::process::id()));
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&probe)
-                .and_then(|_| fs::remove_file(&probe))
-                .map(|()| format!("{} is writable", data_dir.display()))
-                .map_err(|err| format!("{} is not writable: {err}", data_dir.display()))
-        }
-    }
-}
-
 /// Looks at the key's metadata only; its bytes are never read here.
 fn receipt_key_check(data_dir: &Path) -> Result<String, String> {
     use std::os::unix::fs::PermissionsExt;
@@ -503,7 +480,7 @@ pub fn run(args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         hook_registered,
         hook_binary,
         hook_committed,
-        required("data_dir", data_dir_check(&ctx.data_dir)),
+        required("data_dir", stale_defaults::data_dir_check(&ctx.data_dir)),
         required("receipt_key", receipt_key_check(&ctx.data_dir)),
         advisory("claude", on_path(ctx, "claude")),
         advisory("sandbox", sandbox_check()),

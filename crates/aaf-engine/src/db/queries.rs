@@ -391,6 +391,55 @@ impl Db {
         })
     }
 
+    /// Returns `(repo_root, active_count, ready_count)` grouped by repo without
+    /// deserializing full task specs/notes. Excludes archived tasks.
+    pub fn repo_task_summary(
+        &self,
+        repo_root: Option<&str>,
+    ) -> PortResult<Vec<(String, usize, usize)>> {
+        let repo_root = repo_root.map(str::to_string);
+        self.read(move |conn| {
+            let mut out = Vec::new();
+            let push_row = |row: &rusqlite::Row<'_>, out: &mut Vec<(String, usize, usize)>| -> PortResult<()> {
+                let root: String = row.get(0).map_err(sql_err)?;
+                let active = usize::try_from(row.get::<_, i64>(1).map_err(sql_err)?.max(0)).unwrap_or(0);
+                let ready = usize::try_from(row.get::<_, i64>(2).map_err(sql_err)?.max(0)).unwrap_or(0);
+                if !root.trim().is_empty() {
+                    out.push((root, active, ready));
+                }
+                Ok(())
+            };
+            if let Some(root) = repo_root {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT repo_root, \
+                         COALESCE(SUM(CASE WHEN state NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0), \
+                         COALESCE(SUM(CASE WHEN state = 'ready' THEN 1 ELSE 0 END), 0) \
+                         FROM tasks WHERE archived_at IS NULL AND repo_root = ?1 GROUP BY repo_root",
+                    )
+                    .map_err(sql_err)?;
+                let mut rows = stmt.query(params![root]).map_err(sql_err)?;
+                while let Some(row) = rows.next().map_err(sql_err)? {
+                    push_row(row, &mut out)?;
+                }
+            } else {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT repo_root, \
+                         COALESCE(SUM(CASE WHEN state NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0), \
+                         COALESCE(SUM(CASE WHEN state = 'ready' THEN 1 ELSE 0 END), 0) \
+                         FROM tasks WHERE archived_at IS NULL GROUP BY repo_root",
+                    )
+                    .map_err(sql_err)?;
+                let mut rows = stmt.query([]).map_err(sql_err)?;
+                while let Some(row) = rows.next().map_err(sql_err)? {
+                    push_row(row, &mut out)?;
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// Sums `tokens_in + tokens_out` since `since` grouped by `account_id` in one query.
     pub fn tokens_since_all(&self, since: i64) -> PortResult<HashMap<String, u64>> {
         self.read(move |conn| {

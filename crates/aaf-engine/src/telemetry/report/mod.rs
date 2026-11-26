@@ -126,14 +126,16 @@ pub fn collect_report(
     window: ReportWindow,
     cost: &CostPolicy,
 ) -> PortResult<FactoryReport> {
-    let tasks: Vec<Task> = db
-        .list_tasks(repo_root, None)?
-        .into_iter()
-        .filter(|t| in_window(t, window))
-        .collect();
+    let all_tasks = db.list_tasks(repo_root, None)?;
+    let mut tasks = Vec::with_capacity(all_tasks.len());
     let mut runs = Vec::new();
-    for task in &tasks {
-        runs.extend(db.runs_for_task(&task.id)?);
+    for task in all_tasks {
+        let task_runs = db.runs_for_task(&task.id)?;
+        let has_win_run = task_runs.iter().any(|r| run_in_window(r, window));
+        if in_window(&task, window) || has_win_run {
+            runs.extend(task_runs);
+            tasks.push(task);
+        }
     }
     let ids: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
     let events: Vec<FactoryEvent> = db
@@ -148,7 +150,11 @@ fn in_window(task: &Task, window: ReportWindow) -> bool {
     window.covers(task.created_at) || window.covers(task.updated_at)
 }
 
-/// Pure aggregation; tasks outside `window` are ignored.
+fn run_in_window(run: &RunRecord, window: ReportWindow) -> bool {
+    run.status == RunStatus::Running || window.covers(run.ended_at.unwrap_or(run.started_at))
+}
+
+/// Pure aggregation; tasks outside `window` without in-window runs are ignored.
 pub fn compute_report(
     tasks: &[Task],
     runs: &[RunRecord],
@@ -156,7 +162,15 @@ pub fn compute_report(
     window: ReportWindow,
     cost: &CostPolicy,
 ) -> FactoryReport {
-    let tasks: Vec<&Task> = tasks.iter().filter(|t| in_window(t, window)).collect();
+    let run_task_ids: HashSet<&str> = runs
+        .iter()
+        .filter(|r| run_in_window(r, window))
+        .map(|r| r.task_id.as_str())
+        .collect();
+    let tasks: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| in_window(t, window) || run_task_ids.contains(t.id.as_str()))
+        .collect();
     let ids: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
     let moves = state_moves(events, &ids);
 
@@ -200,7 +214,7 @@ pub fn compute_report(
         }
     }
 
-    let in_scope = |r: &&RunRecord| ids.contains(r.task_id.as_str()) && window.covers(r.started_at);
+    let in_scope = |r: &&RunRecord| ids.contains(r.task_id.as_str()) && run_in_window(r, window);
     let executors = executor_stats(runs, &ids, window, cost);
     let estimated_cost_usd = cost.estimate(
         runs.iter()
@@ -325,7 +339,7 @@ fn executor_stats(
     let mut by_exec: BTreeMap<&str, ExecutorStat> = BTreeMap::new();
     let in_scope: Vec<&RunRecord> = runs
         .iter()
-        .filter(|r| ids.contains(r.task_id.as_str()) && window.covers(r.started_at))
+        .filter(|r| ids.contains(r.task_id.as_str()) && run_in_window(r, window))
         .collect();
     for run in &in_scope {
         let stat = by_exec
@@ -349,10 +363,12 @@ fn executor_stats(
         }
         stat.tokens_in = stat.tokens_in.saturating_add(run.tokens_in);
         stat.tokens_out = stat.tokens_out.saturating_add(run.tokens_out);
-        let end = run.ended_at.unwrap_or(window.now);
-        stat.wall_secs = stat
-            .wall_secs
-            .saturating_add(secs_between(run.started_at, end));
+        let dur = match (run.status, run.ended_at) {
+            (_, Some(end)) => secs_between(run.started_at, end),
+            (RunStatus::Running, None) => secs_between(run.started_at, window.now),
+            (_, None) => 0,
+        };
+        stat.wall_secs = stat.wall_secs.saturating_add(dur);
     }
     by_exec
         .into_values()

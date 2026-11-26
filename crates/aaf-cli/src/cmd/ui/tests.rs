@@ -1,5 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::time::Instant;
+
+use aaf_engine::throttle::Pressure;
+
 use super::*;
 
 fn test_backend(tmp: &Path) -> CliUiBackend {
@@ -23,9 +27,8 @@ fn test_backend(tmp: &Path) -> CliUiBackend {
         read_only: false,
         allow_approve: false,
         supervisor: supervisor::UiSupervisor::new(ctx.clone(), None, false),
-        status_cache: Mutex::new(StatusCache::default()),
-        status_refresh: Mutex::new(()),
-        pressure_cache: Mutex::new(None),
+        server_started_at: 0,
+        caches: report_cache::UiCaches::default(),
     }
 }
 
@@ -35,15 +38,15 @@ fn status_cache_returns_cached_value_until_invalidated() {
     let backend = test_backend(tmp.path());
     let first = backend.status_json().unwrap();
     assert_eq!(first["scope"], json!("all"));
-    assert!(backend.status_cache.lock().unwrap().entry.is_some());
-    assert!(backend.pressure_cache.lock().unwrap().is_some());
-    *backend.pressure_cache.lock().unwrap() = Some((Instant::now(), Some(Pressure::Warn)));
-    assert_eq!(backend.cached_pressure(), Some(Pressure::Warn));
+    assert!(backend.caches.status.lock().unwrap().entry.is_some());
+    assert!(backend.caches.pressure.lock().unwrap().is_some());
+    *backend.caches.pressure.lock().unwrap() = Some((Instant::now(), Some(Pressure::Warn)));
+    assert_eq!(backend.caches.cached_pressure(), Some(Pressure::Warn));
     let sentinel = Some((Instant::now(), json!({ "sentinel": 1 })));
-    backend.status_cache.lock().unwrap().entry = sentinel;
+    backend.caches.status.lock().unwrap().entry = sentinel;
     assert_eq!(backend.status_json().unwrap()["sentinel"], json!(1));
     backend.invalidate_status_cache();
-    assert!(backend.status_cache.lock().unwrap().entry.is_none());
+    assert!(backend.caches.status.lock().unwrap().entry.is_none());
     let refreshed = backend.status_json().unwrap();
     assert_eq!(refreshed["scope"], json!("all"));
     assert!(refreshed.get("sentinel").is_none());
@@ -54,14 +57,21 @@ fn status_cache_returns_cached_value_until_invalidated() {
 fn invalidation_during_inflight_refresh_skips_stale_cache_write() {
     let tmp = tempfile::tempdir().unwrap();
     let backend = test_backend(tmp.path());
-    let start_gen = backend.cached_or_generation().unwrap_err();
+    let start_gen = backend.caches.cached_status_or_gen().unwrap_err();
     backend.invalidate_status_cache();
-    backend.store_status_if_current(start_gen, &json!({ "stale": true }));
-    assert!(backend.read_cached_status().is_none());
-    let cur_gen = backend.cached_or_generation().unwrap_err();
+    backend
+        .caches
+        .store_status_if_current(start_gen, &json!({ "stale": true }));
+    assert!(backend.caches.cached_status_or_gen().is_err());
+    let cur_gen = backend.caches.cached_status_or_gen().unwrap_err();
     assert_ne!(cur_gen, start_gen);
-    backend.store_status_if_current(cur_gen, &json!({ "fresh": true }));
-    assert_eq!(backend.read_cached_status(), Some(json!({ "fresh": true })));
+    backend
+        .caches
+        .store_status_if_current(cur_gen, &json!({ "fresh": true }));
+    assert_eq!(
+        backend.caches.cached_status_or_gen().ok(),
+        Some(json!({ "fresh": true }))
+    );
 }
 
 #[test]

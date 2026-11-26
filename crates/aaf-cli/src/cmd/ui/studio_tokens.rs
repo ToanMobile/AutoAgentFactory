@@ -6,6 +6,7 @@
 
 mod alerts;
 mod format;
+pub(crate) mod helpers;
 #[cfg(test)]
 mod tests;
 
@@ -14,23 +15,24 @@ use std::path::Path;
 
 use aaf_domain::budget::RootBudget;
 use aaf_domain::pipeline::CostGuardConfig;
-use aaf_domain::ports::{
-    AccountStore, BudgetStore, KvStore, META_COST_PAUSED_UNTIL, META_FACTORY_FROZEN,
-    META_FACTORY_UNFROZEN_AT, TaskStore,
-};
+use aaf_domain::ports::{AccountStore, BudgetStore, KvStore, META_FACTORY_UNFROZEN_AT};
 use aaf_domain::run::{RunRecord, RunStatus};
 use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::Db;
 use serde_json::Value;
 
 use self::alerts::{AlertInputs, build_alerts, collect_duplicate_audits};
-use self::format::{BurnSnapshot, build_diagnostics_payload};
+use self::format::build_diagnostics_payload;
+use self::helpers::{
+    build_burn_snapshot, bump_max, collect_budget_rows, is_non_coding_aux, repo_basename,
+    safe_run_duration, top_keys_by_score,
+};
 
 const HOUR_SECS: i64 = 3600;
-const DAY_SECS: i64 = 86_400;
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 1800;
 const STALE_RUNNING_GRACE_SECS: u64 = 900;
 const STALE_RUNNING_MIN_SECS: u64 = 3600;
+const UNMEASURED_LONG_MIN_SECS: u64 = 30;
 const TOP_RUNS_LIMIT: usize = 12;
 const MAX_ALERTS: usize = 12;
 pub(super) const SINGLE_RUN_SPIKE_THRESHOLD: u64 = 100_000;
@@ -39,9 +41,11 @@ pub(super) const SINGLE_RUN_SPIKE_THRESHOLD: u64 = 100_000;
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DiagnosticsCtx<'a> {
     pub data_dir: Option<&'a Path>,
+    pub repo_root: Option<&'a str>,
     pub cost_guard: CostGuardConfig,
     pub run_timeout_secs: u64,
     pub config_error: Option<&'a str>,
+    pub supervisor_paused: bool,
 }
 
 /// Per-task token enrichment attached to `task_breakdown` rows.
@@ -82,6 +86,8 @@ pub(super) struct RunTotals {
     pub(super) limit_hit_runs: u64,
     pub(super) zero_token_runs: u64,
     pub(super) zero_token_failed_runs: u64,
+    pub(super) unmeasured_long_runs: u64,
+    pub(super) unmeasured_long_secs: u64,
     pub(super) stale_running_runs: u64,
     pub(super) audit_tok: u64,
     pub(super) audit_runs: u64,
@@ -113,6 +119,7 @@ pub(super) struct AccountAgg {
     pub(super) name: String,
     pub(super) runs: u64,
     pub(super) wasted_runs: u64,
+    pub(super) limit_hit_runs: u64,
     pub(super) tokens_in: u64,
     pub(super) tokens_out: u64,
     pub(super) wasted_tokens: u64,
@@ -137,12 +144,12 @@ pub(super) struct DupAuditRow {
     pub(super) count: u64,
     pub(super) fail_count: u64,
     pub(super) inconclusive_count: u64,
+    pub(super) last_occurred_at: i64,
     pub(super) verdicts: Vec<String>,
 }
 
-/// True when a run's tokens were genuinely wasted.
-/// Cross-audit runs returning FAIL/inconclusive (`RunStatus::Failed`) performed
-/// real review work and are tracked in `audit_rejected_tokens`, not wasted.
+/// True when a run's tokens were genuinely wasted (non-zero audit rejections are
+/// real review work and tracked separately in `audit_rejected_tokens`).
 pub(crate) fn is_wasted_run(executor: &str, status: RunStatus) -> bool {
     match status {
         RunStatus::TimedOut | RunStatus::LimitHit | RunStatus::Killed => true,
@@ -159,12 +166,7 @@ pub(crate) fn is_audit_executor(executor: &str) -> bool {
         || lower.contains("adjudicate")
 }
 
-fn is_non_coding_aux(executor: &str) -> bool {
-    let lower = executor.to_ascii_lowercase();
-    is_audit_executor(&lower) || lower == "plan" || lower.contains("proposer") || lower == "split"
-}
-
-pub(super) fn pct(part: u64, total: u64) -> f64 {
+pub(crate) fn pct(part: u64, total: u64) -> f64 {
     if total == 0 {
         return 0.0;
     }
@@ -174,14 +176,6 @@ pub(super) fn pct(part: u64, total: u64) -> f64 {
 /// Overflow-safe check for `part / total >= threshold_pct / 100`.
 pub(super) fn ratio_ge(part: u64, total: u64, threshold_pct: u64) -> bool {
     total > 0 && u128::from(part) * 100 >= u128::from(total) * u128::from(threshold_pct)
-}
-
-fn repo_basename(repo_root: &str) -> String {
-    Path::new(repo_root)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string()
 }
 
 pub(super) fn wasted_level(wasted_tok: u64, wasted_pct: f64) -> &'static str {
@@ -194,8 +188,17 @@ pub(super) fn wasted_level(wasted_tok: u64, wasted_pct: f64) -> &'static str {
     }
 }
 
-/// Returns `(token_diagnostics_json, per_task_extras)` using pre-loaded per-task
-/// runs (already filtered by `started_at >= since`) so DB queries are never duplicated.
+pub(crate) fn stale_running_limit(run_timeout_secs: u64) -> u64 {
+    let base = if run_timeout_secs > 0 {
+        run_timeout_secs
+    } else {
+        DEFAULT_RUN_TIMEOUT_SECS
+    };
+    base.saturating_add(STALE_RUNNING_GRACE_SECS)
+        .max(STALE_RUNNING_MIN_SECS)
+}
+
+/// Returns `(token_diagnostics_json, per_task_extras)` using pre-loaded per-task runs.
 pub(crate) fn collect_token_diagnostics(
     db: &Db,
     tasks: &[Task],
@@ -255,14 +258,7 @@ pub(crate) fn collect_token_diagnostics(
         Some(ts) => now.saturating_sub(HOUR_SECS).max(ts),
         None => now.saturating_sub(HOUR_SECS),
     };
-    let base_timeout = if dctx.run_timeout_secs > 0 {
-        dctx.run_timeout_secs
-    } else {
-        DEFAULT_RUN_TIMEOUT_SECS
-    };
-    let stale_running_secs = base_timeout
-        .saturating_add(STALE_RUNNING_GRACE_SECS)
-        .max(STALE_RUNNING_MIN_SECS);
+    let stale_running_secs = stale_running_limit(dctx.run_timeout_secs);
 
     let mut totals = RunTotals {
         total_runs: all_runs.len() as u64,
@@ -271,29 +267,29 @@ pub(crate) fn collect_token_diagnostics(
     let mut by_exec: BTreeMap<String, ExecAgg> = BTreeMap::new();
     let mut by_account: BTreeMap<String, AccountAgg> = BTreeMap::new();
     let mut top_runs: Vec<TopRunRow<'_>> = Vec::new();
-    let mut timeout_task_ids: Vec<String> = Vec::new();
-    let mut spike_run_tasks: Vec<String> = Vec::new();
-    let mut spike_run_tasks_1h: Vec<String> = Vec::new();
-    let mut stale_running_tasks: Vec<String> = Vec::new();
+    let mut timeout_scores: HashMap<String, u64> = HashMap::new();
+    let mut spike_scores: HashMap<String, u64> = HashMap::new();
+    let mut spike_1h_scores: HashMap<String, u64> = HashMap::new();
+    let mut stale_scores: HashMap<String, u64> = HashMap::new();
+    let mut unmeas_scores: HashMap<String, u64> = HashMap::new();
+    let (mut wasted_last_at, mut timed_out_last_at, mut zero_tok_last_at) = (None, None, None);
+    let (mut unmeas_last_at, mut audit_last_at, mut spike_last_at) = (None, None, None);
 
     for r in &all_runs {
         let tot = r.tokens_in.saturating_add(r.tokens_out);
+        let run_ts = r.ended_at.unwrap_or(r.started_at);
         let is_audit = is_audit_executor(&r.executor);
-        let audit_rej = is_audit && r.status == RunStatus::Failed;
-        let wasted = is_wasted_run(&r.executor, r.status);
-        let raw_dur =
-            u64::try_from(r.ended_at.unwrap_or(now).saturating_sub(r.started_at)).unwrap_or(0);
-        let is_stale_running = r.status == RunStatus::Running && raw_dur > stale_running_secs;
-        let dur_secs = raw_dur.min(if is_stale_running {
-            stale_running_secs
-        } else {
-            u64::MAX
-        });
+        let audit_rej = is_audit && r.status == RunStatus::Failed && tot > 0;
+        let wasted = match r.status {
+            RunStatus::Failed if is_audit && tot == 0 => true,
+            _ => is_wasted_run(&r.executor, r.status),
+        };
+        let (dur_secs, is_stale_running) = safe_run_duration(r, now, stale_running_secs);
         if is_stale_running {
             totals.stale_running_runs += 1;
-            if !stale_running_tasks.contains(&r.task_id) {
-                stale_running_tasks.push(r.task_id.clone());
-            }
+            let raw = u64::try_from(now.saturating_sub(r.started_at)).unwrap_or(0);
+            let e = stale_scores.entry(r.task_id.clone()).or_default();
+            *e = (*e).max(raw);
         }
 
         totals.total_in = totals.total_in.saturating_add(r.tokens_in);
@@ -302,7 +298,18 @@ pub(crate) fn collect_token_diagnostics(
             totals.zero_token_runs += 1;
             if wasted {
                 totals.zero_token_failed_runs += 1;
+                bump_max(&mut zero_tok_last_at, run_ts);
+                if dur_secs >= UNMEASURED_LONG_MIN_SECS {
+                    totals.unmeasured_long_runs += 1;
+                    totals.unmeasured_long_secs =
+                        totals.unmeasured_long_secs.saturating_add(dur_secs);
+                    *unmeas_scores.entry(r.task_id.clone()).or_default() += dur_secs;
+                    bump_max(&mut unmeas_last_at, run_ts);
+                }
             }
+        }
+        if wasted {
+            bump_max(&mut wasted_last_at, run_ts);
         }
         match r.status {
             RunStatus::Succeeded => totals.succeeded_tok = totals.succeeded_tok.saturating_add(tot),
@@ -322,9 +329,8 @@ pub(crate) fn collect_token_diagnostics(
                 totals.wasted_runs += 1;
                 totals.timed_out_tok = totals.timed_out_tok.saturating_add(tot);
                 totals.wasted_tok = totals.wasted_tok.saturating_add(tot);
-                if tot >= 30_000 && !timeout_task_ids.contains(&r.task_id) {
-                    timeout_task_ids.push(r.task_id.clone());
-                }
+                bump_max(&mut timed_out_last_at, run_ts);
+                *timeout_scores.entry(r.task_id.clone()).or_default() += tot.max(dur_secs);
             }
             RunStatus::Killed => {
                 totals.killed_runs += 1;
@@ -343,6 +349,7 @@ pub(crate) fn collect_token_diagnostics(
         if is_audit {
             totals.audit_runs += 1;
             totals.audit_tok = totals.audit_tok.saturating_add(tot);
+            bump_max(&mut audit_last_at, run_ts);
         } else if !is_non_coding_aux(&r.executor) {
             totals.coding_runs += 1;
             totals.coding_tok = totals.coding_tok.saturating_add(tot);
@@ -400,6 +407,9 @@ pub(crate) fn collect_token_diagnostics(
         aa.runs += 1;
         aa.tokens_in = aa.tokens_in.saturating_add(r.tokens_in);
         aa.tokens_out = aa.tokens_out.saturating_add(r.tokens_out);
+        if r.status == RunStatus::LimitHit {
+            aa.limit_hit_runs += 1;
+        }
         if wasted {
             aa.wasted_runs += 1;
             aa.wasted_tokens = aa.wasted_tokens.saturating_add(tot);
@@ -427,11 +437,12 @@ pub(crate) fn collect_token_diagnostics(
         }
 
         if tot >= SINGLE_RUN_SPIKE_THRESHOLD {
-            if !spike_run_tasks.contains(&r.task_id) {
-                spike_run_tasks.push(r.task_id.clone());
-            }
-            if r.started_at >= spike_since && !spike_run_tasks_1h.contains(&r.task_id) {
-                spike_run_tasks_1h.push(r.task_id.clone());
+            bump_max(&mut spike_last_at, run_ts);
+            let e = spike_scores.entry(r.task_id.clone()).or_default();
+            *e = (*e).max(tot);
+            if run_ts >= spike_since {
+                let e1 = spike_1h_scores.entry(r.task_id.clone()).or_default();
+                *e1 = (*e1).max(tot);
             }
         }
         if tot > 0 || wasted || is_stale_running {
@@ -472,6 +483,11 @@ pub(crate) fn collect_token_diagnostics(
         .take(4)
         .map(|(id, _)| id.clone())
         .collect();
+    let timeout_task_ids = top_keys_by_score(&timeout_scores, 4);
+    let spike_run_tasks = top_keys_by_score(&spike_scores, 8);
+    let spike_run_tasks_1h = top_keys_by_score(&spike_1h_scores, 4);
+    let stale_running_tasks = top_keys_by_score(&stale_scores, 4);
+    let unmeasured_long_tasks = top_keys_by_score(&unmeas_scores, 4);
 
     top_runs.sort_by(|a, b| {
         b.total_tokens
@@ -481,83 +497,45 @@ pub(crate) fn collect_token_diagnostics(
     });
     top_runs.truncate(TOP_RUNS_LIMIT);
 
-    let (tokens_last_1h, _) = db.cost_window_usage(spike_since).unwrap_or((0, None));
-    let (tokens_last_24h, _) = db
-        .cost_window_usage(now.saturating_sub(DAY_SECS))
-        .unwrap_or((0, None));
-    let daily_cap = dctx.cost_guard.daily_token_cap;
-    let raw_paused = db
-        .get_meta(META_COST_PAUSED_UNTIL)
-        .ok()
-        .flatten()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .filter(|&v| v > 0);
-    let cost_paused_until = raw_paused.filter(|&v| v > now && daily_cap > 0);
-    let burn = BurnSnapshot {
-        tokens_last_1h,
-        tokens_last_24h,
-        daily_cap,
-        spike_limit_1h: if daily_cap > 0 && dctx.cost_guard.spike_factor > 0 {
-            let raw =
-                (u128::from(dctx.cost_guard.spike_factor) * u128::from(daily_cap) / 24).max(1);
-            u64::try_from(raw).unwrap_or(u64::MAX)
-        } else {
-            0
-        },
-        cost_paused_until,
-        cost_paused_stale: raw_paused.is_some() && cost_paused_until.is_none(),
-        factory_frozen: db.get_meta(META_FACTORY_FROZEN).ok().flatten().as_deref() == Some("1"),
-    };
-
-    let mut budget_rows: Vec<(&RootBudget, String, f64, bool)> = budgets
-        .values()
-        .filter(|b| b.token_limit > 0 && (b.frozen || ratio_ge(b.tokens_used, b.token_limit, 50)))
-        .map(|b| {
-            let title = task_map
-                .get(b.root_id.as_str())
-                .map(|t| t.title.clone())
-                .or_else(|| db.get_task(&b.root_id).ok().map(|t| t.title))
-                .unwrap_or_else(|| b.root_id.clone());
-            (
-                b,
-                title,
-                pct(b.tokens_used, b.token_limit),
-                open_roots.contains(&b.root_id),
-            )
-        })
-        .collect();
-    budget_rows.sort_by(|a, b| {
-        b.3.cmp(&a.3)
-            .then_with(|| b.0.frozen.cmp(&a.0.frozen))
-            .then_with(|| b.2.total_cmp(&a.2))
-            .then_with(|| b.0.tokens_used.cmp(&a.0.tokens_used))
-            .then_with(|| a.0.root_id.cmp(&b.0.root_id))
-    });
+    let burn = build_burn_snapshot(db, now, spike_since, dctx);
+    let budget_rows = collect_budget_rows(db, &budgets, &task_map, &open_roots);
 
     let total_tokens = totals.total_in.saturating_add(totals.total_out);
     let mut alerts = build_alerts(AlertInputs {
+        now,
+        supervisor_paused: dctx.supervisor_paused,
         total_tokens,
         total_runs: totals.total_runs,
         wasted_tok: totals.wasted_tok,
         wasted_runs: totals.wasted_runs,
         wasted_pct: pct(totals.wasted_tok, total_tokens),
+        wasted_last_at,
         failed_tok: totals.failed_tok,
         timed_out_tok: totals.timed_out_tok,
         timed_out_runs: totals.timed_out_runs,
+        timed_out_last_at,
         killed_tok: totals.killed_tok,
+        limit_hit_tok: totals.limit_hit_tok,
         zero_token_failed_runs: totals.zero_token_failed_runs,
+        zero_token_last_at: zero_tok_last_at,
+        unmeasured_long_runs: totals.unmeasured_long_runs,
+        unmeasured_long_secs: totals.unmeasured_long_secs,
+        unmeasured_long_tasks: &unmeasured_long_tasks,
+        unmeasured_last_at: unmeas_last_at,
         stale_running_runs: totals.stale_running_runs,
         stale_running_tasks: &stale_running_tasks,
         audit_tok: totals.audit_tok,
         audit_runs: totals.audit_runs,
         audit_pct: pct(totals.audit_tok, total_tokens),
         avg_audit_tokens: totals.audit_tok.checked_div(totals.audit_runs).unwrap_or(0),
+        audit_last_at,
         tokens_last_1h: burn.tokens_last_1h,
         tokens_last_24h: burn.tokens_last_24h,
         daily_cap: burn.daily_cap,
         spike_limit_1h: burn.spike_limit_1h,
         cost_paused_until: burn.cost_paused_until,
         max_single_run: top_runs.first().map_or(0, |r| r.total_tokens),
+        spike_last_at,
         top_wasted_tasks: &top_wasted_tasks,
         timeout_task_ids: &timeout_task_ids,
         spike_run_tasks: &spike_run_tasks,
@@ -566,8 +544,9 @@ pub(crate) fn collect_token_diagnostics(
         budget_rows: &budget_rows,
     });
     alerts.sort_by(|a, b| {
-        b.severity_rank
-            .cmp(&a.severity_rank)
+        b.active_recent
+            .cmp(&a.active_recent)
+            .then_with(|| b.severity_rank.cmp(&a.severity_rank))
             .then_with(|| a.code.cmp(b.code))
     });
     let alerts_truncated = alerts.len() > MAX_ALERTS;

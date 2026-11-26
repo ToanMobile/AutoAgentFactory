@@ -12,6 +12,7 @@ use super::{
 };
 
 pub(super) struct BurnSnapshot {
+    pub(super) tokens_last_5m: u64,
     pub(super) tokens_last_1h: u64,
     pub(super) tokens_last_24h: u64,
     pub(super) daily_cap: u64,
@@ -32,7 +33,7 @@ pub(super) fn build_diagnostics_payload(
     by_account: BTreeMap<String, AccountAgg>,
     top_runs: Vec<TopRunRow<'_>>,
     dup_audits: &[DupAuditRow],
-    budget_rows: &[(&RootBudget, String, f64, bool)],
+    budget_rows: &[(&RootBudget, String, f64, &'static str, bool)],
 ) -> Value {
     let total_tokens = t.total_in.saturating_add(t.total_out);
     let wasted_pct = pct(t.wasted_tok, total_tokens);
@@ -64,6 +65,8 @@ pub(super) fn build_diagnostics_payload(
             "limit_hit_runs": t.limit_hit_runs,
             "zero_token_runs": t.zero_token_runs,
             "zero_token_failed_runs": t.zero_token_failed_runs,
+            "unmeasured_long_runs": t.unmeasured_long_runs,
+            "unmeasured_long_secs": t.unmeasured_long_secs,
             "stale_running_runs": t.stale_running_runs,
             "audit_tokens": t.audit_tok,
             "audit_runs": t.audit_runs,
@@ -78,6 +81,7 @@ pub(super) fn build_diagnostics_payload(
             "duplicate_audit_extra_runs": dup_audits.iter().map(|d| d.count.saturating_sub(1)).sum::<u64>(),
         },
         "burn_rate": {
+            "tokens_last_5m": burn.tokens_last_5m,
             "tokens_last_1h": burn.tokens_last_1h,
             "tokens_last_24h": burn.tokens_last_24h,
             "daily_token_cap": burn.daily_cap,
@@ -87,10 +91,20 @@ pub(super) fn build_diagnostics_payload(
             "factory_frozen": burn.factory_frozen,
             "config_error": dctx.config_error,
         },
-        "alerts": alerts.iter().map(|a| json!({
-            "severity": a.severity, "code": a.code, "title": a.title,
-            "detail": a.detail, "recommendation": a.recommendation, "task_ids": a.task_ids,
-        })).collect::<Vec<_>>(),
+        "alerts": alerts.iter().map(|a| {
+            let mut obj = json!({
+                "severity": a.severity, "code": a.code, "title": a.title,
+                "detail": a.detail, "recommendation": a.recommendation,
+                "active_recent": a.active_recent, "task_ids": a.task_ids,
+            });
+            if let Some(ts) = a.last_occurred_at {
+                obj["last_occurred_at"] = json!(ts);
+            }
+            if let Some(cmd) = &a.cli_cmd {
+                obj["cli_cmd"] = json!(cmd);
+            }
+            obj
+        }).collect::<Vec<_>>(),
         "alerts_truncated": alerts_truncated,
         "by_executor": by_exec.into_iter().map(|(exec, a)| {
             let tot = a.tokens_in.saturating_add(a.tokens_out);
@@ -109,9 +123,10 @@ pub(super) fn build_diagnostics_payload(
             let tot = a.tokens_in.saturating_add(a.tokens_out);
             json!({
                 "account_id": acct, "account_name": a.name, "runs": a.runs,
-                "wasted_runs": a.wasted_runs, "tokens_in": a.tokens_in,
-                "tokens_out": a.tokens_out, "tokens_total": tot,
-                "wasted_tokens": a.wasted_tokens, "wasted_pct": pct(a.wasted_tokens, tot),
+                "wasted_runs": a.wasted_runs, "limit_hit_runs": a.limit_hit_runs,
+                "tokens_in": a.tokens_in, "tokens_out": a.tokens_out,
+                "tokens_total": tot, "wasted_tokens": a.wasted_tokens,
+                "wasted_pct": pct(a.wasted_tokens, tot),
             })
         }).collect::<Vec<_>>(),
         "top_runs": top_runs.into_iter().map(|tr| json!({
@@ -125,14 +140,15 @@ pub(super) fn build_diagnostics_payload(
             "audit_rejected": tr.audit_rejected,
             "has_stream_log": dctx.data_dir.is_some_and(|dir| stream_exists(dir, &tr.run.id)),
         })).collect::<Vec<_>>(),
-        "duplicate_audits": dup_audits.iter().map(|d| json!({
+        "duplicate_audits": dup_audits.iter().take(20).map(|d| json!({
             "task_id": d.task_id, "task_title": d.task_title, "tree_fp": d.tree_fp,
             "config_hash": d.config_hash, "count": d.count, "fail_count": d.fail_count,
-            "inconclusive_count": d.inconclusive_count, "verdicts": d.verdicts,
+            "inconclusive_count": d.inconclusive_count,
+            "last_occurred_at": d.last_occurred_at, "verdicts": d.verdicts,
         })).collect::<Vec<_>>(),
-        "budget_watch": budget_rows.iter().take(8).map(|(b, title, used_pct, has_open)| json!({
+        "budget_watch": budget_rows.iter().take(8).map(|(b, title, used_pct, limit_kind, has_open)| json!({
             "root_id": b.root_id, "title": title, "tokens_used": b.tokens_used,
-            "token_limit": b.token_limit, "used_pct": used_pct,
+            "token_limit": b.token_limit, "used_pct": used_pct, "limit_kind": limit_kind,
             "wall_secs_used": b.wall_secs_used, "wall_secs_limit": b.wall_secs_limit,
             "cycles_used": b.cycles_used, "cycles_limit": b.cycles_limit,
             "frozen": b.frozen, "has_open": has_open,

@@ -118,10 +118,12 @@ fn report_passes_the_period_and_doctor_answers() {
     let body: Value = serde_json::from_str(&resp.body).unwrap();
     assert_eq!(body["report"]["tasks_done"], 4);
     assert_eq!(get(addr, "/api/report", true).status, 200);
+    assert_eq!(get(addr, "/api/report?hours=48", true).status, 200);
+    assert_eq!(get(addr, "/api/report?since=0", true).status, 200);
     assert_eq!(get(addr, "/api/report?since=abc", true).status, 200);
     assert_eq!(
         *backend.since_seen.lock().unwrap(),
-        vec![Some(24), None, None]
+        vec![Some(24), None, Some(48), None, None]
     );
     assert_eq!(get(addr, "/api/doctor", true).status, 200);
     handle.join();
@@ -131,12 +133,14 @@ fn report_passes_the_period_and_doctor_answers() {
 fn studio_routes_are_get_only() {
     let (handle, _) = start();
     let addr = handle.addr();
-    let resp = send_raw(
-        addr,
-        &format!(
-            "POST /api/report HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {TEST_TOKEN}\r\nContent-Length: 0\r\n\r\n"
-        ),
-    );
-    assert_eq!(resp.status, 405);
+    for path in ["/api/report", "/api/doctor"] {
+        let resp = send_raw(
+            addr,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {TEST_TOKEN}\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert_eq!(resp.status, 405, "{path} must reject POST");
+    }
     handle.join();
 }

@@ -166,7 +166,7 @@ fn rejected_audit_is_not_wasted_and_window_and_alerts_are_accurate() {
                 spike_factor: 2,
             },
             run_timeout_secs: 1800,
-            config_error: None,
+            ..DiagnosticsCtx::default()
         },
     );
     assert_eq!(diag["summary"]["total_tokens"], 440_000);
@@ -291,7 +291,7 @@ fn stale_cost_pause_inconclusive_retry_and_stale_running_are_handled_accurately(
                 spike_factor: 3,
             },
             run_timeout_secs: 1800,
-            config_error: None,
+            ..DiagnosticsCtx::default()
         },
     );
     assert!(diag["burn_rate"]["cost_paused_until"].is_null());
@@ -366,4 +366,103 @@ fn detects_zero_token_failure_rate_without_false_positive_when_healthy() {
         .collect();
     assert!(codes.contains(&"zero_token_failures"), "got {codes:?}");
     assert!(!codes.contains(&"high_wasted_tokens"));
+}
+
+#[test]
+fn reused_from_replay_unmeasured_leak_wall_budget_and_paused_stale_are_accurate() {
+    let dir = tempdir().unwrap();
+    let db = Db::open(&dir.path().join("aaf.db")).unwrap();
+    let now = 2_000_000;
+    let t1 = mk_task("t-b2", now - 7200);
+    db.insert_task(&t1).unwrap();
+
+    // Gói B2 crash-replay event (`reused_from`) must NOT trigger duplicate_post_gate_audit.
+    for (extra, ts) in [
+        (json!({}), now - 500),
+        (json!({ "reused_from": 1 }), now - 400),
+    ] {
+        let mut payload = json!({
+            "phase": "post_gate",
+            "verdict": "fail: score 60",
+            "tree_fp": "git-tree:b2",
+            "config_hash": "cfg-b2"
+        });
+        if let (Some(dst), Some(src)) = (payload.as_object_mut(), extra.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        db.emit(
+            &FactoryEvent::new(EventKind::CrossAudit, payload.to_string(), ts).for_task("t-b2"),
+        )
+        .unwrap();
+    }
+
+    // Two long (>=30s) 0/0-token killed runs trigger `unmeasured_token_leak`.
+    let mut r1 = mk_run("r-u1", "t-b2", "claude", RunStatus::Killed, 0, 0, now - 600);
+    r1.ended_at = Some(now - 300);
+    let mut r2 = mk_run(
+        "r-u2",
+        "t-b2",
+        "claude",
+        RunStatus::TimedOut,
+        0,
+        0,
+        now - 400,
+    );
+    r2.ended_at = Some(now - 100);
+    let r_stuck = mk_run(
+        "r-st",
+        "t-b2",
+        "claude",
+        RunStatus::Running,
+        0,
+        0,
+        now - 7200,
+    );
+    let runs = vec![r1, r2, r_stuck];
+    for r in &runs {
+        db.insert_run(r).unwrap();
+    }
+    // Root budget with token_limit == 0 but wall_secs near limit must still alert!
+    db.put_budget(&RootBudget {
+        root_id: "t-b2".into(),
+        tokens_used: 0,
+        token_limit: 0,
+        wall_secs_used: 3300,
+        wall_secs_limit: 3600,
+        cycles_used: 1,
+        cycles_limit: 5,
+        frozen: false,
+    })
+    .unwrap();
+
+    let runs_map = group_runs(runs, None);
+    let (diag, _) = collect_token_diagnostics(
+        &db,
+        &[t1],
+        &runs_map,
+        None,
+        now,
+        DiagnosticsCtx {
+            supervisor_paused: true,
+            ..DiagnosticsCtx::default()
+        },
+    );
+    assert_eq!(diag["summary"]["duplicate_audit_groups"], 0);
+    assert_eq!(diag["summary"]["unmeasured_long_runs"], 2);
+    let alerts = diag["alerts"].as_array().unwrap();
+    let codes: Vec<&str> = alerts.iter().filter_map(|a| a["code"].as_str()).collect();
+    assert!(
+        !codes.contains(&"duplicate_post_gate_audit"),
+        "got {codes:?}"
+    );
+    assert!(codes.contains(&"unmeasured_token_leak"), "got {codes:?}");
+    assert!(codes.contains(&"root_budget_near_limit"), "got {codes:?}");
+    let stale = alerts
+        .iter()
+        .find(|a| a["code"] == "stale_running_runs")
+        .unwrap();
+    assert_eq!(stale["severity"], "medium");
+    assert_eq!(stale["active_recent"], false);
 }

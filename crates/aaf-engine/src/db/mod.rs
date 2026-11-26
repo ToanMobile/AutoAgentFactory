@@ -376,6 +376,7 @@ fn configure(conn: &mut Connection, path: &Path) -> Result<(), DbError> {
         });
     }
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "journal_size_limit", 67_108_864i64)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     schema::migrate(conn)
 }

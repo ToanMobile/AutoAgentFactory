@@ -5,9 +5,9 @@
 //! DNS-rebinding defenses, and clean non-blocking shutdown.
 
 use std::collections::HashMap;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -16,35 +16,35 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use super::routes::{Route, action_needs_task_id, match_route, normalize_action};
+use super::sse::{serve_sse, try_reserve_limit};
 use super::{
     APPROVE_DISABLED_MSG, HTML_CSP, RequestSecurityContext, SecurityRejection, UiBackend, UiConfig,
     UiError, backend_error_status, parse_query, validate_ui_config, verify_request_security,
-    with_meta_policy, wrap_ok, write_backend_result, write_http_response, write_json_error,
-    write_json_response, write_sse_event,
+    with_meta_policy, write_backend_result, write_http_response, write_json_error,
+    write_json_response,
 };
 use crate::executors::reaper::validate_run_id;
 use crate::git::worktree::validate_task_id;
-
-use super::routes::{Route, action_needs_task_id, match_route, normalize_action};
 
 pub const MAX_CONCURRENT_CONNS: usize = 32;
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
-const SSE_PUSH_INTERVAL: Duration = Duration::from_millis(1500);
+const MAX_REPORT_HOURS: u64 = 24 * 365;
 const DEFAULT_STREAM_LINES: usize = 120;
 const MAX_STREAM_LINES: usize = 500;
 const INDEX_HTML: &str = include_str!("index.html");
 const STUDIO_HTML: &str = include_str!("studio.html");
 
-type ShutdownState = Arc<(Mutex<bool>, Condvar)>;
+pub(super) type ShutdownState = Arc<(Mutex<bool>, Condvar)>;
 
-fn is_shutdown(state: &ShutdownState) -> bool {
+pub(super) fn is_shutdown(state: &ShutdownState) -> bool {
     *state.0.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn wait_for_shutdown(state: &ShutdownState, timeout: Duration) -> bool {
+pub(super) fn wait_for_shutdown(state: &ShutdownState, timeout: Duration) -> bool {
     let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
     let (guard, _) = state
         .1
@@ -102,12 +102,23 @@ pub fn start_server(cfg: UiConfig, backend: Arc<dyn UiBackend>) -> Result<UiServ
     let addr = listener.local_addr()?;
     let shutdown: ShutdownState = Arc::new((Mutex::new(false), Condvar::new()));
     let active = Arc::new(AtomicUsize::new(0));
+    let sse_active = Arc::new(AtomicUsize::new(0));
     let cfg = Arc::new(cfg);
 
     let accept_shutdown = Arc::clone(&shutdown);
     let accept_thread = thread::Builder::new()
         .name("aaf-web-ui-accept".to_string())
-        .spawn(move || accept_loop(listener, addr.port(), cfg, backend, accept_shutdown, active))?;
+        .spawn(move || {
+            accept_loop(
+                listener,
+                addr.port(),
+                cfg,
+                backend,
+                accept_shutdown,
+                active,
+                sse_active,
+            )
+        })?;
 
     Ok(UiServerHandle {
         addr,
@@ -128,24 +139,6 @@ fn wake_addr(bound: SocketAddr) -> SocketAddr {
     }
 }
 
-struct ConnGuard(Arc<AtomicUsize>);
-impl Drop for ConnGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-fn try_reserve_conn(active: &Arc<AtomicUsize>) -> Option<ConnGuard> {
-    let mut cur = active.load(Ordering::Acquire);
-    while cur < MAX_CONCURRENT_CONNS {
-        match active.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return Some(ConnGuard(Arc::clone(active))),
-            Err(next) => cur = next,
-        }
-    }
-    None
-}
-
 fn accept_loop(
     listener: TcpListener,
     bound_port: u16,
@@ -153,6 +146,7 @@ fn accept_loop(
     backend: Arc<dyn UiBackend>,
     shutdown: ShutdownState,
     active: Arc<AtomicUsize>,
+    sse_active: Arc<AtomicUsize>,
 ) {
     loop {
         let Ok((mut stream, _)) = listener.accept() else {
@@ -165,15 +159,16 @@ fn accept_loop(
         if is_shutdown(&shutdown) {
             break;
         }
-        let Some(guard) = try_reserve_conn(&active) else {
+        let Some(guard) = try_reserve_limit(&active, MAX_CONCURRENT_CONNS) else {
             let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
             let _ = write_json_error(&mut stream, 503, "server connection limit reached");
             continue;
         };
-        let (cfg_c, backend_c, shutdown_c) = (
+        let (cfg_c, backend_c, shutdown_c, sse_c) = (
             Arc::clone(&cfg),
             Arc::clone(&backend),
             Arc::clone(&shutdown),
+            Arc::clone(&sse_active),
         );
         let _ = thread::Builder::new()
             .name("aaf-web-ui-conn".to_string())
@@ -188,6 +183,7 @@ fn accept_loop(
                         &cfg_c,
                         backend_c.as_ref(),
                         &shutdown_c,
+                        &sse_c,
                         &req,
                     ),
                     Err(ParseError::Closed) => {}
@@ -341,6 +337,7 @@ fn dispatch_request(
     cfg: &UiConfig,
     backend: &dyn UiBackend,
     shutdown: &ShutdownState,
+    sse_active: &Arc<AtomicUsize>,
     req: &HttpRequest,
 ) {
     let route = match_route(&req.method, &req.raw_path);
@@ -375,10 +372,28 @@ fn dispatch_request(
         Route::Studio => write_html(stream, STUDIO_HTML),
         Route::Static(asset) => super::pwa::serve_static(stream, asset),
         Route::Report => {
-            let since = req.query.get("since").and_then(|s| s.parse::<u64>().ok());
-            write_backend_result(stream, backend.report_json(since));
+            let since = req
+                .query
+                .get("since")
+                .or_else(|| req.query.get("hours"))
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&h| h > 0)
+                .map(|h| h.min(MAX_REPORT_HOURS));
+            let repo = req
+                .query
+                .get("repo")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty());
+            write_backend_result(stream, backend.report_json_scoped(since, repo));
         }
-        Route::Doctor => write_backend_result(stream, backend.doctor_json()),
+        Route::Doctor => {
+            let repo = req
+                .query
+                .get("repo")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty());
+            write_backend_result(stream, backend.doctor_json_scoped(repo));
+        }
         Route::Health => {
             let _ = write_json_response(stream, 200, &json!({ "ok": true }));
         }
@@ -432,7 +447,13 @@ fn dispatch_request(
             }
             Err(e) => send_err(stream, 400, &format!("invalid run id: {e}")),
         },
-        Route::Events => serve_sse(stream, backend, shutdown, req.query.get("run_id")),
+        Route::Events => serve_sse(
+            stream,
+            backend,
+            shutdown,
+            sse_active,
+            req.query.get("run_id"),
+        ),
         Route::CreateTask => {
             if let Some(val) = parse_json_body::<Value>(stream, &req.body) {
                 write_backend_result(stream, backend.create_task_json(&val));
@@ -536,46 +557,4 @@ fn handle_action_post(stream: &mut TcpStream, backend: &dyn UiBackend, body: &[u
         backend.mutate_task_with_comments(normalized, p.task_id.trim(), p.note.trim(), &p.comments)
     };
     write_backend_result(stream, res);
-}
-
-fn serve_sse(
-    stream: &mut TcpStream,
-    backend: &dyn UiBackend,
-    shutdown: &ShutdownState,
-    run_id_param: Option<&String>,
-) {
-    let run_id = run_id_param
-        .map(String::as_str)
-        .filter(|id| !id.is_empty() && validate_run_id(id).is_ok());
-    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
-        Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n\
-        Referrer-Policy: no-referrer\r\nX-Accel-Buffering: no\r\nConnection: keep-alive\r\n\r\n";
-    if stream.write_all(headers.as_bytes()).is_err() || stream.flush().is_err() {
-        return;
-    }
-
-    let mut last_stream: Option<Vec<String>> = None;
-    while !is_shutdown(shutdown) {
-        if let Ok(status) = backend.status_json()
-            && write_sse_event(stream, "status", &wrap_ok(status)).is_err()
-        {
-            break;
-        }
-        if let Some(rid) = run_id
-            && let Ok(lines) = backend.stream_tail_lines(rid, DEFAULT_STREAM_LINES)
-            && last_stream.as_ref() != Some(&lines)
-        {
-            let ev = json!({ "run_id": rid, "lines": &lines });
-            if write_sse_event(stream, "stream", &ev).is_err() {
-                break;
-            }
-            last_stream = Some(lines);
-        }
-        if stream.write_all(b": keepalive\n\n").is_err() || stream.flush().is_err() {
-            break;
-        }
-        if wait_for_shutdown(shutdown, SSE_PUSH_INTERVAL) {
-            break;
-        }
-    }
 }

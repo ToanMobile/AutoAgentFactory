@@ -15,6 +15,7 @@ fi
 SKILLS=(
   "aaf-update:$REPO_ROOT/.agent/skills/aaf-update"
   "aaf-audit:$REPO_ROOT/.agent/skills/aaf-audit"
+  "aaf_heath:$REPO_ROOT/.agent/skills/aaf_heath"
   "aaf-workflow:$REPO_ROOT/templates/skills/aaf-workflow"
 )
 

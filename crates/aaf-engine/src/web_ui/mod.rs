@@ -21,6 +21,7 @@ mod pwa_tests;
 pub mod qr;
 mod routes;
 pub mod server;
+mod sse;
 #[cfg(test)]
 mod studio_tests;
 #[cfg(test)]
@@ -192,9 +193,27 @@ pub trait UiBackend: Send + Sync {
     fn report_json(&self, _since_hours: Option<u64>) -> Result<Value, String> {
         Err("not found: report is not available in this backend".into())
     }
+    /// `aaf report` optionally filtered to a single validated `repo_root`.
+    fn report_json_scoped(
+        &self,
+        since_hours: Option<u64>,
+        repo: Option<&str>,
+    ) -> Result<Value, String> {
+        if repo.is_some() {
+            return Err("invalid: repo filter is not supported by this backend".into());
+        }
+        self.report_json(since_hours)
+    }
     /// `aaf doctor` checks of this machine and repository.
     fn doctor_json(&self) -> Result<Value, String> {
         Err("not found: doctor is not available in this backend".into())
+    }
+    /// `aaf doctor` optionally scoped to a validated `repo_root`.
+    fn doctor_json_scoped(&self, repo: Option<&str>) -> Result<Value, String> {
+        if repo.is_some() {
+            return Err("invalid: repo filter is not supported by this backend".into());
+        }
+        self.doctor_json()
     }
     /// Worktree git diff for a task.
     fn task_diff_json(&self, _task_id: &str) -> Result<Value, String> {

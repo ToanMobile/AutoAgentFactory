@@ -210,19 +210,24 @@ pub(super) fn stop_children_unlocked(
     workers: BTreeMap<String, WorkerSlot>,
     caffeinate: Option<Child>,
 ) {
-    for (_, mut slot) in workers {
+    let mut active: Vec<WorkerSlot> = workers.into_values().collect();
+    for slot in &active {
         let pid = slot.child.id();
         let _ = Command::new("/bin/kill")
             .args(["-TERM", &pid.to_string()])
             .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = slot.child.try_wait() {
-                break;
-            }
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !active.is_empty() && Instant::now() < deadline {
+        active.retain_mut(|slot| !matches!(slot.child.try_wait(), Ok(Some(_))));
+        if !active.is_empty() {
             thread::sleep(Duration::from_millis(50));
         }
+    }
+    for mut slot in active {
         let _ = slot.child.kill();
         let _ = slot.child.wait();
     }

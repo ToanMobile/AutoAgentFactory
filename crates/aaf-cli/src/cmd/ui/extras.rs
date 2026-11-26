@@ -45,17 +45,17 @@ pub(super) fn known_repos(db: Option<&Db>, scoped_repo: Option<&Path>) -> Vec<Va
         map.insert(p, name);
     }
     if let Some(db) = db
-        && let Ok(tasks) = db.list_tasks(None, None)
+        && let Ok(rows) = db.repo_task_summary(None)
     {
-        for t in tasks {
-            let p = Path::new(&t.repo_root);
+        for (repo_root, _, _) in rows {
+            let p = Path::new(&repo_root);
             if p.is_dir() {
                 let name = p
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or(&t.repo_root)
+                    .unwrap_or(&repo_root)
                     .to_string();
-                map.entry(t.repo_root).or_insert(name);
+                map.entry(repo_root).or_insert(name);
             }
         }
     }

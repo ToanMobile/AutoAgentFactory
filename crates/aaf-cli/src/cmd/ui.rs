@@ -7,8 +7,11 @@ mod actions;
 mod diff_parse;
 mod extras;
 mod proof_stop;
+mod report_cache;
 mod service;
 mod studio;
+mod studio_health;
+mod studio_repos;
 mod studio_tokens;
 mod supervisor;
 mod supervisor_ops;
@@ -16,10 +19,10 @@ mod tailscale;
 
 use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aaf_domain::ports::{Clock, EventSink, RunStore, TaskStore};
 use aaf_engine::db::Db;
@@ -27,7 +30,6 @@ use aaf_engine::executors::stream_log::read_tail_lines;
 use aaf_engine::telemetry::{
     RunCounts, StatusQuery, TaskCounts, collect_status_from_db_with_throttle, scan_throttle,
 };
-use aaf_engine::throttle::{LoadProbe, Pressure, SystemProbe};
 use aaf_engine::watch::{WatchQuery, collect_watch_overlay_with_scan};
 use aaf_engine::web_ui::qr::display_host_for_pairing;
 use aaf_engine::web_ui::{
@@ -44,8 +46,6 @@ use crate::output::{CmdError, CmdOutput, CmdResult};
 
 const DETAIL_EVENTS_LIMIT: u32 = 100;
 const POLL_TICK: Duration = Duration::from_millis(100);
-const STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
-const PRESSURE_CACHE_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, clap::Args)]
 pub struct UiArgs {
@@ -173,9 +173,8 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
         read_only,
         allow_approve: effective_allow_approve,
         supervisor,
-        status_cache: Mutex::new(StatusCache::default()),
-        status_refresh: Mutex::new(()),
-        pressure_cache: Mutex::new(None),
+        server_started_at: SystemClock.now(),
+        caches: report_cache::UiCaches::default(),
     });
     let handle = match start_server(cfg.clone(), backend) {
         Ok(h) => h,
@@ -255,12 +254,6 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
         .field("allow_approve", json!(effective_allow_approve)))
 }
 
-#[derive(Default)]
-struct StatusCache {
-    generation: u64,
-    entry: Option<(Instant, Value)>,
-}
-
 struct CliUiBackend {
     ro_db: SharedRoDb,
     ctx: Ctx,
@@ -270,52 +263,13 @@ struct CliUiBackend {
     read_only: bool,
     allow_approve: bool,
     supervisor: Arc<supervisor::UiSupervisor>,
-    status_cache: Mutex<StatusCache>,
-    status_refresh: Mutex<()>,
-    pressure_cache: Mutex<Option<(Instant, Option<Pressure>)>>,
+    server_started_at: i64,
+    caches: report_cache::UiCaches,
 }
 
 impl CliUiBackend {
     fn invalidate_status_cache(&self) {
-        let mut guard = self.status_cache.lock().unwrap_or_else(|e| e.into_inner());
-        guard.generation = guard.generation.wrapping_add(1);
-        guard.entry = None;
-    }
-
-    fn cached_pressure(&self) -> Option<Pressure> {
-        let mut guard = self
-            .pressure_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((at, reading)) = guard.as_ref()
-            && at.elapsed() < PRESSURE_CACHE_TTL
-        {
-            return *reading;
-        }
-        let reading = SystemProbe::detect().pressure();
-        *guard = Some((Instant::now(), reading));
-        reading
-    }
-
-    fn read_cached_status(&self) -> Option<Value> {
-        self.cached_or_generation().ok()
-    }
-
-    fn cached_or_generation(&self) -> Result<Value, u64> {
-        let guard = self.status_cache.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .entry
-            .as_ref()
-            .filter(|(at, _)| at.elapsed() < STATUS_CACHE_TTL)
-            .map(|(_, cached)| cached.clone())
-            .ok_or(guard.generation)
-    }
-
-    fn store_status_if_current(&self, start_gen: u64, out: &Value) {
-        let mut guard = self.status_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.generation == start_gen {
-            guard.entry = Some((Instant::now(), out.clone()));
-        }
+        self.caches.invalidate_all();
     }
 
     fn require_db_ro(&self) -> Result<Db, String> {
@@ -328,13 +282,37 @@ impl CliUiBackend {
 
 impl UiBackend for CliUiBackend {
     fn report_json(&self, since_hours: Option<u64>) -> Result<Value, String> {
+        self.report_json_scoped(since_hours, None)
+    }
+
+    fn report_json_scoped(
+        &self,
+        since_hours: Option<u64>,
+        req_repo: Option<&str>,
+    ) -> Result<Value, String> {
         let db = self.ro_db.get().map_err(|e| e.message)?;
-        let repo = self.repo_root.as_deref().and_then(Path::to_str);
-        studio::report_json_for_ctx(&self.ctx, &self.config_base, db.as_ref(), repo, since_hours)
+        let scoped = self.repo_root.as_deref().and_then(Path::to_str);
+        studio::cached_report_json(
+            &self.ctx,
+            &self.config_base,
+            db.as_ref(),
+            scoped,
+            req_repo,
+            since_hours,
+            !self.supervisor.is_enabled(),
+            self.server_started_at,
+            &self.caches,
+        )
     }
 
     fn doctor_json(&self) -> Result<Value, String> {
-        studio::doctor_json(&self.ctx)
+        self.doctor_json_scoped(None)
+    }
+
+    fn doctor_json_scoped(&self, req_repo: Option<&str>) -> Result<Value, String> {
+        let db = self.ro_db.get().map_err(|e| e.message)?;
+        let scoped = self.repo_root.as_deref().and_then(Path::to_str);
+        studio::cached_doctor_json(&self.ctx, db.as_ref(), scoped, req_repo, &self.caches)
     }
 
     fn meta_json(&self) -> Result<Value, String> {
@@ -355,14 +333,15 @@ impl UiBackend for CliUiBackend {
     }
 
     fn status_json(&self) -> Result<Value, String> {
-        if let Some(cached) = self.read_cached_status() {
+        if let Ok(cached) = self.caches.cached_status_or_gen() {
             return Ok(cached);
         }
         let _refresh = self
+            .caches
             .status_refresh
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let start_gen = match self.cached_or_generation() {
+        let start_gen = match self.caches.cached_status_or_gen() {
             Ok(cached) => return Ok(cached),
             Err(g) => g,
         };
@@ -412,7 +391,7 @@ impl UiBackend for CliUiBackend {
                 .map_or("claude", |c| c.repo.run.executor.as_str()),
             now,
         };
-        let pressure = self.cached_pressure();
+        let pressure = self.caches.cached_pressure();
         let watch = collect_watch_overlay_with_scan(
             &wq,
             db.as_ref(),
@@ -427,7 +406,11 @@ impl UiBackend for CliUiBackend {
                 .as_ref()
                 .map(|d| collect_recent_runs(d, repo))
                 .unwrap_or_default();
+            let freeze_thresh = eff
+                .as_ref()
+                .map_or(3, |c| c.repo.unblocker.global_freeze_consecutive_fails);
             map.insert("scope".into(), json!(self.scope));
+            map.insert("freeze_threshold".into(), json!(freeze_thresh));
             map.insert(
                 "heavy_slots".into(),
                 json!(watch.as_ref().map(|w| &w.heavy_slots)),
@@ -443,7 +426,7 @@ impl UiBackend for CliUiBackend {
             map.insert("recent_runs".into(), json!(runs));
             map.insert("supervisor".into(), self.supervisor.status_json());
         }
-        self.store_status_if_current(start_gen, &out);
+        self.caches.store_status_if_current(start_gen, &out);
         Ok(out)
     }
 
