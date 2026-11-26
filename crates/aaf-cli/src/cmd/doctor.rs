@@ -369,9 +369,9 @@ fn keychain_sandbox_exposure_check(policy: aaf_domain::keychain::KeychainPolicy)
                 .to_string(),
         ),
         KeychainPolicy::Auto => Err(
-            "Keychain (~/Library/Keychains) is closed automatically for API-key and non-Claude \
-             runs, while remaining open for Claude OAuth (SECURITY.md §10 #3; set [safety] \
-             deny_macos_keychain = \"always\" with API key auth to close for all runs)"
+            "Keychain (~/Library/Keychains) is closed automatically for API-key and non-Keychain \
+             runs, while remaining open for Claude/Antigravity OAuth (SECURITY.md §10 #3; set \
+             [safety] deny_macos_keychain = \"always\" with API key auth to close for all runs)"
                 .to_string(),
         ),
         KeychainPolicy::Never => Err(

@@ -52,7 +52,7 @@ fn should_deny_macos_keychain_matrix() {
     let blank_key = vec![("ANTHROPIC_API_KEY".to_string(), "   ".to_string())];
     let api_key = vec![("ANTHROPIC_API_KEY".to_string(), "sk-ant-test".to_string())];
 
-    // Auto: keep open ONLY for OAuth Claude; close for API-key Claude and all other executors.
+    // Auto: keep open for OAuth Claude and Antigravity (`agy`); close for API-key Claude and other executors.
     assert!(!should_deny_macos_keychain(
         KeychainPolicy::Auto,
         "claude",
@@ -63,15 +63,30 @@ fn should_deny_macos_keychain_matrix() {
         "CLAUDE",
         &blank_key
     ));
+    assert!(!should_deny_macos_keychain(
+        KeychainPolicy::Auto,
+        "antigravity",
+        &empty
+    ));
+    assert!(!should_deny_macos_keychain(
+        KeychainPolicy::Auto,
+        "ANTIGRAVITY",
+        &empty
+    ));
+    assert!(!should_deny_macos_keychain(
+        KeychainPolicy::Auto,
+        "agy",
+        &empty
+    ));
     assert!(should_deny_macos_keychain(
         KeychainPolicy::Auto,
         "claude",
         &api_key
     ));
-    for exec in ["codex", "gemini", "antigravity", "opencode", "custom"] {
+    for exec in ["codex", "gemini", "opencode", "custom"] {
         assert!(
             should_deny_macos_keychain(KeychainPolicy::Auto, exec, &empty),
-            "Auto must deny macOS Keychain for non-Claude executor {exec}"
+            "Auto must deny macOS Keychain for non-OAuth-Keychain executor {exec}"
         );
     }
 
@@ -79,6 +94,11 @@ fn should_deny_macos_keychain_matrix() {
     assert!(should_deny_macos_keychain(
         KeychainPolicy::Always,
         "claude",
+        &empty
+    ));
+    assert!(should_deny_macos_keychain(
+        KeychainPolicy::Always,
+        "antigravity",
         &empty
     ));
     assert!(should_deny_macos_keychain(

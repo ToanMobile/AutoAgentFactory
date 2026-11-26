@@ -179,6 +179,13 @@ impl ExecEnv {
 }
 
 /// Returns whether macOS Seatbelt should deny Keychain read/IPC access for this run.
+///
+/// Under [`KeychainPolicy::Auto`], executors that rely on macOS OAuth Keychain storage
+/// (`claude` without `ANTHROPIC_API_KEY`, and `antigravity` / `agy`) keep Keychain open:
+/// denying `~/Library/Keychains` while macOS `Security.framework` runs inside Seatbelt
+/// causes `Security.framework` (via `cfprefsd`) to prune `login.keychain-db` from
+/// `~/Library/Preferences/com.apple.security.plist`, triggering host-wide "Keychain Not Found"
+/// errors.
 pub fn should_deny_macos_keychain(
     policy: KeychainPolicy,
     executor: &str,
@@ -188,7 +195,11 @@ pub fn should_deny_macos_keychain(
         KeychainPolicy::Always => true,
         KeychainPolicy::Never => false,
         KeychainPolicy::Auto => {
-            if !executor.trim().eq_ignore_ascii_case("claude") {
+            let exec = executor.trim();
+            if exec.eq_ignore_ascii_case("antigravity") || exec.eq_ignore_ascii_case("agy") {
+                return false;
+            }
+            if !exec.eq_ignore_ascii_case("claude") {
                 return true;
             }
             env_vars
