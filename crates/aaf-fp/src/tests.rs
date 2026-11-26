@@ -152,6 +152,96 @@ fn sweep_touches_only_names_of_its_own_making() {
 }
 
 #[test]
+fn planted_index_links_in_a_repo_without_an_index_are_neither_followed_nor_removed() {
+    let repo = tempfile::tempdir().unwrap();
+    real_git(repo.path(), &["init", "-q", "-b", "main"]);
+    fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    let git_dir = repo.path().join(".git");
+    assert!(!git_dir.join("index").exists());
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("written-by-git");
+    let pid = std::process::id();
+    let mut planted = Vec::new();
+    for seq in 0..32 {
+        for name in [
+            format!("aaf-index-{pid}-{seq}"),
+            format!("aaf-index-{pid}-{seq}.lock"),
+        ] {
+            std::os::unix::fs::symlink(&target, git_dir.join(&name)).unwrap();
+            planted.push(name);
+        }
+    }
+    planted.sort();
+
+    let fp = tree_fp(repo.path(), GIT_TIMEOUT).unwrap();
+
+    assert!(fp.starts_with("git-tree:"), "{fp}");
+    // Git writes a missing index through a link at its path: none was used.
+    assert!(!target.exists() && !outside.path().join("written-by-git.lock").exists());
+    let left: Vec<String> = names(&git_dir)
+        .into_iter()
+        .filter(|name| name.starts_with("aaf-"))
+        .collect();
+    assert_eq!(left, planted, "links not ours stay, entries of the run go");
+}
+
+#[test]
+fn temp_names_keep_the_pid_first_so_a_killed_run_is_swept() {
+    let dir = tempfile::tempdir().unwrap();
+    let temp = crate::TempEntries::reserve(dir.path(), true).unwrap();
+    for path in [&temp.index, &temp.objects] {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(crate::stale_pid(name), Some(std::process::id()), "{name}");
+        // `<pid>-<seq>-<nonce>` with no dot: `.lock` is appended, not swapped in.
+        let tag: Vec<&str> = name.rsplitn(4, '-').collect();
+        assert!(tag[0].len() == 16 && tag[0].bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(!name.contains('.'), "{name}");
+    }
+    fs::write(temp.index.with_extension("lock"), "").unwrap();
+    // A run killed here never drops its entries.
+    std::mem::forget(temp);
+    assert_eq!(names(dir.path()).len(), 3);
+
+    stale::sweep(dir.path(), 1, &|_| false);
+
+    assert!(names(dir.path()).is_empty(), "{:?}", names(dir.path()));
+}
+
+#[test]
+fn the_object_directory_name_does_not_give_away_the_index_name() {
+    let dir = Path::new("/git");
+    let (objects, index) = crate::temp_names(dir);
+    let tag = |path: &Path, prefix: &str| {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        name.strip_prefix(prefix).unwrap().to_string()
+    };
+    let (objects, index) = (
+        tag(&objects, stale::OBJECTS_PREFIX),
+        tag(&index, stale::INDEX_PREFIX),
+    );
+    let split = |tag: &str| {
+        tag.rsplit_once('-')
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+    };
+    let ((obj_head, obj_nonce), (idx_head, idx_nonce)) =
+        (split(&objects).unwrap(), split(&index).unwrap());
+    assert_eq!(obj_head, idx_head, "same `<pid>-<seq>`");
+    assert_ne!(obj_nonce, idx_nonce, "{objects} / {index}");
+}
+
+#[test]
+fn an_index_that_is_not_a_regular_file_is_refused() {
+    let repo = tempfile::tempdir().unwrap();
+    real_git(repo.path(), &["init", "-q", "-b", "main"]);
+    let index = repo.path().join(".git").join("index");
+    std::os::unix::fs::symlink("/dev/null", &index).unwrap();
+
+    let err = tree_fp(repo.path(), GIT_TIMEOUT).unwrap_err();
+
+    assert!(matches!(err, crate::FpError::Io(_)), "{err:?}");
+}
+
+#[test]
 fn only_a_missing_process_counts_as_dead() {
     assert!(stale::process_alive(std::process::id()));
     assert!(!stale::process_alive(dead_pid()));
