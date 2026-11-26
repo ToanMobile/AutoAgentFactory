@@ -96,7 +96,7 @@ pub(crate) fn has_behavioral_red_unproven(receipt: &Receipt) -> bool {
 /// True when proof is not required for this diff or the signed proof for
 /// `(worktree, tree_fp)` verifies.
 pub(crate) fn proof_verified(deps: &Deps, worktree: &Path, receipt: &Receipt) -> bool {
-    !crate::proof::proof_needed_for_worktree(
+    !crate::gate::proof_need::proof_needed_for_worktree(
         worktree,
         &deps.settings.repo.proof,
         &deps.settings.repo.gate.base_ref,

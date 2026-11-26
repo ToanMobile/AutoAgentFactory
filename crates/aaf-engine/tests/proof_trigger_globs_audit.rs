@@ -11,8 +11,8 @@ use aaf_domain::ports::Clock;
 use aaf_engine::cross_audit::compute_mechanical_score;
 use aaf_engine::factory::adapters::RealGate;
 use aaf_engine::factory::ports::GateRunner;
+use aaf_engine::gate::proof_need::proof_needed_for_worktree;
 use aaf_engine::gate::run_gate_observed;
-use aaf_engine::proof::proof_needed_for_worktree;
 use tempfile::TempDir;
 
 struct FixedClock(i64);

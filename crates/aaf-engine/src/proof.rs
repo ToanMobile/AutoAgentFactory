@@ -13,7 +13,7 @@ pub use base_config::load_base_proof_capture_cmd;
 pub(crate) use capture::{GateProofCheck, finalize_gate_proof, load_gate_base_capture_cmd};
 pub use capture::{
     HOST_CAPTURE_DEVICE, HOST_CAPTURE_TOOL, capture_and_record_proof, captured_proof_image_path,
-    proof_needed_for_worktree, proof_triggered,
+    proof_triggered,
 };
 pub use flows::{
     load_base_flows, run_flows_and_record_proof_with_env, run_single_flow_with_timeout,
