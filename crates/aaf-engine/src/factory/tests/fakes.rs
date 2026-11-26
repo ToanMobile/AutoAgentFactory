@@ -63,6 +63,7 @@ pub struct GateState {
     /// Full gate runs on the base: red, and whether a rerun then passes.
     pub full_red: bool,
     pub full_flaky: bool,
+    pub full_unverified: bool,
     pub full_runs: u32,
 }
 
@@ -111,7 +112,13 @@ impl GateRunner for FakeGate {
     fn run_full(&self, tree: &Path) -> PortResult<Receipt> {
         let mut state = self.state.lock().unwrap();
         state.full_runs += 1;
-        Ok(if state.full_red {
+        Ok(if state.full_unverified {
+            receipt(
+                tree,
+                GateStatus::Unverified,
+                vec!["tree changed".to_string()],
+            )
+        } else if state.full_red {
             receipt(
                 tree,
                 GateStatus::Blocked,

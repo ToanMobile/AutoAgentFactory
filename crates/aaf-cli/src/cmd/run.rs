@@ -311,12 +311,8 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             cfg.repo.cross_audit.executor = resolved;
         }
     }
-    if let Some(warning) = aaf_engine::factory::fill_default_reviewers(
-        &mut cfg.repo.cross_audit,
-        &cfg.repo.run.executor,
-    ) {
-        cfg.warnings.push(warning);
-    }
+    let fallback = aaf_engine::factory::fall_back_to_one_provider(&mut cfg.repo);
+    cfg.warnings.extend(fallback);
     let run_exec = cfg.repo.run.executor.trim();
     let audit_exec = configured_audit_provider(run_exec, &cfg.repo.cross_audit);
     if cfg.repo.cross_audit.require_different_provider && same_audit_provider(run_exec, audit_exec)
@@ -569,6 +565,10 @@ fn full_gate_tick(deps: &aaf_engine::factory::Deps) {
         Ok(Outcome::Flaky { sha, task_id }) => {
             eprintln!("aaf: full gate: {sha} has a flaky test, task {task_id}")
         }
+        Ok(Outcome::Unverified { sha, reasons }) => eprintln!(
+            "aaf: full gate: {sha} could not be verified: {}",
+            reasons.join("; ")
+        ),
         Ok(Outcome::Red { sha, task_id }) => eprintln!(
             "aaf: full gate: {sha} is red, task {task_id} opened; auto-merge held until green"
         ),

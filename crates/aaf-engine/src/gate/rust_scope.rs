@@ -31,7 +31,15 @@ pub fn expand(
     changes: &[Change],
 ) -> Option<(CommandsConfig, String)> {
     let uses = |cmd: &str| cmd.contains(AFFECTED_PACKAGES);
-    if !uses(&commands.lint) && !uses(&commands.test_scoped) {
+    if ![
+        &commands.lint,
+        &commands.test_scoped,
+        &commands.lint_full,
+        &commands.test_full,
+    ]
+    .iter()
+    .any(|cmd| uses(cmd))
+    {
         return None;
     }
     let selected = if mode == GateMode::Scoped {
@@ -65,6 +73,24 @@ pub fn expand(
     out.lint_full = out.lint_full.replace(AFFECTED_PACKAGES, WHOLE_WORKSPACE);
     out.test_full = out.test_full.replace(AFFECTED_PACKAGES, WHOLE_WORKSPACE);
     Some((out, note))
+}
+
+/// `cfg` with [`expand`] applied to its commands, for code that runs a
+/// command itself from the configuration (the red->green oracle).
+pub fn expanded_cfg<'a>(
+    cfg: &'a aaf_domain::config::RepoConfig,
+    mode: GateMode,
+    repo_root: &Path,
+    changes: &[Change],
+) -> std::borrow::Cow<'a, aaf_domain::config::RepoConfig> {
+    match expand(&cfg.commands, mode, repo_root, changes) {
+        Some((commands, _)) => {
+            let mut owned = cfg.clone();
+            owned.commands = commands;
+            std::borrow::Cow::Owned(owned)
+        }
+        None => std::borrow::Cow::Borrowed(cfg),
+    }
 }
 
 /// [`expand`], or `commands` as they are; the note goes into `notes`.
@@ -169,6 +195,18 @@ fn read_workspace(repo_root: &Path) -> Option<Vec<Member>> {
             dirs.push(entry);
         }
     }
+    // Cargo leaves excluded directories out of the workspace, so `-p` on
+    // one would fail: they are no member here either.
+    let excluded: Vec<String> = ws
+        .get("exclude")
+        .and_then(toml::Value::as_array)
+        .map(|list| list.iter().filter_map(|e| normalize(e.as_str()?)).collect())
+        .unwrap_or_default();
+    dirs.retain(|dir| {
+        !excluded
+            .iter()
+            .any(|ex| dir == ex || dir.starts_with(&format!("{ex}/")))
+    });
     if root.contains_key("package") {
         dirs.push(String::new());
     }
@@ -335,6 +373,36 @@ mod tests {
                 "engine".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn an_excluded_directory_is_no_member() {
+        let t = workspace();
+        write(
+            t.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\", \"tools/fp\"]\nexclude = [\"crates/bench\"]\n\
+             [workspace.dependencies]\ndomain = { path = \"crates/domain\" }\n",
+        );
+        write(
+            t.path(),
+            "crates/bench/Cargo.toml",
+            "[package]\nname = \"bench\"\n[dependencies]\ndomain = { path = \"../domain\" }\n",
+        );
+        let got = affected_packages(t.path(), &modified(&["crates/domain/src/lib.rs"]));
+        let got = names(got).unwrap();
+        assert!(!got.contains(&"bench".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn the_full_commands_are_expanded_too() {
+        let t = workspace();
+        let commands = CommandsConfig {
+            test_full: format!("cargo test {AFFECTED_PACKAGES}"),
+            ..CommandsConfig::default()
+        };
+        let (out, _) = expand(&commands, GateMode::Full, t.path(), &[]).unwrap();
+        assert_eq!(out.test_full, "cargo test --workspace");
     }
 
     #[test]

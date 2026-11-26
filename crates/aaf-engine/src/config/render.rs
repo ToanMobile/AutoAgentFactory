@@ -140,7 +140,8 @@ auto_merge = {auto_merge}
 max_parallel = {max_parallel}
 run_timeout_secs = {run_timeout}
 # Claude executor only: `claude --model` and `claude --effort`. Empty = the
-# CLI's own default. The local file may override these two.
+# CLI's own default. The local file may override these two, except while
+# [pipeline] plan_debate or [cross_audit] dual_review is on.
 model = \"\"
 effort = \"\"
 # The agent gets an allow-list of aaf's environment (PATH, HOME, locale, the

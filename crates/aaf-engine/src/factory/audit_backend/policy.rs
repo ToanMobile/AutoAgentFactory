@@ -311,6 +311,43 @@ pub fn fill_default_reviewers(cfg: &mut CrossAuditConfig, run_executor: &str) ->
     None
 }
 
+/// [`fill_default_reviewers`], then the same for `plan_debate`: with no
+/// `plan_challenger`, no separate auditor and no reviewer of another
+/// provider there is nobody to challenge the plan, and every task would be
+/// blocked at the plan stage, so the debate is turned off with a warning.
+pub fn fall_back_to_one_provider(repo: &mut aaf_domain::config::RepoConfig) -> Vec<String> {
+    use aaf_domain::pipeline::is_known_real_reviewer;
+    let mut warnings: Vec<String> =
+        fill_default_reviewers(&mut repo.cross_audit, &repo.run.executor)
+            .into_iter()
+            .collect();
+    let pipe = &repo.pipeline;
+    if pipe.plan_debate && pipe.plan_challenger.is_empty() {
+        let author = if pipe.plan_author.executor.trim().is_empty() {
+            repo.run.executor.trim()
+        } else {
+            pipe.plan_author.executor.trim()
+        }
+        .to_string();
+        let cross = &repo.cross_audit;
+        let challenger = !cross.executor.trim().is_empty()
+            || !cross.executor_cmd.trim().is_empty()
+            || cross
+                .reviewers
+                .iter()
+                .any(|r| is_known_real_reviewer(r) && !same_audit_provider(&author, &r.executor));
+        if !challenger {
+            repo.pipeline.plan_debate = false;
+            warnings.push(format!(
+                "pipeline.plan_debate needs a second provider and only {author} is set up here: \
+                 the plan is written without a debate (install another CLI or set \
+                 [pipeline.plan_challenger])"
+            ));
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod default_reviewers_tests {
     use super::*;
@@ -337,6 +374,24 @@ mod default_reviewers_tests {
         let mut cfg = dual("");
         assert!(fill_default_reviewers(&mut cfg, "claude").is_some());
         assert!(!cfg.dual_review && cfg.reviewers.is_empty());
+    }
+
+    #[test]
+    fn a_debate_without_a_second_provider_is_turned_off() {
+        let mut repo = aaf_domain::config::RepoConfig::default();
+        repo.run.executor = "claude".into();
+        repo.pipeline.plan_debate = true;
+        repo.cross_audit.dual_review = true;
+        let warnings = fall_back_to_one_provider(&mut repo);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(!repo.pipeline.plan_debate && !repo.cross_audit.dual_review);
+
+        let mut repo = aaf_domain::config::RepoConfig::default();
+        repo.run.executor = "claude".into();
+        repo.pipeline.plan_debate = true;
+        repo.cross_audit.executor = "antigravity".into();
+        assert!(fall_back_to_one_provider(&mut repo).is_empty());
+        assert!(repo.pipeline.plan_debate);
     }
 
     #[test]

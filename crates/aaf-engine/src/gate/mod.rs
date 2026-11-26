@@ -437,7 +437,7 @@ pub fn run_gate_with_options(
             let v = oracle::evaluate_with_options(
                 repo_root,
                 base_sha,
-                cfg,
+                &rust_scope::expanded_cfg(cfg, mode, repo_root, &set.changes),
                 mode,
                 &set.changes,
                 &added,

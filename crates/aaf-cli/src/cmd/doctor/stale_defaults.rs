@@ -11,25 +11,56 @@ use aaf_engine::config::REPO_CONFIG_REL;
 
 use crate::ctx::{Ctx, RepoState};
 
-/// The `[run]` lines old `aaf init` wrote, as `key = value` after trimming.
-const STALE: [(&str, &str); 2] = [("auto_merge", "false"), ("max_parallel", "1")];
+/// The `[run]` lines old `aaf init` wrote, as `key = value` after trimming,
+/// each with the lines that stood right above it in that template. A line
+/// anywhere else was written by a person and stays.
+const STALE: [(&str, &str, &[&str]); 2] = [
+    (
+        "auto_merge",
+        "false",
+        &[
+            "# [cross_audit] below; head-locked changes still need a signed audit.",
+            "# false = open a pull request with the gate receipt; true = merge when the gate is Clear.",
+        ],
+    ),
+    // Below the template's `auto_merge` line: one just removed, or one a
+    // person flipped to true.
+    (
+        "max_parallel",
+        "1",
+        &[REMOVED_AUTO_MERGE, "auto_merge = true"],
+    ),
+];
+
+/// What [`strip`] remembers above the next line after dropping `auto_merge`.
+const REMOVED_AUTO_MERGE: &str = "\0removed auto_merge";
 
 /// `text` without the stale lines of its `[run]` table, and the keys removed.
 pub fn strip(text: &str) -> (String, Vec<&'static str>) {
     let mut out = String::with_capacity(text.len());
     let mut removed = Vec::new();
     let mut in_run = false;
+    let mut above = String::new();
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             in_run = trimmed == "[run]";
         } else if in_run && let Some((key, value)) = trimmed.split_once('=') {
             let (key, value) = (key.trim(), value.trim());
-            if let Some((stale_key, _)) = STALE.iter().find(|(k, v)| *k == key && *v == value) {
+            if let Some((stale_key, _, _)) = STALE
+                .iter()
+                .find(|(k, v, t)| *k == key && *v == value && t.contains(&above.as_str()))
+            {
                 removed.push(*stale_key);
+                above = if *stale_key == "auto_merge" {
+                    REMOVED_AUTO_MERGE.to_string()
+                } else {
+                    String::new()
+                };
                 continue;
             }
         }
+        above = trimmed.to_string();
         out.push_str(line);
     }
     (out, removed)
@@ -110,20 +141,28 @@ mod tests {
     #[test]
     fn drops_only_the_old_init_values_in_run() {
         let text = "[gate]\nmax_parallel = 1\n[run]\nexecutor = \"claude\"\n\
+                    # [cross_audit] below; head-locked changes still need a signed audit.\n\
                     auto_merge = false\nmax_parallel = 1\nrun_timeout_secs = 3600\n";
         let (out, removed) = strip(text);
         assert_eq!(removed, vec!["auto_merge", "max_parallel"]);
         assert_eq!(
             out,
-            "[gate]\nmax_parallel = 1\n[run]\nexecutor = \"claude\"\nrun_timeout_secs = 3600\n"
+            "[gate]\nmax_parallel = 1\n[run]\nexecutor = \"claude\"\n\
+             # [cross_audit] below; head-locked changes still need a signed audit.\n\
+             run_timeout_secs = 3600\n"
         );
     }
 
     #[test]
     fn keeps_values_a_person_chose() {
-        let text = "[run]\nauto_merge = true\nmax_parallel = 3\n";
-        let (out, removed) = strip(text);
-        assert!(removed.is_empty());
-        assert_eq!(out, text);
+        for text in [
+            "[run]\nauto_merge = true\nmax_parallel = 3\n",
+            // Not where the old template put it: written by hand.
+            "[run]\n# review every change\nauto_merge = false\nmax_parallel = 1\n",
+        ] {
+            let (out, removed) = strip(text);
+            assert!(removed.is_empty(), "{text}");
+            assert_eq!(out, text);
+        }
     }
 }

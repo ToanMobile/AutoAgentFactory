@@ -23,11 +23,15 @@ use crate::git::cmd::git;
 /// Worktree id of the checkout the full gate runs in. It is kept between
 /// runs so the build cache (`target/`, `node_modules/`, ...) survives.
 pub const WORKTREE_ID: &str = "full-main";
-const META_LAST_RUN: &str = "full_gate.last_run_at";
-const META_SINCE: &str = "full_gate.since";
-const META_GREEN_SHA: &str = "full_gate.green_sha";
-const META_RED_SHA: &str = "full_gate.red_sha";
-const META_FIX_TASK: &str = "full_gate.fix_task";
+const META_LAST_RUN: &str = "last_run_at";
+const META_SINCE: &str = "since";
+const META_FAILED_AT: &str = "failed_at";
+const META_GREEN_SHA: &str = "green_sha";
+const META_RED_SHA: &str = "red_sha";
+const META_FIX_TASK: &str = "fix_task";
+/// After a run that could not finish (git, the worktree, the receipt), the
+/// next try waits this long instead of every idle poll.
+const RETRY_AFTER_ERROR_SECS: i64 = 3600;
 const FLAKY_FINGERPRINT: &str = "full-gate:flaky:";
 const LOG_TAIL_BYTES: usize = 6000;
 const MAX_COMMITS: &str = "50";
@@ -49,6 +53,11 @@ pub enum Outcome {
         sha: String,
         task_id: String,
     },
+    /// The gate could not verify the base (nothing failed); no hold.
+    Unverified {
+        sha: String,
+        reasons: Vec<String>,
+    },
     /// The base branch is red; auto-merge is held until it is green.
     Red {
         sha: String,
@@ -56,19 +65,45 @@ pub enum Outcome {
     },
 }
 
-/// The task that has to land while the base is red, if it is.
-pub fn fix_task(deps: &Deps) -> PortResult<Option<String>> {
+/// The meta key of `name` for this repository: every repository on the
+/// machine shares one database.
+fn key(deps: &Deps, name: &str) -> String {
+    let repo = aaf_fp::repo_id(Path::new(&deps.settings.repo_root));
+    format!("full_gate.{repo}.{name}")
+}
+
+fn meta(deps: &Deps, name: &str) -> PortResult<Option<String>> {
     Ok(deps
         .store
-        .get_meta(META_FIX_TASK)?
-        .filter(|id| !id.is_empty()))
+        .get_meta(&key(deps, name))?
+        .filter(|v| !v.is_empty()))
+}
+
+fn set(deps: &Deps, name: &str, value: &str) -> PortResult<()> {
+    deps.store.set_meta(&key(deps, name), value)
+}
+
+/// The task that has to land while the base is red, if it is. A fix task
+/// someone cancelled, or one that is gone, holds nothing any more: the next
+/// change to the base is checked again and opens a new one if still red.
+pub fn fix_task(deps: &Deps) -> PortResult<Option<String>> {
+    let Some(id) = meta(deps, META_FIX_TASK)? else {
+        return Ok(None);
+    };
+    match deps.store.get_task(&id) {
+        Ok(task) if task.state == TaskState::Cancelled => Ok(None),
+        Ok(_) => Ok(Some(id)),
+        Err(PortError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// [`super::Settings::effective_land`], except that while the base is red
-/// only the fix task (and its subtasks) may land by itself.
+/// only the fix task (and its subtasks) may land by itself. Turning the
+/// full gate off (`cooldown_hours = 0`) also ends the hold.
 pub fn land_for(deps: &Deps, task: &Task) -> LandMode {
     let land = deps.settings.effective_land();
-    if !land.auto_lands() {
+    if !land.auto_lands() || deps.settings.repo.full_gate.cooldown_hours == 0 {
         return land;
     }
     match fix_task(deps) {
@@ -84,23 +119,28 @@ pub fn tick(deps: &Deps) -> PortResult<Outcome> {
     if cfg.cooldown_hours == 0 {
         return Ok(Outcome::Skipped("off"));
     }
+    if deps.settings.repo.commands.test_full.trim().is_empty() {
+        return Ok(Outcome::Skipped("no test_full"));
+    }
     let now = deps.now();
-    let meta_i64 = |key| -> PortResult<Option<i64>> {
-        Ok(deps.store.get_meta(key)?.and_then(|v| v.parse().ok()))
-    };
-    let since = match meta_i64(META_SINCE)? {
+    let at =
+        |name| -> PortResult<Option<i64>> { Ok(meta(deps, name)?.and_then(|v| v.parse().ok())) };
+    let since = match at(META_SINCE)? {
         Some(at) => at,
         None => {
-            deps.store.set_meta(META_SINCE, &now.to_string())?;
+            set(deps, META_SINCE, &now.to_string())?;
             now
         }
     };
-    let last_run = meta_i64(META_LAST_RUN)?;
+    if at(META_FAILED_AT)?.is_some_and(|t| now - t < RETRY_AFTER_ERROR_SECS) {
+        return Ok(Outcome::Skipped("error backoff"));
+    }
+    let last_run = at(META_LAST_RUN)?;
     let red = fix_task(deps)?.is_some();
-    let hours = |secs: u64| i64::try_from(secs.saturating_mul(3600)).unwrap_or(i64::MAX);
+    let hours = |h: u64| i64::try_from(h.saturating_mul(3600)).unwrap_or(i64::MAX);
     // While the base is red every change to it is checked again at once:
     // that is how the hold on auto-merge ends.
-    if !red && last_run.is_some_and(|at| now - at < hours(cfg.cooldown_hours)) {
+    if !red && last_run.is_some_and(|t| now - t < hours(cfg.cooldown_hours)) {
         return Ok(Outcome::Skipped("cooldown"));
     }
     if busy(deps)? {
@@ -111,43 +151,62 @@ pub fn tick(deps: &Deps) -> PortResult<Outcome> {
         }
     }
     let sha = deps.git.base_sha()?;
-    let green = deps
-        .store
-        .get_meta(META_GREEN_SHA)?
-        .filter(|s| !s.is_empty());
+    let green = meta(deps, META_GREEN_SHA)?;
     if green.as_deref() == Some(sha.as_str()) {
         return Ok(Outcome::Skipped("unchanged"));
     }
-    if red && deps.store.get_meta(META_RED_SHA)?.as_deref() == Some(sha.as_str()) {
+    if red && meta(deps, META_RED_SHA)?.as_deref() == Some(sha.as_str()) {
         return Ok(Outcome::Skipped("still red"));
     }
+    let outcome = run_at(deps, &sha, green.as_deref());
+    if outcome.is_err() {
+        set(deps, META_FAILED_AT, &deps.now().to_string())?;
+    }
+    outcome
+}
 
+fn run_at(deps: &Deps, sha: &str, green: Option<&str>) -> PortResult<Outcome> {
     let worktree = deps.git.task_worktree(WORKTREE_ID)?;
-    deps.git.reset_to(&worktree, &sha)?;
+    deps.git.reset_to(&worktree, sha)?;
     let tree = worktree.path;
-    if let Some(green) = &green
+    if let Some(green) = green
         && docs_only(deps, &tree, green)
     {
-        deps.store.set_meta(META_GREEN_SHA, &sha)?;
-        return Ok(Outcome::DocsOnly { sha });
+        green_at(deps, sha)?;
+        return Ok(Outcome::DocsOnly {
+            sha: sha.to_string(),
+        });
     }
     let receipt = deps.gate.run_full(&tree)?;
-    deps.store
-        .set_meta(META_LAST_RUN, &deps.now().to_string())?;
-    if receipt.status == GateStatus::Clear {
-        return green_at(deps, sha);
+    set(deps, META_LAST_RUN, &deps.now().to_string())?;
+    let sha = sha.to_string();
+    match receipt.status {
+        GateStatus::Clear => {
+            green_at(deps, &sha)?;
+            return Ok(Outcome::Green { sha });
+        }
+        // Nothing failed: the gate could not say (the tree moved under it,
+        // a check it needs is missing). Not a reason to hold anything.
+        GateStatus::Unverified => {
+            set(deps, META_FAILED_AT, &deps.now().to_string())?;
+            return Ok(Outcome::Unverified {
+                sha,
+                reasons: receipt.reasons,
+            });
+        }
+        GateStatus::Blocked => {}
     }
-    let commits = commits_since(&tree, green.as_deref(), &sha);
+    let commits = commits_since(&tree, green, &sha);
     if let Some(rerun) = deps.gate.rerun_failed_test(&tree, &receipt)?
         && rerun.passed > 0
     {
         let task_id = flaky_task(deps, &receipt, &sha)?;
-        green_at(deps, sha.clone())?;
+        green_at(deps, &sha)?;
         return Ok(Outcome::Flaky { sha, task_id });
     }
     let task_id = red_task(deps, &receipt, &sha, &commits)?;
-    deps.store.set_meta(META_RED_SHA, &sha)?;
-    deps.store.set_meta(META_FIX_TASK, &task_id)?;
+    set(deps, META_RED_SHA, &sha)?;
+    set(deps, META_FIX_TASK, &task_id)?;
     Ok(Outcome::Red { sha, task_id })
 }
 
@@ -180,15 +239,16 @@ fn docs_only(deps: &Deps, tree: &Path, green: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn green_at(deps: &Deps, sha: String) -> PortResult<Outcome> {
-    deps.store.set_meta(META_GREEN_SHA, &sha)?;
-    deps.store.set_meta(META_RED_SHA, "")?;
-    if let Some(fix) = fix_task(deps)? {
-        deps.store.set_meta(META_FIX_TASK, "")?;
+fn green_at(deps: &Deps, sha: &str) -> PortResult<()> {
+    set(deps, META_GREEN_SHA, sha)?;
+    set(deps, META_RED_SHA, "")?;
+    set(deps, META_FAILED_AT, "")?;
+    if let Some(fix) = meta(deps, META_FIX_TASK)? {
+        set(deps, META_FIX_TASK, "")?;
         let note = format!("full gate green again at {sha}: auto-merge resumed");
         let _ = deps.store.append_context_note(&fix, &note, deps.now());
     }
-    Ok(Outcome::Green { sha })
+    Ok(())
 }
 
 fn commits_since(tree: &Path, green: Option<&str>, sha: &str) -> String {
@@ -258,11 +318,8 @@ fn open_fix_task(deps: &Deps) -> PortResult<Option<String>> {
     let Some(id) = fix_task(deps)? else {
         return Ok(None);
     };
-    match deps.store.get_task(&id) {
-        Ok(task) if !task.state.is_terminal() => Ok(Some(id)),
-        Ok(_) | Err(PortError::NotFound(_)) => Ok(None),
-        Err(e) => Err(e),
-    }
+    let task = deps.store.get_task(&id)?;
+    Ok((!task.state.is_terminal()).then_some(id))
 }
 
 fn flaky_task(deps: &Deps, receipt: &Receipt, sha: &str) -> PortResult<String> {

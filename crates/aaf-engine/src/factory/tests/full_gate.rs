@@ -20,6 +20,7 @@ fn world() -> World {
         cooldown_hours: 24,
         max_days: 7,
     };
+    w.repo.commands.test_full = "cargo test --workspace".to_string();
     w
 }
 
@@ -144,4 +145,56 @@ fn a_test_that_passes_on_rerun_is_flaky_and_holds_nothing() {
     assert_eq!(w.task(&task_id).priority, Priority::P2);
     let probe = w.add("probe");
     assert_eq!(land_for(&deps, &probe), LandMode::Auto);
+}
+
+#[test]
+fn an_unverified_run_holds_nothing() {
+    let w = world();
+    let deps = w.deps();
+    w.gate.state.lock().unwrap().full_unverified = true;
+    assert!(matches!(tick(&deps).unwrap(), Outcome::Unverified { .. }));
+    let probe = w.add("probe");
+    assert_eq!(land_for(&deps, &probe), LandMode::Auto);
+    assert!(w.db.list_tasks(None, None).unwrap().len() == 1);
+}
+
+#[test]
+fn without_test_full_nothing_runs() {
+    let mut w = world();
+    w.repo.commands.test_full.clear();
+    assert_eq!(tick(&w.deps()).unwrap(), Outcome::Skipped("no test_full"));
+    assert_eq!(full_runs(&w), 0);
+}
+
+#[test]
+fn cancelling_the_fix_task_or_turning_it_off_ends_the_hold() {
+    let mut w = world();
+    let deps = w.deps();
+    let other = w.add("other");
+    w.db.set_state("other", TaskState::Blocked, None, 1)
+        .unwrap();
+    w.gate.state.lock().unwrap().full_red = true;
+    let Outcome::Red { task_id, .. } = tick(&deps).unwrap() else {
+        panic!("expected red");
+    };
+    assert_eq!(land_for(&deps, &other), LandMode::Pr);
+    w.repo.full_gate.cooldown_hours = 0;
+    assert_eq!(land_for(&w.deps(), &other), LandMode::Auto);
+    w.repo.full_gate.cooldown_hours = 24;
+    w.db.set_state(&task_id, TaskState::Cancelled, None, 2)
+        .unwrap();
+    assert_eq!(land_for(&w.deps(), &other), LandMode::Auto);
+}
+
+#[test]
+fn a_red_base_holds_only_its_own_repository() {
+    let w = world();
+    let deps = w.deps();
+    w.gate.state.lock().unwrap().full_red = true;
+    assert!(matches!(tick(&deps).unwrap(), Outcome::Red { .. }));
+    let mut elsewhere = w.deps();
+    elsewhere.settings.repo_root = "/fake/other-repo".to_string();
+    let probe = w.add("probe");
+    assert_eq!(land_for(&elsewhere, &probe), LandMode::Auto);
+    assert_eq!(land_for(&deps, &probe), LandMode::Pr);
 }

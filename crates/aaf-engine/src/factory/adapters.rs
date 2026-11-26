@@ -208,23 +208,26 @@ impl GateRunner for RealGate {
         else {
             return Ok(None);
         };
-        // Always take the command string from the main checkout's RepoConfig,
-        // never from an untrusted Receipt payload.
-        let command = match failed.name.as_str() {
-            "test_scoped" => self.cfg.commands.test_scoped.trim(),
-            "test_full" => self.cfg.commands.test_full.trim(),
-            _ => return Ok(None),
-        };
-        if command.is_empty() {
-            return Ok(None);
-        }
-
         let repo_root = std::fs::canonicalize(tree).map_err(|e| PortError::Io(e.to_string()))?;
         private::create_dir(&self.data_dir).map_err(|e| PortError::Io(e.to_string()))?;
         let base = gate::base::resolve(&repo_root, &self.cfg.gate.base_ref, gate::GIT_TIMEOUT)
             .map_err(|e| PortError::Io(e.to_string()))?;
         let set = gate::changes::collect(&repo_root, &base.diff_target, gate::GIT_TIMEOUT)
             .map_err(|e| PortError::Io(e.to_string()))?;
+        // Always take the command string from the main checkout's RepoConfig,
+        // never from an untrusted Receipt payload, with the same
+        // `{affected_packages}` the gate run had: the bare placeholder is a
+        // test-name filter that matches nothing and passes.
+        let commands =
+            gate::rust_scope::expanded_cfg(&self.cfg, receipt.mode, &repo_root, &set.changes);
+        let command = match failed.name.as_str() {
+            "test_scoped" => commands.commands.test_scoped.trim(),
+            "test_full" => commands.commands.test_full.trim(),
+            _ => return Ok(None),
+        };
+        if command.is_empty() || command.contains(gate::rust_scope::AFFECTED_PACKAGES) {
+            return Ok(None);
+        }
         let diff_env = DiffEnvFiles::write(receipt.mode, base.sha.as_deref(), &set.changes)
             .map_err(|e| PortError::Io(e.to_string()))?;
         let env_owned = diff_env.env_pairs();
