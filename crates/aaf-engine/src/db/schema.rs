@@ -148,6 +148,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_events_kind_created
         ON events(kind, created_at);
     ",
+    // v7: soft-archive terminal (`done`/`cancelled`) tasks from the Board UI
+    // while preserving `runs`, `events`, `cost_guard`, `gc`, and Studio telemetry.
+    "
+    ALTER TABLE tasks ADD COLUMN archived_at INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_tasks_board_visible
+        ON tasks(repo_root, state, priority, created_at)
+        WHERE archived_at IS NULL;
+    ",
 ];
 
 /// Schema version this build reads and writes.

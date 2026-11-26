@@ -42,21 +42,34 @@ pub(super) const MAX_AUDITOR_INCONCLUSIVE_RETRIES: usize = 2;
 
 /// Returns a concise diagnostic reason when `diff` (after deterministic
 /// allowlisted lockfile summarization) cannot possibly be approved by an
-/// auditor (empty or exceeding [`cross_audit::prompt::MAX_DIFF_BYTES`]),
-/// allowing callers to short-circuit with 0 worktrees and 0 LLM tokens.
-pub(super) fn short_circuit_audit_reason(diff: &str) -> Option<String> {
+/// auditor (empty or exceeding `max_diff_bytes`), allowing callers to
+/// short-circuit with 0 worktrees and 0 LLM tokens.
+pub(super) fn short_circuit_audit_reason_with_limit(
+    diff: &str,
+    max_diff_bytes: usize,
+) -> Option<String> {
     if diff.trim().is_empty() {
         return Some("inconclusive: empty diff: nothing to audit".to_string());
     }
     let prepared = cross_audit::prompt::summarize_diff_lockfiles(diff);
-    if cross_audit::prompt::truncate_diff(&prepared).1 {
+    if cross_audit::prompt::truncate_diff_with_limit(&prepared, max_diff_bytes).1 {
+        let top = cross_audit::prompt::top_diff_files(&prepared);
+        let hint = if top.is_empty() {
+            String::new()
+        } else {
+            format!(" [largest: {top}]")
+        };
         return Some(format!(
-            "inconclusive: diff was truncated ({} > {} bytes): the unseen part cannot be approved",
+            "inconclusive: diff was truncated ({} > {} bytes): the unseen part cannot be approved{hint}",
             prepared.len(),
-            cross_audit::prompt::MAX_DIFF_BYTES,
+            max_diff_bytes,
         ));
     }
     None
+}
+
+pub(super) fn short_circuit_audit_reason(diff: &str) -> Option<String> {
+    short_circuit_audit_reason_with_limit(diff, cross_audit::prompt::MAX_DIFF_BYTES)
 }
 
 fn has_status_code(lower: &str, code: &str) -> bool {
@@ -186,13 +199,15 @@ pub(crate) fn run_auditor_turn(
         diff: cross_audit::prompt::summarize_diff_lockfiles(&input.diff),
         mobile: input.mobile,
     };
+    let max_diff_bytes = deps.settings.repo.cross_audit.max_diff_bytes;
     let watch = InfraWatch::new(runner);
     let tokens_measured = watch.reports_tokens();
-    let mut report = match cross_audit::run_scored_audit(
+    let mut report = match cross_audit::run_scored_audit_with_limit(
         &prepared_input,
         &watch,
         &run.request,
         require_scores,
+        max_diff_bytes,
     ) {
         Ok(report) => report,
         Err(err) => {
@@ -249,11 +264,12 @@ pub(crate) fn run_auditor_turn(
         }
         let mut repair_req = run.request.clone();
         repair_req.run_id = unblock::unique_id();
-        repair_req.prompt = cross_audit::prompt::build_format_repair_prompt(
+        repair_req.prompt = cross_audit::prompt::build_format_repair_prompt_with_limit(
             &prepared_input,
             require_scores,
             &reason,
             &last_final_text,
+            max_diff_bytes,
         );
         // Fall back to the latest Inconclusive verdict if the runner errors
         // on the retry (e.g. transient port failure or single-shot test mock).
@@ -285,7 +301,8 @@ pub(crate) fn run_auditor_turn(
             }
             break;
         }
-        let (visible_diff, _) = cross_audit::prompt::truncate_diff(&prepared_input.diff);
+        let (visible_diff, _) =
+            cross_audit::prompt::truncate_diff_with_limit(&prepared_input.diff, max_diff_bytes);
         let hunks = cross_audit::parse_diff_hunks_with_truncation(visible_diff, false);
         let parsed = cross_audit::validate_verdict_against_diff(
             cross_audit::parse_scored_verdict(

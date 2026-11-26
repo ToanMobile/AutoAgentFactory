@@ -96,8 +96,26 @@ pub fn run_scored_audit(
     request_template: &AgentRequest,
     require_scores: bool,
 ) -> Result<AuditReport, PortError> {
+    run_scored_audit_with_limit(
+        input,
+        runner,
+        request_template,
+        require_scores,
+        prompt::MAX_DIFF_BYTES,
+    )
+}
+
+/// Like [`run_scored_audit`] with an explicit diff byte ceiling.
+pub fn run_scored_audit_with_limit(
+    input: &AuditInput,
+    runner: &dyn AgentRunner,
+    request_template: &AgentRequest,
+    require_scores: bool,
+    max_diff_bytes: usize,
+) -> Result<AuditReport, PortError> {
     let checklist = build_checklist(&input.spec, input.mobile);
-    let (visible_diff, diff_truncated) = prompt::truncate_diff(&input.diff);
+    let (visible_diff, diff_truncated) =
+        prompt::truncate_diff_with_limit(&input.diff, max_diff_bytes);
     let mut report = AuditReport {
         verdict: inconclusive("empty diff: nothing to audit"),
         checklist,
@@ -112,7 +130,7 @@ pub fn run_scored_audit(
     }
 
     let mut request = request_template.clone();
-    request.prompt = build_scored_prompt(input, require_scores);
+    request.prompt = prompt::build_scored_prompt_with_limit(input, require_scores, max_diff_bytes);
     let outcome = runner.run(&request)?;
     report.tokens_in = outcome.tokens_in;
     report.tokens_out = outcome.tokens_out;

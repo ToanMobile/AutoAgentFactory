@@ -119,6 +119,7 @@ pub(super) fn normalize_action(raw: &str) -> Option<&'static str> {
         "unfreeze" => Some("unfreeze"),
         "approve_plan" | "approve-plan" => Some("approve_plan"),
         "unblock_all" | "unblock-all" => Some("unblock_all"),
+        "delete_done" | "delete-done" => Some("delete_done"),
         "stop_run" | "stop-run" => Some("stop_run"),
         "supervisor_toggle" | "supervisor-toggle" => Some("supervisor_toggle"),
         "supervisor_repos" | "supervisor-repos" => Some("supervisor_repos"),
@@ -140,6 +141,7 @@ pub(super) fn action_needs_task_id(normalized: &str) -> bool {
         "unfreeze"
             | "unblock_all"
             | "ready_all"
+            | "delete_done"
             | "supervisor_toggle"
             | "supervisor_repos"
             | "account_cooldown"

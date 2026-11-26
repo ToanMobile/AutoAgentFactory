@@ -487,3 +487,35 @@ impl TaskStore for Db {
         })
     }
 }
+
+impl Db {
+    /// Lists non-archived tasks for the Board UI (`archived_at IS NULL` on schema >= 7).
+    pub fn list_board_tasks(
+        &self,
+        repo_root: Option<&str>,
+        state: Option<TaskState>,
+    ) -> PortResult<Vec<Task>> {
+        let mut clauses: Vec<&str> = Vec::new();
+        let mut args: Vec<String> = Vec::new();
+        let ver = self.schema_version();
+        if ver >= 7 {
+            clauses.push("archived_at IS NULL");
+        }
+        if let Some(repo_root) = repo_root {
+            clauses.push("repo_root = ?");
+            args.push(repo_root.to_string());
+        }
+        if let Some(state) = state {
+            clauses.push("state = ?");
+            args.push(state.as_str().to_string());
+        }
+        let cols = task_cols(ver);
+        let mut sql = format!("SELECT {cols} FROM tasks");
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(TASK_ORDER);
+        self.read(move |conn| query_tasks(conn, &sql, rusqlite::params_from_iter(args), ver))
+    }
+}

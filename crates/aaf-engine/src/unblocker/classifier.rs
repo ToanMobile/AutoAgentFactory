@@ -223,6 +223,16 @@ pub fn classify(signal: &FailureSignal) -> BlockedReason {
         };
     }
     if let Some(outcome) = signal.outcome.as_ref()
+        && let Some(rest) = outcome.log_tail.strip_prefix("audit_diff_truncated:")
+    {
+        return BlockedReason::Stuck {
+            detail: format!(
+                "diff_too_large: {}",
+                truncate_chars(&one_line(rest), SUMMARY_MAX_CHARS)
+            ),
+        };
+    }
+    if let Some(outcome) = signal.outcome.as_ref()
         && let Some(detail) = transient_infra_detail(outcome)
     {
         return BlockedReason::Infra { detail };

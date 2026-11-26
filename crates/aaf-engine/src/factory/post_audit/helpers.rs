@@ -277,11 +277,32 @@ pub(super) fn reject_post_audit(
     worktree: TaskWorktree,
     reason: &str,
 ) -> PortResult<Next> {
+    reject_post_audit_with_findings(deps, task_id, worktree, reason, &[])
+}
+
+pub(super) fn reject_post_audit_with_findings(
+    deps: &Deps,
+    task_id: String,
+    worktree: TaskWorktree,
+    reason: &str,
+    findings: &[Finding],
+) -> PortResult<Next> {
+    let now = deps.now();
     let note = format!("post-gate cross-audit rejected the changes ({reason})");
     deps.store
-        .append_context_note(&task_id, &unblock::one_line(&note, 400), deps.now())?;
-    let signal =
-        audit_backend::audit_rejection_signal("post-gate cross-audit rejected the changes");
+        .append_context_note(&task_id, &unblock::one_line(&note, 400), now)?;
+    if let Some(safe) = unblock::format_sanitized_audit_findings(findings) {
+        let f_note = format!(
+            "post_audit_findings: <untrusted-data id=\"audit-findings\">{safe}</untrusted-data>"
+        );
+        deps.store.append_context_note(&task_id, &f_note, now)?;
+    }
+    let signal_tail = if reason.contains("diff was truncated") {
+        format!("audit_diff_truncated: {reason}")
+    } else {
+        "post-gate cross-audit rejected the changes".to_string()
+    };
+    let signal = audit_backend::audit_rejection_signal(&signal_tail);
     Ok(Next::Unblock {
         task_id,
         worktree,
