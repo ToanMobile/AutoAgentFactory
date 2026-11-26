@@ -77,6 +77,7 @@ pub(crate) struct CrossAuditOverlay {
     pub score_gate: Option<bool>,
     pub min_average_score: Option<u8>,
     pub min_criterion_score: Option<u8>,
+    pub max_diff_bytes: Option<usize>,
     pub dual_review: Option<bool>,
     pub cross_adjudicate: Option<bool>,
     pub reviewers: Option<Vec<ReviewerConfig>>,
@@ -154,6 +155,23 @@ pub(crate) fn merge_cross_audit(
     if let Some(g) = global.min_criterion_score {
         let g = clamp_score(g, "global cross_audit.min_criterion_score", warnings);
         repo.min_criterion_score = repo.min_criterion_score.max(g);
+    }
+    let clamp_diff = |v: usize, label: &str, w: &mut Vec<String>| -> usize {
+        let lo = aaf_domain::config::MIN_CROSS_AUDIT_MAX_DIFF_BYTES;
+        let hi = aaf_domain::config::MAX_CROSS_AUDIT_MAX_DIFF_BYTES;
+        let clamped = v.clamp(lo, hi);
+        if clamped != v {
+            w.push(format!("{label} = {v} clamped to {clamped} ({lo}..={hi})"));
+        }
+        clamped
+    };
+    if let Some(g) = global.max_diff_bytes
+        && repo.max_diff_bytes == aaf_domain::config::DEFAULT_CROSS_AUDIT_MAX_DIFF_BYTES
+    {
+        repo.max_diff_bytes = clamp_diff(g, "global cross_audit.max_diff_bytes", warnings);
+    } else {
+        repo.max_diff_bytes =
+            clamp_diff(repo.max_diff_bytes, "cross_audit.max_diff_bytes", warnings);
     }
 }
 
@@ -275,6 +293,11 @@ pub(crate) fn apply_cross_audit_overlay(
             ));
         }
         Some(true) | None => {}
+    }
+    if overlay.max_diff_bytes.is_some() {
+        warnings.push(format!(
+            "{source}: cross_audit.max_diff_bytes ignored: {TRUSTED_ONLY}"
+        ));
     }
     if overlay.reviewers.is_some() {
         warnings.push(format!(

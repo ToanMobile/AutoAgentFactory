@@ -368,11 +368,15 @@ impl<'a> Ladder<'a> {
         }
 
         let t3 = UnblockTier::T3FreshContext;
+        let skip_t3_for_oversized_diff = matches!(
+            &reason,
+            BlockedReason::Stuck { detail } if detail.starts_with("diff_too_large:")
+        );
         let (t3_attempts, prev_errors) = t3_progress_state(task, digest);
         let t3_making_progress = t3_attempts > 0
             && t3_attempts < MAX_T3_ATTEMPTS_ON_PROGRESS
             && prev_errors.is_some_and(|prev| error_count.is_some_and(|cur| cur < prev));
-        if t3_attempts == 0 || t3_making_progress {
+        if !skip_t3_for_oversized_diff && (t3_attempts == 0 || t3_making_progress) {
             let err_tag = error_count.map_or_else(String::new, |n| format!("errors={n} "));
             let text = format!(
                 "{err_tag}previous attempt failed ({}): {}",

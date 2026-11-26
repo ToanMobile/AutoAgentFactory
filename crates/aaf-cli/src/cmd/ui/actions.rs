@@ -123,6 +123,52 @@ pub(super) fn do_unblock_all(db: &Db, repo: Option<&str>) -> Result<Value, Strin
     Ok(json!({ "action": "unblock_all", "count": ids.len(), "task_ids": ids }))
 }
 
+const MAX_DELETE_DONE_BATCH: usize = 500;
+
+pub(super) fn do_delete_done(
+    db: &Db,
+    repo: Option<&str>,
+    task_id: &str,
+    note: &str,
+) -> Result<Value, String> {
+    if !task_id.trim().is_empty() {
+        return Err(
+            "invalid delete_done: pass task IDs as a JSON array in note, not task_id".into(),
+        );
+    }
+    let trimmed = note.trim();
+    if trimmed.is_empty() {
+        return Err("invalid delete_done: note must be a non-empty JSON array of task IDs".into());
+    }
+    let parsed: Vec<String> = serde_json::from_str(trimmed)
+        .map_err(|e| format!("invalid delete_done task_ids JSON array: {e}"))?;
+    if parsed.is_empty() {
+        return Err("invalid delete_done: task_ids array must not be empty".into());
+    }
+    if parsed.len() > MAX_DELETE_DONE_BATCH {
+        return Err(format!(
+            "invalid delete_done: batch size {} exceeds maximum {}",
+            parsed.len(),
+            MAX_DELETE_DONE_BATCH
+        ));
+    }
+    for id in &parsed {
+        aaf_engine::git::worktree::validate_task_id(id)
+            .map_err(|e| format!("invalid task id '{id}': {e}"))?;
+    }
+    let out = db
+        .archive_terminal_tasks_atomic(&parsed, repo, SystemClock.now())
+        .map_err(s_err)?;
+    Ok(json!({
+        "action": "delete_done",
+        "archived": true,
+        "deleted_count": out.deleted_ids.len(),
+        "deleted_ids": out.deleted_ids,
+        "skipped_count": out.skipped_ids.len(),
+        "skipped_ids": out.skipped_ids,
+    }))
+}
+
 pub(super) fn do_approve_commit(
     db: &Db,
     ctx: &Ctx,
@@ -250,6 +296,7 @@ pub(super) fn dispatch_db_action(
         "cancel" => do_cancel(db, task_id, note),
         "unblock" => do_unblock(db, task_id),
         "unblock_all" | "unblock-all" => do_unblock_all(db, repo),
+        "delete_done" | "delete-done" => do_delete_done(db, repo, task_id, note),
         "approve_plan" | "approve-plan" => do_approve_plan(db, task_id),
         "rework" => do_rework(db, ctx, task_id, note),
         "steer" => {
@@ -406,7 +453,9 @@ pub(super) fn build_board_json(
     let Some(db) = db else {
         return Ok(json!({ "scope": scope, "frozen": false, "tasks": [] }));
     };
-    let tasks = db.list_tasks(repo, parsed).map_err(|e| e.to_string())?;
+    let tasks = db
+        .list_board_tasks(repo, parsed)
+        .map_err(|e| e.to_string())?;
     let mut enrichment = db.board_enrichment(repo).map_err(|e| e.to_string())?;
     let items: Vec<Value> = tasks
         .into_iter()

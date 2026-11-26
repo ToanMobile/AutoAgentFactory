@@ -519,9 +519,10 @@ pub(crate) fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<
             && serde_json::from_str::<serde_json::Value>(&event.payload_json)
                 .ok()
                 .is_some_and(|p| {
-                    p["verdict"]
-                        .as_str()
-                        .is_some_and(|v| v == "fail" || v.starts_with("fail:"))
+                    p.get("reused_from").is_none_or(serde_json::Value::is_null)
+                        && p["verdict"]
+                            .as_str()
+                            .is_some_and(|v| v == "fail" || v.starts_with("fail:"))
                 })
         {
             count = count.saturating_add(1);
@@ -530,9 +531,18 @@ pub(crate) fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<
     Ok(count)
 }
 
-/// Automatic audit-rework routing on explicit `AuditVerdict::Fail` (never
-/// `Inconclusive` or truncated diffs). Bounded by `max_audit_reworks` and
-/// token/wall-clock budget without consuming `RootBudget.cycles_used`.
+pub(crate) fn format_sanitized_audit_findings(findings: &[Finding]) -> Option<String> {
+    let raw = findings
+        .iter()
+        .filter(|f| is_valid_rework_finding(f))
+        .map(|f| format!("{}: {} ({})", f.id, f.question, f.evidence.trim()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    (!raw.is_empty())
+        .then(|| sanitize_untrusted_close_tag(&one_line(&raw, AUDIT_FINDINGS_MAX_CHARS)))
+}
+
+/// Automatic audit-rework routing on explicit `AuditVerdict::Fail`.
 pub(crate) fn handle_audit_failure(
     deps: &Deps,
     task: &Task,
@@ -544,8 +554,7 @@ pub(crate) fn handle_audit_failure(
         .pipeline
         .max_audit_reworks
         .min(MAX_AUDIT_REWORKS_CAP);
-    let prior_audit_fails = audit_fails_since_reset(deps, &task.id)?.saturating_sub(1);
-    if cap == 0 || prior_audit_fails >= cap {
+    if cap == 0 || audit_fails_since_reset(deps, &task.id)?.saturating_sub(1) >= cap {
         return Ok(None);
     }
     let (valid, dropped): (Vec<_>, Vec<_>) =
@@ -568,9 +577,12 @@ pub(crate) fn handle_audit_failure(
             json!({ "source": "audit_rework_filter", "dropped_count": items.len(), "dropped": items }),
         )?;
     }
-    if valid.is_empty() {
+    let Some(safe) = (!valid.is_empty())
+        .then(|| format_sanitized_audit_findings(findings))
+        .flatten()
+    else {
         return Ok(None);
-    }
+    };
     let budget = ensure_budget(deps, &task.root_id)?;
     if matches!(
         budget.check(),
@@ -578,12 +590,6 @@ pub(crate) fn handle_audit_failure(
     ) {
         return Ok(None);
     }
-    let raw = valid
-        .iter()
-        .map(|f| format!("{}: {} ({})", f.id, f.question, f.evidence.trim()))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let safe = sanitize_untrusted_close_tag(&one_line(&raw, AUDIT_FINDINGS_MAX_CHARS));
     let note =
         format!("audit_rework: <untrusted-data id=\"audit-findings\">{safe}</untrusted-data>");
     deps.store

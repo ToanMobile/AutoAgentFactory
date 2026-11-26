@@ -4,6 +4,7 @@
 
 pub mod agy;
 pub mod claude;
+mod claude_flags;
 mod confined_paths;
 pub mod env;
 pub mod generic;

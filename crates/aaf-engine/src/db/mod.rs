@@ -10,6 +10,7 @@
 mod cancel;
 mod history;
 pub mod private;
+mod purge;
 mod queries;
 mod queries_cost;
 mod queries_notify;
@@ -30,6 +31,7 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavio
 
 pub use cancel::{CancelOutcome, CancelRefusal};
 pub use history::ArchivedEventRow;
+pub use purge::PurgeOutcome;
 pub use queries::BoardEnrichment;
 pub use schema::SCHEMA_VERSION;
 pub use snapshots::TurnSnapshot;

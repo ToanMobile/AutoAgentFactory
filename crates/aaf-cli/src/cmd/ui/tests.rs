@@ -230,3 +230,82 @@ fn seed_service_and_supervisor_forward_worktree_dir_and_seed_cache() {
         "supervisor must forward AAF_SEED_CACHE: {sup_env:?}"
     );
 }
+
+#[test]
+fn do_delete_done_archives_terminal_tasks_and_enforces_strict_validation() {
+    use aaf_domain::ports::TaskStore;
+    use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
+    use aaf_engine::db::Db;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Db::open(&tmp.path().join("aaf.db")).unwrap();
+    let mk = |id: &str, repo: &str, state: TaskState| {
+        let mut t = Task::new_root(
+            id,
+            repo,
+            format!("Task {id}"),
+            ImmutableSpec {
+                description: "spec".into(),
+                acceptance: vec!["ac".into()],
+            },
+            Priority::P2,
+            100,
+        );
+        t.state = state;
+        t
+    };
+    db.insert_task(&mk("t-done1", "/repo/a", TaskState::Done))
+        .unwrap();
+    db.insert_task(&mk("t-canc1", "/repo/a", TaskState::Cancelled))
+        .unwrap();
+    db.insert_task(&mk("t-ready1", "/repo/a", TaskState::Ready))
+        .unwrap();
+    db.insert_task(&mk("t-done2", "/repo/b", TaskState::Done))
+        .unwrap();
+
+    // Empty note must be refused (no wildcard multi-repo wipe).
+    let err_empty = actions::do_delete_done(&db, None, "", "").unwrap_err();
+    assert!(err_empty.starts_with("invalid delete_done:"), "{err_empty}");
+
+    // Non-empty task_id must be refused (prevents silent wildcard wipe).
+    let err_tid = actions::do_delete_done(&db, None, "t-done1", "").unwrap_err();
+    assert!(err_tid.starts_with("invalid delete_done:"), "{err_tid}");
+
+    // Batch > 500 must be refused.
+    let huge: Vec<String> = (0..501).map(|i| format!("t-{i}")).collect();
+    let huge_json = serde_json::to_string(&huge).unwrap();
+    let err_batch = actions::do_delete_done(&db, None, "", &huge_json).unwrap_err();
+    assert!(err_batch.contains("exceeds maximum"), "{err_batch}");
+
+    // Invalid task_id in JSON array must be rejected before touching DB.
+    let err = actions::do_delete_done(&db, Some("/repo/a"), "", r#"["bad id!"]"#).unwrap_err();
+    assert!(err.contains("invalid task id"), "{err}");
+
+    // Explicit list archives only terminal in-scope tasks; hidden from board_json, kept in DB.
+    let res = actions::do_delete_done(
+        &db,
+        Some("/repo/a"),
+        "",
+        r#"["t-done1","t-canc1","t-ready1","t-done2"]"#,
+    )
+    .unwrap();
+    assert_eq!(res["archived"], true);
+    assert_eq!(res["deleted_count"], 2);
+    assert_eq!(
+        res["deleted_ids"],
+        serde_json::json!(["t-canc1", "t-done1"])
+    );
+    assert_eq!(res["skipped_count"], 2);
+
+    // Hidden from /api/board, preserved in DB for GC/Studio/cost_guard.
+    let board = actions::build_board_json(Some(&db), "/repo/a", Some("/repo/a"), None).unwrap();
+    let board_ids: Vec<&str> = board["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["id"].as_str())
+        .collect();
+    assert_eq!(board_ids, vec!["t-ready1"]);
+    assert!(db.get_task("t-done1").is_ok());
+    assert!(db.get_task("t-done2").is_ok());
+}

@@ -293,6 +293,21 @@ impl StreamLog {
     }
 }
 
+/// True when `<data_dir>/streams/<run_id>.jsonl` is a valid, non-symlink regular file.
+pub fn stream_exists(data_dir: &Path, run_id: &str) -> bool {
+    let Ok(path) = validated_stream_path(data_dir, run_id) else {
+        return false;
+    };
+    let Ok(dir_meta) = fs::symlink_metadata(data_dir.join(STREAMS_DIR)) else {
+        return false;
+    };
+    if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
+        return false;
+    }
+    fs::symlink_metadata(&path)
+        .is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+}
+
 /// Reads the last `max_lines` non-empty lines from `<data_dir>/streams/<run_id>.jsonl`.
 ///
 /// Validates `run_id`, refuses symlinks on the streams directory and file, and

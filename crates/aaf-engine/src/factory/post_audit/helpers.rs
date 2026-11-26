@@ -271,17 +271,139 @@ pub(super) fn collect_mechanical_findings(
     findings
 }
 
+/// An explicit post-gate audit failure already recorded during the task's
+/// current `Gating` visit before routing completed (crash / service restart).
+pub(crate) struct InterruptedPostGateFail {
+    pub(crate) event_id: Option<i64>,
+    pub(crate) verdict: String,
+    pub(crate) findings: Vec<Finding>,
+}
+
+const CRASH_REPLAY_SCAN_LIMIT: u32 = 50;
+
+/// Detects an interrupted post-gate `CrossAudit` FAIL from the current `Gating`
+/// visit for the exact `(tree_fp, config_hash)` so a crash/restart mid-routing
+/// does not burn another identical LLM audit turn.
+///
+/// Stops immediately at any `ReworkRequested` or `TaskStateChanged` event so
+/// completed rework cycles, human unblocks, or earlier `Gating` visits are
+/// never replayed. Requires non-empty structured findings so rework guidance is
+/// never degraded.
+pub(crate) fn find_interrupted_post_gate_fail(
+    deps: &Deps,
+    task_id: &str,
+    receipt: &Receipt,
+    cfg: &CrossAuditConfig,
+) -> PortResult<Option<InterruptedPostGateFail>> {
+    let kinds = [
+        EventKind::CrossAudit,
+        EventKind::TaskStateChanged,
+        EventKind::ReworkRequested,
+    ];
+    for event in deps
+        .store
+        .events_for_task_by_kinds(task_id, &kinds, CRASH_REPLAY_SCAN_LIMIT)?
+    {
+        if event.kind != EventKind::CrossAudit {
+            // Any state transition (including entering Gating, moving to Ready/Blocked,
+            // or human unblock) or ReworkRequested ends the current unrouted window.
+            break;
+        }
+        let Ok(p) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
+            continue;
+        };
+        if p["phase"].as_str() != Some("post_gate") {
+            continue;
+        }
+        if p.get("reused_from").is_some_and(|v| !v.is_null())
+            || p.get("retry").and_then(serde_json::Value::as_bool) == Some(true)
+            || p.get("short_circuited")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            continue;
+        }
+        let verdict = p["verdict"].as_str().unwrap_or("");
+        if verdict == "auth_fallback" || verdict == "auth_wait" {
+            continue;
+        }
+        if p["tree_fp"].as_str() != Some(receipt.tree_fp.as_str())
+            || p["config_hash"].as_str() != Some(receipt.config_hash.as_str())
+        {
+            return Ok(None);
+        }
+        if verdict != "fail" && !verdict.starts_with("fail:") {
+            return Ok(None);
+        }
+        let mut findings: Vec<Finding> = p
+            .get("findings")
+            .and_then(|v| serde_json::from_value::<Vec<Finding>>(v.clone()).ok())
+            .unwrap_or_default();
+        if findings.is_empty() && cfg.score_gate {
+            let scores: Vec<GoldenScore> = p
+                .get("scores")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let reasons: Vec<String> = p
+                .get("reasons")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let effective = p["effective_score"]
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .unwrap_or(0);
+            findings = collect_rework_findings(
+                &AuditVerdict::Pass { warnings: vec![] },
+                &scores,
+                &reasons,
+                effective,
+                cfg,
+            );
+        }
+        if findings.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(InterruptedPostGateFail {
+            event_id: event.id,
+            verdict: verdict.to_string(),
+            findings,
+        }));
+    }
+    Ok(None)
+}
+
 pub(super) fn reject_post_audit(
     deps: &Deps,
     task_id: String,
     worktree: TaskWorktree,
     reason: &str,
 ) -> PortResult<Next> {
+    reject_post_audit_with_findings(deps, task_id, worktree, reason, &[])
+}
+
+pub(super) fn reject_post_audit_with_findings(
+    deps: &Deps,
+    task_id: String,
+    worktree: TaskWorktree,
+    reason: &str,
+    findings: &[Finding],
+) -> PortResult<Next> {
+    let now = deps.now();
     let note = format!("post-gate cross-audit rejected the changes ({reason})");
     deps.store
-        .append_context_note(&task_id, &unblock::one_line(&note, 400), deps.now())?;
-    let signal =
-        audit_backend::audit_rejection_signal("post-gate cross-audit rejected the changes");
+        .append_context_note(&task_id, &unblock::one_line(&note, 400), now)?;
+    if let Some(safe) = unblock::format_sanitized_audit_findings(findings) {
+        let f_note = format!(
+            "post_audit_findings: <untrusted-data id=\"audit-findings\">{safe}</untrusted-data>"
+        );
+        deps.store.append_context_note(&task_id, &f_note, now)?;
+    }
+    let signal_tail = if reason.contains("diff was truncated") {
+        format!("audit_diff_truncated: {reason}")
+    } else {
+        "post-gate cross-audit rejected the changes".to_string()
+    };
+    let signal = audit_backend::audit_rejection_signal(&signal_tail);
     Ok(Next::Unblock {
         task_id,
         worktree,

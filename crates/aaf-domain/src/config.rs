@@ -531,6 +531,7 @@ pub struct GlobalCrossAuditConfig {
     pub score_gate: Option<bool>,
     pub min_average_score: Option<u8>,
     pub min_criterion_score: Option<u8>,
+    pub max_diff_bytes: Option<usize>,
     pub dual_review: Option<bool>,
     pub cross_adjudicate: Option<bool>,
     pub reviewers: Vec<ReviewerConfig>,
@@ -540,6 +541,12 @@ pub struct GlobalCrossAuditConfig {
 pub const DEFAULT_MIN_AVERAGE_SCORE: u8 = 95;
 /// Default minimum per-criterion score (/100) across G1..G7 when `score_gate = true`.
 pub const DEFAULT_MIN_CRITERION_SCORE: u8 = 90;
+/// Default max diff size (bytes) passed to cross-audit before fail-closed truncation.
+pub const DEFAULT_CROSS_AUDIT_MAX_DIFF_BYTES: usize = 400_000;
+/// Minimum allowed `cross_audit.max_diff_bytes`.
+pub const MIN_CROSS_AUDIT_MAX_DIFF_BYTES: usize = 50_000;
+/// Hard fail-closed ceiling for `cross_audit.max_diff_bytes`.
+pub const MAX_CROSS_AUDIT_MAX_DIFF_BYTES: usize = 1_000_000;
 
 /// Optional separate provider/model and post-gate scoring rules for adversarial cross-audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -559,6 +566,7 @@ pub struct CrossAuditConfig {
     pub score_gate: bool,
     pub min_average_score: u8,
     pub min_criterion_score: u8,
+    pub max_diff_bytes: usize,
     pub dual_review: bool,
     pub cross_adjudicate: bool,
     pub reviewers: Vec<ReviewerConfig>,
@@ -576,6 +584,7 @@ impl Default for CrossAuditConfig {
             score_gate: false,
             min_average_score: DEFAULT_MIN_AVERAGE_SCORE,
             min_criterion_score: DEFAULT_MIN_CRITERION_SCORE,
+            max_diff_bytes: DEFAULT_CROSS_AUDIT_MAX_DIFF_BYTES,
             dual_review: false,
             cross_adjudicate: true,
             reviewers: Vec::new(),

@@ -270,6 +270,80 @@ fn pwa_manifest_and_icons_are_served_without_auth_and_valid_png_magic() {
     assert!(!idx_html.contains("boardView === \"kanban\" && stateFilter === \"all\""));
     assert!(idx_html.contains("matchesStateFilter"));
     assert!(idx_html.contains("renderChips(scopedTasks)"));
+    assert!(idx_html.contains("data-done-delete-all"));
+    assert!(idx_html.contains("promptBulkDeleteDone"));
+    assert!(idx_html.contains("getDoneClearTargets"));
+    assert!(idx_html.contains("--danger-btn:#B91C1C"));
+    assert!(idx_html.contains("modalBusy"));
+    assert!(idx_html.contains("\"delete_done\""));
+
+    let (st_pipe_js, _, body_pipe_js) = send_raw_bytes(
+        addr,
+        &format!("GET /assets/pipeline.js HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    );
+    assert_eq!(st_pipe_js, 200);
+    let pipe_js = String::from_utf8_lossy(&body_pipe_js);
+    assert!(pipe_js.contains("aaf-pipe-banner"));
+    assert!(pipe_js.contains("aaf-pipe-grid"));
+    assert!(pipe_js.contains("findCurrentStageIdx"));
+    assert!(!pipe_js.contains("aaf-pipe-scroll"));
+
+    let (st_i18n_js, _, body_i18n_js) = send_raw_bytes(
+        addr,
+        &format!("GET /assets/i18n.js HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    );
+    assert_eq!(st_i18n_js, 200);
+    let i18n_js = String::from_utf8_lossy(&body_i18n_js);
+    for key in [
+        "board.deleteAllDone",
+        "board.deleteCancelled",
+        "modal.bulkDeleteDoneTitle",
+        "modal.bulkDeleteCancelledTitle",
+        "modal.bulkDeleteMixedTitle",
+        "modal.bulkDeleteDoneDesc",
+        "modal.bulkDeleteDoneBtn",
+        "toast.deleteDone",
+        "toast.deleteDonePartial",
+        "toast.deleteDoneSkipped",
+        "toast.deleteDonePartialErr",
+        "toast.deleteDoneNone",
+    ] {
+        assert_eq!(
+            i18n_js.matches(&format!("\"{key}\"")).count(),
+            2,
+            "i18n key {key} must exist in both en and vi"
+        );
+    }
+
+    let delete_body = r#"{"action":"delete_done","task_id":"","note":"[\"t-done-1\"]"}"#;
+    let delete_req = format!(
+        "POST /api/action HTTP/1.1\r\nHost: {addr}\r\n\
+         Authorization: Bearer {TEST_TOKEN}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{delete_body}",
+        delete_body.len()
+    );
+    let (st_del_ro, _, _) = send_raw_bytes(addr, &delete_req);
+    assert_eq!(st_del_ro, 403, "read-only server must refuse delete_done");
+
+    let cfg_rw = UiConfig::resolve("127.0.0.1", 0, Some(TEST_TOKEN.into()), true).unwrap();
+    let handle_rw = start_server(cfg_rw, Arc::new(DummyBackend)).unwrap();
+    let addr_rw = handle_rw.addr();
+    let delete_req_rw = format!(
+        "POST /api/action HTTP/1.1\r\nHost: {addr_rw}\r\n\
+         Authorization: Bearer {TEST_TOKEN}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{delete_body}",
+        delete_body.len()
+    );
+    let (st_del, _, body_del) = send_raw_bytes(addr_rw, &delete_req_rw);
+    assert_eq!(
+        st_del,
+        200,
+        "delete_done action must succeed on writable server: {:?}",
+        String::from_utf8_lossy(&body_del)
+    );
+    handle_rw.join();
 
     let (st_studio, _, body_studio) = send_raw_bytes(
         addr,

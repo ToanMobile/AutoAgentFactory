@@ -16,7 +16,7 @@
 :root{
   --bg:#F4F6F9;--surface:#FFFFFF;--surface2:#EBF0F6;--ink:#0F172A;--ink2:#334155;--muted:#5B6B82;
   --border:#DCE3EE;--border-strong:#C5D0E0;--accent:#2563EB;--accent-soft:rgba(37,99,235,.10);--accent-b:rgba(37,99,235,.32);
-  --ok:#059669;--ok-bg:#ECFDF5;--warn:#D97706;--warn-bg:#FFFBEB;--err:#DC2626;--err-bg:#FEF2F2;
+  --ok:#059669;--ok-bg:#ECFDF5;--warn:#D97706;--warn-bg:#FFFBEB;--err:#DC2626;--err-bg:#FEF2F2;--danger-btn:#DC2626;
   --info:#2563EB;--info-bg:#EFF6FF;--rev:#7C3AED;--rev-bg:#F5F3FF;--slate:#475569;--slate-bg:#F1F5F9;
   --shadow:0 1px 2px rgba(15,23,42,.05),0 6px 20px rgba(15,23,42,.05);
   --shadow-card:0 1px 2px rgba(15,23,42,.04),0 2px 6px rgba(15,23,42,.03);
@@ -27,7 +27,7 @@
 [data-theme="dark"]{
   --bg:#0B0E14;--surface:#121721;--surface2:#0E131C;--ink:#F1F5F9;--ink2:#CBD5E1;--muted:#8B9BB4;
   --border:#222B3A;--border-strong:#313E54;--accent:#3B82F6;--accent-soft:rgba(59,130,246,.16);--accent-b:rgba(96,165,250,.40);
-  --ok:#34D399;--ok-bg:rgba(16,185,129,.14);--warn:#FBBF24;--warn-bg:rgba(245,158,11,.14);--err:#F87171;--err-bg:rgba(239,68,68,.15);
+  --ok:#34D399;--ok-bg:rgba(16,185,129,.14);--warn:#FBBF24;--warn-bg:rgba(245,158,11,.14);--err:#F87171;--err-bg:rgba(239,68,68,.15);--danger-btn:#B91C1C;
   --info:#60A5FA;--info-bg:rgba(59,130,246,.15);--rev:#A78BFA;--rev-bg:rgba(139,92,246,.16);--slate:#94A3B8;--slate-bg:rgba(148,163,184,.12);
   --shadow:0 2px 8px rgba(0,0,0,.4),0 12px 32px rgba(0,0,0,.45);
   --shadow-card:0 1px 3px rgba(0,0,0,.35);
@@ -43,8 +43,8 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 .btn-primary:hover:not(:disabled){filter:brightness(1.06);background:var(--accent);border-color:var(--accent)}
 .btn-ok{background:var(--ok);color:#fff;border-color:var(--ok)}
 .btn-ok:hover:not(:disabled){filter:brightness(1.06);background:var(--ok);border-color:var(--ok)}
-.btn-danger{background:var(--err);color:#fff;border-color:var(--err)}
-.btn-danger:hover:not(:disabled){filter:brightness(1.06);background:var(--err);border-color:var(--err)}
+.btn-danger{background:var(--danger-btn);color:#fff;border-color:var(--danger-btn)}
+.btn-danger:hover:not(:disabled){filter:brightness(1.08);background:var(--danger-btn);border-color:var(--danger-btn)}
 .btn-ghost{background:transparent;border-color:transparent;color:var(--muted)}
 .btn-ghost:hover:not(:disabled){background:var(--surface2);color:var(--ink)}
 .btn-sm{padding:4px 9px;font-size:12px;border-radius:7px}
@@ -515,6 +515,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let sseHideTimer = null;
   let pendingTaskParam = "";
   let modalHandler = null;
+  let modalBusy = false;
+  let modalSeq = 0;
   let drawerSeq = 0;
   let drawerRenderSeq = 0;
   let drawerTaskId = null;
@@ -1422,6 +1424,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const q = $("searchBox").value.trim().toLowerCase();
     const scopedTasks = boardTasks.filter(matchesRepo);
     const cancelledTotal = scopedTasks.filter((t) => t.state === "cancelled").length;
+    if (cancelledTotal === 0 && showCancelled && stateFilter !== "cancelled") {
+      showCancelled = false;
+    }
     let list = scopedTasks.filter((t) => {
       if (!matchesStateFilter(t, stateFilter)) return false;
       if (prio && t.priority !== prio) return false;
@@ -1472,6 +1477,27 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const ro = Boolean(meta.read_only);
 
     if (boardView === "kanban") {
+      const getDoneClearTargets = (col) => {
+        if (col.length > 0) {
+          const allCanc = col.every((t) => t.state === "cancelled");
+          const allDone = col.every((t) => t.state === "done");
+          return { ids: col.map((t) => t.id), kind: allCanc ? "cancelled" : (allDone ? "done" : "mixed") };
+        }
+        if (stateFilter === "all" && cancelledTotal > 0) {
+          const cancIds = scopedTasks.filter((t) => {
+            if (t.state !== "cancelled") return false;
+            if (prio && t.priority !== prio) return false;
+            if (q) {
+              const hay = [t.id, t.title, t.repo_name, t.fingerprint, t.blocked_detail, t.spec_description].join(" ").toLowerCase();
+              if (!hay.includes(q)) return false;
+            }
+            return true;
+          }).map((t) => t.id);
+          return { ids: cancIds, kind: "cancelled" };
+        }
+        return { ids: [], kind: "done" };
+      };
+      let doneClearTarget = { ids: [], kind: "done" };
       const colsHtml = KANBAN_COLS.map(([key, _label, states]) => {
         if (stateFilter === "need_you" && key !== "blocked") return "";
         if (stateFilter !== "all" && stateFilter !== "need_you" && !states.includes(stateFilter)) return "";
@@ -1488,6 +1514,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         const visibleBacklogIds = isBacklogCol ? col.map((t) => t.id) : [];
         const selVisible = isBacklogCol ? visibleBacklogIds.filter((id) => selectedBacklog.has(id)) : [];
         const allChecked = isBacklogCol && visibleBacklogIds.length > 0 && selVisible.length === visibleBacklogIds.length;
+        if (isDoneCol) doneClearTarget = getDoneClearTargets(col);
         const colActs = isBacklogCol && !ro && col.length > 0
           ? `<div class="kcol-acts">
               <button type="button" data-bl-toggle="1">${esc(allChecked ? tr("board.clear") : tr("board.selectAll"))}</button>
@@ -1496,8 +1523,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             </div>`
           : (isBlockedCol && !ro && col.length > 0
               ? `<div class="kcol-acts"><button type="button" class="btn-primary" data-blk-unblock-all="1">${esc(tr("board.unblockAll", { n: col.length }))}</button></div>`
-              : (isDoneCol && cancelledTotal > 0 && stateFilter === "all"
-                  ? `<div class="kcol-acts"><button type="button" data-toggle-cancelled="1">${esc(showCancelled ? tr("board.hideCancelled", { n: cancelledTotal }) : tr("board.showCancelled", { n: cancelledTotal }))}</button></div>`
+              : (isDoneCol
+                  ? (() => {
+                      const acts = [];
+                      if (cancelledTotal > 0 && stateFilter === "all") {
+                        acts.push(`<button type="button" data-toggle-cancelled="1">${esc(showCancelled ? tr("board.hideCancelled", { n: cancelledTotal }) : tr("board.showCancelled", { n: cancelledTotal }))}</button>`);
+                      }
+                      if (!ro && doneClearTarget.ids.length > 0) {
+                        const btnKey = doneClearTarget.kind === "cancelled" ? "board.deleteCancelled" : "board.deleteAllDone";
+                        acts.push(`<button type="button" class="btn-danger" data-done-delete-all="1">${esc(tr(btnKey, { n: doneClearTarget.ids.length }))}</button>`);
+                      }
+                      return acts.length ? `<div class="kcol-acts">${acts.join("")}</div>` : "";
+                    })()
                   : ""));
         const cards = shown.map((t) => {
           const ny = isNeedYouTask(t);
@@ -1564,6 +1601,12 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       }
       const toggleCanc = $("boardList").querySelector("[data-toggle-cancelled]");
       if (toggleCanc) toggleCanc.onclick = () => { showCancelled = !showCancelled; renderBoard(); };
+      const doneDeleteAll = $("boardList").querySelector("[data-done-delete-all]");
+      if (doneDeleteAll) {
+        doneDeleteAll.onclick = () => {
+          if (doneClearTarget.ids.length) promptBulkDeleteDone(doneClearTarget.ids, doneClearTarget.kind);
+        };
+      }
       const blToggle = $("boardList").querySelector("[data-bl-toggle]");
       if (blToggle) {
         blToggle.onclick = () => {
@@ -2177,6 +2220,63 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     });
   }
 
+  function promptBulkDeleteDone(taskIds, kind = "mixed") {
+    if (!Array.isArray(taskIds) || !taskIds.length) return;
+    const titleKey = kind === "cancelled"
+      ? "modal.bulkDeleteCancelledTitle"
+      : (kind === "done" ? "modal.bulkDeleteDoneTitle" : "modal.bulkDeleteMixedTitle");
+    openModal({
+      title: tr(titleKey, { n: taskIds.length }),
+      desc: tr("modal.bulkDeleteDoneDesc"),
+      fields: `<div class="mono muted" style="max-height:120px;overflow:auto">${esc(taskIds.slice(0, 20).join(", "))}${taskIds.length > 20 ? ` … (+${taskIds.length - 20})` : ""}</div>`,
+      confirmLabel: tr("modal.bulkDeleteDoneBtn", { n: taskIds.length }),
+      danger: true,
+      onConfirm: async () => {
+        const CHUNK = 500;
+        let deleted = 0, skipped = 0;
+        const deletedSet = new Set();
+        let err = null;
+        try {
+          for (let i = 0; i < taskIds.length; i += CHUNK) {
+            const slice = taskIds.slice(i, i + CHUNK);
+            const res = await api("/api/action", {
+              method: "POST",
+              body: JSON.stringify({ action: "delete_done", task_id: "", note: JSON.stringify(slice) }),
+            });
+            deleted += Number(res.deleted_count || 0);
+            skipped += Number(res.skipped_count || 0);
+            (res.deleted_ids || []).forEach((id) => deletedSet.add(id));
+          }
+        } catch (e) {
+          err = e;
+        } finally {
+          if (deleted > 0) {
+            if ($("drawerBg").classList.contains("open") && drawerTaskId && deletedSet.has(drawerTaskId)) {
+              closeDrawer();
+            }
+            await refreshAll();
+          }
+        }
+        if (err) {
+          if (deleted > 0) {
+            toast(tr("toast.deleteDonePartialErr", { ok: deleted, msg: err.message }));
+            return;
+          }
+          throw err;
+        }
+        if (deleted > 0 && skipped > 0) {
+          toast(tr("toast.deleteDonePartial", { ok: deleted, skipped }));
+        } else if (deleted > 0) {
+          toast(tr("toast.deleteDone", { n: deleted }));
+        } else if (skipped > 0) {
+          toast(tr("toast.deleteDoneSkipped", { skipped }));
+        } else {
+          toast(tr("toast.deleteDoneNone"));
+        }
+      },
+    });
+  }
+
   function promptBulkBacklog(action, taskIds) {
     const isCancel = action === "cancel";
     openModal({
@@ -2238,20 +2338,27 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     });
   }
 
-  function openModal({ title, desc, fields, confirmLabel, onConfirm }) {
+  function openModal({ title, desc, fields, confirmLabel, danger, onConfirm }) {
+    modalSeq += 1;
+    modalBusy = false;
     lastFocusBeforeModal = document.activeElement;
     $("modalTitle").textContent = title;
     $("modalDesc").textContent = desc;
     $("modalFields").innerHTML = fields || "";
     $("modalConfirm").textContent = confirmLabel || tr("modal.confirm");
+    $("modalConfirm").className = danger ? "btn-danger" : "btn-primary";
+    $("modalConfirm").disabled = false;
+    $("modalCancel").disabled = false;
     modalHandler = onConfirm;
     $("modalBg").classList.add("open");
     setTimeout(() => {
       const firstInput = $("modalFields").querySelector("input,textarea,select");
-      (firstInput || $("modalConfirm")).focus();
+      (firstInput || (danger ? $("modalCancel") : $("modalConfirm"))).focus();
     }, 10);
   }
-  function closeModal() {
+  function closeModal(force = false) {
+    if (modalBusy && !force) return;
+    modalBusy = false;
     $("modalBg").classList.remove("open");
     modalHandler = null;
     if (lastFocusBeforeModal && typeof lastFocusBeforeModal.focus === "function") {
@@ -2852,13 +2959,22 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       else if ($("drawerBg").classList.contains("open")) { e.preventDefault(); closeDrawer(); }
     });
     $("modalConfirm").onclick = async () => {
-      if (!modalHandler) return;
+      if (!modalHandler || modalBusy) return;
+      const seq = modalSeq;
+      modalBusy = true;
       $("modalConfirm").disabled = true;
+      $("modalCancel").disabled = true;
       try {
         const res = await modalHandler();
-        if (res !== false) closeModal();
+        if (seq === modalSeq && res !== false) closeModal(true);
       } catch (e) { toast("Error: " + e.message); }
-      finally { $("modalConfirm").disabled = false; }
+      finally {
+        if (seq === modalSeq) {
+          modalBusy = false;
+          $("modalConfirm").disabled = false;
+          $("modalCancel").disabled = false;
+        }
+      }
     };
     $("watchRunBtn").onclick = () => followRun($("runManual").value.trim() || $("runSelect").value.trim());
     $("runSelect").onchange = () => { const val = $("runSelect").value.trim(); if (val) { $("runManual").value = val; followRun(val); } };

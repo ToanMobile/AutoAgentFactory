@@ -109,11 +109,24 @@ fn reject_dual_audit(
     task_id: String,
     worktree: TaskWorktree,
     reason: &str,
+    findings: &[crate::cross_audit::Finding],
 ) -> PortResult<Next> {
+    let now = deps.now();
     let note = format!("post-gate cross-audit rejected the changes ({reason})");
     deps.store
-        .append_context_note(&task_id, &unblock::one_line(&note, 400), deps.now())?;
-    let signal = audit_rejection_signal("post-gate cross-audit rejected the changes");
+        .append_context_note(&task_id, &unblock::one_line(&note, 400), now)?;
+    if let Some(safe) = unblock::format_sanitized_audit_findings(findings) {
+        let f_note = format!(
+            "post_audit_findings: <untrusted-data id=\"audit-findings\">{safe}</untrusted-data>"
+        );
+        deps.store.append_context_note(&task_id, &f_note, now)?;
+    }
+    let signal_tail = if reason.contains("diff was truncated") {
+        format!("audit_diff_truncated: {reason}")
+    } else {
+        "post-gate cross-audit rejected the changes".to_string()
+    };
+    let signal = audit_rejection_signal(&signal_tail);
     Ok(Next::Unblock {
         task_id,
         worktree,
@@ -173,7 +186,13 @@ fn emit_fail_and_rework(
     if let Some(next) = unblock::handle_audit_failure(deps, task, &converted)? {
         return Ok(next);
     }
-    reject_dual_audit(deps, task.id.clone(), job.worktree.clone(), summary)
+    reject_dual_audit(
+        deps,
+        task.id.clone(),
+        job.worktree.clone(),
+        summary,
+        &converted,
+    )
 }
 
 /// Aggregates all completed partials via [`decide_dual_matrix`], emitting 1 `CrossAudit` per round.
@@ -224,7 +243,7 @@ pub(crate) fn finalize_dual_review(
                     "tree_fp": receipt.tree_fp, "config_hash": receipt.config_hash,
                 }),
             )?;
-            let next = reject_dual_audit(deps, task.id, job.worktree.clone(), &verdict)?;
+            let next = reject_dual_audit(deps, task.id, job.worktree.clone(), &verdict, &[])?;
             Ok(DualFinalizeResult::Done(next))
         }
     }

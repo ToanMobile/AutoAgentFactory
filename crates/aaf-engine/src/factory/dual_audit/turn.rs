@@ -24,7 +24,7 @@ use crate::cross_audit::dual_verdict::{
 };
 use crate::cross_audit::prompt::{PRIOR_BEGIN, PRIOR_END, neutralise, summarize_diff_lockfiles};
 use crate::factory::audit_backend::{report_audit_limit, route_audit_limit};
-use crate::factory::audit_turn::short_circuit_audit_reason;
+use crate::factory::audit_turn::short_circuit_audit_reason_with_limit;
 use crate::factory::plan_job;
 use crate::factory::ports::{Grant, IntegrationGuard};
 use crate::factory::post_audit;
@@ -253,7 +253,7 @@ pub(crate) fn run_reviewer_turn(
     let cfg = &deps.settings.repo.cross_audit;
     let mech = dual_mech_score(deps, job, receipt);
     let raw_diff = deps.git.diff(&job.worktree)?;
-    if let Some(reason) = short_circuit_audit_reason(&raw_diff) {
+    if let Some(reason) = short_circuit_audit_reason_with_limit(&raw_diff, cfg.max_diff_bytes) {
         let out = DualReviewerOutcome::Inconclusive { reason };
         let (rec, _, _) =
             make_partial_record(job, receipt, plan_hash, reviewer, mech, out, deps.now());

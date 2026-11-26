@@ -14,29 +14,66 @@ pub use lockfile_summary::{
     summarize_diff_lockfiles, summarize_diff_lockfiles_with_threshold,
 };
 
-/// Largest diff, in bytes, shown to the auditor. Anything longer is cut and
-/// the audit can no longer pass: unseen changes cannot be approved.
-pub const MAX_DIFF_BYTES: usize = 200_000;
+/// Largest diff, in bytes, shown to the auditor by default. Anything longer is
+/// cut and the audit can no longer pass: unseen changes cannot be approved.
+pub const MAX_DIFF_BYTES: usize = aaf_domain::config::DEFAULT_CROSS_AUDIT_MAX_DIFF_BYTES;
 
 pub const DIFF_BEGIN: &str = "<<<AAF_UNTRUSTED_DIFF_BEGIN>>>";
 pub const DIFF_END: &str = "<<<AAF_UNTRUSTED_DIFF_END>>>";
 pub const TRUNCATION_MARKER: &str = "[AAF_UNTRUSTED_DIFF_TRUNCATED]";
 
-/// The part of the diff the auditor sees, and whether anything was cut.
-pub fn truncate_diff(diff: &str) -> (&str, bool) {
-    if diff.len() <= MAX_DIFF_BYTES {
+/// Summarizes up to 5 largest diff file sections (`path (NKB)`) for split hints.
+pub fn top_diff_files(diff: &str) -> String {
+    let mut files: Vec<(usize, &str)> = Vec::new();
+    let mut cur: Option<(&str, usize)> = None;
+    for line in diff.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let Some((p, sz)) = cur.take() {
+                files.push((sz, p));
+            }
+            let p = rest
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or(rest.trim())
+                .trim_start_matches("b/");
+            cur = Some((p, line.len()));
+        } else if let Some((_, sz)) = &mut cur {
+            *sz = sz.saturating_add(line.len());
+        }
+    }
+    if let Some((p, sz)) = cur {
+        files.push((sz, p));
+    }
+    files.sort_by_key(|a| std::cmp::Reverse(a.0));
+    files
+        .into_iter()
+        .take(5)
+        .map(|(sz, p)| format!("{p} ({}KB)", sz.div_ceil(1024)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The part of the diff the auditor sees under `max_bytes`, and whether anything was cut.
+pub fn truncate_diff_with_limit(diff: &str, max_bytes: usize) -> (&str, bool) {
+    let cap = max_bytes.max(1);
+    if diff.len() <= cap {
         return (diff, false);
     }
-    let mut end = MAX_DIFF_BYTES;
+    let mut end = cap;
     while !diff.is_char_boundary(end) {
         end -= 1;
     }
     (&diff[..end], true)
 }
 
+/// The part of the diff the auditor sees, and whether anything was cut.
+pub fn truncate_diff(diff: &str) -> (&str, bool) {
+    truncate_diff_with_limit(diff, MAX_DIFF_BYTES)
+}
+
 /// Builds the full auditor prompt for `input`.
 pub fn build_prompt(input: &AuditInput) -> String {
-    build_scored_prompt(input, false)
+    build_scored_prompt_with_limit(input, false, MAX_DIFF_BYTES)
 }
 
 /// Builds the full auditor prompt for `input`. When `require_scores` is `true`,
@@ -44,8 +81,17 @@ pub fn build_prompt(input: &AuditInput) -> String {
 /// JSON response object to include `"scores"` for all 7 criteria with a
 /// non-empty `"deduction_reason"` whenever `score < 100`.
 pub fn build_scored_prompt(input: &AuditInput, require_scores: bool) -> String {
+    build_scored_prompt_with_limit(input, require_scores, MAX_DIFF_BYTES)
+}
+
+/// Like [`build_scored_prompt`] with an explicit diff byte ceiling.
+pub fn build_scored_prompt_with_limit(
+    input: &AuditInput,
+    require_scores: bool,
+    max_diff_bytes: usize,
+) -> String {
     let checklist = build_checklist(&input.spec, input.mobile);
-    let (diff, truncated) = truncate_diff(&input.diff);
+    let (diff, truncated) = truncate_diff_with_limit(&input.diff, max_diff_bytes);
 
     let mut out = String::with_capacity(diff.len() + 4096);
     out.push_str(
@@ -89,7 +135,7 @@ pub fn build_scored_prompt(input: &AuditInput, require_scores: bool) -> String {
     if truncated {
         let _ = writeln!(
             out,
-            "The diff was cut at {MAX_DIFF_BYTES} of {} bytes ({TRUNCATION_MARKER}). Audit the \
+            "The diff was cut at {max_diff_bytes} of {} bytes ({TRUNCATION_MARKER}). Audit the \
              visible part; the change cannot be approved in this state.\n",
             input.diff.len()
         );
@@ -157,6 +203,23 @@ pub fn build_format_repair_prompt(
     parse_error: &str,
     previous_output: &str,
 ) -> String {
+    build_format_repair_prompt_with_limit(
+        input,
+        require_scores,
+        parse_error,
+        previous_output,
+        MAX_DIFF_BYTES,
+    )
+}
+
+/// Like [`build_format_repair_prompt`] with an explicit diff byte ceiling.
+pub fn build_format_repair_prompt_with_limit(
+    input: &AuditInput,
+    require_scores: bool,
+    parse_error: &str,
+    previous_output: &str,
+    max_diff_bytes: usize,
+) -> String {
     let checklist = build_checklist(&input.spec, input.mobile);
     let ids: Vec<&str> = checklist.iter().map(|item| item.id.as_str()).collect();
     let raw_reason: String = parse_error
@@ -169,7 +232,7 @@ pub fn build_format_repair_prompt(
     let reason = neutralise(&raw_reason);
     let clipped = clip_repair_prior(previous_output, MAX_REPAIR_PRIOR_CHARS);
     let safe_prior = neutralise(&clipped);
-    let mut out = build_scored_prompt(input, require_scores);
+    let mut out = build_scored_prompt_with_limit(input, require_scores, max_diff_bytes);
     out.reserve(safe_prior.len() + 1024);
     let _ = writeln!(
         out,

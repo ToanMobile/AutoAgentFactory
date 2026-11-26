@@ -16,7 +16,7 @@
 :root{
   --bg:#F4F6F9;--surface:#FFFFFF;--surface2:#EBF0F6;--ink:#0F172A;--ink2:#334155;--muted:#5B6B82;
   --border:#DCE3EE;--accent:#2563EB;--accent-ink:#FFFFFF;
-  --ok:#059669;--ok-bg:#ECFDF5;--warn:#D97706;--warn-bg:#FFFBEB;--err:#DC2626;--err-bg:#FEF2F2;--info:#2563EB;--info-bg:#EFF6FF;
+  --ok:#059669;--ok-bg:#ECFDF5;--warn:#B45309;--warn-bg:#FFFBEB;--err:#DC2626;--err-bg:#FEF2F2;--info:#2563EB;--info-bg:#EFF6FF;
   --bar:#2563EB;--bar2:#BFDBFE;
   --shadow:0 1px 2px rgba(15,23,42,.05),0 6px 20px rgba(15,23,42,.05);
   --mono:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
@@ -71,9 +71,11 @@ main{max-width:1360px;margin:0 auto;padding:20px 24px 64px;display:grid;gap:18px
 .kpi .v{font-size:26px;font-weight:750;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .kpi .s{color:var(--muted);font-size:12.5px;overflow-wrap:anywhere}
 button.kpi{border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);background:var(--surface)}
-button.kpi.hot{border-color:var(--err);background:var(--err-bg)}
-button.kpi.hot .v,button.kpi.hot .l{color:var(--err)}
+.kpi.hot{border-color:var(--err);background:var(--err-bg)}
+.kpi.hot .v,.kpi.hot .l{color:var(--err)}
 button.kpi .s::after{content:" →"}
+.row-link{background:none;border:0;padding:0;margin:0;text-align:left;font-weight:600;color:var(--ink);cursor:pointer}
+.row-link:hover{color:var(--accent);text-decoration:underline;background:none}
 .table-wrap{overflow-x:auto;max-width:100%}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--border);vertical-align:top}
@@ -112,6 +114,39 @@ tr[data-task]:hover{background:var(--surface2)}
 .cmd{display:flex;align-items:center;gap:8px;margin-top:8px;background:var(--surface2);border-radius:9px;padding:6px 6px 6px 12px}
 .cmd code{flex:1;font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
 .cmd button{padding:4px 10px;font-size:12.5px}
+.tok-grid{display:grid;gap:10px;grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:14px}
+@media (max-width:960px){.tok-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.tok-grid{grid-template-columns:1fr}}
+.tok-tile{background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:11px 13px;display:flex;flex-direction:column;gap:3px}
+.tok-tile.warn-tile{border-color:var(--warn);background:var(--warn-bg)}
+.tok-tile.err-tile{border-color:var(--err);background:var(--err-bg)}
+.tok-tile .tl{font-size:12px;font-weight:650;color:var(--muted)}
+.tok-tile .tv{font-size:20px;font-weight:750;font-variant-numeric:tabular-nums;line-height:1.25}
+.tok-tile .ts{font-size:12px;color:var(--ink2);line-height:1.4}
+.prog{height:6px;background:var(--border);border-radius:999px;overflow:hidden;margin-top:4px}
+.prog b{display:block;height:100%;background:var(--accent);border-radius:999px}
+.prog.warn b{background:var(--warn)}.prog.err b{background:var(--err)}
+.alert-list{display:grid;gap:9px;margin-bottom:14px}
+.alert-item{border:1px solid var(--border);border-left:4px solid var(--warn);background:var(--surface2);border-radius:10px;padding:10px 13px;display:grid;gap:4px}
+.alert-item.sev-critical{border-left-color:var(--err);background:var(--err-bg)}
+.alert-item.sev-high{border-left-color:var(--err)}
+.alert-item.sev-medium{border-left-color:var(--warn)}
+.alert-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-weight:650;font-size:13.5px}
+.alert-detail{font-size:13px;color:var(--ink2);line-height:1.45}
+.alert-rec{font-size:12.5px;color:var(--muted);line-height:1.4}
+.alert-tasks{display:flex;gap:6px;flex-wrap:wrap;margin-top:3px}
+.chip-btn{padding:2px 8px;font-size:11.5px;border-radius:999px;font-family:var(--mono);background:var(--surface);border:1px solid var(--border)}
+.btn-xs{padding:3px 8px;font-size:12px;border-radius:7px}
+.stream-panel{margin-top:10px;border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:10px 12px}
+.stream-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.tool-chips{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px}
+.stream-log{max-height:280px;overflow-y:auto;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-family:var(--mono);font-size:12px;line-height:1.5;display:grid;gap:4px}
+.stream-line{display:grid;grid-template-columns:auto auto 1fr;gap:8px;align-items:baseline;border-bottom:1px dashed var(--border);padding-bottom:3px}
+.stream-line:last-child{border-bottom:0;padding-bottom:0}
+.stream-line .st{color:var(--muted);white-space:nowrap}
+.stream-line .sk{font-weight:700;white-space:nowrap}
+.stream-line .sm{overflow-wrap:anywhere;color:var(--ink)}
+.sub-grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));margin-top:12px}
 #drawer{position:fixed;inset:0;z-index:30;display:none}
 #drawer.open{display:block}
 #drawer .scrim{position:absolute;inset:0;background:rgba(10,9,8,.5)}
@@ -168,6 +203,21 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   <div class="card err" id="err"></div>
   <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/">Mở trên Dashboard →</a></div>
   <section class="grid" id="kpis"></section>
+
+  <section class="card" id="tokenDiagCard">
+    <div class="head">
+      <div>
+        <h2>Chẩn đoán &amp; Cảnh báo Token</h2>
+        <div class="sub">Phát hiện đốt token lãng phí (failed / timed_out / killed / limit_hit), tỷ trọng Cross-Audit, audit lặp cùng <code>tree_fp</code>, tốc độ đốt 1h/24h (Cost Guard) và lượt chạy bất thường. Bấm <b>Xem log</b> để soi tool calls bên trong từng lượt chạy.</div>
+      </div>
+      <span class="pill" id="tokAlertBadge">Đang phân tích…</span>
+    </div>
+    <div id="tokAlerts"></div>
+    <div id="tokMetrics" class="tok-grid"></div>
+    <div id="tokTopRunsWrap"></div>
+    <div id="tokSubWrap" class="sub-grid"></div>
+  </section>
+
   <section class="card" id="scoreBox"></section>
 
   <section class="card">
@@ -182,6 +232,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       <select id="tbRepo" aria-label="Lọc theo repo"><option value="">Tất cả repo</option></select>
       <select id="tbState" aria-label="Lọc theo trạng thái">
         <option value="">Tất cả trạng thái</option>
+        <option value="token_warn">Có lãng phí / cảnh báo token</option>
         <option value="blocked">Đang bị Blocked</option>
         <option value="running">Đang chạy (Running/Gating)</option>
         <option value="review">Chờ Review</option>
@@ -192,6 +243,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       </select>
       <select id="tbSort" aria-label="Sắp xếp">
         <option value="tokens_desc">Sắp xếp: Token nhiều nhất</option>
+        <option value="wasted_desc">Sắp xếp: Lãng phí nhiều nhất</option>
         <option value="dur_desc">Sắp xếp: Chạy lâu nhất</option>
         <option value="blocked_first">Sắp xếp: Blocked lên đầu</option>
         <option value="updated_desc">Sắp xếp: Mới cập nhật nhất</option>
@@ -263,7 +315,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   };
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-  let token = "", hours = "168", timer = null, tasks = [], breakdown = [], lastStatus = null, isReadOnly = false, drawerSeq = 0, lastFocus = null, authChan = null, bootedViaChannel = false;
+  let token = "", hours = "168", timer = null, tasks = [], breakdown = [], tokenDiag = null, lastStatus = null, isReadOnly = false, drawerSeq = 0, streamSeq = 0, refreshInFlight = false, lastFocus = null, authChan = null, bootedViaChannel = false;
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
@@ -468,6 +520,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   }
   function closeDrawer() {
     drawerSeq++;
+    streamSeq++;
     $("drawer").classList.remove("open");
     document.body.style.overflow = "";
     if (lastFocus && typeof lastFocus.focus === "function") {
@@ -476,22 +529,83 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     lastFocus = null;
   }
 
-  async function openTask(id) {
-    const t = tasks.find((x) => x.id === id) || breakdown.find((x) => x.id === id);
-    if (!t) return;
+  async function loadRunStream(runId, seq) {
+    const host = $("runStreamBox");
+    if (!host) return;
+    const myStream = ++streamSeq;
+    host.innerHTML = `<div class="stream-panel"><div class="muted">Đang tải stream log cho <span class="mono">${esc(runId)}</span>…</div></div>`;
+    try {
+      const data = await api("/api/streams/" + encodeURIComponent(runId) + "?max_lines=150");
+      if (myStream !== streamSeq || seq !== drawerSeq || !$("drawer").classList.contains("open")) return;
+      const rawLines = Array.isArray(data.lines) ? data.lines : [];
+      if (!rawLines.length) {
+        host.innerHTML = `<div class="stream-panel"><div class="stream-head"><b>Stream log · <span class="mono">${esc(runId)}</span></b><button type="button" class="btn-xs" id="closeStreamBtn">Đóng</button></div><div class="empty" style="padding:6px 0">Không có file stream log trên đĩa cho lượt chạy này (có thể đã bị dọn hoặc chạy ở bản cũ).</div></div>`;
+        const cb = $("closeStreamBtn"); if (cb) cb.onclick = () => { streamSeq++; host.innerHTML = ""; };
+        return;
+      }
+      const toolCounts = {};
+      let totalTools = 0, errCount = 0;
+      const parsed = rawLines.map((ln) => {
+        try {
+          const o = JSON.parse(ln);
+          if (o && o.type === "tool_use") {
+            const nm = String(o.tool || "unknown");
+            toolCounts[nm] = (toolCounts[nm] || 0) + 1;
+            totalTools += 1;
+          }
+          if (o && (o.type === "error" || o.type === "rate_limit")) errCount += 1;
+          return o;
+        } catch (_) {
+          return { type: "raw", target: ln };
+        }
+      });
+      const chips = Object.entries(toolCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `<span class="pill info">${esc(k)} ×${num(n)}</span>`)
+        .join("");
+      const fmtClock = (ts) => ts ? new Date(Number(ts) * 1000).toLocaleTimeString() : "";
+      const rows = parsed.map((o) => {
+        const k = String(o.type || "");
+        const kCls = (k === "error" || k === "rate_limit") ? "color:var(--err)" : (k === "tool_use" ? "color:var(--accent)" : (k === "finish" || k === "result" ? "color:var(--ok)" : "color:var(--muted)"));
+        const label = o.tool ? `${k}:${o.tool}` : k;
+        const msg = o.target || (k === "truncated" ? "(stream log đạt giới hạn 2 MiB)" : "");
+        return `<div class="stream-line"><span class="st">${esc(fmtClock(o.ts))}</span><span class="sk" style="${kCls}">${esc(label)}</span><span class="sm">${esc(msg)}</span></div>`;
+      }).join("");
+      host.innerHTML = `<div class="stream-panel">
+        <div class="stream-head">
+          <div><b>Stream log · <span class="mono">${esc(runId)}</span></b> <span class="tb-sub">(${num(rawLines.length)} dòng cuối · ${num(totalTools)} tool calls${errCount ? ` · ${num(errCount)} lỗi/limit` : ""})</span></div>
+          <div style="display:flex;gap:6px"><button type="button" class="btn-xs" id="reloadStreamBtn">↻ Tải lại</button><button type="button" class="btn-xs" id="closeStreamBtn">Đóng</button></div>
+        </div>
+        ${chips ? `<div class="tool-chips">${chips}</div>` : ""}
+        <div class="stream-log">${rows}</div>
+      </div>`;
+      const rb = $("reloadStreamBtn"); if (rb) rb.onclick = () => loadRunStream(runId, seq);
+      const cb = $("closeStreamBtn"); if (cb) cb.onclick = () => { streamSeq++; host.innerHTML = ""; };
+    } catch (e) {
+      if (myStream !== streamSeq || seq !== drawerSeq) return;
+      host.innerHTML = `<div class="stream-panel"><div class="tb-why">Không đọc được stream log: ${esc(e.message)}</div></div>`;
+    }
+  }
+
+  async function openTask(id, autoRunId) {
+    if (!id) return;
+    const t = tasks.find((x) => x.id === id) || breakdown.find((x) => x.id === id) || { id, title: id, state: "" };
     const tb = breakdown.find((x) => x.id === id) || null;
     const seq = ++drawerSeq;
+    streamSeq++;
     const step = nextSteps(t);
     const ac = t.acceptance || [];
     const specText = cleanSpec(t.spec_description || "");
     const blkKind = t.blocked_reason || (tb && tb.blocked_kind) || "";
     const blkDetail = t.blocked_detail || (tb && tb.blocked_detail) || "";
-    let html = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">${pill(t.state)} <span class="pill">${esc(t.priority || "")}</span>${t.repo_name ? ` <span class="pill">${esc(t.repo_name)}</span>` : ""} <span class="muted" style="font-size:13px">cập nhật ${esc(ago(t.updated_at))}</span></div>`;
+    let html = `<div id="taskMetaRow" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">${t.state ? pill(t.state) : ""} ${t.priority ? `<span class="pill">${esc(t.priority)}</span>` : ""}${t.repo_name ? ` <span class="pill">${esc(t.repo_name)}</span>` : ""}${t.updated_at ? ` <span class="muted" style="font-size:13px">cập nhật ${esc(ago(t.updated_at))}</span>` : ""}</div>`;
     if (tb) {
+      const wasteSub = tb.wasted_tokens ? `<span style="color:var(--err)">lãng phí ${compact(tb.wasted_tokens)}</span>` : `${compact(tb.tokens_in)} in · ${compact(tb.tokens_out)} out`;
+      const budSub = tb.budget_limit ? ` · budget ${Math.round((tb.budget_used || 0) * 100 / tb.budget_limit)}%` : "";
       html += `<div class="need" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
         <div><div class="muted" style="font-size:12px">Thời gian agent chạy</div><div style="font-weight:700;font-size:16px">${tb.run_duration_secs ? dur(tb.run_duration_secs) : "—"}</div><div class="tb-sub">Lead time: ${dur(tb.lead_time_secs)}</div></div>
-        <div><div class="muted" style="font-size:12px">Tổng Token</div><div style="font-weight:700;font-size:16px">${tb.tokens_total ? compact(tb.tokens_total) : "0"}</div><div class="tb-sub">${compact(tb.tokens_in)} in · ${compact(tb.tokens_out)} out</div></div>
-        <div><div class="muted" style="font-size:12px">Số lượt chạy</div><div style="font-weight:700;font-size:16px">${num(tb.runs_total)}</div><div class="tb-sub">${num(tb.runs_succeeded)} đạt · ${num(tb.runs_failed)} lỗi</div></div>
+        <div><div class="muted" style="font-size:12px">Tổng Token (trong kỳ)</div><div style="font-weight:700;font-size:16px">${tb.tokens_total ? compact(tb.tokens_total) : "0"}</div><div class="tb-sub">${wasteSub}${esc(budSub)}</div></div>
+        <div><div class="muted" style="font-size:12px">Số lượt chạy</div><div style="font-weight:700;font-size:16px">${num(tb.runs_total)}</div><div class="tb-sub">${num(tb.runs_succeeded)} đạt · ${num(tb.runs_failed)} lỗi${tb.duplicate_audits ? ` · audit lặp +${num(tb.duplicate_audits)}` : ""}</div></div>
       </div>`;
     }
     if (t.state === "blocked" || blkDetail) {
@@ -500,24 +614,48 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     if (step.text || step.cmds.length) html += `<div><div class="sect" style="margin-top:0">Hướng xử lý tiếp theo</div>${step.text ? `<div class="muted" style="font-size:13.5px">${esc(step.text)}</div>` : ""}${step.cmds.map(cmd).join("")}</div>`;
     if (specText) html += `<div><div class="sect" style="margin-top:0">Nội dung / Spec</div><div style="font-size:14px;overflow-wrap:anywhere;white-space:pre-wrap">${esc(specText)}</div></div>`;
     if (ac.length) html += `<div><div class="sect" style="margin-top:0">Tiêu chí nghiệm thu (${ac.length})</div><ul class="ac">${ac.map((c) => `<li>${t.state === "done" ? "✓ " : ""}${esc(c)}</li>`).join("")}</ul></div>`;
-    html += `<div id="taskMore" class="muted">Đang tải chi tiết từng lượt chạy…</div>`;
-    openDrawer(t.title, t.id + (t.repo_name ? " · " + t.repo_name : ""), html);
+    html += `<div id="runStreamBox"></div><div id="taskMore" class="muted">Đang tải chi tiết từng lượt chạy…</div>`;
+    openDrawer(t.title || id, t.id + (t.repo_name ? " · " + t.repo_name : ""), html);
     try {
       const d = await api("/api/task/" + encodeURIComponent(id));
       if (seq !== drawerSeq || !$("drawer").classList.contains("open")) return;
-      const runs = (d.runs || []).slice().reverse(), ev = (d.events || []).slice(0, 15);
+      if (d.task) {
+        if (d.task.title) $("drawerTitle").textContent = d.task.title;
+        if (!t.state && d.task.state && $("taskMetaRow")) {
+          $("taskMetaRow").innerHTML = `${pill(d.task.state)} ${d.task.priority ? `<span class="pill">${esc(d.task.priority)}</span>` : ""} <span class="muted" style="font-size:13px">cập nhật ${esc(ago(d.task.updated_at))}</span>`;
+        }
+      }
+      const runs = (d.runs || []).slice().reverse();
+      const allEv = d.events || [];
+      const ev = allEv.slice(0, 60);
       let more = "";
       if (runs.length) {
-        more += `<div class="sect" style="margin-top:0">Chi tiết từng lượt chạy (${runs.length})</div><div class="table-wrap"><table><thead><tr><th>Agent / TK</th><th>Trạng thái</th><th class="n">Thời gian</th><th class="n">Token (in/out)</th><th class="n">Bắt đầu</th></tr></thead><tbody>` +
+        more += `<div class="sect" style="margin-top:0">Chi tiết từng lượt chạy (${runs.length})</div><div class="table-wrap"><table><thead><tr><th>Agent / TK</th><th>Trạng thái</th><th class="n">Thời gian</th><th class="n">Token (in/out)</th><th class="n">Log</th></tr></thead><tbody>` +
           runs.map((r) => {
             const dSec = r.started_at && r.ended_at ? dur(r.ended_at - r.started_at) : (r.started_at ? "đang chạy" : "—");
-            const tokStr = (r.tokens_in || r.tokens_out) ? `${compact(r.tokens_in)} / ${compact(r.tokens_out)}` : "—";
-            return `<tr><td><b>${esc(r.executor || "")}</b>${r.account_id ? `<div class="tb-sub mono">${esc(r.account_id)}</div>` : ""}${r.branch ? `<div class="tb-sub mono">${esc(r.branch)}</div>` : ""}</td><td>${runPill(r.status)}${r.exit_code != null ? `<div class="tb-sub">exit ${esc(r.exit_code)}</div>` : ""}</td><td class="n">${esc(dSec)}</td><td class="n" title="${num(r.tokens_in)} in / ${num(r.tokens_out)} out">${esc(tokStr)}</td><td class="n muted">${esc(ago(r.started_at))}</td></tr>`;
+            const tot = (Number(r.tokens_in) || 0) + (Number(r.tokens_out) || 0);
+            const isAudit = /audit|dual-review|adjudicate/i.test(String(r.executor || ""));
+            const isAuditRej = isAudit && r.status === "failed";
+            const isWaste = !isAuditRej && r.status !== "succeeded" && r.status !== "running" && tot > 0;
+            const badge = isAuditRej ? ` <span class="pill warn">audit fail</span>` : (isWaste ? ` <span class="pill err">lãng phí</span>` : "");
+            const tokStr = tot ? `${compact(r.tokens_in)} / ${compact(r.tokens_out)}` : "0";
+            return `<tr><td><b>${esc(r.executor || "")}</b>${r.account_id ? `<div class="tb-sub mono">${esc(r.account_id)}</div>` : ""}<div class="tb-sub muted">${esc(ago(r.started_at))}</div></td><td>${runPill(r.status)}${badge}${r.exit_code != null ? `<div class="tb-sub">exit ${esc(r.exit_code)}</div>` : ""}</td><td class="n">${esc(dSec)}</td><td class="n" title="${num(r.tokens_in)} in / ${num(r.tokens_out)} out"><div><b>${tot ? compact(tot) : "0"}</b></div><div class="tb-sub">${esc(tokStr)}</div></td><td class="n"><button type="button" class="btn-xs" data-stream-run="${esc(r.id || "")}">Xem log</button></td></tr>`;
           }).join("") + `</tbody></table></div>`;
       }
-      if (ev.length) more += `<div class="sect">Lịch sử sự kiện</div><ul class="tl">` + ev.map((e) =>
+      if (ev.length) more += `<div class="sect">Lịch sử sự kiện (${ev.length}${allEv.length >= 100 ? "+ gần nhất" : (allEv.length > ev.length ? `/${allEv.length}` : "")})</div><ul class="tl">` + ev.map((e) =>
         `<li><time>${esc(ago(e.created_at))}</time><span style="overflow-wrap:anywhere"><b>${esc(String(e.kind || "").replace(/_/g, " "))}</b>${eventDetail(e.payload_json)}</span></li>`).join("") + `</ul>`;
-      const box = $("taskMore"); if (box) { box.className = ""; box.innerHTML = more || `<div class="empty">Chưa có lượt chạy nào.</div>`; }
+      const box = $("taskMore");
+      if (box) {
+        box.className = "";
+        box.innerHTML = more || `<div class="empty">Chưa có lượt chạy nào.</div>`;
+        box.querySelectorAll("[data-stream-run]").forEach((btn) => {
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            if (btn.dataset.streamRun) loadRunStream(btn.dataset.streamRun, seq);
+          };
+        });
+      }
+      if (autoRunId) loadRunStream(autoRunId, seq);
     } catch (e) {
       if (seq !== drawerSeq) return;
       const box = $("taskMore"); if (box) box.textContent = "Không tải được danh sách lượt chạy: " + e.message;
@@ -551,14 +689,164 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   function renderKpis(r) {
     const c = r.counts || {}, a = r.autonomy || {}, lt = r.lead_time || {};
     const n = needs().length;
+    const s = (tokenDiag && tokenDiag.summary) || null;
+    const tokIn = s && s.tokens_in != null ? Number(s.tokens_in) : (Number(r.total_tokens_in) || 0);
+    const tokOut = s && s.tokens_out != null ? Number(s.tokens_out) : (Number(r.total_tokens_out) || 0);
+    const totTok = tokIn + tokOut;
+    const hasApiCost = r.estimated_cost_usd != null && r.cost_basis !== "none";
+    const wastedTok = s ? (Number(s.wasted_tokens) || 0) : 0;
+    const wastedPct = s ? (Number(s.wasted_pct) || 0) : 0;
+    const wastedLevel = s ? String(s.wasted_level || "ok") : "ok";
+    const tokHead = hasApiCost ? usd(r.estimated_cost_usd) : (totTok ? compact(totTok) + " tok" : "0 tok");
+    const tokSub = hasApiCost
+      ? `${compact(tokIn)} in · ${compact(tokOut)} out${wastedTok ? ` · lãng phí ${wastedPct.toFixed(0)}%` : ""}`
+      : `${compact(tokIn)} in · ${compact(tokOut)} out · Subscription${wastedTok ? ` · lãng phí ${wastedPct.toFixed(0)}%` : ""}`;
     $("kpis").innerHTML = [
       kpi("Cần bạn xử lý", num(n), n ? "mở trên Cockpit" : "không có việc chờ", { action: "needs", hot: n > 0 }),
-      kpi("Task hoàn thành", num(r.tasks_done), `${num(c.total)} task trong kỳ`),
+      kpi("Task hoàn thành", num(r.tasks_done), `${num(c.total)} task cập nhật trong kỳ`),
       kpi("Tỷ lệ tự động", pct(a.autonomy_rate_pct), `${num(a.done_without_human)}/${num(a.done_tasks)} tự xong không cần can thiệp`),
       kpi("Gate đạt lần đầu", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `Gate mất ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : "tỷ lệ pass lượt 1"),
       kpi("Thời gian hoàn thành", lt.samples ? dur(lt.p50_secs) : "—", lt.samples ? `trung vị · 90% dưới ${dur(lt.p90_secs)}` : "từ lúc tạo → xong"),
-      kpi("Token & Chi phí", usd(r.estimated_cost_usd), `${compact(r.total_tokens_in)} in · ${compact(r.total_tokens_out)} out`),
+      kpi(hasApiCost ? "Token & Chi phí" : "Tổng Token tiêu thụ", tokHead, tokSub, { hot: wastedLevel === "err" }),
     ].join("");
+  }
+
+  function renderTokenDiagnostics(diag) {
+    const badge = $("tokAlertBadge");
+    if (!diag || !diag.summary) {
+      if (badge) { badge.className = "pill"; badge.textContent = "Chưa có dữ liệu"; }
+      $("tokAlerts").innerHTML = `<div class="empty">Chưa có dữ liệu token trong kỳ này.</div>`;
+      $("tokMetrics").innerHTML = "";
+      $("tokTopRunsWrap").innerHTML = "";
+      $("tokSubWrap").innerHTML = "";
+      return;
+    }
+    const s = diag.summary || {}, br = diag.burn_rate || {};
+    const alerts = Array.isArray(diag.alerts) ? diag.alerts : [];
+    const critN = alerts.filter((a) => a.severity === "critical").length;
+    const highN = alerts.filter((a) => a.severity === "high").length;
+    if (badge) {
+      if (critN) { badge.className = "pill err"; badge.textContent = `${alerts.length}${diag.alerts_truncated ? "+" : ""} cảnh báo (${critN} nghiêm trọng)`; }
+      else if (highN) { badge.className = "pill err"; badge.textContent = `${alerts.length}${diag.alerts_truncated ? "+" : ""} cảnh báo (${highN} mức cao)`; }
+      else if (alerts.length) { badge.className = "pill warn"; badge.textContent = `${alerts.length} lưu ý token`; }
+      else { badge.className = "pill ok"; badge.textContent = "Ổn định · 0 cảnh báo"; }
+    }
+    if (!alerts.length) {
+      $("tokAlerts").innerHTML = `<div class="explain-box" style="border-color:var(--ok);background:var(--ok-bg);color:var(--ok)"><b>Không phát hiện bất thường đốt token</b> trong khoảng thời gian đã chọn.</div>`;
+    } else {
+      const sevLabel = (v) => v === "critical" ? "NGHIÊM TRỌNG" : (v === "high" ? "CAO" : "LƯU Ý");
+      const sevCls = (v) => v === "critical" || v === "high" ? "err" : "warn";
+      $("tokAlerts").innerHTML = `<div class="alert-list">` + alerts.map((a) => {
+        const chips = Array.isArray(a.task_ids) && a.task_ids.length
+          ? `<div class="alert-tasks">${a.task_ids.map((tid) => `<button type="button" class="chip-btn" data-task="${esc(tid)}">${esc(tid)}</button>`).join("")}</div>`
+          : "";
+        return `<div class="alert-item sev-${esc(a.severity || "medium")}">
+          <div class="alert-top"><span class="pill ${sevCls(a.severity)}">${esc(sevLabel(a.severity))}</span><span>${esc(a.title || "")}</span></div>
+          <div class="alert-detail">${esc(a.detail || "")}</div>
+          ${a.recommendation ? `<div class="alert-rec">Gợi ý: ${esc(a.recommendation)}</div>` : ""}
+          ${chips}
+        </div>`;
+      }).join("") + `</div>`;
+    }
+
+    const wLvl = String(s.wasted_level || "ok");
+    const wastedCls = wLvl === "err" ? "err-tile" : (wLvl === "warn" ? "warn-tile" : "");
+    const auditCls = (s.audit_pct >= 35 || s.avg_audit_tokens >= 50000) ? "err-tile" : ((s.audit_pct >= 25 || s.avg_audit_tokens >= 35000) ? "warn-tile" : "");
+    const cap24 = Number(br.daily_token_cap) || 0;
+    const pct24 = cap24 > 0 ? Math.min(100, Math.round((Number(br.tokens_last_24h) || 0) * 100 / cap24)) : 0;
+    const burnCls = br.cost_paused_until || br.factory_frozen || pct24 >= 90 ? "err-tile" : (pct24 >= 75 ? "warn-tile" : "");
+    const dupExtra = Number(s.duplicate_audit_extra_runs) || 0;
+    const zFail = Number(s.zero_token_failed_runs) || 0;
+    const staleRun = Number(s.stale_running_runs) || 0;
+    const anomCls = staleRun > 0 ? "err-tile" : (dupExtra > 0 ? "warn-tile" : "");
+    const burnNote = br.config_error
+      ? `Lỗi đọc config Cost Guard (${br.config_error})`
+      : (cap24 > 0
+          ? `Trần 24h: ${pct24}% (${compact(cap24)})${br.spike_limit_1h ? ` · ngưỡng 1h: ${compact(br.spike_limit_1h)}` : ""}`
+          : `Cost Guard chưa đặt trần 24h${br.cost_paused_stale ? " · cờ pause cũ đã hết hạn" : ""}`);
+
+    $("tokMetrics").innerHTML = `
+      <div class="tok-tile ${wastedCls}">
+        <span class="tl">Token lãng phí (lỗi/timeout/kill)</span>
+        <span class="tv">${compact(s.wasted_tokens)} <span style="font-size:14px;font-weight:600">(${(Number(s.wasted_pct) || 0).toFixed(1)}%)</span></span>
+        <span class="ts">${num(s.wasted_runs)} lượt: fail ${compact(s.failed_tokens)} · timeout ${compact(s.timed_out_tokens)} · kill ${compact(s.killed_tokens)}</span>
+      </div>
+      <div class="tok-tile ${auditCls}">
+        <span class="tl">Tỷ trọng Cross-Audit</span>
+        <span class="tv">${compact(s.audit_tokens)} <span style="font-size:14px;font-weight:600">(${(Number(s.audit_pct) || 0).toFixed(1)}%)</span></span>
+        <span class="ts">${num(s.audit_runs)} lượt · TB ${compact(s.avg_audit_tokens)}/audit vs ${compact(s.avg_coding_tokens)}/code${s.audit_rejected_tokens ? ` · fail hợp lệ ${compact(s.audit_rejected_tokens)}` : ""}</span>
+      </div>
+      <div class="tok-tile ${burnCls}">
+        <span class="tl">Tốc độ đốt toàn máy (1h / 24h)</span>
+        <span class="tv">${compact(br.tokens_last_1h)} / ${compact(br.tokens_last_24h)}</span>
+        <span class="ts">${esc(burnNote)}</span>
+        ${cap24 > 0 ? `<div class="prog ${pct24 >= 90 ? "err" : (pct24 >= 75 ? "warn" : "")}"><b style="width:${pct24}%"></b></div>` : ""}
+      </div>
+      <div class="tok-tile ${anomCls}">
+        <span class="tl">Audit lặp · 0-tok · treo running</span>
+        <span class="tv">${num(dupExtra)} lặp · ${num(zFail)} lỗi 0-tok${staleRun ? ` · ${num(staleRun)} treo` : ""}</span>
+        <span class="ts">${num(s.duplicate_audit_groups)} cặp tree_fp lặp · ${num(s.zero_token_runs)}/${num(s.total_runs)} lượt không báo usage</span>
+      </div>`;
+
+    const topRuns = Array.isArray(diag.top_runs) ? diag.top_runs : [];
+    if (topRuns.length) {
+      $("tokTopRunsWrap").innerHTML = `<div class="sect" style="margin-top:4px">Top ${topRuns.length} lượt chạy đốt nhiều token nhất</div>
+        <div class="table-wrap"><table><thead><tr>
+          <th>Task / Repo</th><th>Executor</th><th>Trạng thái</th><th class="n">Thời gian</th><th class="n">Token (in/out)</th><th class="n">Bắt đầu</th><th class="n">Stream log</th>
+        </tr></thead><tbody>` + topRuns.map((r) => {
+          const tag = r.audit_rejected ? ` <span class="pill warn">audit fail</span>` : (r.wasted && r.tokens_total > 0 ? ` <span class="pill err">lãng phí</span>` : "");
+          const logBtn = `<button type="button" class="btn-xs" data-open-task="${esc(r.task_id)}" data-open-run="${r.has_stream_log ? esc(r.run_id) : ""}">${r.has_stream_log ? "Xem log" : "Chi tiết"}</button>`;
+          const acctLabel = r.account_name || r.account_id || "";
+          return `<tr data-task="${esc(r.task_id)}">
+            <td class="wrap" style="min-width:200px"><button type="button" class="row-link" data-task="${esc(r.task_id)}">${esc(r.task_title || r.task_id)}</button><div class="tb-sub"><span class="mono">${esc(r.task_id)}</span>${r.repo_name ? ` · <span class="pill" style="font-size:11px;padding:1px 6px">${esc(r.repo_name)}</span>` : ""}</div></td>
+            <td><b>${esc(r.executor || "")}</b>${acctLabel ? `<div class="tb-sub mono">${esc(acctLabel)}</div>` : ""}</td>
+            <td>${runPill(r.status)}${tag}</td>
+            <td class="n">${dur(r.duration_secs)}</td>
+            <td class="n" title="${num(r.tokens_in)} in / ${num(r.tokens_out)} out"><div><b>${compact(r.tokens_total)}</b></div><div class="tb-sub">${compact(r.tokens_in)} / ${compact(r.tokens_out)}</div></td>
+            <td class="n muted">${esc(ago(r.started_at))}</td>
+            <td class="n">${logBtn}</td>
+          </tr>`;
+        }).join("") + `</tbody></table></div>`;
+    } else {
+      $("tokTopRunsWrap").innerHTML = "";
+    }
+
+    const subCards = [];
+    const byAcct = Array.isArray(diag.by_account) ? diag.by_account : [];
+    if (byAcct.length) {
+      subCards.push(`<div><div class="sect" style="margin-top:0">Token theo Tài khoản</div><div class="table-wrap"><table>
+        <thead><tr><th>Tài khoản</th><th class="n">Lượt</th><th class="n">Tổng token</th><th class="n">Lãng phí</th></tr></thead><tbody>` +
+        byAcct.slice().sort((a, b) => (b.tokens_total || 0) - (a.tokens_total || 0)).map((a) =>
+          `<tr><td><b>${esc(a.account_name || a.account_id)}</b>${a.account_name && a.account_name !== a.account_id ? `<div class="tb-sub mono">${esc(a.account_id)}</div>` : ""}</td><td class="n">${num(a.runs)}${a.wasted_runs ? `<div class="tb-sub" style="color:var(--err)">${num(a.wasted_runs)} lỗi</div>` : ""}</td><td class="n"><b>${compact(a.tokens_total)}</b></td><td class="n">${a.wasted_tokens ? `<span style="color:var(--err);font-weight:600">${compact(a.wasted_tokens)}</span> <span class="tb-sub">(${(Number(a.wasted_pct) || 0).toFixed(0)}%)</span>` : "0"}</td></tr>`
+        ).join("") + `</tbody></table></div></div>`);
+    }
+    const budWatch = Array.isArray(diag.budget_watch) ? diag.budget_watch : [];
+    const dupList = Array.isArray(diag.duplicate_audits) ? diag.duplicate_audits : [];
+    if (budWatch.length || dupList.length) {
+      let rightHtml = "";
+      if (budWatch.length) {
+        rightHtml += `<div class="sect" style="margin-top:0">Ngân sách Root Task (&ge;50% trần)</div><div class="table-wrap"><table>
+          <thead><tr><th>Root Task</th><th class="n">Đã dùng / Trần</th><th class="n">Trạng thái</th></tr></thead><tbody>` +
+          budWatch.map((b) => {
+            const p = Math.min(100, Math.round(Number(b.used_pct) || 0));
+            const pCls = b.frozen || p >= 90 ? "err" : (p >= 70 ? "warn" : "");
+            return `<tr data-task="${esc(b.root_id)}">
+              <td class="wrap"><button type="button" class="row-link" data-task="${esc(b.root_id)}">${esc(b.title || b.root_id)}</button><div class="tb-sub mono">${esc(b.root_id)}${b.has_open === false ? " · đã đóng" : ""}</div></td>
+              <td class="n"><b>${compact(b.tokens_used)}</b> / ${compact(b.token_limit)}<div class="prog ${pCls}"><b style="width:${p}%"></b></div></td>
+              <td class="n"><span class="pill ${pCls}">${b.frozen ? "Đóng băng" : p + "%"}</span></td>
+            </tr>`;
+          }).join("") + `</tbody></table></div>`;
+      }
+      if (dupList.length) {
+        rightHtml += `<div class="sect">Cross-Audit lặp trên cùng (tree_fp, config) (${dupList.length})</div><div class="table-wrap"><table>
+          <thead><tr><th>Task</th><th>tree_fp</th><th class="n">Số lần</th></tr></thead><tbody>` +
+          dupList.map((d) =>
+            `<tr data-task="${esc(d.task_id)}"><td class="wrap"><button type="button" class="row-link" data-task="${esc(d.task_id)}">${esc(d.task_id)}</button><div class="tb-sub">${esc((d.verdicts || []).join(" | ").slice(0, 110))}</div></td><td class="mono">${esc(String(d.tree_fp || "").slice(0, 22))}…</td><td class="n"><span class="pill ${d.fail_count >= 2 ? "err" : "warn"}">×${num(d.count)}</span></td></tr>`
+          ).join("") + `</tbody></table></div>`;
+      }
+      subCards.push(`<div>${rightHtml}</div>`);
+    }
+    $("tokSubWrap").innerHTML = subCards.join("");
   }
 
   function syncBreakdownRepoSelect() {
@@ -591,7 +879,10 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const sortBy = $("tbSort").value;
     let list = breakdown.filter((t) => {
       if (repo && t.repo_name !== repo) return false;
-      if (st === "running") { if (t.state !== "running" && t.state !== "gating") return false; }
+      if (st === "token_warn") {
+        const budPct = t.budget_limit ? ((t.budget_used || 0) * 100 / t.budget_limit) : 0;
+        if (!((t.wasted_tokens || 0) > 0 || (t.duplicate_audits || 0) > 0 || t.budget_frozen || budPct >= 70 || (t.tokens_total || 0) >= 150000)) return false;
+      } else if (st === "running") { if (t.state !== "running" && t.state !== "gating") return false; }
       else if (st && t.state !== st) return false;
       if (q) {
         const hay = [t.id, t.title, t.repo_name, t.blocked_kind, t.blocked_detail, t.last_executor, t.last_account].join(" ").toLowerCase();
@@ -601,6 +892,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     });
     list = list.slice().sort((a, b) => {
       switch (sortBy) {
+        case "wasted_desc": return ((b.wasted_tokens || 0) - (a.wasted_tokens || 0)) || (b.tokens_total - a.tokens_total);
         case "dur_desc": return (b.run_duration_secs - a.run_duration_secs) || (b.tokens_total - a.tokens_total);
         case "blocked_first": return ((a.state === "blocked" ? 0 : 1) - (b.state === "blocked" ? 0 : 1)) || (b.updated_at - a.updated_at);
         case "updated_desc": return (b.updated_at - a.updated_at);
@@ -611,11 +903,15 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const sumDur = list.reduce((acc, t) => acc + (Number(t.run_duration_secs) || 0), 0);
     const sumIn = list.reduce((acc, t) => acc + (Number(t.tokens_in) || 0), 0);
     const sumOut = list.reduce((acc, t) => acc + (Number(t.tokens_out) || 0), 0);
+    const sumWasted = list.reduce((acc, t) => acc + (Number(t.wasted_tokens) || 0), 0);
+    const sumTot = sumIn + sumOut;
+    const sumWastedPct = sumTot > 0 ? ((sumWasted * 100) / sumTot).toFixed(1) : "0.0";
     const cntBlk = list.filter((t) => t.state === "blocked").length;
     $("tbSummary").innerHTML = `
       <span class="pill">${num(list.length)} task</span>
       <span class="pill info">Tổng thời gian chạy: ${dur(sumDur)}</span>
-      <span class="pill">Tổng token: ${compact(sumIn + sumOut)} (${compact(sumIn)} in / ${compact(sumOut)} out)</span>
+      <span class="pill">Tổng token: ${compact(sumTot)} (${compact(sumIn)} in / ${compact(sumOut)} out)</span>
+      ${sumWasted ? `<span class="pill ${Number(sumWastedPct) >= 20 ? "err" : "warn"}">Lãng phí: ${compact(sumWasted)} (${sumWastedPct}%)</span>` : ""}
       ${cntBlk ? `<span class="pill err">${num(cntBlk)} bị Blocked</span>` : `<span class="pill ok">0 bị Blocked</span>`}`;
 
     if (!list.length) {
@@ -644,14 +940,29 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       <th>Task</th><th>Trạng thái</th><th class="n">Thời gian chạy</th><th class="n">Lượt chạy</th><th class="n">Token tiêu thụ</th><th>Agent / Tài khoản</th><th>Nguyên nhân Blocked / Lỗi</th>
     </tr></thead><tbody>` + shown.map((t) => {
       const blkKind = t.blocked_kind ? reasonLabel(t.blocked_kind) : "";
+      const notes = [];
+      if (t.runs_timed_out) notes.push(`<span class="pill err">timeout ×${num(t.runs_timed_out)}</span>`);
+      if (t.duplicate_audits) notes.push(`<span class="pill warn">audit lặp +${num(t.duplicate_audits)}</span>`);
+      if (t.budget_limit && t.budget_used) {
+        const bp = Math.round(t.budget_used * 100 / t.budget_limit);
+        if (t.budget_frozen || bp >= 70) notes.push(`<span class="pill ${t.budget_frozen || bp >= 90 ? "err" : "warn"}">budget ${bp}%</span>`);
+      }
       const whyHtml = t.state === "blocked"
-        ? `<div class="tb-why"><b>${esc(blkKind || "Bị chặn")}</b>${t.blocked_detail ? `: ${esc(t.blocked_detail)}` : ""}</div>`
-        : (t.last_run_status && t.last_run_status !== "succeeded" && t.last_run_status !== "running"
-            ? `<div class="tb-sub">Lượt gần nhất: <span class="pill err">${esc(t.last_run_status)}</span></div>`
-            : `<span class="muted">—</span>`);
-      return `<tr data-task="${esc(t.id)}" tabindex="0" role="button">
+        ? `<div class="tb-why"><b>${esc(blkKind || "Bị chặn")}</b>${t.blocked_detail ? `: ${esc(t.blocked_detail)}` : ""}</div>${notes.length ? `<div class="tb-sub">${notes.join(" ")}</div>` : ""}`
+        : (notes.length
+            ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${notes.join("")}</div>`
+            : (t.last_run_status && t.last_run_status !== "succeeded" && t.last_run_status !== "running"
+                ? `<div class="tb-sub">Lượt gần nhất: <span class="pill err">${esc(t.last_run_status)}</span></div>`
+                : `<span class="muted">—</span>`));
+      const wastedLine = t.wasted_tokens
+        ? `<div class="tb-sub" style="color:var(--err);font-weight:600">lãng phí ${compact(t.wasted_tokens)}</div>`
+        : "";
+      const auditLine = t.audit_tokens
+        ? `<div class="tb-sub">audit ${compact(t.audit_tokens)}</div>`
+        : "";
+      return `<tr data-task="${esc(t.id)}">
         <td class="wrap" style="min-width:240px">
-          <div style="font-weight:600">${esc(t.title)}</div>
+          <button type="button" class="row-link" data-task="${esc(t.id)}">${esc(t.title)}</button>
           <div class="tb-sub"><span class="mono">${esc(t.id)}</span>${t.repo_name ? ` · <span class="pill" style="font-size:11px;padding:1px 7px">${esc(t.repo_name)}</span>` : ""} · ${esc(t.priority || "")}</div>
         </td>
         <td>${pill(t.state)}</td>
@@ -666,6 +977,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
         <td class="n" title="${num(t.tokens_in)} vào / ${num(t.tokens_out)} ra">
           <div><b>${t.tokens_total ? compact(t.tokens_total) : "0"}</b></div>
           <div class="tb-sub">${compact(t.tokens_in)} in · ${compact(t.tokens_out)} out</div>
+          ${wastedLine}${auditLine}
         </td>
         <td>
           <div>${esc(t.last_executor || "—")}</div>
@@ -697,13 +1009,40 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       }).join("") + `</table>`;
   }
 
-  function renderExecutors(list, total) {
-    if (!list || !list.length) { $("executors").innerHTML = `<div class="empty">Chưa có lượt chạy agent nào trong kỳ này.</div>`; return; }
-    $("executors").innerHTML = `<table><tr><th>Agent</th><th class="n">Lượt chạy</th><th class="n hide-sm">Lỗi</th><th class="n">Thời gian</th><th class="n hide-sm">Token (in/out)</th><th class="n">Chi phí</th></tr>` +
-      list.map((e) => `<tr><td><b>${esc(e.executor)}</b>${e.running ? ` <span class="pill info">${num(e.running)} live</span>` : ""}</td><td class="n">${num(e.runs)}</td>` +
-        `<td class="n hide-sm">${e.failed ? `<span class="pill err">${num(e.failed)}</span>` : "0"}</td><td class="n">${dur(e.wall_secs)}</td>` +
-        `<td class="n hide-sm" title="${num(e.tokens_in)} in / ${num(e.tokens_out)} out">${compact(e.tokens_in)} / ${compact(e.tokens_out)}</td><td class="n">${usd(e.estimated_cost_usd)}</td></tr>`).join("") +
-      `<tr><td><b>Tổng</b></td><td></td><td class="hide-sm"></td><td></td><td class="hide-sm"></td><td class="n"><b>${usd(total)}</b></td></tr></table>`;
+  function renderExecutors(list, total, costBasis) {
+    const diagList = tokenDiag && Array.isArray(tokenDiag.by_executor) && tokenDiag.by_executor.length
+      ? tokenDiag.by_executor : null;
+    const rowsSrc = diagList || (Array.isArray(list) ? list : []);
+    if (!rowsSrc.length) { $("executors").innerHTML = `<div class="empty">Chưa có lượt chạy agent nào trong kỳ này.</div>`; return; }
+    const costMap = {};
+    if (Array.isArray(list)) {
+      for (const e of list) costMap[e.executor] = e.estimated_cost_usd;
+    }
+    const showUsd = total != null && costBasis !== "none";
+    const totalTok = rowsSrc.reduce((acc, e) => acc + (Number(e.tokens_in) || 0) + (Number(e.tokens_out) || 0), 0);
+    const totalWasted = rowsSrc.reduce((acc, e) => acc + (Number(e.wasted_tokens) || 0), 0);
+    $("executors").innerHTML = `<div class="table-wrap"><table><tr><th>Agent</th><th class="n">Lượt</th><th class="n hide-sm">Lỗi</th><th class="n">Thời gian</th><th class="n">Token (in/out)</th><th class="n hide-sm">TB / lượt</th><th class="n">Lãng phí</th><th class="n">${showUsd ? "Chi phí" : "Gói"}</th></tr>` +
+      rowsSrc.map((e) => {
+        const tot = (Number(e.tokens_in) || 0) + (Number(e.tokens_out) || 0);
+        const avg = e.avg_tokens_per_run != null ? e.avg_tokens_per_run : (e.runs ? Math.round(tot / e.runs) : 0);
+        const w = Number(e.wasted_tokens) || 0;
+        const wp = tot > 0 ? ((w * 100) / tot) : 0;
+        const errCount = (Number(e.failed) || 0) + (Number(e.timed_out) || 0) + (Number(e.killed) || 0) + (Number(e.limit_hit) || 0);
+        const failParts = [];
+        if (e.timed_out) failParts.push(`TO:${num(e.timed_out)}`);
+        if (e.killed) failParts.push(`K:${num(e.killed)}`);
+        if (e.audit_rejected) failParts.push(`AF:${num(e.audit_rejected)}`);
+        const failSub = failParts.length ? `<div class="tb-sub">${failParts.join(" ")}</div>` : "";
+        const est = costMap[e.executor] != null ? costMap[e.executor] : e.estimated_cost_usd;
+        const costCell = est != null ? usd(est) : `<span class="muted">Sub</span>`;
+        return `<tr><td><b>${esc(e.executor)}</b>${e.running ? ` <span class="pill info">${num(e.running)} live</span>` : ""}</td><td class="n">${num(e.runs)}</td>` +
+          `<td class="n hide-sm">${errCount ? `<span class="pill err">${num(errCount)}</span>` : "0"}${failSub}</td><td class="n">${dur(e.wall_secs)}</td>` +
+          `<td class="n" title="${num(e.tokens_in)} in / ${num(e.tokens_out)} out"><b>${compact(tot)}</b><div class="tb-sub">${compact(e.tokens_in)} / ${compact(e.tokens_out)}</div></td>` +
+          `<td class="n hide-sm">${compact(avg)}</td>` +
+          `<td class="n">${w ? `<span style="color:var(--err);font-weight:600">${compact(w)}</span><div class="tb-sub">${wp.toFixed(0)}%</div>` : "0"}</td>` +
+          `<td class="n">${costCell}</td></tr>`;
+      }).join("") +
+      `<tr><td><b>Tổng</b></td><td></td><td class="hide-sm"></td><td></td><td class="n"><b>${compact(totalTok)}</b></td><td class="hide-sm"></td><td class="n"><b style="${totalWasted ? "color:var(--err)" : ""}">${compact(totalWasted)}</b></td><td class="n"><b>${showUsd ? usd(total) : "Subscription"}</b></td></tr></table></div>`;
   }
 
   function renderBlocked(top) {
@@ -755,40 +1094,48 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 
   async function refresh() {
     if (!token) { showAuth(""); return; }
-    const q = hours ? "?since=" + encodeURIComponent(hours) : "";
-    const [rep, st, meta, board] = await Promise.allSettled([api("/api/report" + q), api("/api/status"), api("/api/meta"), api("/api/board")]);
-    const errors = [rep, st, meta, board].filter((p) => p.status === "rejected").map((p) => p.reason.message);
-    $("err").style.display = errors.length ? "block" : "none";
-    $("err").textContent = errors.length ? "Một số dữ liệu chưa tải được: " + [...new Set(errors)].join("; ") : "";
-    lastStatus = st.status === "fulfilled" ? st.value : null;
-    if (board.status === "fulfilled") tasks = board.value.tasks || [];
-    if (meta.status === "fulfilled") {
-      isReadOnly = Boolean(meta.value.read_only);
-      $("roPill").classList.toggle("hidden", !isReadOnly);
-      $("scope").textContent = `${meta.value.repo_name || meta.value.scope || ""} · v${meta.value.version || "?"}`;
-    }
-    const frozen = (lastStatus && lastStatus.frozen) || (board.status === "fulfilled" && board.value.frozen);
-    $("factory").className = "pill " + (frozen ? "err" : "ok");
-    $("factory").textContent = frozen ? "Đang đóng băng" : "Đang hoạt động";
-    $("factory").title = frozen
-      ? (isReadOnly ? "Chạy aaf board unfreeze trên terminal" : "Chạy aaf board unfreeze hoặc gỡ đóng băng trên Cockpit")
-      : "Xưởng sẵn sàng nhận việc";
-    renderNeedBadge();
-    if (rep.status === "fulfilled") {
-      const r = rep.value.report || {};
-      breakdown = Array.isArray(rep.value.task_breakdown) ? rep.value.task_breakdown : [];
-      syncBreakdownRepoSelect();
-      renderKpis(r);
-      if (window.AafPipelineUI && typeof window.AafPipelineUI.renderStudioScore === "function") {
-        window.AafPipelineUI.renderStudioScore($("scoreBox"), r.score !== undefined ? r.score : rep.value.score);
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+    try {
+      const q = hours ? "?since=" + encodeURIComponent(hours) : "";
+      const [rep, st, meta, board] = await Promise.allSettled([api("/api/report" + q), api("/api/status"), api("/api/meta"), api("/api/board")]);
+      const errors = [rep, st, meta, board].filter((p) => p.status === "rejected").map((p) => p.reason.message);
+      $("err").style.display = errors.length ? "block" : "none";
+      $("err").textContent = errors.length ? "Một số dữ liệu chưa tải được: " + [...new Set(errors)].join("; ") : "";
+      lastStatus = st.status === "fulfilled" ? st.value : null;
+      if (board.status === "fulfilled") tasks = board.value.tasks || [];
+      if (meta.status === "fulfilled") {
+        isReadOnly = Boolean(meta.value.read_only);
+        $("roPill").classList.toggle("hidden", !isReadOnly);
+        $("scope").textContent = `${meta.value.repo_name || meta.value.scope || ""} · v${meta.value.version || "?"}`;
       }
-      renderTaskBreakdown();
-      renderStages(r.stages);
-      renderExecutors(r.executors, r.estimated_cost_usd);
-      renderBlocked(r.top_blocked);
+      const frozen = (lastStatus && lastStatus.frozen) || (board.status === "fulfilled" && board.value.frozen);
+      $("factory").className = "pill " + (frozen ? "err" : "ok");
+      $("factory").textContent = frozen ? "Đang đóng băng" : "Đang hoạt động";
+      $("factory").title = frozen
+        ? (isReadOnly ? "Chạy aaf board unfreeze trên terminal" : "Chạy aaf board unfreeze hoặc gỡ đóng băng trên Cockpit")
+        : "Xưởng sẵn sàng nhận việc";
+      renderNeedBadge();
+      if (rep.status === "fulfilled") {
+        const r = rep.value.report || {};
+        breakdown = Array.isArray(rep.value.task_breakdown) ? rep.value.task_breakdown : [];
+        tokenDiag = rep.value.token_diagnostics || null;
+        syncBreakdownRepoSelect();
+        renderKpis(r);
+        renderTokenDiagnostics(tokenDiag);
+        if (window.AafPipelineUI && typeof window.AafPipelineUI.renderStudioScore === "function") {
+          window.AafPipelineUI.renderStudioScore($("scoreBox"), r.score !== undefined ? r.score : rep.value.score);
+        }
+        renderTaskBreakdown();
+        renderStages(r.stages);
+        renderExecutors(r.executors, r.estimated_cost_usd, r.cost_basis);
+        renderBlocked(r.top_blocked);
+      }
+      renderLive(lastStatus);
+      $("foot").textContent = "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây";
+    } finally {
+      refreshInFlight = false;
     }
-    renderLive(lastStatus);
-    $("foot").textContent = "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây";
   }
 
   function schedule() {
@@ -830,12 +1177,26 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     $("scrim").onclick = closeDrawer;
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closeDrawer();
-      if ((e.key === "Enter" || e.key === " ") && e.target && e.target.dataset && e.target.dataset.task) {
+      if (
+        (e.key === "Enter" || e.key === " ")
+        && !$("drawer").classList.contains("open")
+        && e.target && e.target.tagName !== "BUTTON" && e.target.dataset && e.target.dataset.task
+      ) {
         e.preventDefault();
         openTask(e.target.dataset.task);
       }
     });
     document.addEventListener("click", (e) => {
+      const openRunBtn = e.target.closest("[data-open-task]");
+      if (openRunBtn) {
+        e.stopPropagation();
+        const tid = String(openRunBtn.dataset.openTask || "");
+        const rid = String(openRunBtn.dataset.openRun || "");
+        if (tid) {
+          if ($("drawer").classList.contains("open")) closeDrawer();
+          return openTask(tid, rid);
+        }
+      }
       const el = e.target.closest("[data-copy],[data-action],[data-task]");
       if (!el) return;
       if (el.dataset.copy != null) return copy(el.dataset.copy);
