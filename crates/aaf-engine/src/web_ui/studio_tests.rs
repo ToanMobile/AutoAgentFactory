@@ -83,6 +83,9 @@ fn studio_page_is_served_with_the_strict_csp_and_no_data() {
     assert_eq!(resp.status, 200);
     assert!(resp.body.contains("<title>AAF Studio</title>"));
     assert!(resp.body.contains("/api/report"));
+    assert!(resp.body.contains("id=\"tokenDiagCard\""));
+    assert!(resp.body.contains("/api/streams/"));
+    assert!(resp.body.contains("wasted_desc"));
     assert!(!resp.body.contains(TEST_TOKEN));
     assert_eq!(
         resp.headers

@@ -9,6 +9,7 @@ mod extras;
 mod proof_stop;
 mod service;
 mod studio;
+mod studio_tokens;
 mod supervisor;
 mod supervisor_ops;
 mod tailscale;
@@ -41,7 +42,7 @@ use super::scope::resolve_scope;
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult};
 
-const DETAIL_EVENTS_LIMIT: u32 = 25;
+const DETAIL_EVENTS_LIMIT: u32 = 100;
 const POLL_TICK: Duration = Duration::from_millis(100);
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const PRESSURE_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -329,11 +330,7 @@ impl UiBackend for CliUiBackend {
     fn report_json(&self, since_hours: Option<u64>) -> Result<Value, String> {
         let db = self.ro_db.get().map_err(|e| e.message)?;
         let repo = self.repo_root.as_deref().and_then(Path::to_str);
-        let cost = db
-            .as_ref()
-            .map(|d| self.ctx.cost_policy(d))
-            .unwrap_or_default();
-        studio::report_json(db.as_ref(), repo, since_hours, &cost)
+        studio::report_json_for_ctx(&self.ctx, &self.config_base, db.as_ref(), repo, since_hours)
     }
 
     fn doctor_json(&self) -> Result<Value, String> {
