@@ -179,9 +179,9 @@ fn plan_prompt_and_read_only_sandbox_policy() {
     let prompt = build_plan_prompt(&task, &ctx);
     for needle in [
         "READ-ONLY",
-        "Files to change",
-        "Test strategy",
-        "Risks",
+        "1. Goal:",
+        "2. Files:",
+        "3. Checks:",
         "Avoid extra allocs",
     ] {
         assert!(prompt.contains(needle), "missing {needle}");
