@@ -147,7 +147,7 @@ fn write_receipt_for(data_dir: &Path, repo_root: &Path, tree_fp: &str) {
 #[test]
 fn schema_v5_to_v6_conditional_delete_trigger_and_index() {
     // Later migrations stack on v6; the v6 trigger and index must survive them.
-    assert!(SCHEMA_VERSION >= 6);
+    const { assert!(SCHEMA_VERSION >= 6) };
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("aaf.db");
 
