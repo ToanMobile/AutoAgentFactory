@@ -23,7 +23,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        # Pull requests get the fast Ubuntu run; macOS (about twice as slow)
+        # runs on every push to main.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["macos-latest", "ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -38,6 +40,10 @@ jobs:
           cargo clippy --version
 
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          # rust-cache saves only on a key miss; naming the nextest version
+          # makes a new version land in the saved ~/.cargo/bin once.
+          key: nextest-0.9.152
 
       - name: Format
         run: cargo fmt --all --check
@@ -45,5 +51,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # nextest runs every test in its own process and runs the test binaries
+      # in parallel, where cargo test runs them one after the other. The
+      # binary lands in ~/.cargo/bin, which rust-cache keeps between runs.
+      - name: Install cargo-nextest
+        run: |
+          if ! cargo nextest --version 2>/dev/null | grep -q "^cargo-nextest ${NEXTEST_VERSION} "; then
+            cargo install cargo-nextest --locked --version "${NEXTEST_VERSION}"
+          fi
+        env:
+          NEXTEST_VERSION: 0.9.152
+
       - name: Test
-        run: cargo test --workspace --no-fail-fast
+        run: cargo nextest run --workspace --no-fail-fast
+
+      # nextest does not run doctests.
+      - name: Doctests
+        run: cargo test --workspace --doc
