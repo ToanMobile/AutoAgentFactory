@@ -2,7 +2,6 @@
 //! signed approval of that exact set of changes.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::Path;
 
 use aaf_domain::config::{RepoConfig, TEST_FILE_GLOBS};
@@ -14,6 +13,9 @@ use super::changes::{self, AddedLines, Change};
 use super::{GIT_TIMEOUT, GateError, base, static_checks};
 
 mod dir;
+mod nested;
+
+pub(super) use dir::content_hash;
 
 fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateError> {
     let mut builder = GlobSetBuilder::new();
@@ -29,37 +31,6 @@ fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateErr
     builder
         .build()
         .map_err(|err| GateError::Config(format!("gate.head_lock_globs: {err}")))
-}
-
-/// Hash of what is on disk at `path` now, or `deleted`.
-pub(super) fn content_hash(repo_root: &Path, path: &str) -> Result<String, GateError> {
-    let trimmed = path.trim_end_matches('/');
-    let full = repo_root.join(trimmed);
-    let Ok(meta) = fs::symlink_metadata(&full) else {
-        // A name git reported in non-UTF-8 bytes was decoded lossily, so
-        // the decoded name is never on disk: it is not a deletion an
-        // approval could cover.
-        if path.contains('\u{FFFD}') {
-            return Err(GateError::Config(format!(
-                "locked path {path} is not valid UTF-8"
-            )));
-        }
-        return Ok("deleted".to_string());
-    };
-    if meta.is_symlink() {
-        let target = fs::read_link(&full)?;
-        let target = target.as_os_str().as_encoded_bytes();
-        return Ok(format!("link:{}", aaf_fp::sha256_hex(target)));
-    }
-    if meta.is_file() {
-        return Ok(aaf_fp::sha256_hex(&fs::read(&full)?));
-    }
-    if meta.is_dir() && !trimmed.is_empty() {
-        return dir::hash_dir(&full, path);
-    }
-    Err(GateError::Config(format!(
-        "locked path {path} is neither a file nor a symlink"
-    )))
 }
 
 struct LockMatchers {
@@ -186,7 +157,7 @@ type LockEntry = (String, &'static str, String, String);
 /// derived views (base config, tracked-only changes) reuse the exact same
 /// single working-tree read).
 fn locked_with(
-    repo_root: &Path,
+    (repo_root, base): (&Path, &str),
     cfg: &RepoConfig,
     extra_hard_globs: &[String],
     changes: &[Change],
@@ -205,22 +176,35 @@ fn locked_with(
     }
     let mut entries: Vec<LockEntry> = Vec::new();
     let mut report: Vec<LockedChange> = Vec::new();
+    let mut probe = nested::Probe::new(repo_root, base, changes);
     for change in changes {
-        let Some(path) = locked_path(repo_root, change, &matchers).or_else(|| {
+        let own = locked_path(repo_root, change, &matchers).or_else(|| {
             allow_paths
                 .contains(change.path.as_str())
                 .then_some(change.path.as_str())
-        }) else {
-            continue;
+        });
+        // A nested repository or gitlink is locked by the files inside it.
+        let path = match own {
+            Some(path) => path,
+            None if probe.locks(change, &matchers)? => {
+                change.old_path.as_deref().unwrap_or(&change.path)
+            }
+            None => continue,
         };
         // The hash follows the content on disk, so an approval stops
-        // covering the change the moment the file is edited again.
-        let hash = hash(&change.path)?;
+        // covering the change the moment the file is edited again; a
+        // gitlink's also binds its commits, whatever the disk holds.
+        let content = hash(&change.path)?;
+        let tag = probe.link(change)?;
         // A directory's path says nothing of the files inside it: never Soft.
-        let tier = if hash.starts_with("dir:") {
+        let tier = if own.is_none() || tag.is_some() || content.starts_with("dir:") {
             LockTier::Hard
         } else {
             matchers.classify_tier(path, &change.path, &allow_paths)
+        };
+        let hash = match tag {
+            Some(tag) => format!("{tag}|{content}"),
+            None => content,
         };
         entries.push((
             path.to_string(),
@@ -299,7 +283,7 @@ pub(crate) fn evaluate_changes_with_common(
     common_root: Option<&Path>,
     cfg: &RepoConfig,
     extra_hard_globs: &[String],
-    changes: &[Change],
+    (base, changes): (&str, &[Change]),
     added: &[AddedLines],
     require_independent: bool,
 ) -> Result<HeadLockReport, GateError> {
@@ -307,7 +291,7 @@ pub(crate) fn evaluate_changes_with_common(
         changes::with_ignored_matching(repo_root, extra_hard_globs, changes, GIT_TIMEOUT)?;
     let mut hash = |path: &str| content_hash(repo_root, path);
     let (locked_changes, lock_fp, _) = locked_with(
-        repo_root,
+        (repo_root, base),
         cfg,
         extra_hard_globs,
         &effective,
@@ -366,7 +350,7 @@ pub fn evaluate(
                 None,
                 cfg,
                 &extra_hard,
-                &set.changes,
+                (base_sha, &set.changes),
                 &added,
                 req,
             )
@@ -494,7 +478,7 @@ pub(super) fn approve_inner(
     let working_changes =
         changes::with_ignored_matching(repo_root, &extra_hard, &set.changes, GIT_TIMEOUT)?;
     let (locked_changes, lock_fp, primary_entries) = locked_with(
-        repo_root,
+        (repo_root, &base.diff_target),
         cfg,
         &extra_hard,
         &working_changes,
@@ -522,7 +506,7 @@ pub(super) fn approve_inner(
     });
     let base_view = base_cfg.as_ref().and_then(|b| {
         let (bl, fp, ent) = locked_with(
-            repo_root,
+            (repo_root, &base.diff_target),
             b,
             &extra_hard,
             &working_changes,
@@ -559,7 +543,7 @@ pub(super) fn approve_inner(
     if !tracked_changes.is_empty() {
         for c in [Some(cfg), base_cfg.as_ref()].into_iter().flatten() {
             if let Ok((tl, fp, ent)) = locked_with(
-                repo_root,
+                (repo_root, &base.diff_target),
                 c,
                 &extra_hard,
                 &tracked_changes,

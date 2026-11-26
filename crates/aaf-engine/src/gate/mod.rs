@@ -253,7 +253,7 @@ pub fn run_gate_with_options(
         Some(common_root),
         cfg,
         &base_capture_lock_globs,
-        &set.changes,
+        (&base.diff_target, &set.changes),
         &added,
         require_independent,
     )?;

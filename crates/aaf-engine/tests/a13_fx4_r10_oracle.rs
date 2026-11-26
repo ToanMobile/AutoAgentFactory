@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use aaf_domain::config::MachineConfig;
+use aaf_domain::config::{MachineConfig, RepoConfig};
 use aaf_domain::gate::{GateMode, GateStatus, Receipt};
 use aaf_domain::ports::Clock;
 use aaf_engine::config::{ConfigInputs, ConfigOverlay, REPO_CONFIG_REL, load};
@@ -86,7 +86,7 @@ fn run_gate(repo: &Path, data: &Path) -> Receipt {
     run_gate_mode(repo, data, GateMode::Scoped)
 }
 
-fn run_gate_mode(repo: &Path, data: &Path, mode: GateMode) -> Receipt {
+fn repo_cfg(repo: &Path) -> RepoConfig {
     let no_env = |_: &str| None;
     let effective = load(&ConfigInputs {
         global_config: None,
@@ -95,6 +95,10 @@ fn run_gate_mode(repo: &Path, data: &Path, mode: GateMode) -> Receipt {
         cli: ConfigOverlay::default(),
     })
     .unwrap();
+    effective.repo
+}
+
+fn run_gate_mode(repo: &Path, data: &Path, mode: GateMode) -> Receipt {
     let machine = MachineConfig::default();
     let throttle = Throttle {
         machine: &machine,
@@ -110,7 +114,7 @@ fn run_gate_mode(repo: &Path, data: &Path, mode: GateMode) -> Receipt {
     run_gate_throttled(
         data,
         repo,
-        &effective.repo,
+        &repo_cfg(repo),
         mode,
         &FixedClock(2000),
         &throttle,
@@ -235,6 +239,14 @@ fn gitlink_change_never_errors_the_gate() {
     .unwrap();
     git_out(root, &["add", "src/app.sh", "tests/test_answer.sh"]);
     git_out(root, &["commit", "-q", "-m", "bump submodule"]);
+    // GATE-089: a bumped gitlink whose repository is not on disk is head
+    // locked (Hard); an independent approval lets the gate run on.
+    let r = run_gate(root, data.path());
+    assert_eq!(r.status, GateStatus::Blocked, "{:?}", r.reasons);
+    assert!(has(&r, "head lock"), "{:?}", r.reasons);
+    let cfg = repo_cfg(root);
+    aaf_engine::gate::head_lock::approve(data.path(), root, &cfg, "r", false, &FixedClock(1))
+        .unwrap();
 
     // The gitlink is skipped, so the reverted tree still proves red->green.
     let r = run_gate(root, data.path());
