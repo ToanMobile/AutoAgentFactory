@@ -331,3 +331,77 @@ fn missing_lossily_decoded_path_fails_closed() {
     let gone = content_hash(repo.root(), "tests/gone_test.rs").unwrap();
     assert_eq!(gone, "deleted");
 }
+
+#[test]
+fn directory_content_hash_is_deterministic_sensitive_and_ignores_git_dirs() {
+    let repo = Repo::new();
+    repo.write(".cargo/config.toml", "[build]\nrustc = \"/bin/true\"\n");
+    repo.write(".cargo/sub/a.txt", "hello\n");
+    repo.write(".cargo/.git/HEAD", "ref: refs/heads/main\n");
+    repo.write(".cargo/sub/.git/HEAD", "ref: refs/heads/nested\n");
+
+    let first = content_hash(repo.root(), ".cargo").unwrap();
+    let second = content_hash(repo.root(), ".cargo").unwrap();
+    let trailing = content_hash(repo.root(), ".cargo/").unwrap();
+    assert!(
+        first.starts_with("dir:"),
+        "expected dir: prefix, got {first}"
+    );
+    assert_eq!(first, second);
+    assert_eq!(first, trailing);
+
+    // Mutating `.git` subdirectories at any depth must not change the hash.
+    repo.write(".cargo/.git/HEAD", "0123456789abcdef\n");
+    repo.write(".cargo/.git/objects/info/packs", "pack\n");
+    repo.write(".cargo/sub/.git/index", "changed\n");
+    assert_eq!(content_hash(repo.root(), ".cargo").unwrap(), first);
+
+    // Changing a child file must change the hash.
+    repo.write(".cargo/config.toml", "[build]\nrustc = \"/bin/false\"\n");
+    let modified = content_hash(repo.root(), ".cargo").unwrap();
+    assert_ne!(modified, first);
+    assert!(modified.starts_with("dir:"));
+}
+
+#[test]
+fn nested_git_repo_at_locked_dir_has_approvable_lock_fp_that_tracks_edits() {
+    let repo = Repo::new();
+    let cargo_dir = repo.path(".cargo");
+    fs::create_dir_all(&cargo_dir).unwrap();
+    repo.git(&["-C", ".cargo", "init", "-q", "-b", "main"]);
+    repo.git(&["-C", ".cargo", "config", "user.name", "test"]);
+    repo.git(&[
+        "-C",
+        ".cargo",
+        "config",
+        "user.email",
+        "test@example.invalid",
+    ]);
+    repo.git(&["-C", ".cargo", "config", "commit.gpgsign", "false"]);
+    repo.write(".cargo/config.toml", "[build]\nrustc = \"/bin/true\"\n");
+    repo.git(&["-C", ".cargo", "add", "-A"]);
+    repo.git(&["-C", ".cargo", "commit", "-q", "-m", "nested"]);
+
+    // Untracked nested repositories are listed by git with a trailing `/`.
+    let locked = vec![LockedChange {
+        path: ".cargo/".to_string(),
+        change: ChangeKind::Added,
+        tier: aaf_domain::gate::LockTier::Hard,
+    }];
+    let before = report(&repo);
+    assert_eq!(before.status, LockStatus::Blocked);
+    assert_eq!(before.lock_fp.len(), 64);
+    assert_eq!(before.locked_changes.len(), 1, "{before:?}");
+    assert_eq!(before.locked_changes, locked);
+
+    let approval = sign_off(&repo).unwrap();
+    assert_eq!(approval.lock_fp, before.lock_fp);
+    assert_eq!(report(&repo).status, LockStatus::Approved);
+
+    repo.write(".cargo/config.toml", "[build]\nrustc = \"/bin/false\"\n");
+    let after = report(&repo);
+    assert_eq!(after.status, LockStatus::Blocked);
+    assert_eq!(after.lock_fp.len(), 64);
+    assert_ne!(after.lock_fp, before.lock_fp);
+    assert_eq!(after.locked_changes, locked);
+}

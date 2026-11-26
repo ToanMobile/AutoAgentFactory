@@ -13,6 +13,8 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use super::changes::{self, AddedLines, Change};
 use super::{GIT_TIMEOUT, GateError, base, static_checks};
 
+mod dir;
+
 fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateError> {
     let mut builder = GlobSetBuilder::new();
     for glob in globs {
@@ -31,7 +33,8 @@ fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateErr
 
 /// Hash of what is on disk at `path` now, or `deleted`.
 pub(super) fn content_hash(repo_root: &Path, path: &str) -> Result<String, GateError> {
-    let full = repo_root.join(path);
+    let trimmed = path.trim_end_matches('/');
+    let full = repo_root.join(trimmed);
     let Ok(meta) = fs::symlink_metadata(&full) else {
         // A name git reported in non-UTF-8 bytes was decoded lossily, so
         // the decoded name is never on disk: it is not a deletion an
@@ -50,6 +53,9 @@ pub(super) fn content_hash(repo_root: &Path, path: &str) -> Result<String, GateE
     }
     if meta.is_file() {
         return Ok(aaf_fp::sha256_hex(&fs::read(&full)?));
+    }
+    if meta.is_dir() && !trimmed.is_empty() {
+        return dir::hash_dir(&full, path);
     }
     Err(GateError::Config(format!(
         "locked path {path} is neither a file nor a symlink"
@@ -96,10 +102,12 @@ impl LockMatchers {
         self.test_globs.is_match(path) || self.non_test_globs.is_match(path)
     }
 
+    fn matches_dir_prefix(&self, path: &str) -> bool {
+        self.symlink_dir_globs.is_match(path.trim_end_matches('/'))
+    }
+
     fn matches_symlink_dir(&self, repo_root: &Path, path: &str) -> bool {
-        self.symlink_dir_globs.is_match(path)
-            && fs::symlink_metadata(repo_root.join(path))
-                .is_ok_and(|meta| meta.file_type().is_symlink())
+        changes::matches_locked_dir(&self.symlink_dir_globs, repo_root, path)
     }
 
     /// Tier-2 (`Soft`) ONLY for pure test-file paths that match no Tier-1 glob,
@@ -113,8 +121,8 @@ impl LockMatchers {
         let is_pure_test = self.test_globs.is_match(locked_path)
             && !self.non_test_globs.is_match(locked_path)
             && !self.non_test_globs.is_match(current_path)
-            && !self.symlink_dir_globs.is_match(locked_path)
-            && !self.symlink_dir_globs.is_match(current_path)
+            && !self.matches_dir_prefix(locked_path)
+            && !self.matches_dir_prefix(current_path)
             && !allow_paths.contains(locked_path)
             && !allow_paths.contains(current_path);
         if is_pure_test {
@@ -149,7 +157,7 @@ fn locked_path<'a>(
         .then_some(change.path.as_str()),
         ChangeKind::Renamed => {
             let old = change.old_path.as_deref().unwrap_or(&change.path);
-            if matchers.matches_any(old) || matchers.symlink_dir_globs.is_match(old) {
+            if matchers.matches_any(old) || matchers.matches_dir_prefix(old) {
                 Some(old)
             } else if matchers.non_test_globs.is_match(&change.path)
                 || matchers.matches_symlink_dir(repo_root, &change.path)
@@ -162,7 +170,7 @@ fn locked_path<'a>(
         ChangeKind::Modified | ChangeKind::Deleted => {
             let path = change.old_path.as_deref().unwrap_or(&change.path);
             let symlink_dir = if change.kind == ChangeKind::Deleted {
-                matchers.symlink_dir_globs.is_match(path)
+                matchers.matches_dir_prefix(path)
             } else {
                 matchers.matches_symlink_dir(repo_root, path)
             };
@@ -208,7 +216,12 @@ fn locked_with(
         // The hash follows the content on disk, so an approval stops
         // covering the change the moment the file is edited again.
         let hash = hash(&change.path)?;
-        let tier = matchers.classify_tier(path, &change.path, &allow_paths);
+        // A directory's path says nothing of the files inside it: never Soft.
+        let tier = if hash.starts_with("dir:") {
+            LockTier::Hard
+        } else {
+            matchers.classify_tier(path, &change.path, &allow_paths)
+        };
         entries.push((
             path.to_string(),
             change.kind.letter(),

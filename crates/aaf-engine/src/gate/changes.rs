@@ -104,6 +104,8 @@ pub fn collect(repo_root: &Path, base: &str, timeout: Duration) -> Result<Change
                 "-M",
                 "-z",
                 "--no-ext-diff",
+                // `submodule.<name>.ignore` in `.gitmodules` must not hide a gitlink.
+                "--ignore-submodules=none",
                 base,
                 "--",
             ],
@@ -444,6 +446,7 @@ pub fn diff_added_tracked(
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
+            "--ignore-submodules=none",
             // A `-diff` or `binary` attribute (in `.gitattributes` or
             // `.git/info/attributes`) would otherwise hide every added line
             // behind "Binary files differ". Real binaries are dropped below.
@@ -510,10 +513,23 @@ pub(super) fn symlink_dir_prefixes(non_test_globs: &[String]) -> Vec<String> {
     prefixes
 }
 
+/// Whether `path` (after trimming any trailing `/`) matches a locked directory
+/// prefix in `dir_set` and is a symlink or directory on disk (without
+/// following symlinks). Fails closed (`true`) on any stat error but NotFound.
+pub(super) fn matches_locked_dir(dir_set: &globset::GlobSet, repo_root: &Path, path: &str) -> bool {
+    let trimmed = path.trim_end_matches('/');
+    !trimmed.is_empty()
+        && dir_set.is_match(trimmed)
+        && match fs::symlink_metadata(repo_root.join(trimmed)) {
+            Ok(meta) => meta.file_type().is_symlink() || meta.file_type().is_dir(),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        }
+}
+
 /// Scans gitignored untracked files via `git ls-files --others --ignored
 /// --exclude-standard -z` (fail-closed on git error) and appends `Added`
 /// changes for any path not already in `existing` that matches `globs`
-/// (case-insensitive) or is a symlink shadowing a directory prefix of `globs`.
+/// (case-insensitive) or is a symlink or directory at a prefix of `globs`.
 pub(super) fn with_ignored_matching<'a>(
     repo_root: &Path,
     globs: &[String],
@@ -556,10 +572,7 @@ pub(super) fn with_ignored_matching<'a>(
         if seen.contains(path.as_str()) {
             continue;
         }
-        let is_symlink_dir = dir_set.is_match(&path)
-            && fs::symlink_metadata(repo_root.join(&path))
-                .is_ok_and(|meta| meta.file_type().is_symlink());
-        if file_set.is_match(&path) || is_symlink_dir {
+        if file_set.is_match(&path) || matches_locked_dir(&dir_set, repo_root, &path) {
             matched.push(Change {
                 kind: ChangeKind::Added,
                 path,
