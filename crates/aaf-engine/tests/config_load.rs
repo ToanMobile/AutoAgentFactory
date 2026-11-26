@@ -515,3 +515,29 @@ fn an_auto_auditor_takes_the_global_one() {
     fx.tier2("[cross_audit]\nexecutor = \"gemini\"\n");
     assert_eq!(fx.ok(&[]).repo.cross_audit.executor, "gemini");
 }
+
+#[test]
+fn proof_required_defaults_true_for_mobile_and_game_and_false_for_backend_and_rust() {
+    use aaf_engine::config::{default_proof_required, default_proof_trigger_globs};
+
+    for profile in ["android", "ios", "flutter", "react-native", "expo", "unity"] {
+        assert!(
+            default_proof_required(profile),
+            "expected default_proof_required=true for {profile}"
+        );
+        assert!(
+            !default_proof_trigger_globs(profile).is_empty(),
+            "expected default trigger_globs for {profile}"
+        );
+    }
+    for profile in ["backend", "rust", "web", "auto"] {
+        assert!(
+            !default_proof_required(profile),
+            "expected default_proof_required=false for {profile}"
+        );
+    }
+    // Explicit repo pin always wins over profile default even when built-in defaults are on.
+    let fx = Fixture::new();
+    fx.tier2("[project]\nprofile = \"android\"\n[proof]\nrequired = false\n");
+    assert!(!fx.ok(&[]).repo.proof.required);
+}

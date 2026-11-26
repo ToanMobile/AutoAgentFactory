@@ -15,7 +15,8 @@ mod merge_pipeline;
 mod render;
 
 pub use detect::{
-    Detected, PROFILES, default_proof_trigger_globs, detect_stack, effective_profile,
+    Detected, PROFILES, default_proof_required, default_proof_trigger_globs, detect_stack,
+    effective_profile,
 };
 pub use load::{
     ConfigError, ConfigInputs, EffectiveConfig, LOCAL_CONFIG_REL, REPO_CONFIG_REL,

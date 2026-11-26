@@ -1719,6 +1719,51 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     renderDrawerTab();
   }
 
+  function stripUntrustedTags(raw) {
+    return String(raw || "")
+      .replace(/<\/?untrusted-data(?:\s+[^>]*)?>/gi, "")
+      .replace(/<<<UNTRUSTED_DATA_(?:BEGIN|END)[^>]*>>>/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function splitDrawerNotes(notes) {
+    const steer = [];
+    const sys = [];
+    for (const raw of notes || []) {
+      const s = String(raw || "").trim();
+      if (!s || s.startsWith("plan_approved:")) continue;
+      if (s.startsWith("steer:")) {
+        const body = s.slice(6).trim();
+        if (body) steer.push(body);
+      } else if (s.startsWith("audit_rework:")) {
+        sys.push({ label: tr("drawer.noteAudit"), body: stripUntrustedTags(s.slice(13)) });
+      } else if (s.startsWith("gate_diagnostic:")) {
+        sys.push({ label: tr("drawer.noteGate"), body: stripUntrustedTags(s.slice(16)) });
+      } else if (s.startsWith("unblock[")) {
+        sys.push({ label: tr("drawer.noteUnblock"), body: stripUntrustedTags(s) });
+      } else if (s.startsWith("unblocked:")) {
+        sys.push({ label: tr("drawer.noteUnblocked"), body: stripUntrustedTags(s.slice(10)) });
+      } else {
+        sys.push({ label: "", body: stripUntrustedTags(s) });
+      }
+    }
+    return { steer, sys };
+  }
+
+  function renderCompactSpec(specText) {
+    const clean = String(specText || "").trim();
+    if (!clean) return "";
+    const lines = clean.split("\n");
+    const isLong = clean.length > 360 || lines.length > 5;
+    if (!isLong) {
+      return `<div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(clean)}</div>`;
+    }
+    const preview = clean.length > 260 ? clean.slice(0, 260).trimEnd() + "…" : lines.slice(0, 4).join("\n") + "…";
+    return `<div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(preview)}</div>
+      <details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:12px;font-weight:600">${esc(tr("drawer.showMore"))}</summary><div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${esc(clean)}</div></details>`;
+  }
+
   async function renderDrawerTab() {
     if (!drawerTaskId || !drawerDetail) return;
     const renderSeq = ++drawerRenderSeq;
@@ -1741,6 +1786,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const blkText = formatBlockedText(t.blocked_reason);
       const canReview = t.state === "review" || t.state === "blocked";
       const canCancel = ["backlog", "ready", "blocked", "review"].includes(t.state);
+      const { steer, sys } = splitDrawerNotes(notes);
+      const planShort = plan.summary || (plan.contract && plan.contract.summary) || "";
       $("drawerBody").innerHTML = `
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
           <span class="pill pill-${esc(prioClass(t.priority))}">${esc(t.priority || "")}</span>
@@ -1752,12 +1799,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <div style="font-weight:700;font-size:16px;word-break:break-word">${esc(t.title)}</div>
         ${t.repo_root ? `<div class="mono" style="font-size:12px;color:var(--muted);overflow-wrap:anywhere">${esc(t.repo_root)}</div>` : ""}
         ${blkText ? `<div class="blocked-callout"><strong>${esc(tr("drawer.blockedPrefix"))}</strong> ${esc(blkText)}</div>` : ""}
-        ${plan.needs_approval ? `<div class="plan-callout"><strong>${esc(tr("drawer.planWaiting"))}</strong> ${esc(plan.summary || tr("drawer.planWaitingFallback"))}</div>` : ""}
+        ${plan.needs_approval ? `<div class="plan-callout"><strong>${esc(tr("drawer.planWaiting"))}</strong> ${esc(planShort || tr("drawer.planWaitingFallback"))}</div>` : ""}
+        ${plan.available && !plan.needs_approval ? `<div class="kv-section" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="min-width:0;font-size:13px"><strong style="margin-right:6px">${esc(tr("drawer.planSummary"))}:</strong><span class="muted">${esc(planShort)}</span></div><button type="button" class="btn-sm" id="drawerOpenPlanBtn" style="flex:none">${esc(tr("drawer.openPlan"))}</button></div>` : ""}
         <div class="kv-section"><div class="kv-title">${esc(tr("drawer.pipeline"))}</div><div id="drawerPipeBox" class="muted">${esc(tr("drawer.loadingPipeline"))}</div></div>
-        ${specText ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.spec"))}</div><div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(specText)}</div></div>` : ""}
-        ${acceptance.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.acceptance"))}</div>${acceptance.map((a)=>`<div style="margin-bottom:4px">• ${esc(a)}</div>`).join("")}</div>` : ""}
+        ${specText ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.spec"))}</div>${renderCompactSpec(specText)}</div>` : ""}
+        ${acceptance.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.acceptance"))}</div>${acceptance.map((a)=>`<div style="margin-bottom:4px;font-size:13px;line-height:1.45">• ${esc(a)}</div>`).join("")}</div>` : ""}
         ${deps.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.deps"))}</div><div class="mono">${esc(deps.join(", "))}</div></div>` : ""}
-        ${notes.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.notes"))}</div>${notes.map((n)=>`<div class="mono" style="margin-bottom:4px;overflow-wrap:anywhere">• ${esc(n)}</div>`).join("")}</div>` : ""}
+        ${steer.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.notes"))}</div>${steer.map((n)=>`<div style="margin-bottom:4px;font-size:13px;line-height:1.45">• ${esc(n)}</div>`).join("")}</div>` : ""}
+        ${sys.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.systemNotes", { n: sys.length }))}</summary><div style="margin-top:8px">${sys.map((item)=>`<div style="margin-bottom:6px;font-size:12.5px;line-height:1.45;overflow-wrap:anywhere">${item.label ? `<strong>${esc(item.label)}:</strong> ` : ""}<span class="muted">${esc(item.body.length > 260 ? item.body.slice(0, 260) + "…" : item.body)}</span></div>`).join("")}</div></details>` : ""}
         <div class="kv-section">
           <div class="kv-title">${esc(tr("drawer.runs", { n: runs.length }))}</div>
           ${runs.length ? runs.slice().reverse().map((r) => {
@@ -1773,10 +1822,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             </div>`;
           }).join("") : `<div class="muted">${esc(tr("drawer.noRuns"))}</div>`}
         </div>
-        <div class="kv-section">
-          <div class="kv-title">${esc(tr("drawer.recentEvents", { n: events.length }))}</div>
-          ${events.map((e) => `<div class="mono" style="font-size:11.5px;padding:3px 0;border-bottom:1px solid var(--border)">${esc(String(e.kind || "").replace(/_/g, " "))} · <span class="muted">${esc(ago(e.created_at))}</span></div>`).join("") || `<div class="muted">${esc(tr("drawer.none"))}</div>`}
-        </div>
+        <details class="kv-section">
+          <summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.recentEvents", { n: events.length }))}</summary>
+          <div style="margin-top:6px">${events.map((e) => `<div class="mono" style="font-size:11.5px;padding:3px 0;border-bottom:1px solid var(--border)">${esc(String(e.kind || "").replace(/_/g, " "))} · <span class="muted">${esc(ago(e.created_at))}</span></div>`).join("") || `<div class="muted">${esc(tr("drawer.none"))}</div>`}</div>
+        </details>
         <div class="action-bar">
           ${t.state === "backlog" ? `<button class="btn-primary btn-sm" id="drawerReadyBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.moveToReady"))}</button>` : ""}
           ${plan.needs_approval ? `<button class="btn-ok btn-sm" id="drawerApprovePlanBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.approvePlan"))}</button>` : ""}
@@ -1786,6 +1835,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           ${canCancel ? `<button class="btn-danger btn-sm" id="drawerCancelBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.cancelTask"))}</button>` : ""}
         </div>
         ${ro ? `<div class="muted" style="font-size:12px">${esc(roHint())}</div>` : ""}`;
+      if ($("drawerOpenPlanBtn")) $("drawerOpenPlanBtn").onclick = () => switchDrawerTab("plan");
       $("drawerBody").querySelectorAll("[data-run]").forEach((b) => {
         b.onclick = () => { closeDrawer(); switchTab("stream"); followRun(b.dataset.run); };
       });
@@ -1910,13 +1960,15 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const tests = c && Array.isArray(c.red_green_tests) ? c.red_green_tests : [];
       const tierReasons = c && Array.isArray(c.tier_reasons) ? c.tier_reasons : [];
       const openQs = c && Array.isArray(c.open_questions) ? c.open_questions : [];
+      const summaryText = plan.summary || (c && c.summary) || "";
+      const showNoteBody = !c && plan.note_body && plan.note_body.trim() !== summaryText.trim();
       $("drawerBody").innerHTML = `
         <div class="plan-callout">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
             <span style="font-weight:700">${esc(plan.needs_approval ? tr("drawer.planWaitingTitle") : tr("drawer.planRecordedTitle"))}</span>
             ${c && c.tier_assessment ? `<span class="pill pill-slate">${esc(c.tier_assessment)}</span>` : ""}
           </div>
-          <div>${esc(plan.summary || (c && c.summary) || plan.note_body || "")}</div>
+          <div>${esc(summaryText || plan.note_body || "")}</div>
           ${tierReasons.length ? `<div class="muted" style="font-size:12px;margin-top:5px">${tierReasons.map((r) => `• ${esc(r)}`).join(" ")}</div>` : ""}
           ${plan.hash ? `<div class="mono muted" style="margin-top:6px">hash: ${esc(plan.hash)}</div>` : ""}
         </div>
@@ -1924,7 +1976,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         ${invariants.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.invariants", { n: invariants.length }))}</div>${invariants.map((inv) => `<div style="margin-bottom:4px">• ${esc(inv)}</div>`).join("")}</div>` : ""}
         ${tests.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.tests", { n: tests.length }))}</div>${tests.map((rt) => `<div style="margin-bottom:6px"><span class="mono" style="font-weight:600">${esc(rt.test_path || rt.ac_ref || "test")}</span>${rt.red_condition ? `<div class="muted" style="font-size:12px">RED: ${esc(rt.red_condition)}</div>` : ""}${rt.green_condition ? `<div class="muted" style="font-size:12px">GREEN: ${esc(rt.green_condition)}</div>` : ""}</div>`).join("")}</div>` : ""}
         ${openQs.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.openQuestions", { n: openQs.length }))}</div>${openQs.map((q) => `<div style="margin-bottom:4px">• ${esc(q)}</div>`).join("")}</div>` : ""}
-        ${!c && plan.note_body ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.planDetails"))}</div><div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(plan.note_body)}</div></div>` : ""}
+        ${showNoteBody ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.planDetails"))}</div><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55">${esc(plan.note_body)}</div></div>` : ""}
         ${plan.needs_approval ? `<div class="action-bar"><button class="btn-ok" id="planTabApproveBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.approvePlanReady"))}</button></div>` : ""}`;
       if ($("planTabApproveBtn")) {
         $("planTabApproveBtn").onclick = () => runQuickAction("approve_plan", taskId, $("planTabApproveBtn"), true);

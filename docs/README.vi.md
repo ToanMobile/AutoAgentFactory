@@ -143,7 +143,7 @@ Biến môi trường: `AAF_DATA_DIR` (mặc định `~/.local/share/autofactory
 
 ## Mặc định có sẵn
 
-Repo không ghi key nào trong `.autofactory/config.toml` thì nhận giá trị dưới đây. Nguồn là [`crates/aaf-domain/defaults.toml`](../crates/aaf-domain/defaults.toml), được nhúng vào binary: sửa file đó, build lại hoặc chạy `/aaf-update`, là mọi repo đổi theo. Repo nào ghi rõ key thì giá trị của repo vẫn thắng. `aaf doctor --fix` xoá các dòng `auto_merge = false` / `max_parallel = 1` do `aaf init` bản cũ ghi, để các repo đó cũng nhận mặc định mới.
+Repo không ghi key nào trong `.autofactory/config.toml` thì nhận giá trị dưới đây. Nguồn là [`crates/aaf-domain/defaults.toml`](../crates/aaf-domain/defaults.toml), được nhúng vào binary: sửa file đó, build lại hoặc chạy `/aaf-update`, là mọi repo đổi theo. Repo nào ghi rõ key thì giá trị của repo vẫn thắng. `aaf doctor --fix` xoá các dòng `auto_merge = false`, `max_parallel = 1`, và `[proof] required = false` do `aaf init` bản cũ ghi, để các repo đó cũng nhận mặc định mới.
 
 | # | Key | Làm gì | Mặc định |
 |---|---|---|---|
@@ -157,7 +157,7 @@ Repo không ghi key nào trong `.autofactory/config.toml` thì nhận giá trị
 | 8 | `cross_audit.dual_review` | 2 reviewer độc lập. Không khai báo `[[cross_audit.reviewers]]` thì tự lấy `[run].executor` và auditor auto; máy chỉ có 1 provider thì chạy 1 audit và `aaf run` cảnh báo | `true` |
 | 9 | `cross_audit.require_different_provider` | Dừng thay vì audit bằng chính account của agent | `false` |
 | 10 | `gate.red_green_oracle` | Test mới phải fail trước khi sửa và pass sau khi sửa: `off`, `warn`, `block` | `"warn"` |
-| 11 | `proof.required` | Ảnh chụp làm bằng chứng cho thay đổi UI mobile | `false` |
+| 11 | `proof.required` | Ảnh chụp minh chứng (`mobile-mcp:mobile_save_screenshot`) cho thay đổi UI mobile & game | `true` (`android`, `ios`, `flutter`, `react-native`, `expo`, `unity`); `false` (`backend`, `rust`, `web`, `auto`) |
 | 12 | `github.enabled` | Đồng bộ task với GitHub Project board | `false` |
 | 13 | `telegram.enabled`, `allow_approve`, `allow_mutating` | Bot Telegram; cho duyệt và cho lệnh thay đổi trạng thái qua bot | `true`, `false`, `false` |
 | 14 | `notifications.webhook_url` | Webhook JSON khi có sự kiện (`""` = tắt) | `""` |

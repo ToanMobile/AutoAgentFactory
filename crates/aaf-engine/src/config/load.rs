@@ -15,8 +15,9 @@ use super::merge::{
     apply_cross_audit_overlay, apply_overlay, merge_cross_audit, merge_max_open_review,
 };
 use super::merge_pipeline::{
-    PipelineOverlay, RepoKeyPresence, apply_pipeline_overlay, merge_cross_audit_dual,
-    merge_pipeline, merge_unblocker, parse_repo_key_presence, reconcile_land_mode,
+    PipelineOverlay, RepoKeyPresence, apply_pipeline_overlay, apply_profile_proof_default,
+    merge_cross_audit_dual, merge_pipeline, merge_unblocker, parse_repo_key_presence,
+    reconcile_land_mode,
 };
 
 /// Tier 2, relative to the repo root.
@@ -287,6 +288,9 @@ fn layer(
         &mut warnings,
     );
     validate_profile(&repo)?;
+    if aaf_domain::builtin_defaults::is_active() {
+        apply_profile_proof_default(&mut repo, &inputs.repo_root, presence);
+    }
     Ok(EffectiveConfig {
         global,
         repo,

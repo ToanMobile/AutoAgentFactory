@@ -20,7 +20,9 @@ use aaf_engine::git::worktree::worktree_path;
 use serde_json::{Value, json};
 
 use crate::cmd::board::store::open_db;
-use crate::cmd::task_ops::{PLAN_APPROVAL_PREFIX, PLAN_DEBATE_STALLED_PREFIX, latest_plan_info};
+use crate::cmd::task_ops::{
+    PLAN_APPROVAL_PREFIX, PLAN_DEBATE_STALLED_PREFIX, latest_plan_info, plan_from_task_notes,
+};
 use crate::ctx::{Ctx, SystemClock};
 
 const MAX_TITLE_CHARS: usize = 200;
@@ -79,8 +81,12 @@ pub(super) fn task_needs_plan_approval(task: &Task) -> bool {
 
 pub(super) fn plan_detail_json(db: &Db, task: &Task) -> Value {
     let needs_approval = task_needs_plan_approval(task);
-    match latest_plan_info(db, &task.id) {
-        Ok(Some(plan)) => json!({
+    let plan = match latest_plan_info(db, &task.id) {
+        Ok(Some(plan)) => Some(plan),
+        _ => plan_from_task_notes(task),
+    };
+    match plan {
+        Some(plan) => json!({
             "available": true,
             "needs_approval": needs_approval,
             "summary": plan.summary,
@@ -88,7 +94,7 @@ pub(super) fn plan_detail_json(db: &Db, task: &Task) -> Value {
             "hash": plan.plan_contract_hash,
             "contract": plan.plan_contract,
         }),
-        _ => json!({
+        None => json!({
             "available": false,
             "needs_approval": needs_approval,
         }),

@@ -222,7 +222,7 @@ Add `--json` to any command for machine-readable output
 
 ## ⚙️ Built-in defaults
 
-What a repository gets when its `.autofactory/config.toml` leaves a key out. The source is [`crates/aaf-domain/defaults.toml`](crates/aaf-domain/defaults.toml), which is embedded in the binary: edit it, rebuild or run `/aaf-update`, and every repository follows. A key set in a repository still wins. `aaf doctor --fix` removes the `auto_merge = false` / `max_parallel = 1` lines that an older `aaf init` wrote, so those repositories pick up the new defaults too.
+What a repository gets when its `.autofactory/config.toml` leaves a key out. The source is [`crates/aaf-domain/defaults.toml`](crates/aaf-domain/defaults.toml), which is embedded in the binary: edit it, rebuild or run `/aaf-update`, and every repository follows. A key set in a repository still wins. `aaf doctor --fix` removes the `auto_merge = false`, `max_parallel = 1`, and `proof.required = false` lines that an older `aaf init` wrote, so those repositories pick up the new defaults too.
 
 | # | Key | What it does | Default |
 |---|---|---|---|
@@ -236,7 +236,7 @@ What a repository gets when its `.autofactory/config.toml` leaves a key out. The
 | 8 | `cross_audit.dual_review` | Two independent reviewers. Without `[[cross_audit.reviewers]]` they are `[run].executor` and the resolved auditor; with only one provider installed, one audit runs and `aaf run` warns | `true` |
 | 9 | `cross_audit.require_different_provider` | Stop instead of auditing with the agent's own account | `false` |
 | 10 | `gate.red_green_oracle` | New tests must fail before and pass after the fix: `off`, `warn`, `block` | `"warn"` |
-| 11 | `proof.required` | Screenshot proof for mobile UI changes | `false` |
+| 11 | `proof.required` | Screenshot proof (`mobile-mcp:mobile_save_screenshot`) for mobile & game UI changes | `true` (`android`, `ios`, `flutter`, `react-native`, `expo`, `unity`); `false` (`backend`, `rust`, `web`, `auto`) |
 | 12 | `github.enabled` | Sync tasks with a GitHub Project board | `false` |
 | 13 | `telegram.enabled`, `allow_approve`, `allow_mutating` | Telegram bot; approving and state-changing commands from it | `true`, `false`, `false` |
 | 14 | `notifications.webhook_url` | JSON webhook for events (`""` = off) | `""` |

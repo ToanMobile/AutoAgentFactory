@@ -112,10 +112,13 @@ pub fn build_plan_prompt(task: &Task, ctx: &PromptContext<'_>) -> String {
         "You are in READ-ONLY planning mode for one task (running headlessly with no human \
          present — do not ask questions or wait for confirmation). Do NOT edit, create, or \
          delete any files, and do NOT run commits or mutating commands.\n\
-         Inspect the codebase and produce a concise implementation plan covering:\n\
-         1. Files to change (paths and responsibilities)\n\
-         2. Test strategy (tests to add/update to prove each acceptance criterion)\n\
-         3. Risks and edge cases\n\n\
+         Inspect the codebase and write an ULTRA-CONCISE implementation plan in the task's \
+         language (target <= 1,200 chars, <= 12 short bullets). Start directly with the plan \
+         — NEVER add preambles or apologies about read-only mode or inability to save a plan \
+         file. Cover only:\n\
+         1. Files to change (1 short line per file: path + what changes)\n\
+         2. Test strategy (concrete RED->GREEN checks for each acceptance criterion)\n\
+         3. Key risks / edge cases (1-3 short bullets)\n\n\
          # Task: {}\n\n{}\n\n# Acceptance criteria\n\n",
         task.title, task.spec.description
     );

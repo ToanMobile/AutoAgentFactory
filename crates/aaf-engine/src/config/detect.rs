@@ -352,6 +352,19 @@ pub fn effective_profile(repo: &RepoConfig, repo_root: &Path) -> String {
     }
 }
 
+/// Whether `[proof].required` defaults to `true` for `profile`.
+///
+/// Enabled for mobile & game profiles (`android`, `ios`, `flutter`,
+/// `react-native`, `expo`, `unity`) so `mobile-mcp:mobile_save_screenshot`
+/// proof verification runs out of the box; disabled for non-mobile stacks
+/// (`backend`, `rust`, `web`, `auto`, ...).
+pub fn default_proof_required(profile: &str) -> bool {
+    matches!(
+        profile.trim().to_ascii_lowercase().as_str(),
+        "android" | "ios" | "flutter" | "react-native" | "expo" | "unity"
+    )
+}
+
 /// Sensible default `[proof].trigger_globs` for UI-bearing project stacks.
 ///
 /// Returns an empty list for headless/non-UI stacks (`rust`, `backend`, `auto`, ...).
@@ -362,6 +375,7 @@ pub fn default_proof_trigger_globs(profile: &str) -> Vec<String> {
         "flutter" => &["lib/**"],
         "react-native" | "expo" => &["src/**", "app/**"],
         "web" => &["src/**", "app/**", "pages/**"],
+        "unity" => &["Assets/**"],
         _ => &[],
     };
     globs.iter().map(|s| (*s).to_string()).collect()

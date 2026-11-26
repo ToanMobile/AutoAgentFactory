@@ -349,3 +349,53 @@ fn do_delete_done_archives_terminal_tasks_and_enforces_strict_validation() {
     assert!(db.get_task("t-done1").is_ok());
     assert!(db.get_task("t-done2").is_ok());
 }
+
+#[test]
+fn plan_detail_falls_back_to_approved_context_note_after_human_unblock() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("state.db")).unwrap();
+    let mut task = aaf_domain::task::Task::new_root(
+        "t-plan-fb",
+        "/repo/a",
+        "Demo plan fallback",
+        aaf_domain::task::ImmutableSpec {
+            description: "Desc".into(),
+            acceptance: vec!["ac".into()],
+        },
+        aaf_domain::task::Priority::P1,
+        100,
+    );
+    task.context_notes
+        .push("plan_approved: # Plan: Fix login\n- Update Login.kt\n- Add LoginTest".into());
+    db.insert_task(&task).unwrap();
+    db.emit(
+        &aaf_domain::event::FactoryEvent::new(
+            aaf_domain::event::EventKind::PlanGenerated,
+            serde_json::json!({ "plan": "# Plan: Fix login\n- Update Login.kt" }).to_string(),
+            101,
+        )
+        .for_task("t-plan-fb"),
+    )
+    .unwrap();
+    // Human unblock starts a new epoch; latest_plan_info stops here, so UI must fall back to context_notes.
+    db.emit(
+        &aaf_domain::event::FactoryEvent::new(
+            aaf_domain::event::EventKind::TaskStateChanged,
+            serde_json::json!({ "by": "human", "to": "ready", "why": "aaf board unblock --all" })
+                .to_string(),
+            102,
+        )
+        .for_task("t-plan-fb"),
+    )
+    .unwrap();
+
+    let detail = extras::plan_detail_json(&db, &task);
+    assert_eq!(detail["available"], true);
+    assert_eq!(detail["summary"], "Plan: Fix login");
+    assert!(
+        detail["note_body"]
+            .as_str()
+            .unwrap()
+            .contains("- Update Login.kt")
+    );
+}

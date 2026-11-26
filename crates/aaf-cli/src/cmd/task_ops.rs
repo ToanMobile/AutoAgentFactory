@@ -225,11 +225,49 @@ pub(crate) fn latest_plan_info(db: &Db, task_id: &str) -> Result<Option<LatestPl
         }
     }
     Ok(legacy.map(|plan| LatestPlan {
-        summary: plan.clone(),
+        summary: plan_summary_one_line(&plan),
         note_body: plan,
         plan_contract_hash: None,
         plan_contract: None,
     }))
+}
+
+/// Extracts a concise single-line summary from free-form markdown plan text.
+pub(crate) fn plan_summary_one_line(plan: &str) -> String {
+    let first = plan
+        .lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches(['#', '-', '*', '•', ' '])
+                .trim()
+        })
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let mut chars = first.chars();
+    let short: String = chars.by_ref().take(140).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// Fallback for Cockpit/UI inspection when a task already carries an approved
+/// plan in `context_notes` across a human unblock (which breaks event-epoch lookup).
+pub(crate) fn plan_from_task_notes(task: &Task) -> Option<LatestPlan> {
+    let body = task
+        .context_notes
+        .iter()
+        .rev()
+        .find_map(|n| n.strip_prefix(PLAN_APPROVED_PREFIX))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(LatestPlan {
+        summary: plan_summary_one_line(body),
+        note_body: body.to_string(),
+        plan_contract_hash: None,
+        plan_contract: None,
+    })
 }
 
 pub(crate) fn format_approved_plan_note(plan: &LatestPlan) -> String {

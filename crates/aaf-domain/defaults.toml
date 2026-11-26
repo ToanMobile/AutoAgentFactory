@@ -47,7 +47,9 @@ require_plan_approval = false
 red_green_oracle = "warn"
 
 [proof]
-# [11] true = bắt buộc ảnh chụp màn hình làm bằng chứng cho thay đổi UI.
+# [11] Mặc định bật (true) cho mọi profile mobile & game (android, ios, flutter,
+# react-native, expo, unity) kèm trigger_globs theo stack; tắt (false) cho
+# backend, rust, web, auto. Giá trị dưới đây là baseline cho stack không phải mobile/game.
 required = false
 
 [github]

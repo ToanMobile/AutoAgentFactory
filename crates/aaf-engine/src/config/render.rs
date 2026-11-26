@@ -279,13 +279,13 @@ max_days = {fg_max_days}
         fg_cooldown = defaults.full_gate.cooldown_hours,
         fg_max_days = defaults.full_gate.max_days,
     );
-    leave_builtin_keys_out(&out)
+    leave_builtin_keys_out(&out, &detected.profile)
 }
 
 /// Keys that `crates/aaf-domain/defaults.toml` decides are written commented
 /// out, with the built-in value, so the repository keeps following that file
 /// until someone uncomments a line to pin it.
-fn leave_builtin_keys_out(text: &str) -> String {
+fn leave_builtin_keys_out(text: &str, profile: &str) -> String {
     let entries = aaf_domain::builtin_defaults::repo_entries();
     let mut section = String::new();
     let mut out = String::with_capacity(text.len());
@@ -298,7 +298,16 @@ fn leave_builtin_keys_out(text: &str) -> String {
                 .iter()
                 .find(|(s, k, _)| *s == section && k == key.trim())
         {
-            let _ = writeln!(out, "# {} = {value}   # built-in default", key.trim());
+            let shown = if section == "proof" && key.trim() == "required" {
+                if super::detect::default_proof_required(profile) {
+                    "true"
+                } else {
+                    "false"
+                }
+            } else {
+                value.as_str()
+            };
+            let _ = writeln!(out, "# {} = {shown}   # built-in default", key.trim());
             continue;
         }
         out.push_str(line);

@@ -35,17 +35,19 @@ const STALE: [(&str, &str, &[&str]); 2] = [
 /// What [`strip`] remembers above the next line after dropping `auto_merge`.
 const REMOVED_AUTO_MERGE: &str = "\0removed auto_merge";
 
-/// `text` without the stale lines of its `[run]` table, and the keys removed.
+/// `text` without the stale lines of its `[run]` and `[proof]` tables, and the keys removed.
 pub fn strip(text: &str) -> (String, Vec<&'static str>) {
     let mut out = String::with_capacity(text.len());
     let mut removed = Vec::new();
-    let mut in_run = false;
+    let mut section = String::new();
     let mut above = String::new();
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_run = trimmed == "[run]";
-        } else if in_run && let Some((key, value)) = trimmed.split_once('=') {
+            section = trimmed.to_string();
+        } else if section == "[run]"
+            && let Some((key, value)) = trimmed.split_once('=')
+        {
             let (key, value) = (key.trim(), value.trim());
             if let Some((stale_key, _, _)) = STALE
                 .iter()
@@ -59,6 +61,15 @@ pub fn strip(text: &str) -> (String, Vec<&'static str>) {
                 };
                 continue;
             }
+        } else if section == "[proof]"
+            && above == "[proof]"
+            && let Some((key, value)) = trimmed.split_once('=')
+            && key.trim() == "required"
+            && value.trim() == "false"
+        {
+            removed.push("proof.required");
+            above.clear();
+            continue;
         }
         above = trimmed.to_string();
         out.push_str(line);
@@ -185,10 +196,20 @@ mod tests {
             "[run]\nauto_merge = true\nmax_parallel = 3\n",
             // Not where the old template put it: written by hand.
             "[run]\n# review every change\nauto_merge = false\nmax_parallel = 1\n",
+            "[proof]\n# disabled on purpose\nrequired = false\n",
+            "[proof]\nrequired = true\n",
         ] {
             let (out, removed) = strip(text);
             assert!(removed.is_empty(), "{text}");
             assert_eq!(out, text);
         }
+    }
+
+    #[test]
+    fn drops_old_init_proof_required_false() {
+        let text = "[proof]\nrequired = false\nmin_bytes = 8192\n";
+        let (out, removed) = strip(text);
+        assert_eq!(removed, vec!["proof.required"]);
+        assert_eq!(out, "[proof]\nmin_bytes = 8192\n");
     }
 }

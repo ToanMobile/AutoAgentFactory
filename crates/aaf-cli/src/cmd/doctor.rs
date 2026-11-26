@@ -320,11 +320,8 @@ fn proof_readiness_check(
     let (Some(root), Some(profile)) = (repo_root, profile) else {
         return not_applicable("proof_readiness");
     };
-    let mobile = matches!(
-        profile,
-        "android" | "ios" | "flutter" | "react-native" | "expo" | "unity"
-    );
-    if !cfg.repo.proof.required && !mobile {
+    let ui_profile = aaf_engine::config::default_proof_required(profile);
+    if !cfg.repo.proof.required && !ui_profile {
         return advisory("proof_readiness", Ok(format!("not required for {profile}")));
     }
     let mut issues = Vec::new();

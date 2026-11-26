@@ -211,6 +211,11 @@ fn layer_off() -> bool {
     cfg!(debug_assertions) && std::env::var_os("AAF_NO_BUILTIN_DEFAULTS").is_some()
 }
 
+/// Whether the embedded `defaults.toml` layer is active in this process.
+pub fn is_active() -> bool {
+    !layer_off()
+}
+
 #[allow(clippy::expect_used)]
 fn embedded_table() -> &'static toml::Table {
     static TABLE: OnceLock<toml::Table> = OnceLock::new();

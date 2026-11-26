@@ -19,7 +19,7 @@ use crate::git::TaskWorktree;
 use crate::unblocker::FailureSignal;
 
 const EMPTY_PLAN: &str = "the plan run ended without producing a plan";
-const MAX_PLAN_CHARS: usize = 4000;
+const MAX_PLAN_CHARS: usize = 2000;
 const PLAN_EVENTS_LIMIT: u32 = 100;
 
 pub(super) fn needs_plan_stage(deps: &Deps, task: &Task) -> PortResult<bool> {

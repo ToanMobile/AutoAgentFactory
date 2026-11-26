@@ -31,6 +31,8 @@ pub(crate) struct RepoKeyPresence {
     pub cost_guard_spike_factor: bool,
     pub run_auto_merge: bool,
     pub run_land: bool,
+    pub proof_required: bool,
+    pub proof_trigger_globs: bool,
 }
 
 impl RepoKeyPresence {
@@ -54,6 +56,8 @@ impl RepoKeyPresence {
             cost_guard_spike_factor: false,
             run_auto_merge: false,
             run_land: false,
+            proof_required: true,
+            proof_trigger_globs: true,
         }
     }
 
@@ -80,6 +84,8 @@ impl RepoKeyPresence {
             ),
             run_auto_merge: has_key(table, "run", "auto_merge"),
             run_land: has_key(table, "run", "land"),
+            proof_required: has_key(table, "proof", "required"),
+            proof_trigger_globs: has_key(table, "proof", "trigger_globs"),
         }
     }
 }
@@ -133,6 +139,27 @@ fn matches_auto_merge_repo(allowlist: &[String], repo_root: &Path) -> bool {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         canon == canon_root
     })
+}
+
+/// Applies profile-aware built-in `[proof]` defaults when Tier-2 omitted
+/// `proof.required`: `true` (+ stack `trigger_globs`) for mobile & game
+/// profiles (`android`, `ios`, `flutter`, `react-native`, `expo`, `unity`),
+/// `false` for `backend`, `rust`, `web`, `auto`.
+pub(crate) fn apply_profile_proof_default(
+    repo: &mut RepoConfig,
+    repo_root: &Path,
+    presence: &RepoKeyPresence,
+) {
+    if presence.proof_required {
+        return;
+    }
+    let profile = super::detect::effective_profile(repo, repo_root);
+    if super::detect::default_proof_required(&profile) {
+        repo.proof.required = true;
+        if !presence.proof_trigger_globs && repo.proof.trigger_globs.is_empty() {
+            repo.proof.trigger_globs = super::detect::default_proof_trigger_globs(&profile);
+        }
+    }
 }
 
 fn has_key(table: &toml::Table, section: &str, key: &str) -> bool {
