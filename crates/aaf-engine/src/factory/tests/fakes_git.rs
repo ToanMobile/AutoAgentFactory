@@ -9,7 +9,8 @@ use aaf_domain::ports::{PortError, PortResult};
 
 use crate::factory::ports::{GitOps, Integration};
 use crate::git::pr_feedback_gh::{PrFeedbackSnapshot, PrRef};
-use crate::git::{MergeOutcome, PrOutcome, TaskWorktree};
+use crate::git::pr_merged_gh::VerifiedPrMerge;
+use crate::git::{GitError, MergeOutcome, PrOutcome, TaskWorktree};
 use crate::pr_ops::PrMergeOutcome;
 
 pub(super) fn task_of(path: &Path) -> String {
@@ -61,6 +62,8 @@ pub struct GitState {
     pub merge_pr_script: VecDeque<PrMergeOutcome>,
     /// `(pr_url, head_sha)` of every `merge_pr` call.
     pub merge_pr_calls: Vec<(String, String)>,
+    /// Optional verified merged PR outcomes returned by `verified_merged_pr` (keyed by PR number).
+    pub verified_merged_pr: HashMap<u64, Result<Option<VerifiedPrMerge>, String>>,
 }
 
 #[derive(Default)]
@@ -249,6 +252,14 @@ impl GitOps for FakeGit {
         match state.pr_feedback.get(&pr.number) {
             Some(Ok(snap)) => Ok(snap.clone()),
             Some(Err(err)) => Err(PortError::Io(err.to_string())),
+            None => Ok(None),
+        }
+    }
+    fn verified_merged_pr(&self, pr: &PrRef) -> Result<Option<VerifiedPrMerge>, GitError> {
+        let state = self.0.lock().unwrap();
+        match state.verified_merged_pr.get(&pr.number) {
+            Some(Ok(res)) => Ok(res.clone()),
+            Some(Err(msg)) => Err(GitError::Invalid(msg.clone())),
             None => Ok(None),
         }
     }

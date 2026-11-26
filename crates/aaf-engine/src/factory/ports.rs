@@ -291,6 +291,16 @@ pub trait GitOps: Send + Sync {
     ) -> PortResult<Option<PrFeedbackSnapshot>> {
         Ok(None)
     }
+    /// Verifies whether a `Review` task's recorded PR URL has been `MERGED`
+    /// into the repository base branch on GitHub (even without a local
+    /// worktree or `aaf/<task_id>` head branch). Returns `Ok(None)` when not
+    /// merged or unsupported.
+    fn verified_merged_pr(
+        &self,
+        _pr: &PrRef,
+    ) -> Result<Option<crate::git::pr_merged_gh::VerifiedPrMerge>, GitError> {
+        Ok(None)
+    }
 }
 
 /// An account to run on, held until dropped. `account` is `None` when no

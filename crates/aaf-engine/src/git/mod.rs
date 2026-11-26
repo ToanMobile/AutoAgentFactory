@@ -15,6 +15,7 @@ pub mod hydration;
 pub mod merge_queue;
 pub mod pr;
 pub mod pr_feedback_gh;
+pub mod pr_merged_gh;
 pub mod warm_slot;
 mod warm_slot_ops;
 pub mod worktree;

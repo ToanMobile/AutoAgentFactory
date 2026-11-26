@@ -37,4 +37,5 @@ mod rebase_hooks;
 mod round;
 mod selection;
 mod startup_sweep;
+mod sweep_merged_pr;
 mod world;

@@ -8,11 +8,28 @@ use aaf_domain::ports::PortResult;
 
 use super::{GitOps, RealGit, err};
 use crate::git::cmd::git;
+use crate::git::pr_feedback_gh::PrRef;
+use crate::git::pr_merged_gh::{VerifiedPrMerge, verify_merged_pr};
 use crate::git::worktree;
 use crate::git::{GitError, TaskWorktree};
 use crate::process::CommandRunner;
 
 impl RealGit {
+    /// Checks whether a recorded PR URL is `MERGED` into the configured base
+    /// branch using `runner` (injectable in tests).
+    pub fn verify_merged_pr_with(
+        &self,
+        pr: &PrRef,
+        runner: &dyn CommandRunner,
+    ) -> Result<Option<VerifiedPrMerge>, GitError> {
+        verify_merged_pr(
+            runner,
+            &self.repo_root,
+            pr,
+            &self.base.branch,
+            &self.start(),
+        )
+    }
     /// Runs squash-merge PR verification using `runner` (injectable in tests).
     pub fn verify_squash_merges_with(
         &self,

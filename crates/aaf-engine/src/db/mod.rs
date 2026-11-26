@@ -8,6 +8,7 @@
 //! failing half-way through a transaction.
 
 mod cancel;
+mod done;
 mod history;
 pub mod private;
 mod purge;
@@ -30,6 +31,7 @@ use aaf_domain::ports::{PortError, PortResult};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 
 pub use cancel::{CancelOutcome, CancelRefusal};
+pub use done::{DoneOptions, DoneOutcome, DoneRefusal};
 pub use history::ArchivedEventRow;
 pub use purge::PurgeOutcome;
 pub use queries::BoardEnrichment;

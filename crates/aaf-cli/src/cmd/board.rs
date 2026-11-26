@@ -4,6 +4,7 @@
 mod approve_plan;
 mod cancel;
 mod dag;
+mod done;
 pub(crate) mod github;
 mod rework;
 pub(crate) mod split;
@@ -54,6 +55,8 @@ pub enum BoardCommand {
     Rework(rework::ReworkArgs),
     /// Cancel a non-active task (optionally cascading to unfinished subtasks).
     Cancel(cancel::CancelArgs),
+    /// Mark a non-active task Done manually (e.g. PR merged outside `aaf merge`).
+    Done(done::DoneArgs),
     /// Show chronological runs, events, tokens, wall-clock and estimated cost for a task.
     Trace(trace::TraceArgs),
     /// Import open GitHub issues from allowlisted logins with 72h dedup.
@@ -145,6 +148,7 @@ pub fn run(args: &BoardArgs, ctx: &Ctx) -> CmdResult {
         BoardCommand::Unfreeze => unfreeze_factory(ctx),
         BoardCommand::Rework(rework_args) => rework::run(rework_args, ctx),
         BoardCommand::Cancel(cancel_args) => cancel::run(cancel_args, ctx),
+        BoardCommand::Done(done_args) => done::run(done_args, ctx),
         BoardCommand::Trace(trace_args) => trace::run(trace_args, ctx),
         BoardCommand::ImportIssues(import_args) => github::run_import_issues(import_args, ctx),
         BoardCommand::SyncGithub(sync_args) => github::run_sync_github(sync_args, ctx),

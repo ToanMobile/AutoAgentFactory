@@ -575,4 +575,14 @@ impl GitOps for RealGit {
             .map(Some)
             .map_err(err)
     }
+
+    fn verified_merged_pr(
+        &self,
+        pr: &PrRef,
+    ) -> Result<Option<crate::git::pr_merged_gh::VerifiedPrMerge>, GitError> {
+        let runner = SystemRunner {
+            timeout: GH_LIST_TIMEOUT,
+        };
+        self.verify_merged_pr_with(pr, &runner)
+    }
 }
