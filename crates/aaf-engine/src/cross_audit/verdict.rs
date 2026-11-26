@@ -3,14 +3,14 @@
 use std::borrow::Cow;
 
 use aaf_domain::gate::GoldenScore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::checklist::Item;
 use super::diff_hunks::{DiffHunks, evidence_in_diff, has_file_line_reference};
 use super::scoring::GOLDEN_IDS;
 
 /// A checklist item the auditor answered "yes".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub id: String,
     pub question: String,

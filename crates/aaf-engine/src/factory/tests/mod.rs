@@ -28,6 +28,7 @@ mod merge_retry;
 mod opt12;
 mod oracle_g3_rework_filter;
 mod policy;
+mod post_audit_replay;
 mod pr_feedback;
 mod proof_needs_human;
 mod real_run;

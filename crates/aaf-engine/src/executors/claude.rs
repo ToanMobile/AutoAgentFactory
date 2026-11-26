@@ -25,15 +25,6 @@ pub struct ClaudeCodeRunner {
     allow_unsandboxed_bypass: bool,
 }
 
-fn flag_value(key: &str, value: &str) -> PortResult<()> {
-    if value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(PortError::Invalid(format!(
-            "run.{key} = {value:?} is not a single word"
-        )));
-    }
-    Ok(())
-}
-
 impl ClaudeCodeRunner {
     pub fn new(bin: impl Into<String>, env: ExecEnv) -> Self {
         Self {
@@ -62,51 +53,12 @@ impl ClaudeCodeRunner {
 
     /// The exact command a run of `request` executes (before sandboxing).
     pub fn command(&self, request: &AgentRequest) -> PortResult<CommandSpec> {
-        if request.prompt.is_empty() {
-            return Err(PortError::Invalid("empty prompt".to_string()));
-        }
-        let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        // Permission mode selection (`claude --help`, 2.1.330):
-        // - Read-only: `--permission-mode plan`.
-        // - Sandboxed (or explicit non-persistent CLI opt-in): `bypassPermissions`.
-        // - Default unsandboxed: `acceptEdits` + `--permission-prompts none`.
-        if request.sandbox.read_only {
-            args.extend(["--permission-mode", "plan"].map(String::from));
-        } else if request.sandbox.enabled || self.allow_unsandboxed_bypass {
-            args.extend(["--permission-mode", "bypassPermissions"].map(String::from));
-        } else {
-            args.extend(
-                [
-                    "--permission-mode",
-                    "acceptEdits",
-                    "--permission-prompts",
-                    "none",
-                ]
-                .map(String::from),
-            );
-        }
-        for (flag, key, value) in [
-            ("--model", "model", &self.model),
-            ("--effort", "effort", &self.effort),
-        ] {
-            if !value.is_empty() {
-                flag_value(key, value)?;
-                args.extend([flag.to_string(), value.clone()]);
-            }
-        }
-        if let Some(schema) = request
-            .json_schema
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            args.extend(["--json-schema".to_string(), schema.to_string()]);
-        }
-        // After `--` so a prompt that starts with a dash is still the prompt.
-        args.push("--".to_string());
-        args.push(request.prompt.clone());
+        let args = super::claude_flags::build_claude_args(
+            request,
+            &self.model,
+            &self.effort,
+            self.allow_unsandboxed_bypass,
+        )?;
 
         let mut env = Vec::new();
         if let Some(account) = &request.account {

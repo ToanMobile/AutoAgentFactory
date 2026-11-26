@@ -554,3 +554,47 @@ fn real_cli_streams_json_under_pty_and_sandbox() {
     );
     assert!(summary.final_text.contains("Not logged in"), "{summary:?}");
 }
+
+#[test]
+fn read_only_command_uses_slim_flags_without_stripping_inspection_tools() {
+    let mut ro = request("audit the diff", "/work");
+    ro.sandbox.enabled = true;
+    ro.sandbox.read_only = true;
+    let args = runner().command(&ro).unwrap().args;
+
+    let pos = |flag: &str| args.iter().position(|a| a == flag);
+    let mode_idx = pos("--permission-mode").expect("permission mode");
+    assert_eq!(args[mode_idx + 1], "plan");
+    assert!(
+        args.contains(&"--no-session-persistence".to_string()),
+        "read-only runs must skip session persistence: {args:?}"
+    );
+    assert!(
+        args.contains(&"--strict-mcp-config".to_string()),
+        "read-only runs must fail-closed without external MCP schemas: {args:?}"
+    );
+    let disallowed_idx = pos("--disallowedTools").expect("disallowedTools");
+    let disallowed = &args[disallowed_idx + 1];
+    for blocked in ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"] {
+        assert!(
+            disallowed.contains(blocked),
+            "missing {blocked}: {disallowed}"
+        );
+    }
+    assert!(
+        !disallowed.contains("Agent"),
+        "Agent tool must stay enabled for large-diff audits: {disallowed}"
+    );
+    assert!(
+        !args.contains(&"--tools".to_string()),
+        "never strip read-only inspection tools via --tools: {args:?}"
+    );
+
+    // Write runs must keep MCP inheritance and session persistence intact.
+    let mut rw = request("implement feature", "/work");
+    rw.sandbox.enabled = true;
+    let rw_args = runner().command(&rw).unwrap().args;
+    assert!(!rw_args.contains(&"--strict-mcp-config".to_string()));
+    assert!(!rw_args.contains(&"--no-session-persistence".to_string()));
+    assert!(!rw_args.contains(&"--disallowedTools".to_string()));
+}

@@ -20,21 +20,79 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-/* --- Task Pipeline SVG DAG --- */
-.aaf-pipe-wrap{display:flex;flex-direction:column;gap:10px;min-width:0}
-.aaf-pipe-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:10px 8px}
-.aaf-pipe-svg{display:block;height:auto;overflow:visible}
-.aaf-pipe-node{cursor:pointer;outline:none}
-.aaf-pipe-node:hover .aaf-pipe-box{filter:brightness(0.97)}
-[data-theme="dark"] .aaf-pipe-node:hover .aaf-pipe-box{filter:brightness(1.1)}
-.aaf-pipe-node:focus-visible .aaf-pipe-box{stroke:var(--accent)!important;stroke-width:2.5!important}
-.aaf-pipe-node.selected .aaf-pipe-box{stroke-width:2.5!important}
-@keyframes aafPipePulse{0%,100%{opacity:.55;stroke-width:2}50%{opacity:.12;stroke-width:8}}
-.aaf-pipe-pulse{animation:aafPipePulse 1.8s ease-in-out infinite}
-@media(prefers-reduced-motion:reduce){.aaf-pipe-pulse{animation:none;opacity:.3}}
-.aaf-pipe-legend{display:flex;gap:12px;flex-wrap:wrap;align-items:center;font-size:11.5px;color:var(--muted)}
-.aaf-pipe-leg-item{display:inline-flex;align-items:center;gap:5px}
-.aaf-pipe-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+/* --- Task Pipeline Fit-to-Screen Stepper Grid --- */
+.aaf-pipe-wrap{display:flex;flex-direction:column;gap:9px;min-width:0;width:100%}
+.aaf-pipe-banner{background:var(--surface2);border:1px solid var(--border);border-left:4px solid var(--accent);border-radius:11px;padding:10px 12px;display:flex;flex-direction:column;gap:7px;min-width:0}
+.aaf-pipe-banner.st-passed{border-left-color:var(--ok);background:color-mix(in srgb,var(--ok-bg) 55%,var(--surface2))}
+.aaf-pipe-banner.st-running{border-left-color:var(--info,var(--accent));background:color-mix(in srgb,var(--info-bg,var(--surface2)) 70%,var(--surface2))}
+.aaf-pipe-banner.st-waiting_human{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn-bg) 65%,var(--surface2))}
+.aaf-pipe-banner.st-failed{border-left-color:var(--err);background:color-mix(in srgb,var(--err-bg) 65%,var(--surface2))}
+.aaf-pipe-banner.st-skipped{border-left-color:var(--slate,var(--muted))}
+.aaf-pipe-banner-top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.aaf-pipe-now{display:flex;align-items:center;gap:7px;min-width:0;flex-wrap:wrap}
+.aaf-pipe-live-dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+@keyframes aafPipeDotPulse{0%,100%{box-shadow:0 0 0 0 currentColor}55%{box-shadow:0 0 0 6px transparent}}
+.aaf-pipe-live-dot.pulsing{animation:aafPipeDotPulse 1.7s ease-out infinite}
+@media(prefers-reduced-motion:reduce){.aaf-pipe-live-dot.pulsing{animation:none}}
+.aaf-pipe-now-title{font-weight:700;font-size:13px;color:var(--ink);letter-spacing:-.01em}
+.aaf-pipe-prog-meta{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.aaf-pipe-prog-track{height:6px;border-radius:999px;background:color-mix(in srgb,var(--border) 75%,transparent);overflow:hidden;width:100%}
+.aaf-pipe-prog-fill{height:100%;border-radius:999px;transition:width .25s ease}
+.aaf-pipe-now-sub{font-size:11.5px;color:var(--ink2,var(--muted));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.aaf-pipe-board{background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.aaf-pipe-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 14px;width:100%;min-width:0}
+@media(max-width:460px){.aaf-pipe-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px}}
+.aaf-pipe-cell{position:relative;min-width:0;display:flex}
+.aaf-pipe-cell:not(:nth-child(4n)):not(:last-child)::after{content:"›";position:absolute;right:-11px;top:50%;transform:translateY(-52%);font-size:15px;font-weight:700;line-height:1;color:var(--border-strong,var(--muted));pointer-events:none;user-select:none}
+.aaf-pipe-cell.edge-ok:not(:nth-child(4n)):not(:last-child)::after{color:var(--ok)}
+@media(max-width:460px){
+  .aaf-pipe-cell:not(:nth-child(4n)):not(:last-child)::after{display:none}
+  .aaf-pipe-cell:not(:nth-child(2n)):not(:last-child)::after{display:block;right:-10px}
+}
+.aaf-pipe-node{position:relative;flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;padding:8px 8px 7px;border-radius:9px;border:1.5px solid var(--border);background:var(--surface);color:var(--ink);text-align:left;cursor:pointer;outline:none;transition:transform .12s ease,border-color .14s ease,box-shadow .14s ease,opacity .14s ease}
+.aaf-pipe-node:hover{border-color:var(--accent);opacity:1;transform:translateY(-1px)}
+.aaf-pipe-node:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.aaf-pipe-node.selected{box-shadow:0 0 0 2px var(--accent)!important;border-color:var(--accent)!important;opacity:1}
+.aaf-pipe-node.st-passed{background:color-mix(in srgb,var(--ok-bg) 70%,var(--surface));border-color:color-mix(in srgb,var(--ok) 48%,var(--border))}
+.aaf-pipe-node.st-running{background:color-mix(in srgb,var(--info-bg,var(--surface2)) 85%,var(--surface));border-color:var(--info,var(--accent))}
+.aaf-pipe-node.st-failed{background:color-mix(in srgb,var(--err-bg) 80%,var(--surface));border-color:var(--err)}
+.aaf-pipe-node.st-waiting_human{background:color-mix(in srgb,var(--warn-bg) 80%,var(--surface));border-color:var(--warn)}
+.aaf-pipe-node.st-skipped{background:var(--surface2);border-style:dashed;opacity:.72}
+.aaf-pipe-node.st-pending{opacity:.62}
+.aaf-pipe-node.is-current{opacity:1;border-width:2px;box-shadow:0 2px 10px color-mix(in srgb,var(--accent) 22%,transparent),0 0 0 2.5px color-mix(in srgb,var(--accent) 18%,transparent)}
+.aaf-pipe-node.is-current.st-running{box-shadow:0 2px 12px color-mix(in srgb,var(--info,var(--accent)) 28%,transparent),0 0 0 2.5px color-mix(in srgb,var(--info,var(--accent)) 22%,transparent)}
+.aaf-pipe-node.is-current.st-waiting_human{box-shadow:0 2px 12px color-mix(in srgb,var(--warn) 26%,transparent),0 0 0 2.5px color-mix(in srgb,var(--warn) 22%,transparent)}
+.aaf-pipe-node.is-current.st-failed{box-shadow:0 2px 12px color-mix(in srgb,var(--err) 26%,transparent),0 0 0 2.5px color-mix(in srgb,var(--err) 22%,transparent)}
+.aaf-pipe-node.is-current.st-passed{box-shadow:0 2px 10px color-mix(in srgb,var(--ok) 24%,transparent),0 0 0 2.5px color-mix(in srgb,var(--ok) 20%,transparent)}
+.aaf-pipe-node-top{display:flex;align-items:center;justify-content:space-between;gap:4px;min-width:0}
+.aaf-pipe-step{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:50%;font-size:10.5px;font-weight:800;font-family:var(--mono);flex:none;background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
+.aaf-pipe-node.st-passed .aaf-pipe-step{background:#047857;color:#fff;border-color:#047857}
+.aaf-pipe-node.st-running .aaf-pipe-step{background:var(--accent);color:#fff;border-color:var(--accent)}
+.aaf-pipe-node.st-failed .aaf-pipe-step{background:var(--danger-btn,#DC2626);color:#fff;border-color:var(--danger-btn,#DC2626)}
+.aaf-pipe-node.st-waiting_human .aaf-pipe-step{background:#B45309;color:#fff;border-color:#B45309}
+.aaf-pipe-badge{font-size:9.5px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;padding:1px 5px;border-radius:999px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.aaf-pipe-badge.b-running{background:var(--accent);color:#fff}
+.aaf-pipe-badge.b-waiting_human{background:#B45309;color:#fff}
+.aaf-pipe-badge.b-failed{background:var(--danger-btn,#DC2626);color:#fff}
+.aaf-pipe-badge.b-passed{background:#047857;color:#fff}
+.aaf-pipe-badge.b-skipped{background:var(--slate-bg,var(--surface2));color:var(--slate,var(--muted));border:1px solid var(--border)}
+.aaf-pipe-badge.b-next{background:var(--accent-soft,var(--surface2));color:var(--accent);border:1px solid var(--accent-b,var(--border))}
+.aaf-pipe-badge.b-rw{background:var(--warn-bg);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 38%,transparent);font-family:var(--mono)}
+.aaf-pipe-label{font-weight:700;font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.aaf-pipe-meta{font-family:var(--mono);font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.aaf-pipe-node.st-passed .aaf-pipe-meta{color:var(--ok)}
+.aaf-pipe-node.st-running .aaf-pipe-meta{color:var(--info,var(--accent));font-weight:600}
+.aaf-pipe-node.st-failed .aaf-pipe-meta{color:var(--err);font-weight:600}
+.aaf-pipe-node.st-waiting_human .aaf-pipe-meta{color:var(--warn);font-weight:600}
+
+.aaf-pipe-reworks{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding-top:4px;border-top:1px dashed color-mix(in srgb,var(--border) 80%,transparent)}
+.aaf-pipe-rw-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-family:var(--mono);font-size:11px;font-weight:700;background:var(--warn-bg);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 35%,transparent)}
+.aaf-pipe-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.aaf-pipe-legend{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--muted)}
+.aaf-pipe-leg-item{display:inline-flex;align-items:center;gap:4px}
+.aaf-pipe-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
+.aaf-pipe-hint{font-size:11px;color:var(--muted)}
 .aaf-pipe-detail{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
 .aaf-pipe-detail-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .aaf-pipe-detail-meta{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
@@ -125,20 +183,25 @@
     return "pending";
   }
 
+  function isViLang() {
+    return Boolean(typeof window !== "undefined" && window.AafI18n && window.AafI18n.getLang() === "vi");
+  }
+
   function statusVisual(st) {
+    const vi = isViLang();
     switch (st) {
       case "passed":
-        return { stroke: "var(--ok)", fill: "var(--ok-bg)", text: "var(--ok)", icon: "✓", label: "passed" };
+        return { stroke: "var(--ok)", fill: "var(--ok-bg)", text: "var(--ok)", icon: "✓", label: vi ? "Đã qua" : "Passed" };
       case "running":
-        return { stroke: "var(--info, var(--accent))", fill: "var(--info-bg, var(--surface2))", text: "var(--info, var(--accent))", icon: "●", label: "running" };
+        return { stroke: "var(--info, var(--accent))", fill: "var(--info-bg, var(--surface2))", text: "var(--info, var(--accent))", icon: "●", label: vi ? "Đang chạy" : "Running" };
       case "failed":
-        return { stroke: "var(--err)", fill: "var(--err-bg)", text: "var(--err)", icon: "✕", label: "failed" };
+        return { stroke: "var(--err)", fill: "var(--err-bg)", text: "var(--err)", icon: "✕", label: vi ? "Thất bại" : "Failed" };
       case "waiting_human":
-        return { stroke: "var(--warn)", fill: "var(--warn-bg)", text: "var(--warn)", icon: "⏸", label: "waiting" };
+        return { stroke: "var(--warn)", fill: "var(--warn-bg)", text: "var(--warn)", icon: "⏸", label: vi ? "Chờ duyệt" : "Waiting" };
       case "skipped":
-        return { stroke: "var(--slate, var(--muted))", fill: "var(--surface2)", text: "var(--slate, var(--muted))", icon: "–", label: "skipped" };
+        return { stroke: "var(--slate, var(--muted))", fill: "var(--surface2)", text: "var(--slate, var(--muted))", icon: "–", label: vi ? "Bỏ qua" : "Skipped" };
       default:
-        return { stroke: "var(--border)", fill: "var(--surface)", text: "var(--muted)", icon: "○", label: "pending" };
+        return { stroke: "var(--border)", fill: "var(--surface)", text: "var(--muted)", icon: "○", label: vi ? "Chờ" : "Pending" };
     }
   }
 
@@ -186,190 +249,169 @@
   /* =========================================================================
    * 1. renderTaskPipeline(containerEl, pipelineResp, onNodeSelect, opts)
    * ========================================================================= */
+  function findCurrentStageIdx(nodes, taskState) {
+    const sts = nodes.map((n) => normStatus(n.status));
+    const runIdx = sts.indexOf("running");
+    if (runIdx >= 0) return runIdx;
+    const waitIdx = sts.indexOf("waiting_human");
+    if (waitIdx >= 0) return waitIdx;
+    for (let i = sts.length - 1; i >= 0; i--) {
+      if (sts[i] === "failed") return i;
+    }
+    const ts = String(taskState || "").trim().toLowerCase();
+    if (ts === "done") return nodes.length - 1;
+    let lastDone = -1;
+    for (let i = 0; i < sts.length; i++) {
+      if (sts[i] === "passed" || sts[i] === "skipped") lastDone = i;
+    }
+    if (lastDone >= 0 && lastDone + 1 < nodes.length) return lastDone + 1;
+    return Math.max(0, lastDone);
+  }
+
   function renderTaskPipeline(containerEl, pipelineResp, onNodeSelect, opts) {
     if (!containerEl) return null;
     injectStyles();
     opts = opts || {};
+    const vi = isViLang();
 
     const resp = pipelineResp || {};
     const nodes = Array.isArray(resp.nodes) ? resp.nodes : [];
     const edges = Array.isArray(resp.edges) ? resp.edges : [];
 
     if (!nodes.length) {
-      containerEl.innerHTML = `<div class="aaf-pipe-empty">Chưa có dữ liệu pipeline cho task này.</div>`;
+      containerEl.innerHTML = `<div class="aaf-pipe-empty">${esc(vi ? "Chưa có dữ liệu pipeline cho task này." : "No pipeline data recorded for this task.")}</div>`;
       return null;
     }
-
-    const nodeW = 148;
-    const nodeH = 72;
-    const gapX = 48;
-    const padX = 24;
 
     const idxById = new Map();
     nodes.forEach((n, i) => idxById.set(String(n.id), i));
 
-    // Classify edges into forward next arrows and rework / loop-back arcs
-    const forwardEdges = [];
     const reworkEdges = [];
+    const reworkCountByFrom = new Map();
     edges.forEach((e) => {
       const fi = idxById.get(String(e.from));
       const ti = idxById.get(String(e.to));
       if (fi == null || ti == null) return;
       const kind = String(e.kind || "next").toLowerCase();
       if (kind === "rework" || ti <= fi) {
-        reworkEdges.push({ fromIdx: fi, toIdx: ti, kind, count: Number(e.count) || 1 });
-      } else {
-        forwardEdges.push({ fromIdx: fi, toIdx: ti, kind, count: Number(e.count) || 1 });
+        const count = Number(e.count) || 1;
+        reworkEdges.push({ fromIdx: fi, toIdx: ti, count });
+        reworkCountByFrom.set(fi, (reworkCountByFrom.get(fi) || 0) + count);
       }
     });
 
-    // Assign alternating top/bottom lanes for rework arcs so multiple arcs never collide
-    const topArcs = [];
-    const bottomArcs = [];
-    reworkEdges.forEach((arc, i) => {
-      if (i % 2 === 0) topArcs.push(arc);
-      else bottomArcs.push(arc);
-    });
-    const skipForwardEdges = forwardEdges.filter((e) => e.toIdx - e.fromIdx > 1);
+    const curIdx = findCurrentStageIdx(nodes, resp.state);
+    const curNode = nodes[curIdx] || nodes[0];
+    const curSt = normStatus(curNode.status);
+    const curVis = statusVisual(curSt);
+    const passedCount = nodes.filter((n) => {
+      const s = normStatus(n.status);
+      return s === "passed" || s === "skipped";
+    }).length;
+    const pct = Math.min(100, Math.round(((curSt === "running" ? passedCount + 0.5 : passedCount) / nodes.length) * 100));
+    const bannerPulsing = curSt === "running" || curSt === "waiting_human";
+    const fillColor = curSt === "failed"
+      ? "var(--err)"
+      : (curSt === "waiting_human"
+          ? "var(--warn)"
+          : (curSt === "running" ? "var(--info, var(--accent))" : "var(--ok)"));
 
-    const topPad = topArcs.length ? 30 + topArcs.length * 32 : 16;
-    const bottomLanes = bottomArcs.length + (skipForwardEdges.length ? 1 : 0);
-    const bottomPad = bottomLanes ? 26 + bottomLanes * 30 : 18;
+    const curDur = fmtMs(curNode.duration_ms);
+    const subParts = [];
+    if (curNode.executor) subParts.push(curNode.executor);
+    if (curDur) subParts.push(curDur);
+    if (Number(curNode.attempts) > 1) subParts.push(vi ? `${curNode.attempts} lượt` : `${curNode.attempts} attempts`);
+    if (curNode.detail) subParts.push(String(curNode.detail).replace(/\s+/g, " ").trim());
+    const curSub = subParts.join(" · ");
 
-    const nodeY = topPad;
-    const midY = nodeY + nodeH / 2;
-    const svgW = Math.max(360, padX * 2 + nodes.length * nodeW + Math.max(0, nodes.length - 1) * gapX);
-    const svgH = nodeY + nodeH + bottomPad;
+    const currentBadgeFor = (st) => {
+      if (st === "running") return { cls: "b-running", txt: vi ? "Đang chạy" : "LIVE" };
+      if (st === "waiting_human") return { cls: "b-waiting_human", txt: vi ? "Chờ bạn" : "WAIT" };
+      if (st === "failed") return { cls: "b-failed", txt: vi ? "Đang lỗi" : "FAIL" };
+      if (st === "passed") return { cls: "b-passed", txt: vi ? "Hoàn tất" : "DONE" };
+      if (st === "skipped") return { cls: "b-skipped", txt: vi ? "Bỏ qua" : "SKIP" };
+      return { cls: "b-next", txt: vi ? "Tiếp theo" : "NEXT" };
+    };
 
-    const markerSuffix = "p" + Math.random().toString(36).slice(2, 8);
-    const nodeX = (i) => padX + i * (nodeW + gapX);
-
-    const edgeSvgParts = [];
-
-    // Forward edges
-    forwardEdges.forEach((e) => {
-      const x1 = nodeX(e.fromIdx) + nodeW;
-      const x2 = nodeX(e.toIdx);
-      const fromSt = normStatus(nodes[e.fromIdx].status);
-      const stroke = fromSt === "passed" ? "var(--ok)" : "var(--border-strong, var(--border))";
-      const mId = fromSt === "passed" ? `arr-ok-${markerSuffix}` : `arr-def-${markerSuffix}`;
-
-      if (e.toIdx === e.fromIdx + 1) {
-        edgeSvgParts.push(
-          `<line x1="${x1}" y1="${midY}" x2="${x2 - 5}" y2="${midY}" stroke="${stroke}" stroke-width="2" marker-end="url(#${mId})" />`
-        );
-      } else {
-        const sx = nodeX(e.fromIdx) + nodeW * 0.65;
-        const ex = nodeX(e.toIdx) + nodeW * 0.35;
-        const cy = nodeY + nodeH + 26;
-        edgeSvgParts.push(
-          `<path d="M ${sx} ${nodeY + nodeH} Q ${(sx + ex) / 2} ${cy} ${ex} ${nodeY + nodeH + 4}" fill="none" stroke="${stroke}" stroke-width="1.75" stroke-dasharray="4 3" marker-end="url(#${mId})" />`
-        );
-      }
-    });
-
-    // Helper for drawing rework arc
-    function drawReworkArc(arc, laneIdx, isTop) {
-      const mId = `arr-rw-${markerSuffix}`;
-      const badgeLabel = arc.count > 1 ? `↻ ×${arc.count}` : "↻ rework";
-      const badgeW = Math.max(46, badgeLabel.length * 7 + 12);
-
-      if (arc.fromIdx === arc.toIdx) {
-        // Self-loop above/below node
-        const cx = nodeX(arc.fromIdx) + nodeW / 2;
-        const yEdge = isTop ? nodeY : nodeY + nodeH;
-        const dir = isTop ? -1 : 1;
-        const h = 24 + laneIdx * 24;
-        const d = `M ${cx + 22} ${yEdge} C ${cx + 34} ${yEdge + dir * h}, ${cx - 34} ${yEdge + dir * h}, ${cx - 22} ${yEdge + dir * 4}`;
-        const labelY = yEdge + dir * (h * 0.82);
-        return `
-          <path d="${d}" fill="none" stroke="var(--warn)" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#${mId})" />
-          <g transform="translate(${cx - badgeW / 2}, ${labelY - 10})">
-            <rect width="${badgeW}" height="19" rx="9.5" fill="var(--warn-bg)" stroke="var(--warn)" stroke-width="1" />
-            <text x="${badgeW / 2}" y="13" text-anchor="middle" font-size="10.5" font-weight="700" font-family="var(--mono)" fill="var(--warn)">${esc(badgeLabel)}</text>
-          </g>
-        `;
-      }
-
-      const sx = nodeX(arc.fromIdx) + nodeW * 0.5;
-      const ex = nodeX(arc.toIdx) + nodeW * 0.5;
-      const yEdge = isTop ? nodeY : nodeY + nodeH;
-      const dir = isTop ? -1 : 1;
-      const archH = 28 + laneIdx * 30;
-      const ctrlY = yEdge + dir * archH * 1.45;
-      const apexY = yEdge + dir * archH * 0.72;
-      const midX = (sx + ex) / 2;
-
-      return `
-        <path d="M ${sx} ${yEdge} Q ${midX} ${ctrlY} ${ex} ${yEdge + dir * 4}" fill="none" stroke="var(--warn)" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#${mId})" />
-        <g transform="translate(${midX - badgeW / 2}, ${apexY - 10})">
-          <rect width="${badgeW}" height="19" rx="9.5" fill="var(--warn-bg)" stroke="var(--warn)" stroke-width="1" />
-          <text x="${badgeW / 2}" y="13" text-anchor="middle" font-size="10.5" font-weight="700" font-family="var(--mono)" fill="var(--warn)">${esc(badgeLabel)}</text>
-        </g>
-      `;
-    }
-
-    topArcs.forEach((arc, i) => edgeSvgParts.push(drawReworkArc(arc, i, true)));
-    bottomArcs.forEach((arc, i) => edgeSvgParts.push(drawReworkArc(arc, i + (skipForwardEdges.length ? 1 : 0), false)));
-
-    // Nodes
-    const nodeSvgParts = nodes.map((n, i) => {
-      const x = nodeX(i);
+    const cardsHtml = nodes.map((n, i) => {
       const st = normStatus(n.status);
       const vis = statusVisual(st);
-      const label = clipText(n.label || n.id || "Stage", 17);
+      const isCur = i === curIdx;
+      const rwCnt = reworkCountByFrom.get(i) || 0;
       const durTxt = fmtMs(n.duration_ms);
-      const statusSub = durTxt ? `${vis.label} · ${durTxt}` : vis.label;
       const attempts = Number(n.attempts) || 0;
-      const execTxt = n.executor ? clipText(n.executor, 11) : "";
-      const bottomParts = [];
-      if (execTxt) bottomParts.push(execTxt);
-      if (attempts > 1) bottomParts.push(`×${attempts}`);
-      else if (attempts === 1 && !execTxt) bottomParts.push("1 attempt");
-      const bottomLine = clipText(bottomParts.join(" · ") || (n.kind ? String(n.kind) : ""), 20);
-      const dashAttr = st === "skipped" ? ` stroke-dasharray="4 3"` : "";
-      const titleTip = `${n.label || n.id} (${st})${durTxt ? " · " + durTxt : ""}${n.detail ? "\n" + n.detail : ""}`;
+      const stepIcon = st === "passed" || st === "failed" || st === "waiting_human" || st === "skipped"
+        ? vis.icon
+        : String(i + 1);
+      const rightBadge = isCur
+        ? (() => {
+            const b = currentBadgeFor(st);
+            return `<span class="aaf-pipe-badge ${b.cls}">${esc(b.txt)}</span>`;
+          })()
+        : (rwCnt > 0 ? `<span class="aaf-pipe-badge b-rw">↻×${rwCnt}</span>` : "");
+      const metaParts = [];
+      if (durTxt) metaParts.push(durTxt);
+      else metaParts.push(vis.label);
+      if (attempts > 1) metaParts.push(`×${attempts}`);
+      else if (n.executor && st !== "pending") metaParts.push(clipText(n.executor, 10));
+      const metaTxt = metaParts.join(" · ");
+      const titleTip = `${i + 1}. ${n.label || n.id} (${vis.label})${durTxt ? " · " + durTxt : ""}${n.detail ? "\n" + n.detail : ""}`;
 
       return `
-        <g class="aaf-pipe-node" data-node-idx="${i}" tabindex="0" role="button" aria-label="${esc(n.label || n.id)}: ${esc(st)}">
-          <title>${esc(titleTip)}</title>
-          ${st === "running" ? `<rect class="aaf-pipe-pulse" x="${x - 2}" y="${nodeY - 2}" width="${nodeW + 4}" height="${nodeH + 4}" rx="12" fill="none" stroke="${vis.stroke}" />` : ""}
-          <rect class="aaf-pipe-box" x="${x}" y="${nodeY}" width="${nodeW}" height="${nodeH}" rx="10" fill="${vis.fill}" stroke="${vis.stroke}" stroke-width="1.6"${dashAttr} />
-          <rect x="${x}" y="${nodeY}" width="5" height="${nodeH}" rx="2.5" fill="${vis.stroke}" />
-          <text x="${x + 14}" y="${nodeY + 22}" font-size="12.5" font-weight="700" font-family="var(--sans)" fill="var(--ink)">${esc(label)}</text>
-          <text x="${x + nodeW - 10}" y="${nodeY + 22}" text-anchor="end" font-size="12" font-weight="700" fill="${vis.text}">${esc(vis.icon)}</text>
-          <text x="${x + 14}" y="${nodeY + 41}" font-size="11" font-weight="600" font-family="var(--mono)" fill="${vis.text}">${esc(clipText(statusSub, 19))}</text>
-          <text x="${x + 14}" y="${nodeY + 58}" font-size="10.5" font-family="var(--mono)" fill="var(--muted)">${esc(bottomLine)}</text>
-        </g>
+        <div class="aaf-pipe-cell ${st === "passed" ? "edge-ok" : ""}" role="listitem">
+          <button type="button" class="aaf-pipe-node st-${st}${isCur ? " is-current" : ""}" data-node-idx="${i}" title="${esc(titleTip)}" aria-label="${esc(`${i + 1}. ${n.label || n.id}: ${vis.label}`)}">
+            <div class="aaf-pipe-node-top">
+              <span class="aaf-pipe-step">${esc(stepIcon)}</span>
+              ${rightBadge}
+            </div>
+            <div class="aaf-pipe-label">${esc(n.label || n.id || "Stage")}</div>
+            <div class="aaf-pipe-meta">${esc(metaTxt)}</div>
+          </button>
+        </div>
       `;
-    });
+    }).join("");
+
+    const reworksHtml = reworkEdges.length
+      ? `<div class="aaf-pipe-reworks">${reworkEdges.map((r) => {
+          const fromLbl = nodes[r.fromIdx].label || nodes[r.fromIdx].id;
+          const toLbl = nodes[r.toIdx].label || nodes[r.toIdx].id;
+          return `<span class="aaf-pipe-rw-pill">↻ ${esc(fromLbl)} → ${esc(toLbl)}${r.count > 1 ? ` ×${r.count}` : ""}</span>`;
+        }).join("")}</div>`
+      : "";
+
+    const stepPrefix = vi ? `Bước ${curIdx + 1}/${nodes.length}` : `Step ${curIdx + 1}/${nodes.length}`;
+    const progLabel = vi ? `${passedCount}/${nodes.length} bước · ${pct}%` : `${passedCount}/${nodes.length} · ${pct}%`;
 
     const wrap = document.createElement("div");
     wrap.className = "aaf-pipe-wrap";
     wrap.innerHTML = `
-      <div class="aaf-pipe-scroll">
-        <svg class="aaf-pipe-svg" viewBox="0 0 ${svgW} ${svgH}" width="${svgW}" height="${svgH}" role="img" aria-label="Task execution pipeline">
-          <defs>
-            <marker id="arr-def-${markerSuffix}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--border-strong, var(--muted))" />
-            </marker>
-            <marker id="arr-ok-${markerSuffix}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--ok)" />
-            </marker>
-            <marker id="arr-rw-${markerSuffix}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--warn)" />
-            </marker>
-          </defs>
-          ${edgeSvgParts.join("")}
-          ${nodeSvgParts.join("")}
-        </svg>
+      <div class="aaf-pipe-banner st-${curSt}">
+        <div class="aaf-pipe-banner-top">
+          <div class="aaf-pipe-now">
+            <span class="aaf-pipe-live-dot${bannerPulsing ? " pulsing" : ""}" style="background:${curVis.stroke};color:${curVis.stroke}"></span>
+            <span class="aaf-pipe-now-title">${esc(stepPrefix)} · ${esc(curNode.label || curNode.id)}</span>
+            <span class="aaf-st-pill aaf-st-${curSt}">${esc(curVis.label)}</span>
+          </div>
+          <span class="aaf-pipe-prog-meta">${esc(progLabel)}</span>
+        </div>
+        <div class="aaf-pipe-prog-track"><div class="aaf-pipe-prog-fill" style="width:${pct}%;background:${fillColor}"></div></div>
+        ${curSub ? `<div class="aaf-pipe-now-sub" title="${esc(curSub)}">${esc(curSub)}</div>` : ""}
       </div>
-      <div class="aaf-pipe-legend">
-        <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--ok)"></span>Passed</span>
-        <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--info,var(--accent))"></span>Running</span>
-        <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--warn)"></span>Waiting / Rework</span>
-        <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--err)"></span>Failed</span>
-        <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--slate,var(--muted))"></span>Pending / Skipped</span>
+      <div class="aaf-pipe-board">
+        <div class="aaf-pipe-grid" role="list" aria-label="${esc(vi ? "Luồng thực thi" : "Task execution pipeline")}">
+          ${cardsHtml}
+        </div>
+        ${reworksHtml}
+      </div>
+      <div class="aaf-pipe-foot">
+        <div class="aaf-pipe-legend">
+          <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--ok)"></span>${esc(vi ? "Đã qua" : "Passed")}</span>
+          <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--info,var(--accent))"></span>${esc(vi ? "Đang chạy" : "Running")}</span>
+          <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--warn)"></span>${esc(vi ? "Chờ / Rework" : "Waiting / Rework")}</span>
+          <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--err)"></span>${esc(vi ? "Lỗi" : "Failed")}</span>
+          <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--slate,var(--muted))"></span>${esc(vi ? "Chờ / Bỏ qua" : "Pending / Skipped")}</span>
+        </div>
+        <span class="aaf-pipe-hint">${esc(vi ? "Bấm từng bước để xem chi tiết" : "Click a stage for details")}</span>
       </div>
       <div class="aaf-pipe-detail-slot"></div>
     `;
@@ -384,13 +426,14 @@
       const node = nodes[idx];
       if (!node) return;
       selectedIdx = selectedIdx === idx ? null : idx;
-      wrap.querySelectorAll(".aaf-pipe-node").forEach((g) => {
-        g.classList.toggle("selected", Number(g.dataset.nodeIdx) === selectedIdx);
+      wrap.querySelectorAll(".aaf-pipe-node").forEach((el) => {
+        el.classList.toggle("selected", Number(el.dataset.nodeIdx) === selectedIdx);
       });
       if (selectedIdx == null) {
         detailSlot.innerHTML = "";
       } else {
         const st = normStatus(node.status);
+        const vis = statusVisual(st);
         const durTxt = fmtMs(node.duration_ms);
         const canOpenTab = typeof onNodeSelect === "function";
         const tabLabel = canOpenTab
@@ -402,22 +445,22 @@
           <div class="aaf-pipe-detail">
             <div class="aaf-pipe-detail-head">
               <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
-                <strong>${esc(node.label || node.id)}</strong>
-                <span class="aaf-st-pill aaf-st-${st}">${esc(st.replace(/_/g, " "))}</span>
+                <strong>${esc(`${idx + 1}. ${node.label || node.id}`)}</strong>
+                <span class="aaf-st-pill aaf-st-${st}">${esc(vis.label)}</span>
                 ${node.kind ? `<span class="mono muted">${esc(node.kind)}</span>` : ""}
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                ${tabLabel ? `<button type="button" class="btn-primary btn-sm" data-open-node-tab>Mở tab ${esc(tabLabel)} →</button>` : ""}
+                ${tabLabel ? `<button type="button" class="btn-primary btn-sm" data-open-node-tab>${esc(vi ? `Mở tab ${tabLabel} →` : `Open ${tabLabel} →`)}</button>` : ""}
                 <button type="button" class="btn-sm" data-close-detail aria-label="Close detail">✕</button>
               </div>
             </div>
             <div class="aaf-pipe-detail-meta">
-              ${node.attempts != null ? `<span>Attempts: <b>${esc(node.attempts)}</b></span>` : ""}
-              ${durTxt ? `<span>Duration: <b>${esc(durTxt)}</b></span>` : ""}
+              ${node.attempts != null ? `<span>${esc(vi ? "Lượt" : "Attempts")}: <b>${esc(node.attempts)}</b></span>` : ""}
+              ${durTxt ? `<span>${esc(vi ? "Thời lượng" : "Duration")}: <b>${esc(durTxt)}</b></span>` : ""}
               ${node.executor ? `<span>Executor: <span class="mono">${esc(node.executor)}</span></span>` : ""}
-              ${node.account_id ? `<span>Account: <span class="mono">${esc(node.account_id)}</span></span>` : ""}
+              ${node.account_id ? `<span>${esc(vi ? "Tài khoản" : "Account")}: <span class="mono">${esc(node.account_id)}</span></span>` : ""}
             </div>
-            ${node.detail ? `<div class="aaf-pipe-detail-body">${esc(node.detail)}</div>` : `<div class="muted" style="font-size:12px">No extra detail recorded for this stage.</div>`}
+            ${node.detail ? `<div class="aaf-pipe-detail-body">${esc(node.detail)}</div>` : `<div class="muted" style="font-size:12px">${esc(vi ? "Chưa có chi tiết bổ sung cho bước này." : "No extra detail recorded for this stage.")}</div>`}
           </div>
         `;
         const openTabBtn = detailSlot.querySelector("[data-open-node-tab]");
@@ -428,21 +471,15 @@
         if (closeBtn) {
           closeBtn.addEventListener("click", () => {
             selectedIdx = null;
-            wrap.querySelectorAll(".aaf-pipe-node").forEach((g) => g.classList.remove("selected"));
+            wrap.querySelectorAll(".aaf-pipe-node").forEach((el) => el.classList.remove("selected"));
             detailSlot.innerHTML = "";
           });
         }
       }
     }
 
-    wrap.querySelectorAll(".aaf-pipe-node").forEach((g) => {
-      g.addEventListener("click", () => selectNode(Number(g.dataset.nodeIdx)));
-      g.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          selectNode(Number(g.dataset.nodeIdx));
-        }
-      });
+    wrap.querySelectorAll(".aaf-pipe-node").forEach((el) => {
+      el.addEventListener("click", () => selectNode(Number(el.dataset.nodeIdx)));
     });
 
     return { selectNode };

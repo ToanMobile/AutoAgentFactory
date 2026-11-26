@@ -277,6 +277,17 @@ fn pwa_manifest_and_icons_are_served_without_auth_and_valid_png_magic() {
     assert!(idx_html.contains("modalBusy"));
     assert!(idx_html.contains("\"delete_done\""));
 
+    let (st_pipe_js, _, body_pipe_js) = send_raw_bytes(
+        addr,
+        &format!("GET /assets/pipeline.js HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    );
+    assert_eq!(st_pipe_js, 200);
+    let pipe_js = String::from_utf8_lossy(&body_pipe_js);
+    assert!(pipe_js.contains("aaf-pipe-banner"));
+    assert!(pipe_js.contains("aaf-pipe-grid"));
+    assert!(pipe_js.contains("findCurrentStageIdx"));
+    assert!(!pipe_js.contains("aaf-pipe-scroll"));
+
     let (st_i18n_js, _, body_i18n_js) = send_raw_bytes(
         addr,
         &format!("GET /assets/i18n.js HTTP/1.1\r\nHost: {addr}\r\n\r\n"),

@@ -14,8 +14,9 @@ mod helpers;
 
 pub use helpers::is_large_diff;
 pub(crate) use helpers::{
-    audit_infra_next, collect_rework_findings, has_behavioral_red_unproven, is_large_worktree_diff,
-    load_verified_audit_verdict, proof_verified,
+    audit_infra_next, collect_rework_findings, find_interrupted_post_gate_fail,
+    has_behavioral_red_unproven, is_large_worktree_diff, load_verified_audit_verdict,
+    proof_verified,
 };
 use helpers::{
     collect_mechanical_findings, primary_infra_next, reject_post_audit,
@@ -175,6 +176,30 @@ fn execute_post_gate_audit(
                 pre.scores,
             )
         } else {
+            if let Some(reused) = find_interrupted_post_gate_fail(deps, &task.id, &receipt, cfg)? {
+                deps.emit(
+                    EventKind::CrossAudit,
+                    &task.id,
+                    json!({
+                        "phase": "post_gate",
+                        "verdict": reused.verdict,
+                        "tree_fp": receipt.tree_fp,
+                        "config_hash": receipt.config_hash,
+                        "reused_from": reused.event_id,
+                        "findings": reused.findings,
+                    }),
+                )?;
+                if let Some(next) = unblock::handle_audit_failure(deps, &task, &reused.findings)? {
+                    return Ok(next);
+                }
+                return reject_post_audit_with_findings(
+                    deps,
+                    task.id,
+                    job.worktree,
+                    &reused.verdict,
+                    &reused.findings,
+                );
+            }
             let (mut audit_provider, mut reviewer, mut same_account) =
                 match audit_backend::resolve_task_audit_context(
                     deps,
@@ -369,6 +394,20 @@ fn execute_post_gate_audit(
     let audited = (&verdict, diff_truncated);
     let retry =
         !passed && audit_backend::retry_inconclusive(deps, &task, audited, "tree_fp", tree_fp)?;
+    let explicit_fail =
+        !diff_truncated && (matches!(verdict, AuditVerdict::Fail { .. }) || score_gate_failed);
+    let mut explicit_findings = Vec::new();
+    if explicit_fail {
+        explicit_findings =
+            collect_rework_findings(&verdict, &scores, &reasons, effective_score, cfg);
+        if cfg.score_gate && mech.score < cfg.min_average_score {
+            explicit_findings.extend(collect_mechanical_findings(
+                &receipt,
+                &mech,
+                cfg.min_average_score,
+            ));
+        }
+    }
 
     deps.emit(
         EventKind::CrossAudit,
@@ -384,6 +423,7 @@ fn execute_post_gate_audit(
             "effective_score": effective_score,
             "scores": scores,
             "reasons": reasons,
+            "findings": explicit_findings,
             "tree_fp": receipt.tree_fp,
             "config_hash": receipt.config_hash,
             "retry": retry,
@@ -423,23 +463,12 @@ fn execute_post_gate_audit(
         }));
     }
 
-    let explicit_fail =
-        !diff_truncated && (matches!(verdict, AuditVerdict::Fail { .. }) || score_gate_failed);
     let mut reject_findings = Vec::new();
     if explicit_fail {
-        let mut findings =
-            collect_rework_findings(&verdict, &scores, &reasons, effective_score, cfg);
-        if cfg.score_gate && mech.score < cfg.min_average_score {
-            findings.extend(collect_mechanical_findings(
-                &receipt,
-                &mech,
-                cfg.min_average_score,
-            ));
-        }
-        if let Some(next) = unblock::handle_audit_failure(deps, &task, &findings)? {
+        if let Some(next) = unblock::handle_audit_failure(deps, &task, &explicit_findings)? {
             return Ok(next);
         }
-        reject_findings = findings;
+        reject_findings = explicit_findings;
     }
     let inconclusive = matches!(verdict, AuditVerdict::Inconclusive { .. });
     if super::infra_retry::block_inconclusive_audit(

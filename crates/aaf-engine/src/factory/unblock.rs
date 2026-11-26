@@ -519,9 +519,10 @@ pub(crate) fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<
             && serde_json::from_str::<serde_json::Value>(&event.payload_json)
                 .ok()
                 .is_some_and(|p| {
-                    p["verdict"]
-                        .as_str()
-                        .is_some_and(|v| v == "fail" || v.starts_with("fail:"))
+                    p.get("reused_from").is_none_or(serde_json::Value::is_null)
+                        && p["verdict"]
+                            .as_str()
+                            .is_some_and(|v| v == "fail" || v.starts_with("fail:"))
                 })
         {
             count = count.saturating_add(1);
