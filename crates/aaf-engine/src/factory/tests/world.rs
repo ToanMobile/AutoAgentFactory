@@ -63,7 +63,13 @@ impl World {
             notifier: Arc::default(),
             auto_merge: false,
             max_parallel: 1,
-            repo: RepoConfig::default(),
+            // PR mode, like `auto_merge: false` above (the old defaults).
+            repo: {
+                let mut repo = RepoConfig::default();
+                repo.run.auto_merge = false;
+                repo.run.land = aaf_domain::config::LandMode::Pr;
+                repo
+            },
             owner_github_allowlist: Vec::new(),
         }
     }

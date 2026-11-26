@@ -119,6 +119,17 @@ fn store_submit_guard_matching_corpus() {
         ("echo ok; \"fastlane\" 'deliver'", STORE),
         ("echo $(eas submit)", STORE),
         ("fastlane deliver 'oops", OPAQUE),
+        // releasing the repository itself
+        ("git push origin v1.2.3", STORE),
+        ("git push origin main v0.5.0", STORE),
+        ("git push --tags", STORE),
+        ("git push --follow-tags origin feature", STORE),
+        ("git -C repo push origin refs/tags/v1.0.0", STORE),
+        ("gh release create v1.2.3 --generate-notes", STORE),
+        ("git push origin feature/v2-ui", ALLOW),
+        ("git tag -a v1.2.3 -m release", ALLOW),
+        ("gh release list", ALLOW),
+        ("gh release view v1.2.3", ALLOW),
         // allowed
         ("fastlane test", ALLOW),
         ("fastlane ios build", ALLOW),

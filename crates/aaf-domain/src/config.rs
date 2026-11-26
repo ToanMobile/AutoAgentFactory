@@ -429,16 +429,19 @@ impl Default for UnblockerConfig {
     }
 }
 
+/// Read through [`crate::builtin_defaults::RunConfigRaw`], so a file that
+/// sets only `auto_merge` or only `land` gets the other to match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(from = "crate::builtin_defaults::RunConfigRaw")]
 pub struct RunConfig {
     /// `claude`, `codex`, `gemini`, `antigravity`, `opencode` or `custom`.
     pub executor: String,
     /// Command template for non-Claude executors; `{prompt}` is substituted.
     pub executor_cmd: Vec<String>,
     pub auto_merge: bool,
-    #[serde(default, skip_serializing_if = "LandMode::is_default")]
+    #[serde(skip_serializing_if = "LandMode::is_default")]
     pub land: LandMode,
+    /// Agent runs at the same time; `0` = automatic (accounts, CPUs, memory).
     pub max_parallel: u32,
     pub run_timeout_secs: u64,
     /// `--model` of the Claude executor; empty leaves the CLI's own default.

@@ -1,0 +1,75 @@
+# Giá trị MẶC ĐỊNH của aaf, được nhúng vào binary lúc build.
+#
+# Repo nào không ghi key trong `.autofactory/config.toml` thì nhận giá trị ở
+# đây. Sửa file này, build/cài lại (`/aaf-update`) là mọi repo đổi theo; repo
+# nào ghi rõ key thì giá trị trong repo vẫn thắng. `cargo test -p aaf-domain`
+# kiểm tra file này đọc được và đủ key.
+#
+# Số trong ngoặc [n] khớp với bảng "Mặc định aaf" gửi trong thread.
+
+[run]
+# [2] true = task gate CLEAR tự merge (land "auto": push thẳng, bị branch
+# protection chặn thì mở PR rồi merge). false = mở PR, dừng ở Review chờ người.
+auto_merge = true
+# [2] Số agent chạy cùng lúc. 0 = tự tính theo số account, CPU và áp lực RAM
+# (RAM căng còn 2, nguy hiểm còn 1). Số dương = cố định.
+max_parallel = 0
+
+[cross_audit]
+# [1] Ai audit thay đổi đụng file head-locked. "" = dùng chung executor của
+# agent, nên phải có người `aaf approve`. "auto" = provider khác đang cài
+# (gemini, codex, claude, opencode). Hoặc ghi tên: "codex", "gemini"...
+executor = "auto"
+# [6] true = chặn merge khi điểm audit dưới ngưỡng (min_average_score,
+# min_criterion_score).
+score_gate = true
+# [7] Khi nào audit sau gate: "head_lock" (chỉ khi đụng file khoá), "large"
+# (thêm diff >= 3 file hoặc > 200 dòng code), "always" (mọi task).
+audit_scope = "large"
+# [8] true = 2 reviewer độc lập (tốn gấp đôi token audit).
+dual_review = true
+# [9] true = không có provider khác thì dừng thay vì audit bằng chính account đó.
+require_different_provider = false
+
+[pipeline]
+# [4] true = viết plan trước khi code.
+plan_stage = true
+# [4] true = 2 model tranh luận plan (tốn 2-3 lần token).
+plan_debate = true
+# [5] true = người phải duyệt plan mới được code.
+require_plan_approval = false
+
+[gate]
+# [10] Oracle red->green: test mới phải fail trước sửa, pass sau sửa (chống
+# test rỗng). "off", "warn" (chỉ ghi nhận), "block" (chặn).
+red_green_oracle = "warn"
+
+[proof]
+# [11] true = bắt buộc ảnh chụp màn hình làm bằng chứng cho thay đổi UI.
+required = false
+
+[github]
+# [12] true = đồng bộ task với GitHub Project board (cần repo/project_number).
+enabled = false
+
+[telegram]
+# [13] true = bật bot Telegram (cần token trong biến môi trường).
+enabled = true
+# [13] true = cho phép duyệt (approve) qua Telegram.
+allow_approve = false
+# [13] true = cho phép lệnh thay đổi trạng thái (cancel, rework...) qua Telegram.
+allow_mutating = false
+
+[notifications]
+# [14] URL nhận webhook JSON khi có sự kiện. "" = tắt.
+webhook_url = ""
+
+[safety]
+# [15] GitHub login được phép biến issue/comment thành task. [] = không ai.
+owner_github_allowlist = []
+
+[unblocker.cost_guard]
+# [16] Trần token 24h cho cả máy. 0 = không giới hạn.
+daily_token_cap = 0
+# [16] Đóng băng khi token 1h gấp N lần bình thường. 0 = tắt.
+spike_factor = 0

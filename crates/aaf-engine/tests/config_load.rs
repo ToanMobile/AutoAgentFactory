@@ -211,6 +211,7 @@ fn run_precedence_env_over_local_and_cli_over_env() {
 #[test]
 fn env_booleans_accept_common_spellings_and_empty_means_unset() {
     let fx = Fixture::new();
+    fx.tier2("[run]\nauto_merge = false\n");
     // Parsed as "true": the environment may not switch auto-merge on, so the
     // value shows up as the warning that it was ignored.
     for raw in ["1", "TRUE", "yes", "on"] {

@@ -119,7 +119,7 @@ Cờ chung `--json`: stdout đúng một JSON object `{ok, command, status, …,
 
 Thứ tự: tầng 1 < tầng 2 < tầng 3 < env `AAF_*` < cờ CLI. Từ tầng 3 trở lên chỉ siết được gate: thêm `head_lock_globs`, nâng `store_compliance` (`off < auto < always`), tăng `min_android_target_sdk`. `[commands]`, `project.profile`, `run.executor`, `run.executor_cmd` chỉ đọc ở tầng 2, `run.env_pass` ở tầng 1 và 2; đặt ở tầng cao hơn thì bị bỏ qua kèm cảnh báo. `run.model`, `run.effort`, `run.max_parallel`, `run.run_timeout_secs` lấy theo tầng cao hơn. Key lạ ở bất kỳ tầng nào là lỗi load (exit 1). `commands.repro` vẫn chỉ là schema + API thư viện chạy thủ công (`ReproCommand::argv`), **không bao giờ tự thực thi** trong gate hay factory.
 
-**Oracle red→green (`[gate].red_green_oracle`, khuyến nghị `"block"`):** mặc định `"off"` để opt-in, có thể đặt `"warn"` hoặc `"block"`. Khi bật, nhánh `Proven` chạy lại trên cây reverted để bắt test flaky rồi đối chứng trên cây base (nếu base đã đỏ sẵn thì hạ sang cảnh báo `behavioral_red_unproven` thay vì `red_green=proven`); diff chỉ thêm module mới bị `compile_red` vẫn bị chặn ở chính sách mặc định (cần nối qua điểm vào có ở base). Khi oracle bỏ qua (không có thay đổi prod, docs fast path, chưa có base commit, hoặc chưa cấu hình lệnh test), biên nhận ghi chú `note: oracle skipped (…)` mà không đổi trạng thái gate.
+**Oracle red→green (`[gate].red_green_oracle`, khuyến nghị `"block"`):** mặc định `"warn"` (theo `defaults.toml`), có thể đặt `"off"` hoặc `"block"`. Khi bật, nhánh `Proven` chạy lại trên cây reverted để bắt test flaky rồi đối chứng trên cây base (nếu base đã đỏ sẵn thì hạ sang cảnh báo `behavioral_red_unproven` thay vì `red_green=proven`); diff chỉ thêm module mới bị `compile_red` vẫn bị chặn ở chính sách mặc định (cần nối qua điểm vào có ở base). Khi oracle bỏ qua (không có thay đổi prod, docs fast path, chưa có base commit, hoặc chưa cấu hình lệnh test), biên nhận ghi chú `note: oracle skipped (…)` mà không đổi trạng thái gate.
 
 **Trần token 24 giờ và phát hiện đốt token đột biến (`[unblocker.cost_guard]`):**
 - `daily_token_cap` (`0` = tắt) là tổng token toàn máy (mọi repo và account chung `AAF_DATA_DIR`) trong cửa sổ 24 giờ trượt, lọc theo `COALESCE(ended_at, started_at)`. Cấu hình ở tầng 1 (`~/.config/autofactory/config.toml`); tầng 2 (`.autofactory/config.toml`) chỉ được bật thêm hoặc siết thấp hơn (`min`), không bao giờ nới hay tắt trần dương hay `spike_factor` mặc định của tầng 1 (chỉ tầng 1 `spike_factor = 0` mới tắt được spike cho trần tầng 1; repo chỉ tắt được spike cho trần do chính nó đặt); tầng 3 (`config.local.toml`) bị bỏ qua kèm cảnh báo.
@@ -128,6 +128,31 @@ Thứ tự: tầng 1 < tầng 2 < tầng 3 < env `AAF_*` < cờ CLI. Từ tầng
 - Giới hạn kế toán đã biết: executor `custom` luôn báo `0` token nên không bị đếm; token chỉ được cộng khi run kết thúc, vì vậy tổng thực tế có thể vượt trần một khoảng bằng các run đang chạy song song.
 
 Biến môi trường: `AAF_DATA_DIR` (mặc định `~/.local/share/autofactory`), `AAF_CONFIG_DIR`, `AAF_WORKTREE_DIR` (mặc định `~/.cache/autofactory/worktrees`; đặt trên cùng volume APFS/reflink với repo để tự động seed cache bằng clone CoW thật — kiểm tra bằng `aaf doctor`), `AAF_SEED_CACHE` (đặt `=0` để tắt tự động seed cache CoW gồm Unity `Library`, npm `node_modules`, CocoaPods `Pods` khi tạo task worktree mới), `AAF_STORE_COMPLIANCE`, `AAF_MIN_ANDROID_TARGET_SDK`, `AAF_MAX_PARALLEL`, `AAF_AUTO_MERGE` (chỉ tắt được). `AAF_RUN_ID` và `AAF_HEAVY_SLOT` do `aaf` tự đặt, không gán tay.
+
+## Mặc định có sẵn
+
+Repo không ghi key nào trong `.autofactory/config.toml` thì nhận giá trị dưới đây. Nguồn là [`crates/aaf-domain/defaults.toml`](../crates/aaf-domain/defaults.toml), được nhúng vào binary: sửa file đó, build lại hoặc chạy `/aaf-update`, là mọi repo đổi theo. Repo nào ghi rõ key thì giá trị của repo vẫn thắng. `aaf doctor --fix` xoá các dòng `auto_merge = false` / `max_parallel = 1` do `aaf init` bản cũ ghi, để các repo đó cũng nhận mặc định mới.
+
+| # | Key | Làm gì | Mặc định |
+|---|---|---|---|
+| 1 | `cross_audit.executor` | Ai audit thay đổi đụng file head-locked. `auto` là provider khác đầu tiên đang cài (gemini, codex, claude, opencode). `""` là dùng chung executor của agent, khi đó cần `aaf approve` | `"auto"` |
+| 2 | `run.auto_merge`, `run.max_parallel` | Task gate CLEAR thì tự merge. Số agent song song tính theo account, CPU và RAM (`0` = tự động) | `true`, `0` |
+| 3 | `aaf run --auto-split` (cờ) | Chia task gốc thành 2–4 task con chạy song song | tắt |
+| 4 | `pipeline.plan_stage`, `pipeline.plan_debate` | Viết plan trước khi code, 2 model tranh luận plan | `true`, `true` |
+| 5 | `pipeline.require_plan_approval` | Người phải duyệt plan trước | `false` |
+| 6 | `cross_audit.score_gate` | Chặn merge khi điểm audit dưới ngưỡng | `true` |
+| 7 | `cross_audit.audit_scope` | Khi nào audit sau gate: `head_lock`, `large` (từ 3 file hoặc trên 200 LOC), `always` | `"large"` |
+| 8 | `cross_audit.dual_review` | 2 reviewer độc lập | `true` |
+| 9 | `cross_audit.require_different_provider` | Dừng thay vì audit bằng chính account của agent | `false` |
+| 10 | `gate.red_green_oracle` | Test mới phải fail trước khi sửa và pass sau khi sửa: `off`, `warn`, `block` | `"warn"` |
+| 11 | `proof.required` | Ảnh chụp làm bằng chứng cho thay đổi UI mobile | `false` |
+| 12 | `github.enabled` | Đồng bộ task với GitHub Project board | `false` |
+| 13 | `telegram.enabled`, `allow_approve`, `allow_mutating` | Bot Telegram; cho duyệt và cho lệnh thay đổi trạng thái qua bot | `true`, `false`, `false` |
+| 14 | `notifications.webhook_url` | Webhook JSON khi có sự kiện (`""` = tắt) | `""` |
+| 15 | `safety.owner_github_allowlist` | GitHub login được biến issue thành task | `[]` |
+| 16 | `cost_guard.daily_token_cap`, `spike_factor` | Trần token 24h và đóng băng khi token 1h tăng đột biến (`0` = tắt) | `0`, `0` |
+
+Gate chỉ test các crate Rust bị ảnh hưởng: `{affected_packages}` trong `commands.lint` / `commands.test_scoped` được thay bằng `-p <crate>` cho các member bị đổi và mọi member phụ thuộc vào chúng. Nếu diff đụng manifest, `Cargo.lock`, `build.rs` hoặc file nằm ngoài các member thì nó thành `--workspace`. Full suite chạy lúc release bằng `aaf gate --release`; upload lên store, push tag và `gh release create` đều bắt buộc phải có receipt này.
 
 ## Chống quá tải máy
 

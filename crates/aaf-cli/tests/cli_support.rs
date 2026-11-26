@@ -117,6 +117,7 @@ impl Sandbox {
         cmd.args(args)
             .current_dir(&self.repo)
             .env_clear()
+            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
             .env("HOME", &self.home)
             .env("AAF_DATA_DIR", &self.data)
             .env("PATH", self.path_var())

@@ -101,9 +101,13 @@ pub(crate) fn reconcile_land_mode(
             ));
         }
     } else if presence.run_auto_merge {
-        if repo.run.auto_merge {
-            repo.run.land = LandMode::Auto;
-        }
+        // `land` was left out, so it holds the default (`auto`); follow the
+        // explicit `auto_merge` either way.
+        repo.run.land = if repo.run.auto_merge {
+            LandMode::Auto
+        } else {
+            LandMode::Pr
+        };
     } else if presence.run_land {
         repo.run.auto_merge = repo.run.land.auto_lands();
     } else if let Some(root) = repo_root

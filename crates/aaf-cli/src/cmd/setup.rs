@@ -72,7 +72,7 @@ pub fn run(args: &SetupArgs, ctx: &Ctx) -> CmdResult {
         commit: false,
     };
     let init_out = init(&init_args, ctx, ctx::current_exe().as_deref())?;
-    let doctor_out = run_doctor(&DoctorArgs {}, ctx)?;
+    let doctor_out = run_doctor(&DoctorArgs { fix: false }, ctx)?;
     let checks = doctor_out
         .fields
         .get("checks")

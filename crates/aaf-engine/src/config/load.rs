@@ -144,8 +144,14 @@ pub fn load(inputs: &ConfigInputs<'_>) -> Result<EffectiveConfig, ConfigError> {
     let global = read_global(inputs, &mut sources)?;
     let repo_path = inputs.repo_root.join(REPO_CONFIG_REL);
     let (repo, presence) = match read_tier_with_text::<RepoConfig>(&repo_path, &mut sources)? {
-        Some((cfg, text)) => (cfg, parse_repo_key_presence(&text)),
-        None => (RepoConfig::default(), RepoKeyPresence::all_unspecified()),
+        Some((_, text)) => (
+            parse_layered(&repo_path, &text, aaf_domain::builtin_defaults::parse_repo)?,
+            parse_repo_key_presence(&text),
+        ),
+        None => (
+            parse_layered(&repo_path, "", aaf_domain::builtin_defaults::parse_repo)?,
+            RepoKeyPresence::all_unspecified(),
+        ),
     };
     let repo_source = repo_path.display().to_string();
     layer(
@@ -203,7 +209,32 @@ pub fn load_over_repo_from_env(
 
 /// Reads only tier 1 (`config_dir/config.toml`), without touching tier 2, tier 3, or env.
 pub fn load_global(config_dir: &Path) -> Result<GlobalConfig, ConfigError> {
-    read_tier(&config_dir.join("config.toml"), &mut Vec::new()).map(Option::unwrap_or_default)
+    read_global_at(&config_dir.join("config.toml"), &mut Vec::new())
+}
+
+/// Tier 1 at `path` with the built-in defaults layer under it.
+fn read_global_at(path: &Path, sources: &mut Vec<String>) -> Result<GlobalConfig, ConfigError> {
+    let text = read_tier_with_text::<GlobalConfig>(path, sources)?.map_or(String::new(), |(_, t)| t);
+    parse_layered(path, &text, aaf_domain::builtin_defaults::parse_global)
+}
+
+/// `parse` (a `builtin_defaults` reader) with its error placed in `text`.
+fn parse_layered<T>(
+    path: &Path,
+    text: &str,
+    parse: fn(&str) -> Result<T, toml::de::Error>,
+) -> Result<T, ConfigError> {
+    parse(text).map_err(|err| {
+        let (line, column) = err
+            .span()
+            .map_or((0, 0), |span| line_column(text, span.start));
+        ConfigError::Parse {
+            path: path.to_path_buf(),
+            line,
+            column,
+            message: err.message().to_string(),
+        }
+    })
 }
 
 fn read_global(
@@ -211,8 +242,8 @@ fn read_global(
     sources: &mut Vec<String>,
 ) -> Result<GlobalConfig, ConfigError> {
     Ok(match &inputs.global_config {
-        Some(path) => read_tier(path, sources)?.unwrap_or_default(),
-        None => GlobalConfig::default(),
+        Some(path) => read_global_at(path, sources)?,
+        None => parse_layered(Path::new("<built-in>"), "", aaf_domain::builtin_defaults::parse_global)?,
     })
 }
 

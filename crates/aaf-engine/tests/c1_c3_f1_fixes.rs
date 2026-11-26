@@ -309,6 +309,7 @@ fn seed_and_run(
         receipt_head: s.receipt_head,
     });
     let mut repo = RepoConfig::default();
+    repo.run.auto_merge = false;
     repo.run.land = LandMode::PrMerge;
     let deps = Deps {
         store: Arc::clone(db) as Arc<dyn Store>,

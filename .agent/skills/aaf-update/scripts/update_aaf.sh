@@ -197,6 +197,15 @@ if [[ -n "$RELEASE_PART" ]]; then
   fi
   echo "==> Bumped [workspace.package] version -> ${NEW_SEMVER} (syncing Cargo.lock)..."
   (cd "$AAF_REPO" && cargo update --workspace --offline >/dev/null)
+  # A release ships only a tree with a CLEAR `--release` receipt: the full
+  # lint, build and test suite. A receipt already signed for this exact tree
+  # is reused, so a re-run after a green gate costs nothing.
+  echo "==> Release gate: aaf gate --release (full suite, reused if already CLEAR)..."
+  if ! (cd "$AAF_REPO" && aaf gate --release); then
+    git -C "$AAF_REPO" checkout -- Cargo.toml Cargo.lock
+    echo "error: aaf gate --release is not CLEAR; nothing was committed, tagged or pushed" >&2
+    exit 2
+  fi
   echo "==> Committing, tagging ${NEW_TAG}, and pushing to GitHub (triggers release.yml)..."
   git -C "$AAF_REPO" add Cargo.toml Cargo.lock
   git -C "$AAF_REPO" commit -m "chore(release): ${NEW_TAG}"
@@ -334,6 +343,13 @@ if [[ "$(uname -s)" == "Darwin" && -z "${AAF_RUN_ID:-}" && "${AAF_SKIP_UI_SERVIC
     /bin/launchctl kickstart -k "gui/$(id -u)/com.autoagentfactory.ui" || true
   fi
 fi
+
+# Repos `aaf init`-ed before auto-merge / automatic parallelism became the
+# default still carry `auto_merge = false` / `max_parallel = 1`. Drop exactly
+# those old values (hand-set ones stay) in every repo aaf has tasks for.
+echo "==> Migrating old init defaults in known repos (aaf doctor --fix)..."
+(cd / && AAF_DOCTOR_FIX_SKIP="/agent-workbench" "$AAF_BIN" doctor --fix | grep ' fix: ') \
+  || echo "    nothing to change"
 
 if [[ ${#CHECK_REPOS[@]} -gt 0 ]]; then
   for r in "${CHECK_REPOS[@]}"; do

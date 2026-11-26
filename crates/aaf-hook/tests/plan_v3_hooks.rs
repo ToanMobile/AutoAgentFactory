@@ -476,6 +476,7 @@ fn binary_respects_aaf_run_id_for_interactive_vs_worker_mode() {
     let run_bin = |command: &str, run_id: Option<&str>| -> i32 {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_aaf-hook"));
         cmd.env_clear()
+            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("AAF_DATA_DIR", base.join("data"))
             .env("AAF_CONFIG_DIR", base.join("config"))

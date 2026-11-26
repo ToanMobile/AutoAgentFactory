@@ -225,7 +225,7 @@ pub(super) fn load_trusted_base_config(
             "missing or unreadable {REPO_CONFIG_REL} at base {base_sha}"
         ))
     })?;
-    let base: RepoConfig = toml::from_str(&raw).map_err(|e| {
+    let base: RepoConfig = aaf_domain::builtin_defaults::parse_repo(&raw).map_err(|e| {
         GitError::Gate(format!("invalid {REPO_CONFIG_REL} at base {base_sha}: {e}"))
     })?;
     let tightened = match global {

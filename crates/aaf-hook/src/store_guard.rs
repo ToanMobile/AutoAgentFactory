@@ -21,6 +21,25 @@ fn is_local_gradle_publish(task: &str) -> bool {
         || lower.contains("localpublication")
 }
 
+/// A `git push` argument that sends a tag: `--tags`, `--follow-tags`, a
+/// `refs/tags/...` refspec, or a version-like ref such as `v1.2.3`.
+fn is_tag_push_arg(word: &str) -> bool {
+    if matches!(word, "--tags" | "--follow-tags") {
+        return true;
+    }
+    let src = word.trim_start_matches('+');
+    let src = src.split(':').next_back().unwrap_or(src);
+    if src.starts_with("refs/tags/") {
+        return true;
+    }
+    let version = src.strip_prefix('v').unwrap_or("");
+    version.starts_with(|c: char| c.is_ascii_digit())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        && version.contains('.')
+}
+
 /// Programs that run the tool named in their arguments.
 const LAUNCHERS: &[&str] = &[
     "bundle", "npx", "bunx", "yarn", "pnpm", "xcrun", "mise", "rbenv",
@@ -57,6 +76,22 @@ pub fn matches<S: AsRef<str>>(words: &[S], anywhere: bool) -> Option<&'static st
                         && !is_local_gradle_publish(task)
                 })
                 .then_some("gradle publish"),
+            // Publishing a release of the repository itself: pushing a tag
+            // (which starts the release workflow) or `gh release create`.
+            "git" => {
+                let rest: Vec<&str> = after().collect();
+                (rest
+                    .iter()
+                    .position(|w| *w == "push")
+                    .is_some_and(|at| rest[at + 1..].iter().any(|w| is_tag_push_arg(w))))
+                .then_some("git tag push")
+            }
+            "gh" => {
+                let rest: Vec<&str> = after().collect();
+                rest.windows(2)
+                    .any(|w| w[0] == "release" && w[1] == "create")
+                    .then_some("gh release create")
+            }
             _ => None,
         };
         if hit.is_some() {
