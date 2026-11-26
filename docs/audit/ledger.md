@@ -11,6 +11,13 @@
 - Bổ sung độ phủ v4.2 (`HEAD` `6ca3522`, kiểm độ phủ 459/459 file disjoint):
   - `crates/aaf-engine/src/factory/{dual_audit,dual_audit_matrix,dual_audit_turn,plan_job,plan_legacy,stage_router}.rs`, `crates/aaf-engine/src/plan_debate/**` → lane `auto`
   - `crates/aaf-engine/src/gc_audits.rs` → lane `obs`
+- Bổ sung độ phủ v4.5 (`HEAD` `abd89cb`, kiểm độ phủ 609/609 file disjoint, 44 file mới ngoài bảng):
+  - `crates/aaf-engine/src/confine_core/**`, `crates/aaf-engine/src/gate/{confine,oracle_control,rust_scope}.rs`, `crates/aaf-engine/src/gate/oracle_worktree/**` → lane `gate-ok`
+  - `crates/aaf-engine/src/gate/helpers.rs`, `crates/aaf-engine/src/factory/full_gate.rs` → lane `gate-fast`
+  - `crates/aaf-engine/src/clock.rs`, `crates/aaf-engine/src/pr_ops/**` → lane `core`
+  - `crates/aaf-engine/src/factory/{audit_backend,audit_turn,dual_audit,post_audit,worker}/**`, `crates/aaf-engine/src/factory/{infra_retry,merge_retry,pr_feedback,pr_feedback_note,sweep_squash}.rs` → lane `auto`
+  - `crates/aaf-engine/src/telemetry/**`, `crates/aaf-engine/src/github_poll.rs` → lane `obs`
+- Vòng 4 (2026-11-26): `aaf accounts next` trả `none` (cả 4 account `claude_code` đang `leased`), `gemini` CLI bị từ chối (`UNSUPPORTED_CLIENT`), không có `codex` → thợ quét/sửa dùng subagent của phiên PM (`claude-fable-5-2`), thợ xác minh/phản kiểm dùng Antigravity CLI (`Gemini 4 Neon`). Worktree xác minh/sửa/tích hợp đặt ở `/Volumes/Data/Toan/aaf-wt/` (cùng volume APFS) vì `.aaf-audit-tmp/` từng bị dọn ngoài ý muốn ngày 2026-11-25.
 
 ## Lane
 | Lane | Lần quét gần nhất | HEAD | Phần chưa đọc |
