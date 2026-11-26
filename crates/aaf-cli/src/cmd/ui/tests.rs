@@ -136,6 +136,9 @@ fn service_bookmark_plist_and_port_in_use_behave_safely() {
     assert!(xml.contains(service::SERVICE_LABEL));
     assert!(xml.contains("<string>/usr/bin:/bin&amp;x</string>"));
     assert!(xml.contains("<key>AAF_CONFIG_DIR</key>"));
+    assert!(xml.contains(
+        "<key>WorkingDirectory</key>\n\t<string>/Users/x/.local/share/autofactory</string>"
+    ));
     assert!(!xml.contains("token") && !xml.contains("--key") && !xml.contains("AAF_UI_TOKEN"));
 
     let xml_act = service::plist_xml(

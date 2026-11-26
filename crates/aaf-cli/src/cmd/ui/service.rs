@@ -219,6 +219,15 @@ pub(crate) fn normalize_path_var(raw: &str) -> String {
     out.join(":")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn service_working_dir(home: &Path, extra_env: &[(&str, String)]) -> PathBuf {
+    extra_env
+        .iter()
+        .find(|(k, v)| *k == "AAF_DATA_DIR" && !v.trim().is_empty())
+        .map(|(_, v)| PathBuf::from(v))
+        .unwrap_or_else(|| home.join(".local/share/autofactory"))
+}
+
 /// Launchd agent definition that runs `<exe> ui --service` at login and keeps it alive.
 /// The bearer token is NEVER embedded in the plist (argv/env are exposed via `ps`/`launchctl`).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -230,7 +239,7 @@ pub(crate) fn plist_xml(
     allow_actions: bool,
 ) -> String {
     let exe = xml_escape(&exe.display().to_string());
-    let home_s = xml_escape(&home.display().to_string());
+    let work_dir = xml_escape(&service_working_dir(home, extra_env).display().to_string());
     let log = xml_escape(&log_path(home).display().to_string());
     let path_var = xml_escape(&normalize_path_var(path_var));
     let mut env_xml = format!("\t\t<key>PATH</key>\n\t\t<string>{path_var}</string>");
@@ -262,7 +271,7 @@ pub(crate) fn plist_xml(
 {env_xml}
 	</dict>
 	<key>WorkingDirectory</key>
-	<string>{home_s}</string>
+	<string>{work_dir}</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -371,6 +380,7 @@ pub(crate) fn install(
     if let Some(dir) = log_path(home).parent() {
         let _ = fs::create_dir_all(dir);
     }
+    let _ = fs::create_dir_all(service_working_dir(home, extra_env));
     trim_log_if_large(home);
 
     let xml = plist_xml(&exe, home, path_var, extra_env, allow_actions);

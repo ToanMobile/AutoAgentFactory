@@ -262,6 +262,22 @@ else
     install_binary "${BIN_ROOT}/aaf-hook" "aaf-hook"
 fi
 
+# On macOS, sign with a stable certificate + fixed identifier so TCC permissions
+# survive upgrades (override via AAF_CODESIGN_IDENTITY or disable with "-").
+if [ "$(uname -s)" = "Darwin" ] && [ "${AAF_CODESIGN_IDENTITY:-}" != "-" ] && command -v codesign >/dev/null 2>&1; then
+    SIGN_ID="${AAF_CODESIGN_IDENTITY:-}"
+    if [ -z "$SIGN_ID" ] && command -v security >/dev/null 2>&1; then
+        SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | awk '/Apple Development:/ {print $2; exit}' || true)"
+    fi
+    if [ -n "$SIGN_ID" ]; then
+        if codesign --force --sign "$SIGN_ID" --identifier "com.autoagentfactory.aaf" "${INSTALL_DIR}/aaf" \
+            && codesign --force --sign "$SIGN_ID" --identifier "com.autoagentfactory.aaf-hook" "${INSTALL_DIR}/aaf-hook" \
+            && codesign --verify --strict "${INSTALL_DIR}/aaf" "${INSTALL_DIR}/aaf-hook" 2>/dev/null; then
+            printf 'Signed aaf & aaf-hook with persistent macOS TCC identity.\n'
+        fi
+    fi
+fi
+
 printf 'Installed aaf and aaf-hook into %s\n' "$INSTALL_DIR"
 "${INSTALL_DIR}/aaf" --version
 

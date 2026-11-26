@@ -35,6 +35,19 @@ const CACHE_WRITE_DENIED: [&str; 13] = [
 const SDK_WRITE_DENIED: [&str; 1] = ["platform-tools"];
 const CARGO_WRITE_DENIED: [&str; 4] = ["bin", "env", "config*", "credentials*"];
 const GRADLE_WRITE_DENIED: [&str; 3] = ["init.d", "gradle.properties", "init.gradle*"];
+/// macOS TCC-protected user folders denied from sandboxed agent reads unless the
+/// active task/worktree explicitly lives inside one of them, preventing spurious
+/// `"aaf" would like to access files in your Desktop/Documents/Downloads folder`
+/// prompts triggered by child tools scanning `$HOME`.
+#[cfg(target_os = "macos")]
+const MACOS_TCC_PERSONAL_DIRS: [&str; 6] = [
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Pictures",
+    "Movies",
+    "Music",
+];
 
 /// The part of the data dir a confined agent queues its heavy builds in
 /// (`aaf slot`): the throttle's directory to read and lock, its guest
@@ -229,6 +242,8 @@ pub(super) fn build_sandbox_paths(
             &mut read_denied,
             format!("{home}/.local/share/autofactory/ui-service.token"),
         );
+        #[cfg(target_os = "macos")]
+        deny_unused_macos_tcc_dirs(home, &request.cwd, &writable, &git_dirs, &mut read_denied);
     }
     for (warm, explicit) in [
         (
@@ -299,4 +314,71 @@ pub(super) fn build_sandbox_paths(
         run_mark,
         deny_keychain_dir,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn deny_unused_macos_tcc_dirs(
+    home: &str,
+    cwd: &str,
+    writable: &[String],
+    git_dirs: &[String],
+    read_denied: &mut Vec<String>,
+) {
+    let active_paths: Vec<(PathBuf, Option<PathBuf>)> = std::iter::once(cwd)
+        .chain(writable.iter().map(String::as_str))
+        .chain(git_dirs.iter().map(String::as_str))
+        .map(|raw| (PathBuf::from(raw), sandbox::canonical(raw).ok()))
+        .collect();
+    for name in MACOS_TCC_PERSONAL_DIRS {
+        let candidate = format!("{home}/{name}");
+        let cand_path = Path::new(&candidate);
+        let cand_canon = sandbox::canonical(&candidate).ok();
+        let needed = active_paths.iter().any(|(raw, canon)| {
+            raw.starts_with(cand_path)
+                || cand_canon
+                    .as_ref()
+                    .zip(canon.as_ref())
+                    .is_some_and(|(c, a)| a.starts_with(c))
+        });
+        if !needed {
+            push_unique(read_denied, candidate);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_tcc_personal_dirs_denied_unless_task_lives_inside_one() {
+        let home = "/Users/tester";
+        let mut denied = Vec::new();
+        deny_unused_macos_tcc_dirs(
+            home,
+            "/Volumes/Data/repo",
+            &["/tmp".to_string()],
+            &[],
+            &mut denied,
+        );
+        for d in MACOS_TCC_PERSONAL_DIRS {
+            assert!(
+                denied.contains(&format!("{home}/{d}")),
+                "expected {home}/{d} in read_denied"
+            );
+        }
+
+        let mut desktop_repo_denied = Vec::new();
+        deny_unused_macos_tcc_dirs(
+            home,
+            "/Users/tester/Desktop/my-app",
+            &["/tmp".to_string()],
+            &[],
+            &mut desktop_repo_denied,
+        );
+        assert!(!desktop_repo_denied.contains(&format!("{home}/Desktop")));
+        assert!(desktop_repo_denied.contains(&format!("{home}/Documents")));
+        assert!(desktop_repo_denied.contains(&format!("{home}/Downloads")));
+    }
 }

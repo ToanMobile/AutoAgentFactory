@@ -76,10 +76,10 @@ pub fn resolve_auto_audit_executor(
         h.join(".claude").is_dir()
             || std::fs::read_dir(h).ok().is_some_and(|entries| {
                 entries.flatten().any(|e| {
-                    e.path().is_dir()
-                        && e.file_name()
-                            .to_str()
-                            .is_some_and(|n| n.starts_with(".claude-"))
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.starts_with(".claude-"))
+                        && e.path().is_dir()
                 })
             })
     };

@@ -279,6 +279,35 @@ AAF_BIN="$CARGO_BIN/aaf"
 HOOK_BIN="$CARGO_BIN/aaf-hook"
 [[ -x "$AAF_BIN" ]] || AAF_BIN="$(command -v aaf || echo "$HOME/.cargo/bin/aaf")"
 [[ -x "$HOOK_BIN" ]] || HOOK_BIN="$(command -v aaf-hook || echo "$HOME/.cargo/bin/aaf-hook")"
+
+# Sign macOS binaries with a stable certificate + fixed identifier so macOS TCC
+# keys permissions by Designated Requirement instead of per-build CDHash (prevents
+# repeated "aaf would like to access files..." prompts after every rebuild).
+# Override via AAF_CODESIGN_IDENTITY=<hash-or-name> or disable with AAF_CODESIGN_IDENTITY=-.
+if [[ "$(uname -s)" == "Darwin" && "${AAF_CODESIGN_IDENTITY:-}" != "-" ]] && command -v codesign >/dev/null 2>&1; then
+  SIGN_ID="${AAF_CODESIGN_IDENTITY:-}"
+  SIGN_LABEL="$SIGN_ID"
+  if [[ -z "$SIGN_ID" ]] && command -v security >/dev/null 2>&1; then
+    SIGN_LINE="$(security find-identity -v -p codesigning 2>/dev/null | grep -E 'Apple Development:' | head -n 1 || true)"
+    if [[ -n "$SIGN_LINE" ]]; then
+      SIGN_ID="$(printf '%s\n' "$SIGN_LINE" | awk '{print $2}')"
+      SIGN_LABEL="$(printf '%s\n' "$SIGN_LINE" | sed -E 's/.*"([^"]+)".*/\1/')"
+    fi
+  fi
+  if [[ -n "$SIGN_ID" ]]; then
+    echo "==> Signing macOS binaries for persistent TCC identity ($SIGN_LABEL)..."
+    if codesign --force --sign "$SIGN_ID" --identifier "com.autoagentfactory.aaf" "$AAF_BIN" \
+      && codesign --force --sign "$SIGN_ID" --identifier "com.autoagentfactory.aaf-hook" "$HOOK_BIN" \
+      && codesign --verify --strict "$AAF_BIN" "$HOOK_BIN" 2>/dev/null; then
+      echo "    codesign: OK (com.autoagentfactory.aaf & com.autoagentfactory.aaf-hook)"
+    else
+      echo "    [WARN] codesign with '$SIGN_LABEL' failed; continuing with linker ad-hoc signature" >&2
+    fi
+  else
+    echo "    [INFO] No Apple Development codesigning identity found; keeping ad-hoc signature (set AAF_CODESIGN_IDENTITY to persist macOS TCC grants)"
+  fi
+fi
+
 NEW_VER="$("$AAF_BIN" --version)"
 
 echo "==> Installed binaries:"
