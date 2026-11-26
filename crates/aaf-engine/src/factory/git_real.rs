@@ -25,6 +25,7 @@ use crate::process::SystemRunner;
 mod cleanup;
 #[allow(dead_code)]
 mod commit;
+mod guards;
 mod pr_note;
 pub(crate) use commit::COMMIT_DEFERRED;
 #[cfg(test)]
@@ -319,6 +320,9 @@ impl GitOps for RealGit {
         if out.success() {
             // The gate reads the working tree; what lands is the commit.
             worktree::ensure_clean(tree).map_err(err)?;
+            let base_sha = git(tree, &["rev-parse", "--verify", &start]).map_err(err)?;
+            crate::git::hydration::hydrate_missing_copy_files(&self.repo_root, tree, &base_sha)
+                .map_err(err)?;
             return Ok(Vec::new());
         }
         // Aborting a rebase that never started hides the original rebase error.
@@ -340,6 +344,17 @@ impl GitOps for RealGit {
         git(tree, &["reset", "--hard", "--quiet", sha]).map_err(err)?;
         git(tree, &["clean", "-ffdq"]).map_err(err)?;
         Ok(())
+    }
+
+    fn base_changed_paths_since_merge_base(
+        &self,
+        worktree: &TaskWorktree,
+    ) -> PortResult<Vec<String>> {
+        self.base_changed_paths_impl(worktree)
+    }
+
+    fn foreign_aaf_branch_ancestors(&self, worktree: &TaskWorktree) -> PortResult<Vec<String>> {
+        self.foreign_aaf_branch_ancestors_impl(worktree)
     }
 
     fn merge(

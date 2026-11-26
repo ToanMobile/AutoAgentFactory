@@ -38,6 +38,7 @@ fn everything_below_budget() -> FailureSignal {
         test_rerun: Some(RerunResult { runs: 2, passed: 2 }),
         same_failure_count: 5,
         budget: BudgetCheck::Ok,
+        audit_rejected: None,
     }
 }
 

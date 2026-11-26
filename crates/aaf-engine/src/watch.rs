@@ -228,7 +228,8 @@ pub fn format_blocked(reason: &BlockedReason) -> String {
         | BlockedReason::FlakyTest { detail }
         | BlockedReason::Stuck { detail }
         | BlockedReason::BudgetExceeded { detail }
-        | BlockedReason::Infra { detail } => detail,
+        | BlockedReason::Infra { detail }
+        | BlockedReason::AuditRejected { detail } => detail,
     };
     format!("{}: {detail}", reason.kind())
 }

@@ -308,6 +308,12 @@ fn blocked_reason_is_tagged_by_kind_and_kind_matches_the_tag() {
             },
             json!({"kind": "infra", "detail": "d"}),
         ),
+        (
+            BlockedReason::AuditRejected {
+                detail: "score 86/95".to_string(),
+            },
+            json!({"kind": "audit_rejected", "detail": "score 86/95"}),
+        ),
     ];
     for (reason, wire) in &cases {
         assert_eq!(wire["kind"], json!(reason.kind()), "{reason:?}");

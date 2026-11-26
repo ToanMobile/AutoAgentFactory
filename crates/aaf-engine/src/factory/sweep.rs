@@ -453,12 +453,11 @@ impl<'a> Scheduler<'a> {
     /// `Done`, so the scheduler never spawns a redundant agent that fails with
     /// `NO_CHANGE`.
     pub(super) fn try_auto_complete_split_parent(&mut self, task: &Task) -> PortResult<bool> {
-        if task.depth != 0
-            || !task
-                .context_notes
-                .iter()
-                .any(|n| n.starts_with("split: spawned "))
-        {
+        let is_split_parent = task.context_notes.iter().any(|n| {
+            n.starts_with("split: spawned ")
+                || (n.starts_with("unblock[T4]") && n.contains("split into "))
+        });
+        if task.depth != 0 || !is_split_parent {
             return Ok(false);
         }
         let children = self.deps.store.children_of(&task.id)?;

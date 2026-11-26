@@ -11,7 +11,7 @@ use aaf_domain::run::{RunFinish, RunRecord, RunStatus};
 use aaf_domain::task::Task;
 use serde_json::json;
 
-use super::super::ports::{AccountPool, Grant, Purpose};
+use super::super::ports::{AccountPool, Grant, IntegrationGuard, Purpose};
 use super::super::worker::{ensure_budget, request_with, should_charge_wall, status_of};
 use super::super::{Deps, Store};
 use crate::unblocker::{AgentSubtaskProposer, PROPOSER_EXECUTOR, SubtaskProposer};
@@ -167,9 +167,17 @@ impl<'a> LazyProposer<'a> {
             account_id: grant.account_id(),
             inner: self.watch,
         };
+        // Run the subtask proposer in a clean base worktree so it inspects the
+        // actual base branch each subtask will cut from (not uncommitted/failed
+        // parent-branch edits that subtasks will not inherit).
+        let clean = IntegrationGuard::acquire(&*self.deps.git, &[]).ok();
+        let proposer_cwd: String = clean.as_ref().map_or_else(
+            || self.cwd.to_string(),
+            |g| g.integration().tree.path.to_string_lossy().into_owned(),
+        );
         let mut base = request_with(
             self.deps,
-            self.cwd,
+            &proposer_cwd,
             grant,
             self.provider_kind,
             self.hook_req,
@@ -181,7 +189,9 @@ impl<'a> LazyProposer<'a> {
             budgets: &*self.deps.store as &dyn Store,
             base,
         };
-        proposer.propose(task, reason, digest)
+        let result = proposer.propose(task, reason, digest);
+        drop(clean);
+        result
     }
 }
 

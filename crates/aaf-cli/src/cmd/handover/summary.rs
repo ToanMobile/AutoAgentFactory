@@ -28,7 +28,8 @@ fn blocked_summary(reason: &BlockedReason) -> String {
         | BlockedReason::FlakyTest { detail }
         | BlockedReason::Stuck { detail }
         | BlockedReason::BudgetExceeded { detail }
-        | BlockedReason::Infra { detail } => detail.clone(),
+        | BlockedReason::Infra { detail }
+        | BlockedReason::AuditRejected { detail } => detail.clone(),
         BlockedReason::Quota { reset_at } => match reset_at {
             Some(ts) => format!("quota exhausted (reset_at={ts})"),
             None => "quota exhausted".to_string(),

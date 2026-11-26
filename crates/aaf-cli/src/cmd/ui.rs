@@ -9,6 +9,7 @@ mod extras;
 mod proof_stop;
 mod report_cache;
 mod service;
+mod service_env;
 mod studio;
 mod studio_health;
 mod studio_repos;

@@ -129,6 +129,8 @@ pub struct FailureSignal {
     /// Consecutive failures with the same [`failure_digest`], this one included.
     pub same_failure_count: u32,
     pub budget: BudgetCheck,
+    /// Structured post-gate/cross-audit rejection detail (skips T3/T4 decomposition).
+    pub audit_rejected: Option<String>,
 }
 
 impl FailureSignal {
@@ -142,6 +144,7 @@ impl FailureSignal {
             test_rerun: None,
             same_failure_count: 0,
             budget: BudgetCheck::Ok,
+            audit_rejected: None,
         }
     }
 }
@@ -216,6 +219,15 @@ pub fn classify(signal: &FailureSignal) -> BlockedReason {
                 rerun.passed, rerun.runs
             ),
         };
+    }
+    if let Some(detail) = &signal.audit_rejected {
+        let flat = one_line(detail);
+        let detail = if flat.is_empty() {
+            "cross-audit rejected the changes".to_string()
+        } else {
+            truncate_chars(&flat, SUMMARY_MAX_CHARS)
+        };
+        return BlockedReason::AuditRejected { detail };
     }
     if signal.outcome.as_ref().is_some_and(|o| o.timed_out) {
         return BlockedReason::Stuck {
@@ -296,6 +308,9 @@ pub fn failure_digest(signal: &FailureSignal) -> String {
 fn digest_material(signal: &FailureSignal) -> String {
     if let Some(dep) = &signal.open_dependency {
         return format!("dependency:{dep}");
+    }
+    if let Some(audit) = &signal.audit_rejected {
+        return format!("audit_rejected:{audit}");
     }
     if signal
         .outcome

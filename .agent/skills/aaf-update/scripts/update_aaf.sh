@@ -312,7 +312,7 @@ if [[ "$(uname -s)" == "Darwin" && -z "${AAF_RUN_ID:-}" && "${AAF_SKIP_UI_SERVIC
       install_flags+=(--allow-actions)
     fi
     if [[ -f "$plist_file" ]]; then
-      for env_key in AAF_WORKTREE_DIR AAF_DATA_DIR AAF_CONFIG_DIR AAF_SEED_CACHE; do
+      for env_key in AAF_WORKTREE_DIR AAF_DATA_DIR AAF_CONFIG_DIR AAF_SEED_CACHE JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT GRADLE_USER_HOME; do
         if [[ -z "${!env_key:-}" ]]; then
           if saved_val="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:${env_key}" "$plist_file" 2>/dev/null)" && [[ -n "$saved_val" ]]; then
             service_env+=("${env_key}=${saved_val}")

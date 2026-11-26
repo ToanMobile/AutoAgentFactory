@@ -529,10 +529,10 @@ pub fn run(args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
     ];
     checks.extend(hosts::repo_hook_checks(ctx, root_opt, &effective.repo));
     checks.extend(stale_defaults::checks(args.fix, ctx, &repo_state));
-    checks.push(seed::worktree_cow_volume_check(ctx, root_opt));
-    checks.push(seed::seed_cache_dry_run_check(
+    checks.extend(seed::worktree_checks(
         ctx,
         root_opt,
+        profile.as_deref(),
         &effective.repo.worktree,
     ));
     #[cfg(target_os = "macos")]

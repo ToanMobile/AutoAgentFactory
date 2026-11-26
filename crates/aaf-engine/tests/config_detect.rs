@@ -356,6 +356,7 @@ fn rendered_config_escapes_hostile_strings() {
             lint: "\"\"\"".to_string(),
             lint_full: "lf".to_string(),
             repro: "sh -c 'exit \"1\"' # x".to_string(),
+            light_commands: Vec::new(),
         },
         evidence: vec!["evil\n[gate]\nstore_compliance = \"off\"".to_string()],
     };

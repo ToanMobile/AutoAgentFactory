@@ -14,6 +14,7 @@ pub enum BlockedReason {
     BudgetExceeded { detail: String },
     NeedsHuman { why: String },
     Infra { detail: String },
+    AuditRejected { detail: String },
 }
 
 impl BlockedReason {
@@ -28,6 +29,7 @@ impl BlockedReason {
             BlockedReason::BudgetExceeded { .. } => "budget_exceeded",
             BlockedReason::NeedsHuman { .. } => "needs_human",
             BlockedReason::Infra { .. } => "infra",
+            BlockedReason::AuditRejected { .. } => "audit_rejected",
         }
     }
 }

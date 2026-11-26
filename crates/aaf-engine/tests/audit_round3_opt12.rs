@@ -485,8 +485,12 @@ fn opt12_1_12_2_and_12_3_audit_and_diagnostics() {
         &hooks_once(),
     )
     .unwrap();
-    assert_eq!(s2.requeued, vec!["tb"]);
-    assert!(g2.integrates.load(Ordering::SeqCst) == 0 && ar2.1.lock().unwrap().is_empty());
+    // Oversized diff short-circuits the auditor (0 auditor calls) and skips T3
+    // straight to T4 decomposition; with no valid split plan from the mock
+    // runner, the task escalates to `blocked` rather than burning a T3 retry.
+    assert_eq!(s2.blocked, vec!["tb"]);
+    assert!(s2.requeued.is_empty());
+    assert!(ar2.1.lock().unwrap().is_empty());
 
     // 12.2b: 1-shot format-repair recovers valid JSON; runner Err falls back to Inconclusive.
     for (outs, want_rev) in [

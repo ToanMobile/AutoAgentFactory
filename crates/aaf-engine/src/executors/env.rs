@@ -51,6 +51,32 @@ const ENV_ALLOW: [&str; 32] = [
 ];
 const ENV_ALLOW_PREFIX: &str = "LC_";
 
+/// Toolchain directory variables (subset of [`ENV_ALLOW`]) safe to forward into
+/// a launchd service plist so headless background gates find the Android/Java
+/// SDK without exposing secrets or proxy credentials.
+pub const TOOLCHAIN_HOME_ENV: [&str; 4] = [
+    "JAVA_HOME",
+    "ANDROID_HOME",
+    "ANDROID_SDK_ROOT",
+    "GRADLE_USER_HOME",
+];
+
+/// True when `value` is a clean absolute path to an existing local directory
+/// (rejecting control chars, relative paths, and URL schemes; permits Homebrew
+/// versioned paths such as `/opt/homebrew/opt/openjdk@17/...`).
+pub fn is_valid_toolchain_dir(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed != value
+        || trimmed.chars().any(char::is_control)
+        || trimmed.contains("://")
+    {
+        return false;
+    }
+    let path = Path::new(trimmed);
+    path.is_absolute() && path.is_dir()
+}
+
 /// Non-interactive defaults injected into confined PTY runs unless overridden
 /// by `run.env_pass` / `machine_env_pass`.
 pub const NON_INTERACTIVE_ENV: [(&str, &str); 5] = [

@@ -186,19 +186,33 @@ pub(crate) fn collect_rework_findings(
     };
     if cfg.score_gate {
         let low_average = effective_score < cfg.min_average_score;
-        for s in scores {
-            if s.score < cfg.min_criterion_score
-                || (low_average && s.score < 100 && !s.deduction_reason.trim().is_empty())
-            {
-                actionable.push(Finding {
-                    id: s.id.clone(),
-                    question: format!(
-                        "score {}/100 (min criterion {})",
-                        s.score, cfg.min_criterion_score
-                    ),
-                    evidence: s.deduction_reason.clone(),
-                });
-            }
+        let mut failing: Vec<&GoldenScore> = scores
+            .iter()
+            .filter(|s| s.score < cfg.min_criterion_score)
+            .collect();
+        failing.sort_by_key(|s| s.score);
+        let mut deducted_passing: Vec<&GoldenScore> = if low_average {
+            scores
+                .iter()
+                .filter(|s| {
+                    s.score >= cfg.min_criterion_score
+                        && s.score < 100
+                        && !s.deduction_reason.trim().is_empty()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        deducted_passing.sort_by_key(|s| s.score);
+        for s in failing.into_iter().chain(deducted_passing) {
+            actionable.push(Finding {
+                id: s.id.clone(),
+                question: format!(
+                    "score {}/100 (min criterion {})",
+                    s.score, cfg.min_criterion_score
+                ),
+                evidence: s.deduction_reason.clone(),
+            });
         }
         if actionable.is_empty() {
             for reason in reasons {
@@ -398,12 +412,16 @@ pub(super) fn reject_post_audit_with_findings(
         );
         deps.store.append_context_note(&task_id, &f_note, now)?;
     }
-    let signal_tail = if reason.contains("diff was truncated") {
-        format!("audit_diff_truncated: {reason}")
+    let signal = if reason.contains("diff was truncated") {
+        audit_backend::audit_rejection_signal(&format!("audit_diff_truncated: {reason}"))
+    } else if reason.starts_with("inconclusive:") {
+        audit_backend::audit_rejection_signal(reason)
     } else {
-        "post-gate cross-audit rejected the changes".to_string()
+        let mut s =
+            audit_backend::audit_rejection_signal("post-gate cross-audit rejected the changes");
+        s.audit_rejected = Some(unblock::one_line(reason, 200));
+        s
     };
-    let signal = audit_backend::audit_rejection_signal(&signal_tail);
     Ok(Next::Unblock {
         task_id,
         worktree,

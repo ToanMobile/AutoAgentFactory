@@ -145,6 +145,19 @@ pub trait GitOps: Send + Sync {
     fn reset_to(&self, _worktree: &TaskWorktree, _sha: &str) -> PortResult<()> {
         Err(PortError::Invalid("reset_to not supported".to_string()))
     }
+    /// Files changed on the base branch between `merge-base(base, HEAD)` and
+    /// `base` tip; empty when the worktree is already on the current base tip.
+    fn base_changed_paths_since_merge_base(
+        &self,
+        _worktree: &TaskWorktree,
+    ) -> PortResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+    /// Foreign unmerged `aaf/*` task branches whose tip commit is an ancestor
+    /// of `worktree`'s `HEAD` (detects cross-branch `git merge aaf/<other>`).
+    fn foreign_aaf_branch_ancestors(&self, _worktree: &TaskWorktree) -> PortResult<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// Lands the branch through the merge queue; `regate` judges the rebased
     /// tree.
     fn merge(

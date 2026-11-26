@@ -2,6 +2,7 @@
 //! its locked changes, and the unblocker ladder after a gate failure. Each
 //! runs on its own thread and ends by saying where the task goes next.
 
+mod guards;
 mod types;
 pub(crate) use types::{GateJob, Job, Next, Outcome, PreGateAudit};
 
@@ -334,6 +335,11 @@ fn agent(
     } else if hook_problem_if(deps, &worktree.path, hook_req, exec).is_some() {
         deps.git.rebase(&worktree)?;
     }
+    if let Some(next) =
+        guards::rebase_if_gate_infra_drifted(deps, task_id, &worktree, grant, routed)?
+    {
+        return Ok(next);
+    }
     if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
         unblock::block_untried(deps, task_id, &problem)?;
         return Ok(Next::Blocked);
@@ -408,6 +414,9 @@ fn agent(
         }
         if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
             unblock::block_untried(deps, task_id, &problem)?;
+            return Ok(Next::Blocked);
+        }
+        if guards::block_if_cross_branch_contaminated(deps, &task, &worktree)? {
             return Ok(Next::Blocked);
         }
         if deps.git.has_changes(&worktree)? {

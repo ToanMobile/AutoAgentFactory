@@ -279,29 +279,9 @@ pub(crate) fn plist_xml(
     )
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) fn non_default_service_env(ctx: &Ctx) -> Vec<(&'static str, String)> {
-    let wt_rel = aaf_engine::executors::DEFAULT_WORKTREES_REL;
-    let abs = |p: &Path| ctx.cwd.join(p);
-    let mut extra = Vec::new();
-    for (k, p, rel) in [
-        ("AAF_CONFIG_DIR", &ctx.config_dir, ".config/autofactory"),
-        ("AAF_DATA_DIR", &ctx.data_dir, ".local/share/autofactory"),
-        ("AAF_WORKTREE_DIR", &ctx.worktrees_dir, wt_rel),
-    ] {
-        let v = abs(p);
-        if v != abs(&ctx.home.join(rel)) {
-            extra.push((k, v.display().to_string()));
-        }
-    }
-    for (k, v) in &ctx.aaf_env {
-        if k == "AAF_SEED_CACHE" && !v.is_empty() {
-            extra.push(("AAF_SEED_CACHE", v.clone()));
-            break;
-        }
-    }
-    extra
-}
+pub(super) use super::service_env::non_default_service_env;
+#[cfg(test)]
+pub(super) use super::service_env::non_default_service_env_with_toolchain;
 
 /// Actionable error message when binding `port` fails with `AddrInUse`.
 pub(crate) fn port_in_use_message(port: u16, service: bool, config_dir: &Path) -> String {

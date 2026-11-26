@@ -333,6 +333,12 @@ pub struct CommandsConfig {
     /// A command that reproduces a reported failure. Read and stored, but
     /// nothing runs it yet: `aaf_engine::detector::repro` has no caller.
     pub repro: String,
+    /// Command keys (e.g. `test_scoped`) that bypass the machine-wide heavy
+    /// slot when their command text does not directly invoke a heavy build
+    /// tool (useful for diff-aware wrapper scripts that call `aaf slot --`
+    /// only on heavy branches). Tier 2 only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub light_commands: Vec<String>,
 }
 
 /// Ordered so that a higher tier may only raise it: `Off < Auto < Always`.

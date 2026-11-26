@@ -208,7 +208,7 @@ impl Task {
             fingerprint: None,
             blocked_reason: None,
             unblock_cycles: 0,
-            scope_paths: Vec::new(),
+            scope_paths: parent.scope_paths.clone(),
             retry_after: None,
             auto_recover_count: 0,
             created_at: now,

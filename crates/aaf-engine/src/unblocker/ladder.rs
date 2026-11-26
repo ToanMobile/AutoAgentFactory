@@ -133,7 +133,7 @@ fn reason_text(reason: &BlockedReason) -> &str {
         | BlockedReason::BudgetExceeded { detail } => detail,
         BlockedReason::GateFailed { summary } => summary,
         BlockedReason::NeedsHuman { why } => why,
-        BlockedReason::Infra { detail } => detail,
+        BlockedReason::Infra { detail } | BlockedReason::AuditRejected { detail } => detail,
         BlockedReason::Dependency { task_id } => task_id,
         BlockedReason::Quota { .. } => "",
     }
@@ -361,6 +361,7 @@ impl<'a> Ladder<'a> {
             BlockedReason::NeedsHuman { .. }
                 | BlockedReason::BudgetExceeded { .. }
                 | BlockedReason::Infra { .. }
+                | BlockedReason::AuditRejected { .. }
         ) {
             let why = reason_text(&reason).to_string();
             let (t, r, a) = self.escalate(reason, why);

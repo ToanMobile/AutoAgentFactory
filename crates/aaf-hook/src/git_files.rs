@@ -388,8 +388,30 @@ pub(crate) fn check_git_aaf_refs(sub: &str, rest: &[String]) -> Option<Denial> {
         "receive-pack",
         "fast-import",
     ];
-    (REF_WRITERS.contains(&sub) && touches_aaf_refs(rest))
-        .then(|| Denial::new(RULE, AAF_REF_REASON, FIX))
+    if REF_WRITERS.contains(&sub) && touches_aaf_refs(rest) {
+        return Some(Denial::new(RULE, AAF_REF_REASON, FIX));
+    }
+    if matches!(sub, "merge" | "cherry-pick") && targets_aaf_task_branch(rest) {
+        return Some(Denial::new(
+            RULE,
+            "merging or cherry-picking another aaf/* task branch contaminates this worktree",
+            "stay isolated on your own task branch cut from the base branch; do not merge or cherry-pick aaf/* branches",
+        ));
+    }
+    None
+}
+
+fn targets_aaf_task_branch(rest: &[String]) -> bool {
+    rest.iter().map(String::as_str).any(|arg| {
+        if arg.starts_with('-') {
+            return false;
+        }
+        let lower = arg.to_ascii_lowercase();
+        lower.starts_with("aaf/")
+            || lower.contains("/aaf/")
+            || lower.contains("..aaf/")
+            || lower.contains("...aaf/")
+    })
 }
 
 /// Denies shell commands and write redirects that mutate `refs/aaf/*` files directly.

@@ -378,7 +378,8 @@ fn reason_detail(reason: &BlockedReason) -> &str {
         | BlockedReason::FlakyTest { detail }
         | BlockedReason::Stuck { detail }
         | BlockedReason::BudgetExceeded { detail }
-        | BlockedReason::Infra { detail } => detail,
+        | BlockedReason::Infra { detail }
+        | BlockedReason::AuditRejected { detail } => detail,
         BlockedReason::NeedsHuman { why } => why,
         BlockedReason::Dependency { task_id } => task_id,
         BlockedReason::Quota { .. } => "",
@@ -418,8 +419,12 @@ fn build_prompt(task: &Task, reason: &BlockedReason, digest: &str) -> String {
     }
     format!(
         "A task failed repeatedly (failure kind: {kind}, digest: {digest}). Split it into at \
-         most {MAX_PLANS} smaller independent subtasks that together satisfy the original \
+         most {MAX_PLANS} smaller subtasks that together satisfy the original \
          acceptance criteria.\n\
+         IMPORTANT: Every subtask starts on a clean branch cut from the repository base branch — \
+         commits or edits from the failed parent branch will NOT exist in any subtask worktree. \
+         Never assume parent-attempt code already exists. Order subtasks logically if they touch \
+         the same files.\n\
          Do not modify any file. Answer with ONLY a JSON array, no prose, of objects with \
          exactly these keys: \"title\" (string), \"description\" (string), \"acceptance\" \
          (non-empty array of strings). Answer [] if the task cannot be split.\n\

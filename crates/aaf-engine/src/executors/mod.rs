@@ -31,7 +31,10 @@ use aaf_domain::ports::{AgentRequest, AgentRunner, PortError, PortResult};
 use self::agy::AgyRunner;
 use self::claude::ClaudeCodeRunner;
 use self::env::inject_non_interactive_env;
-pub use self::env::{agent_env, env_pass_secrets, validate_writable_caches};
+pub use self::env::{
+    TOOLCHAIN_HOME_ENV, agent_env, env_pass_secrets, is_valid_toolchain_dir,
+    validate_writable_caches,
+};
 use self::generic::GenericRunner;
 use self::pty::{CommandSpec, DEFAULT_TAIL_BYTES, LineCallback, PtyOutput};
 #[cfg(test)]

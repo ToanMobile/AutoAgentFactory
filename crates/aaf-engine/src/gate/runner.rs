@@ -341,8 +341,19 @@ pub fn run_all(
 /// name of the config key does not make it cheaper. The decision comes from
 /// the one classifier the throttle, `aaf slot` and the doctor share.
 pub fn is_heavy(name: &str, command: &str) -> bool {
+    is_heavy_with_light(name, command, &[])
+}
+
+/// Like [`is_heavy`], honoring Tier-2 `[commands].light_commands` unless the
+/// command text itself invokes a heavy build tool directly.
+pub fn is_heavy_with_light(name: &str, command: &str, light_commands: &[String]) -> bool {
+    if heavy_tool(command).is_some() {
+        return true;
+    }
+    if light_commands.iter().any(|k| k == name) {
+        return false;
+    }
     matches!(name, "lint_full" | "build" | "test_scoped" | "test_full")
-        || heavy_tool(command).is_some()
 }
 
 /// What the throttled commands need besides the plan itself.
@@ -531,27 +542,28 @@ pub fn run_all_throttled_with_timeouts(
         remove: env_remove,
     };
     for (name, command) in plan(commands, mode) {
-        let (result, confine_mode) = if is_heavy(name, &command) {
-            run_heavy(
-                repo_root,
-                name,
-                &command,
-                timeouts,
-                heavy,
-                env,
-                &mut run.notes,
-            )?
-        } else {
-            run_command_confined(
-                repo_root,
-                name,
-                &command,
-                timeouts,
-                extra_env,
-                env_remove,
-                Some(heavy.data_dir),
-            )?
-        };
+        let (result, confine_mode) =
+            if is_heavy_with_light(name, &command, &commands.light_commands) {
+                run_heavy(
+                    repo_root,
+                    name,
+                    &command,
+                    timeouts,
+                    heavy,
+                    env,
+                    &mut run.notes,
+                )?
+            } else {
+                run_command_confined(
+                    repo_root,
+                    name,
+                    &command,
+                    timeouts,
+                    extra_env,
+                    env_remove,
+                    Some(heavy.data_dir),
+                )?
+            };
         record_confine_mode(&mut run.unconfined, confine_mode);
         let passed = result.passed();
         run.results.push(result);

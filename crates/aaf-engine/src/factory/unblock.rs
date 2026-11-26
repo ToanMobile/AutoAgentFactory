@@ -4,7 +4,6 @@
 
 use aaf_domain::blocked::{BlockedReason, SubtaskPlan, UnblockAction};
 use aaf_domain::budget::BudgetCheck;
-use aaf_domain::config::MAX_AUDIT_REWORKS_CAP;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{AgentRunner, LimitHit, PortResult};
 use aaf_domain::task::{ImmutableSpec, Task, TaskState};
@@ -13,17 +12,21 @@ use serde_json::json;
 use super::adapters::provider_for;
 use super::audit_turn::InfraWatch;
 use super::ports::{AccountPool, Grant};
-use super::rework_filter::is_valid_rework_finding;
 use super::stage_router::StageTarget;
 use super::worker::{GateJob, Job, Next, ensure_budget, halt_on_infra_with, hook_problem_if};
 use super::{Deps, Store};
-use crate::cross_audit::Finding;
 use crate::git::TaskWorktree;
 use crate::git::worktree::validate_task_id;
 use crate::unblocker::{FailureSignal, Ladder, QuotaRoute, failure_digest};
 use crate::webhook::WebhookEvent;
 
+mod audit_rework;
 mod proposer;
+#[cfg(test)]
+pub(crate) use audit_rework::audit_fails_since_reset;
+pub(crate) use audit_rework::{
+    format_sanitized_audit_findings, handle_audit_failure, sanitize_untrusted_close_tag,
+};
 use proposer::LazyProposer;
 
 /// Records an account rate-limit cooldown on `accounts` and emits `AccountCooldown`.
@@ -73,7 +76,6 @@ pub(super) fn route_limit_hit_on(
 /// second pass finds T2 already tried, so this bound is never the stop.
 const MAX_LADDER_PASSES: usize = 3;
 const SUMMARY_MAX_CHARS: usize = 500;
-const AUDIT_FINDINGS_MAX_CHARS: usize = 1500;
 
 /// 32 hex characters, unique per call: run ids, webhook event ids and
 /// integration-tree names. Not a secret; it only has to never repeat, across
@@ -356,6 +358,9 @@ pub(crate) fn handle_with_opt(
                 if matches!(decision.reason, BlockedReason::Infra { .. }) {
                     // Upstream infra failures must never count toward the global freeze.
                     super::infra_retry::block_infra(deps, &task, &decision.reason, &why)?;
+                } else if matches!(decision.reason, BlockedReason::AuditRejected { .. }) {
+                    // Audit/score-gate exhaustion hands over to human review without freezing the factory.
+                    block(deps, &task, &decision.reason, "audit_rejected", &why, false)?;
                 } else {
                     let reason = BlockedReason::NeedsHuman { why: why.clone() };
                     block(deps, &task, &reason, "needs_human", &why, true)?;
@@ -396,8 +401,48 @@ fn regate(
     }))
 }
 
+fn plans_share_files(parent: &Task, plans: &[SubtaskPlan]) -> bool {
+    if plans.len() < 2 {
+        return false;
+    }
+    if !parent.scope_paths.is_empty() {
+        return true;
+    }
+    let mut seen = std::collections::HashSet::new();
+    for plan in plans {
+        let mut plan_paths = std::collections::HashSet::new();
+        for token in plan
+            .title
+            .split_whitespace()
+            .chain(plan.description.split_whitespace())
+        {
+            let trimmed = token.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '.'
+                )
+            });
+            if trimmed.contains('/')
+                && trimmed.contains('.')
+                && !trimmed.starts_with("http")
+                && !trimmed.starts_with('/')
+            {
+                plan_paths.insert(trimmed.to_string());
+            }
+        }
+        for path in plan_paths {
+            if !seen.insert(path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn spawn_subtasks(deps: &Deps, parent: &Task, plans: Vec<SubtaskPlan>) -> PortResult<()> {
     let existing = deps.store.children_of(&parent.id)?.len();
+    let chain_sequentially = plans_share_files(parent, &plans);
+    let mut prev_id: Option<String> = None;
     for (index, plan) in plans.into_iter().enumerate() {
         let mut id = format!("{}-s{}", parent.id, existing + index + 1);
         if validate_task_id(&id).is_err() {
@@ -412,6 +457,10 @@ fn spawn_subtasks(deps: &Deps, parent: &Task, plans: Vec<SubtaskPlan>) -> PortRe
             .map_err(|e| aaf_domain::ports::PortError::Invalid(e.to_string()))?;
         deps.store.insert_task(&child)?;
         deps.store.add_dep(&parent.id, &child.id)?;
+        if chain_sequentially && let Some(ref prev) = prev_id {
+            deps.store.add_dep(&child.id, prev)?;
+        }
+        prev_id = Some(child.id.clone());
         deps.emit(
             EventKind::TaskCreated,
             &child.id,
@@ -476,124 +525,4 @@ pub(crate) fn root_succeeded(deps: &Deps, task: &Task) -> PortResult<()> {
         ladder(deps).record_root_result(&task.root_id, true)?;
     }
     Ok(())
-}
-
-/// Neutralises any closing `</untrusted-data` tag (ASCII case-insensitive) so
-/// untrusted audit findings cannot escape their wrapper block.
-pub(super) fn sanitize_untrusted_close_tag(text: &str) -> String {
-    const NEEDLE: &[u8] = b"</untrusted-data";
-    let (bytes, mut out, mut copied, mut at) =
-        (text.as_bytes(), String::with_capacity(text.len()), 0, 0);
-    while at + NEEDLE.len() <= bytes.len() {
-        if bytes[at..at + NEEDLE.len()].eq_ignore_ascii_case(NEEDLE) {
-            out.push_str(&text[copied..at]);
-            out.push_str("&lt;/untrusted-data");
-            at += NEEDLE.len();
-            copied = at;
-        } else {
-            at += 1;
-        }
-    }
-    out.push_str(&text[copied..]);
-    out
-}
-
-/// Counts explicit failing `CrossAudit` events for `task_id` since the latest
-/// `ReworkRequested` or human unblock (`Blocked -> Ready`) using a filtered
-/// reverse scan so counts are never dropped past 50 events.
-pub(crate) fn audit_fails_since_reset(deps: &Deps, task_id: &str) -> PortResult<u32> {
-    let mut count: u32 = 0;
-    let kinds = [
-        EventKind::CrossAudit,
-        EventKind::TaskStateChanged,
-        EventKind::ReworkRequested,
-    ];
-    for event in deps
-        .store
-        .events_for_task_by_kinds(task_id, &kinds, u32::MAX)?
-    {
-        if event.kind == EventKind::ReworkRequested || is_human_unblock_event(&event) {
-            break;
-        }
-        if event.kind == EventKind::CrossAudit
-            && serde_json::from_str::<serde_json::Value>(&event.payload_json)
-                .ok()
-                .is_some_and(|p| {
-                    p.get("reused_from").is_none_or(serde_json::Value::is_null)
-                        && p["verdict"]
-                            .as_str()
-                            .is_some_and(|v| v == "fail" || v.starts_with("fail:"))
-                })
-        {
-            count = count.saturating_add(1);
-        }
-    }
-    Ok(count)
-}
-
-pub(crate) fn format_sanitized_audit_findings(findings: &[Finding]) -> Option<String> {
-    let raw = findings
-        .iter()
-        .filter(|f| is_valid_rework_finding(f))
-        .map(|f| format!("{}: {} ({})", f.id, f.question, f.evidence.trim()))
-        .collect::<Vec<_>>()
-        .join("; ");
-    (!raw.is_empty())
-        .then(|| sanitize_untrusted_close_tag(&one_line(&raw, AUDIT_FINDINGS_MAX_CHARS)))
-}
-
-/// Automatic audit-rework routing on explicit `AuditVerdict::Fail`.
-pub(crate) fn handle_audit_failure(
-    deps: &Deps,
-    task: &Task,
-    findings: &[Finding],
-) -> PortResult<Option<Next>> {
-    let cap = deps
-        .settings
-        .repo
-        .pipeline
-        .max_audit_reworks
-        .min(MAX_AUDIT_REWORKS_CAP);
-    if cap == 0 || audit_fails_since_reset(deps, &task.id)?.saturating_sub(1) >= cap {
-        return Ok(None);
-    }
-    let (valid, dropped): (Vec<_>, Vec<_>) =
-        findings.iter().partition(|f| is_valid_rework_finding(f));
-    if !dropped.is_empty() {
-        let items: Vec<_> = dropped
-            .iter()
-            .map(|f| {
-                let reason = if f.evidence.trim().is_empty() {
-                    "empty_evidence"
-                } else {
-                    "missing_file_line"
-                };
-                json!({ "id": f.id, "reason": reason })
-            })
-            .collect();
-        deps.emit(
-            EventKind::DetectorHit,
-            &task.id,
-            json!({ "source": "audit_rework_filter", "dropped_count": items.len(), "dropped": items }),
-        )?;
-    }
-    let Some(safe) = (!valid.is_empty())
-        .then(|| format_sanitized_audit_findings(findings))
-        .flatten()
-    else {
-        return Ok(None);
-    };
-    let budget = ensure_budget(deps, &task.root_id)?;
-    if matches!(
-        budget.check(),
-        BudgetCheck::Frozen | BudgetCheck::TokensExceeded | BudgetCheck::WallClockExceeded
-    ) {
-        return Ok(None);
-    }
-    let note =
-        format!("audit_rework: <untrusted-data id=\"audit-findings\">{safe}</untrusted-data>");
-    deps.store
-        .append_context_note(&task.id, &note, deps.now())?;
-    deps.move_to(&task.id, TaskState::Ready, None, "audit_rework")?;
-    Ok(Some(Next::Ready))
 }

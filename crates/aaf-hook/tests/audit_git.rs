@@ -160,3 +160,22 @@ fn git_clean_follows_the_last_dry_run_flag() {
         ],
     );
 }
+
+#[test]
+fn git_merge_and_cherry_pick_from_aaf_task_branches_are_denied() {
+    run_corpus(
+        &Fixture::new(),
+        &[
+            ("git merge --ff-only aaf/t-6ae3e474", GIT),
+            ("git merge refs/heads/aaf/t-6ae3e474-s1", GIT),
+            ("git merge origin/aaf/t-6ae3e474", GIT),
+            ("git cherry-pick aaf/t-6ae3e474", GIT),
+            ("git cherry-pick refs/remotes/origin/aaf/t-6ae3e474-s1", GIT),
+            ("git cherry-pick main..aaf/t-6ae3e474", GIT),
+            ("git cherry-pick main...aaf/t-6ae3e474", GIT),
+            // allowed
+            ("git merge main", ALLOW),
+            ("git merge origin/main", ALLOW),
+        ],
+    );
+}

@@ -128,6 +128,7 @@ pub(super) fn android_gradle_commands(prefix: &str) -> CommandsConfig {
         lint: String::new(),
         lint_full: run("lint"),
         repro: String::new(),
+        light_commands: Vec::new(),
     }
 }
 

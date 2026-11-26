@@ -204,10 +204,40 @@ fn seed_service_and_supervisor_forward_worktree_dir_and_seed_cache() {
         stdin_is_tty: false,
         aaf_env: Vec::new(),
     };
-    let env_def = service::non_default_service_env(&ctx_default);
+    let env_def = service::non_default_service_env_with_toolchain(&ctx_default, &[]);
     assert!(
         env_def.is_empty(),
         "expected empty default env, got {env_def:?}"
+    );
+
+    let sdk_dir = tmp.path().join("android-sdk");
+    let jdk_dir = tmp.path().join("openjdk@17/Contents/Home");
+    std::fs::create_dir_all(&sdk_dir).unwrap();
+    std::fs::create_dir_all(&jdk_dir).unwrap();
+    let env_sdk = service::non_default_service_env_with_toolchain(
+        &ctx_default,
+        &[
+            ("ANDROID_HOME".to_string(), sdk_dir.display().to_string()),
+            ("JAVA_HOME".to_string(), jdk_dir.display().to_string()),
+            ("ANDROID_SDK_ROOT".to_string(), "relative/path".to_string()),
+            (
+                "GRADLE_USER_HOME".to_string(),
+                "http://user:pass@proxy:3128".to_string(),
+            ),
+            ("ANTHROPIC_API_KEY".to_string(), "sk-secret".to_string()),
+        ],
+    );
+    assert!(
+        env_sdk.contains(&("ANDROID_HOME", sdk_dir.display().to_string()))
+            && env_sdk.contains(&("JAVA_HOME", jdk_dir.display().to_string())),
+        "valid toolchain dirs must be forwarded into plist env: {env_sdk:?}"
+    );
+    assert!(
+        !env_sdk.iter().any(|(k, _)| matches!(
+            *k,
+            "ANDROID_SDK_ROOT" | "GRADLE_USER_HOME" | "ANTHROPIC_API_KEY"
+        )),
+        "relative paths, proxy userinfo, and secrets must be ignored: {env_sdk:?}"
     );
 
     // 2. Custom worktrees_dir + AAF_SEED_CACHE=0 -> both forwarded by service and supervisor.
@@ -216,7 +246,7 @@ fn seed_service_and_supervisor_forward_worktree_dir_and_seed_cache() {
         aaf_env: vec![("AAF_SEED_CACHE".to_string(), "0".to_string())],
         ..ctx_default
     };
-    let svc_env = service::non_default_service_env(&ctx_custom);
+    let svc_env = service::non_default_service_env_with_toolchain(&ctx_custom, &[]);
     assert!(
         svc_env.contains(&("AAF_WORKTREE_DIR", custom_wt.display().to_string())),
         "service must forward non-default AAF_WORKTREE_DIR: {svc_env:?}"

@@ -196,7 +196,7 @@ fn collect_rework_findings_skips_passing_minor_nits_when_average_meets_threshold
 
     let low_avg = collect_rework_findings(&verdict, &scores, &reasons, 92, &cfg);
     let low_ids: Vec<&str> = low_avg.iter().map(|f| f.id.as_str()).collect();
-    assert_eq!(low_ids, vec!["G1", "G4", "G6"]);
+    assert_eq!(low_ids, vec!["G4", "G6", "G1"]);
 }
 
 #[test]
@@ -342,5 +342,137 @@ fn fallback_rejection_note_never_leaks_unverified_findings() {
     assert!(
         !notes.iter().any(|n| n.contains("hallucinated prose")),
         "raw unverified finding leaked into context_notes: {notes:?}"
+    );
+}
+
+#[test]
+fn score_findings_prioritize_failing_g6_g7_ahead_of_passing_g1_g2() {
+    use crate::factory::unblock::format_sanitized_audit_findings;
+
+    let long_reason = "x".repeat(600);
+    let scores = vec![
+        GoldenScore {
+            id: "G1".into(),
+            score: 92,
+            deduction_reason: format!("src/a.rs:10 {long_reason}"),
+        },
+        GoldenScore {
+            id: "G2".into(),
+            score: 92,
+            deduction_reason: format!("src/b.rs:20 {long_reason}"),
+        },
+        GoldenScore {
+            id: "G3".into(),
+            score: 90,
+            deduction_reason: format!("src/c.rs:30 {long_reason}"),
+        },
+        GoldenScore {
+            id: "G4".into(),
+            score: 86,
+            deduction_reason: "tests/t.py:55 regex test brittle".into(),
+        },
+        GoldenScore {
+            id: "G5".into(),
+            score: 96,
+            deduction_reason: String::new(),
+        },
+        GoldenScore {
+            id: "G6".into(),
+            score: 72,
+            deduction_reason: "tools/admin.html:2891 crammed 1000-char line".into(),
+        },
+        GoldenScore {
+            id: "G7".into(),
+            score: 80,
+            deduction_reason: "tools/admin.html:2956 alert without structured log".into(),
+        },
+    ];
+    let cfg = CrossAuditConfig {
+        score_gate: true,
+        min_average_score: 95,
+        min_criterion_score: 90,
+        ..CrossAuditConfig::default()
+    };
+    let findings = collect_rework_findings(
+        &AuditVerdict::Pass { warnings: vec![] },
+        &scores,
+        &["effective score 86".into()],
+        86,
+        &cfg,
+    );
+    let ids: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(
+        &ids[..3],
+        &["G6", "G7", "G4"],
+        "lowest failing scores first: {ids:?}"
+    );
+
+    let formatted = format_sanitized_audit_findings(&findings).unwrap();
+    assert!(
+        formatted.contains("G6:") && formatted.contains("crammed 1000-char line"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("G7:") && formatted.contains("structured log"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("G4:") && formatted.contains("regex test brittle"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn handle_audit_failure_stops_early_on_score_plateau() {
+    let world = World::new();
+    let task = add_gating_task(&world, "t-plat");
+    let deps = world.deps();
+    let emit_score = |score: u8| {
+        deps.emit(
+            EventKind::CrossAudit,
+            "t-plat",
+            json!({
+                "phase": "post_gate",
+                "verdict": format!("fail: effective score {score} < 95"),
+                "effective_score": score,
+            }),
+        )
+        .unwrap();
+    };
+    let findings = vec![finding(
+        "G6",
+        "score 72/100",
+        "tools/admin.html:2891 long line",
+    )];
+
+    // 1st fail (86) -> rework allowed (Gating -> Ready).
+    emit_score(86);
+    assert!(
+        handle_audit_failure(&deps, &task, &findings)
+            .unwrap()
+            .is_some()
+    );
+    // 2nd fail (86, no gain) -> still allowed once.
+    deps.move_to("t-plat", aaf_domain::task::TaskState::Running, None, "r1")
+        .unwrap();
+    deps.move_to("t-plat", aaf_domain::task::TaskState::Gating, None, "g1")
+        .unwrap();
+    emit_score(86);
+    assert!(
+        handle_audit_failure(&deps, &task, &findings)
+            .unwrap()
+            .is_some()
+    );
+    // 3rd fail (85, two consecutive non-improving reworks) -> plateau stops rework early.
+    deps.move_to("t-plat", aaf_domain::task::TaskState::Running, None, "r2")
+        .unwrap();
+    deps.move_to("t-plat", aaf_domain::task::TaskState::Gating, None, "g2")
+        .unwrap();
+    emit_score(85);
+    assert!(
+        handle_audit_failure(&deps, &task, &findings)
+            .unwrap()
+            .is_none(),
+        "plateau (86 -> 86 -> 85) must stop audit_rework early"
     );
 }

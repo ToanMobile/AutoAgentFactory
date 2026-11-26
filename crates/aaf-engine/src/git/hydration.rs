@@ -14,11 +14,13 @@ use aaf_domain::worktree_config::{WorktreeConfig, is_secret_file};
 mod cleanup;
 mod denied;
 pub mod device;
+mod rebase;
 pub mod seed;
 pub mod stage;
 
 pub use denied::{worktree_write_denied_for_cwd, worktree_write_denied_strings};
 pub use device::{MountEntry, same_cow_device};
+pub use rebase::hydrate_missing_copy_files;
 pub(crate) use stage::stage_for_gate_from_base;
 pub use stage::{CloneSkip, GateSecretStage, remove_partial_dst, stage_for_gate};
 use stage::{cow_clone_dir, run_setup_cmd};

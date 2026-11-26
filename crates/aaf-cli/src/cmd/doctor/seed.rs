@@ -245,6 +245,96 @@ pub(super) fn seed_cache_dry_run_check(
     advisory("seed_cache_dry_run", res)
 }
 
+pub(crate) fn evaluate_android_sdk_service(
+    profile: Option<&str>,
+    worktree: &WorktreeConfig,
+    plist_xml: Option<&str>,
+    env_has_sdk: bool,
+) -> Option<Result<String, String>> {
+    if !matches!(profile, Some("android")) {
+        return None;
+    }
+    let copies_local_props = worktree.copy_files.iter().any(|p| {
+        Path::new(p)
+            .file_name()
+            .is_some_and(|name| name == "local.properties")
+    });
+    let plist_has_sdk = plist_xml.is_some_and(|xml| {
+        xml.contains("<key>ANDROID_HOME</key>") || xml.contains("<key>ANDROID_SDK_ROOT</key>")
+    });
+    if copies_local_props || plist_has_sdk {
+        let via = match (plist_has_sdk, copies_local_props) {
+            (true, true) => "LaunchAgent plist + [worktree].copy_files",
+            (true, false) => "LaunchAgent plist (ANDROID_HOME/ANDROID_SDK_ROOT)",
+            (false, true) => "[worktree].copy_files (local.properties)",
+            (false, false) => unreachable!(),
+        };
+        return Some(Ok(format!(
+            "Android SDK available to headless gates via {via}"
+        )));
+    }
+    if plist_xml.is_some() {
+        return Some(Err(
+            "LaunchAgent plist lacks ANDROID_HOME/ANDROID_SDK_ROOT and [worktree].copy_files has no local.properties; \
+             headless Gradle gates may fail with 'SDK location not found' — reinstall service (`aaf ui --install-service`) \
+             or add local.properties to [worktree].copy_files"
+                .to_string(),
+        ));
+    }
+    if env_has_sdk {
+        return Some(Ok(
+            "ANDROID_HOME/ANDROID_SDK_ROOT set in shell (no LaunchAgent plist installed)"
+                .to_string(),
+        ));
+    }
+    Some(Err(
+        "ANDROID_HOME/ANDROID_SDK_ROOT is not set and [worktree].copy_files has no local.properties; \
+         worktree Gradle gates may fail with 'SDK location not found'"
+            .to_string(),
+    ))
+}
+
+pub(super) fn android_sdk_service_check(
+    ctx: &Ctx,
+    root_opt: Option<&Path>,
+    profile: Option<&str>,
+    worktree: &WorktreeConfig,
+) -> Check {
+    if root_opt.is_none() {
+        return not_applicable("android_service_sdk");
+    }
+    let plist_path = ctx
+        .home
+        .join("Library/LaunchAgents/com.autoagentfactory.ui.plist");
+    let plist_xml = fs::read_to_string(&plist_path).ok();
+    let env_has_sdk = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+        .iter()
+        .any(|k| std::env::var(k).ok().is_some_and(|v| !v.trim().is_empty()));
+    match evaluate_android_sdk_service(profile, worktree, plist_xml.as_deref(), env_has_sdk) {
+        Some(res) => advisory("android_service_sdk", res),
+        None => Check {
+            name: "android_service_sdk",
+            ok: true,
+            required: false,
+            applicable: false,
+            detail: "not applicable: project profile is not android".to_string(),
+        },
+    }
+}
+
+pub(super) fn worktree_checks(
+    ctx: &Ctx,
+    root_opt: Option<&Path>,
+    profile: Option<&str>,
+    worktree: &WorktreeConfig,
+) -> Vec<Check> {
+    vec![
+        worktree_cow_volume_check(ctx, root_opt),
+        seed_cache_dry_run_check(ctx, root_opt, worktree),
+        android_sdk_service_check(ctx, root_opt, profile, worktree),
+    ]
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -354,6 +444,36 @@ mod tests {
         assert!(
             !err.contains("export AAF_WORKTREE_DIR=/Volumes/LegacyHFS"),
             "must not suggest pointing AAF_WORKTREE_DIR onto a non-APFS volume: {err}"
+        );
+    }
+
+    #[test]
+    fn doctor_android_sdk_service_warns_when_plist_and_copy_files_both_lack_sdk() {
+        let empty = WorktreeConfig::default();
+        let plist_no_sdk = "<dict><key>PATH</key><string>/usr/bin</string></dict>";
+        let err = evaluate_android_sdk_service(Some("android"), &empty, Some(plist_no_sdk), true)
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains("ANDROID_HOME"), "{err}");
+
+        let plist_with_sdk = "<dict><key>ANDROID_HOME</key><string>/sdk</string></dict>";
+        assert!(
+            evaluate_android_sdk_service(Some("android"), &empty, Some(plist_with_sdk), false)
+                .unwrap()
+                .is_ok()
+        );
+
+        let with_copy = WorktreeConfig {
+            copy_files: vec!["PhoneConnect/local.properties".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            evaluate_android_sdk_service(Some("android"), &with_copy, Some(plist_no_sdk), false)
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
+            evaluate_android_sdk_service(Some("rust"), &empty, Some(plist_no_sdk), false).is_none()
         );
     }
 }
