@@ -40,24 +40,46 @@
     return utf8ByteLen(out);
   }
 
+  function isVi() {
+    try {
+      if (typeof window !== "undefined" && window.AafI18n && typeof window.AafI18n.getLang === "function") {
+        return window.AafI18n.getLang() === "vi";
+      }
+      if (typeof localStorage !== "undefined") {
+        return localStorage.getItem("aaf_ui_lang") === "vi";
+      }
+    } catch (_) {}
+    return false;
+  }
+  const L = (en, vi) => (isVi() ? vi : en);
+
   function formatByteBadge(bytes, allowRework) {
     if (bytes > REWORK_MAX_BYTES) {
       return {
         cls: "aaf-badge-trunc",
-        text: `⚠ ${bytes} / ${REWORK_MAX_BYTES} B (Exceeds limit)`,
+        text: L(
+          `⚠ ${bytes} / ${REWORK_MAX_BYTES} B (Exceeds limit)`,
+          `⚠ ${bytes} / ${REWORK_MAX_BYTES} B (Vượt giới hạn)`
+        ),
       };
     }
     if (bytes > STEER_MAX_BYTES) {
       return {
         cls: "aaf-badge-lock",
         text: allowRework
-          ? `⚠ ${bytes} / ${STEER_MAX_BYTES} B (> Steer · Rework ≤ ${REWORK_MAX_BYTES} B)`
-          : `⚠ ${bytes} / ${STEER_MAX_BYTES} B (Exceeds Steer limit)`,
+          ? L(
+              `⚠ ${bytes} / ${STEER_MAX_BYTES} B (> Steer · Rework ≤ ${REWORK_MAX_BYTES} B)`,
+              `⚠ ${bytes} / ${STEER_MAX_BYTES} B (> Điều hướng · Làm lại ≤ ${REWORK_MAX_BYTES} B)`
+            )
+          : L(
+              `⚠ ${bytes} / ${STEER_MAX_BYTES} B (Exceeds Steer limit)`,
+              `⚠ ${bytes} / ${STEER_MAX_BYTES} B (Vượt giới hạn Điều hướng)`
+            ),
       };
     }
     return {
       cls: "aaf-badge-st-U",
-      text: `${bytes} / ${STEER_MAX_BYTES} B (Steer)`,
+      text: L(`${bytes} / ${STEER_MAX_BYTES} B (Steer)`, `${bytes} / ${STEER_MAX_BYTES} B (Điều hướng)`),
     };
   }
 
@@ -190,11 +212,11 @@
 
   function normalizeStatus(raw) {
     const s = String(raw || "").trim().toLowerCase();
-    if (s === "a" || s === "added" || s === "add" || s === "new") return { code: "A", label: "Added" };
-    if (s === "d" || s === "deleted" || s === "del" || s === "removed") return { code: "D", label: "Deleted" };
-    if (s === "r" || s === "renamed" || s === "rename") return { code: "R", label: "Renamed" };
-    if (s === "m" || s === "modified" || s === "mod" || s === "changed") return { code: "M", label: "Modified" };
-    return { code: "U", label: s ? s.toUpperCase() : "Changed" };
+    if (s === "a" || s === "added" || s === "add" || s === "new") return { code: "A", label: L("Added", "Thêm mới") };
+    if (s === "d" || s === "deleted" || s === "del" || s === "removed") return { code: "D", label: L("Deleted", "Đã xoá") };
+    if (s === "r" || s === "renamed" || s === "rename") return { code: "R", label: L("Renamed", "Đổi tên") };
+    if (s === "m" || s === "modified" || s === "mod" || s === "changed") return { code: "M", label: L("Modified", "Đã sửa") };
+    return { code: "U", label: s ? s.toUpperCase() : L("Changed", "Thay đổi") };
   }
 
   function normalizeLineKind(raw) {
@@ -236,7 +258,7 @@
 
   function renderPlainDiffHtml(raw) {
     if (!raw || !String(raw).trim()) {
-      return `<div class="aaf-diff-empty">No code diff available in worktree.</div>`;
+      return `<div class="aaf-diff-empty">${esc(L("No code diff available in worktree.", "Không có thay đổi mã nguồn trong worktree."))}</div>`;
     }
     return `<div class="aaf-plain-diff">` + String(raw).split("\n").map((ln) => {
       const safe = esc(ln) || " ";
@@ -281,7 +303,7 @@
     const canSubmit = !isTerminal && !isReadOnly && typeof onSubmitComments === "function";
 
     if (resp.available === false) {
-      containerEl.innerHTML = `<div class="aaf-diff-empty">${esc(resp.note || "No worktree diff available.")}</div>`;
+      containerEl.innerHTML = `<div class="aaf-diff-empty">${esc(resp.note || L("No worktree diff available.", "Không có thay đổi nào trong worktree."))}</div>`;
       return null;
     }
 
@@ -295,16 +317,16 @@
       root.innerHTML = `
         <div class="aaf-diff-summary">
           <div class="aaf-diff-stats">
-            <span class="mono muted">${esc(resp.branch || resp.worktree_path || "Plain diff")}</span>
-            ${resp.truncated ? `<span class="aaf-badge aaf-badge-trunc">Truncated</span>` : ""}
+            <span class="mono muted">${esc(resp.branch || resp.worktree_path || L("Plain diff", "Bản thay đổi thô"))}</span>
+            ${resp.truncated ? `<span class="aaf-badge aaf-badge-trunc">${esc(L("Truncated", "Đã cắt ngắn"))}</span>` : ""}
           </div>
           <div class="aaf-diff-controls">
-            <button type="button" data-plain-wrap>${wrapLines ? "Disable wrap" : "Wrap lines"}</button>
+            <button type="button" data-plain-wrap>${esc(wrapLines ? L("Disable wrap", "Tắt xuống dòng") : L("Wrap lines", "Tự xuống dòng"))}</button>
           </div>
         </div>
         ${resp.stat ? `<pre class="mono muted" style="margin:0;white-space:pre-wrap;background:var(--surface2);padding:8px 10px;border-radius:8px;border:1px solid var(--border)">${esc(resp.stat)}</pre>` : ""}
         ${renderPlainDiffHtml(resp.diff)}
-        ${resp.truncated ? `<div class="muted" style="font-size:12px">Diff output was truncated by server size limit.</div>` : ""}
+        ${resp.truncated ? `<div class="muted" style="font-size:12px">${esc(L("Diff output was truncated by server size limit.", "Nội dung thay đổi đã bị cắt ngắn do vượt giới hạn kích thước."))}</div>` : ""}
       `;
       containerEl.innerHTML = "";
       containerEl.appendChild(root);
@@ -313,7 +335,7 @@
         wrapBtn.addEventListener("click", () => {
           wrapLines = !wrapLines;
           root.classList.toggle("aaf-wrap", wrapLines);
-          wrapBtn.textContent = wrapLines ? "Disable wrap" : "Wrap lines";
+          wrapBtn.textContent = wrapLines ? L("Disable wrap", "Tắt xuống dòng") : L("Wrap lines", "Tự xuống dòng");
         });
       }
       return { getComments: () => [] };
@@ -384,27 +406,27 @@
 
     function renderComposerHtml(comp) {
       const loc = comp.line > 0
-        ? `${comp.path}:L${comp.line}${comp.side === "old" ? " (old)" : ""}`
-        : `${comp.path} (file note)`;
+        ? `${comp.path}:L${comp.line}${comp.side === "old" ? L(" (old)", " (cũ)") : ""}`
+        : `${comp.path} ${L("(file note)", "(ghi chú tệp)")}`;
       const isEdit = comp.editId != null;
       const draftBytes = estimateFormattedBytes(previewCommentsWithComposer(comp), baseNote);
       const byteBadge = formatByteBadge(draftBytes, stateStr === "review");
       return `
         <div class="aaf-composer" data-composer>
           <div class="aaf-composer-head">
-            <span class="aaf-cmt-loc">${isEdit ? "Edit comment · " : "Comment on "}${esc(loc)}</span>
+            <span class="aaf-cmt-loc">${esc(isEdit ? L("Edit comment · ", "Sửa góp ý · ") : L("Comment on ", "Góp ý tại "))}${esc(loc)}</span>
             <span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap">
               <span class="aaf-badge ${byteBadge.cls}" data-composer-bytes>${esc(byteBadge.text)}</span>
               <span class="muted">${comments.length}/${MAX_COMMENTS}</span>
             </span>
           </div>
-          <textarea data-composer-input placeholder="Add inline review comment… (Cmd/Ctrl+Enter to save)">${esc(comp.draftText || "")}</textarea>
+          <textarea data-composer-input placeholder="${esc(L("Add inline review comment… (Cmd/Ctrl+Enter to save)", "Nhập góp ý duyệt mã… (Cmd/Ctrl+Enter để lưu)"))}">${esc(comp.draftText || "")}</textarea>
           ${comp.error ? `<div class="aaf-composer-err">${esc(comp.error)}</div>` : ""}
           <div class="aaf-composer-foot">
-            <span class="muted" style="font-size:11.5px">Queued locally until you submit below</span>
+            <span class="muted" style="font-size:11.5px">${esc(L("Queued locally until you submit below", "Lưu tạm cho đến khi bạn bấm gửi bên dưới"))}</span>
             <div class="aaf-composer-btns">
-              <button type="button" data-composer-cancel>Cancel</button>
-              <button type="button" class="btn-primary" data-composer-save>${isEdit ? "Update Comment" : "Save Comment"}</button>
+              <button type="button" data-composer-cancel>${esc(L("Cancel", "Huỷ"))}</button>
+              <button type="button" class="btn-primary" data-composer-save>${esc(isEdit ? L("Update Comment", "Cập nhật góp ý") : L("Save Comment", "Lưu góp ý"))}</button>
             </div>
           </div>
         </div>
@@ -413,15 +435,15 @@
 
     function renderCommentCardHtml(c) {
       const loc = c.line > 0
-        ? `${c.path}:L${c.line}${c.side === "old" ? " (old)" : ""}`
-        : `${c.path} (file note)`;
+        ? `${c.path}:L${c.line}${c.side === "old" ? L(" (old)", " (cũ)") : ""}`
+        : `${c.path} ${L("(file note)", "(ghi chú tệp)")}`;
       return `
         <div class="aaf-cmt-card" data-cmt-id="${c.id}">
           <div class="aaf-cmt-card-head">
             <span class="aaf-cmt-loc">${esc(loc)}</span>
             <div class="aaf-cmt-acts">
-              <button type="button" data-cmt-edit="${c.id}">Edit</button>
-              <button type="button" data-cmt-del="${c.id}" aria-label="Remove comment">Remove</button>
+              <button type="button" data-cmt-edit="${c.id}">${esc(L("Edit", "Sửa"))}</button>
+              <button type="button" data-cmt-del="${c.id}" aria-label="${esc(L("Remove comment", "Xoá góp ý"))}">${esc(L("Remove", "Xoá"))}</button>
             </div>
           </div>
           <div class="aaf-cmt-body">${esc(c.body)}</div>
@@ -445,8 +467,8 @@
         const showComp = activeComposer && activeComposer.anchorKey === fileAnchor;
         bodyHtml = `
           <div class="aaf-file-note">
-            <span>Binary file changed — line-level diff unavailable.</span>
-            <button type="button" class="btn-sm" data-file-note="${fileIdx}">+ Add file comment</button>
+            <span>${esc(L("Binary file changed — line-level diff unavailable.", "Tệp nhị phân thay đổi — không hiển thị so sánh từng dòng."))}</span>
+            <button type="button" class="btn-sm" data-file-note="${fileIdx}">${esc(L("+ Add file comment", "+ Thêm góp ý cho tệp"))}</button>
           </div>
           ${(existing.length || showComp) ? `
             <div style="padding:8px 10px;background:var(--surface2);border-top:1px solid var(--border)">
@@ -462,8 +484,8 @@
         const showComp = activeComposer && activeComposer.anchorKey === fileAnchor;
         bodyHtml = `
           <div class="aaf-file-note">
-            <span>No text hunks (file mode change, rename, or empty file).</span>
-            <button type="button" class="btn-sm" data-file-note="${fileIdx}">+ Add file comment</button>
+            <span>${esc(L("No text hunks (file mode change, rename, or empty file).", "Không có đoạn thay đổi văn bản (đổi quyền, đổi tên hoặc tệp trống)."))}</span>
+            <button type="button" class="btn-sm" data-file-note="${fileIdx}">${esc(L("+ Add file comment", "+ Thêm góp ý cho tệp"))}</button>
           </div>
           ${(existing.length || showComp) ? `
             <div style="padding:8px 10px;background:var(--surface2);border-top:1px solid var(--border)">
@@ -495,9 +517,9 @@
 
             rows.push(`
               <tr class="aaf-dl aaf-dl-${kind}">
-                <td class="aaf-ln">${oldLn != null ? `<button type="button" class="aaf-ln-btn" ${btnAttrs} title="Comment on ${esc(path)}:L${oldLn}">${oldLn}</button>` : ""}</td>
-                <td class="aaf-ln">${newLn != null ? `<button type="button" class="aaf-ln-btn" ${btnAttrs} title="Comment on ${esc(path)}:L${newLn}">${newLn}</button>` : ""}</td>
-                <td class="aaf-ln-act">${canCommentLine ? `<button type="button" class="aaf-add-cmt-btn ${lineCmts.length ? "has-cmt" : ""}" ${btnAttrs} aria-label="Add comment at ${esc(path)} line ${newLn ?? oldLn}" title="Add inline comment">+</button>` : ""}</td>
+                <td class="aaf-ln">${oldLn != null ? `<button type="button" class="aaf-ln-btn" ${btnAttrs} title="${esc(L("Comment on ", "Góp ý tại "))}${esc(path)}:L${oldLn}">${oldLn}</button>` : ""}</td>
+                <td class="aaf-ln">${newLn != null ? `<button type="button" class="aaf-ln-btn" ${btnAttrs} title="${esc(L("Comment on ", "Góp ý tại "))}${esc(path)}:L${newLn}">${newLn}</button>` : ""}</td>
+                <td class="aaf-ln-act">${canCommentLine ? `<button type="button" class="aaf-add-cmt-btn ${lineCmts.length ? "has-cmt" : ""}" ${btnAttrs} aria-label="${esc(L(`Add comment at ${path} line ${newLn ?? oldLn}`, `Thêm góp ý tại ${path} dòng ${newLn ?? oldLn}`))}" title="${esc(L("Add inline comment", "Thêm góp ý tại dòng này"))}">+</button>` : ""}</td>
                 <td class="aaf-code-cell"><span class="aaf-sign">${esc(sign)}</span>${esc(text)}</td>
               </tr>
             `);
@@ -526,8 +548,8 @@
               <span class="aaf-chev" aria-hidden="true">${isCollapsed ? "▸" : "▾"}</span>
               <span class="aaf-badge aaf-badge-st-${st.code}" title="${esc(st.label)}">${esc(st.code)}</span>
               <span class="aaf-file-path">${esc(path)}</span>
-              ${file.head_locked ? `<span class="aaf-badge aaf-badge-lock">🔒 HEAD-LOCKED</span>` : ""}
-              ${fileCmts.length ? `<span class="aaf-badge aaf-badge-cmt">${fileCmts.length} comment${fileCmts.length > 1 ? "s" : ""}</span>` : ""}
+              ${file.head_locked ? `<span class="aaf-badge aaf-badge-lock">🔒 ${esc(L("HEAD-LOCKED", "KHOÁ BẢO VỆ"))}</span>` : ""}
+              ${fileCmts.length ? `<span class="aaf-badge aaf-badge-cmt">${esc(L(`${fileCmts.length} comment${fileCmts.length > 1 ? "s" : ""}`, `${fileCmts.length} góp ý`))}</span>` : ""}
             </span>
             <span class="aaf-file-head-r">
               <span class="aaf-stat-add">+${adds}</span>
@@ -542,35 +564,36 @@
     function renderStickyBarHtml() {
       const count = comments.length;
       const hasContent = count > 0 || baseNote.trim().length > 0;
-      const cmtSuffix = count > 0 ? ` (${count} comment${count > 1 ? "s" : ""})` : "";
+      const cmtSuffix = count > 0 ? L(` (${count} comment${count > 1 ? "s" : ""})`, ` (${count} góp ý)`) : "";
       const payloadBytes = hasContent ? estimateFormattedBytes(comments, baseNote) : 0;
       const byteBadge = formatByteBadge(payloadBytes, stateStr === "review");
       const overSteerLimit = payloadBytes > STEER_MAX_BYTES;
+      const stLabel = stateStr === "done" ? L("done", "đã hoàn thành") : (stateStr === "cancelled" ? L("cancelled", "đã huỷ") : stateStr);
       let actionButtons = "";
 
       if (isTerminal) {
         actionButtons = `
-          <span class="muted" style="font-size:12px">Task is ${esc(stateStr)} — read-only</span>
-          <button type="button" data-copy-cmts ${!hasContent ? "disabled" : ""}>Copy Comments</button>
+          <span class="muted" style="font-size:12px">${esc(L(`Task is ${stLabel} — read-only`, `Việc ${stLabel} — chỉ đọc`))}</span>
+          <button type="button" data-copy-cmts ${!hasContent ? "disabled" : ""}>${esc(L("Copy Comments", "Sao chép góp ý"))}</button>
         `;
       } else if (isReadOnly) {
         actionButtons = `
-          <span class="muted" style="font-size:12px">Read-only mode</span>
-          <button type="button" data-copy-cmts ${!hasContent ? "disabled" : ""}>Copy Comments</button>
+          <span class="muted" style="font-size:12px">${esc(L("Read-only mode", "Chế độ chỉ đọc"))}</span>
+          <button type="button" data-copy-cmts ${!hasContent ? "disabled" : ""}>${esc(L("Copy Comments", "Sao chép góp ý"))}</button>
         `;
       } else if (stateStr === "review") {
         actionButtons = `
-          <button type="button" data-submit-mode="steer" ${submitting || !hasContent ? "disabled" : ""} ${overSteerLimit ? `title="Exceeds ${STEER_MAX_BYTES}-byte Steer limit"` : ""}>
-            ${submitting ? "Sending…" : `Send as Steer${count > 0 ? ` (${count})` : ""}`}
+          <button type="button" data-submit-mode="steer" ${submitting || !hasContent ? "disabled" : ""} ${overSteerLimit ? `title="${esc(L(`Exceeds ${STEER_MAX_BYTES}-byte Steer limit`, `Vượt giới hạn ${STEER_MAX_BYTES} byte của Điều hướng`))}"` : ""}>
+            ${esc(submitting ? L("Sending…", "Đang gửi…") : L(`Send as Steer${count > 0 ? ` (${count})` : ""}`, `Gửi điều hướng${count > 0 ? ` (${count})` : ""}`))}
           </button>
           <button type="button" class="btn-danger" data-submit-mode="rework" ${submitting || !hasContent ? "disabled" : ""}>
-            ${submitting ? "Sending…" : `Request Rework${cmtSuffix}`}
+            ${esc(submitting ? L("Sending…", "Đang gửi…") : `${L("Request Rework", "Yêu cầu làm lại")}${cmtSuffix}`)}
           </button>
         `;
       } else {
         actionButtons = `
-          <button type="button" class="btn-primary" data-submit-mode="steer" ${submitting || !hasContent ? "disabled" : ""} ${overSteerLimit ? `title="Exceeds ${STEER_MAX_BYTES}-byte Steer limit"` : ""}>
-            ${submitting ? "Sending…" : `Send as Steer${cmtSuffix}`}
+          <button type="button" class="btn-primary" data-submit-mode="steer" ${submitting || !hasContent ? "disabled" : ""} ${overSteerLimit ? `title="${esc(L(`Exceeds ${STEER_MAX_BYTES}-byte Steer limit`, `Vượt giới hạn ${STEER_MAX_BYTES} byte của Điều hướng`))}"` : ""}>
+            ${esc(submitting ? L("Sending…", "Đang gửi…") : `${L("Send as Steer", "Gửi điều hướng")}${cmtSuffix}`)}
           </button>
         `;
       }
@@ -580,7 +603,7 @@
             const loc = c.line > 0 ? `${c.path}:L${c.line}` : c.path;
             return `<div class="aaf-sticky-pitem">
               <div class="aaf-sticky-pitem-txt"><span class="aaf-cmt-loc">${esc(loc)}</span> — ${esc(c.body)}</div>
-              <button type="button" class="btn-sm" data-cmt-del="${c.id}" aria-label="Remove comment">×</button>
+              <button type="button" class="btn-sm" data-cmt-del="${c.id}" aria-label="${esc(L("Remove comment", "Xoá góp ý"))}">×</button>
             </div>`;
           }).join("")}</div>`
         : "";
@@ -589,15 +612,15 @@
         <div class="aaf-sticky-bar" data-sticky-bar>
           <div class="aaf-sticky-top">
             <div class="aaf-sticky-meta">
-              <span class="aaf-badge ${count ? "aaf-badge-cmt" : "aaf-badge-st-U"}">${count}/${MAX_COMMENTS} inline comment${count === 1 ? "" : "s"}</span>
+              <span class="aaf-badge ${count ? "aaf-badge-cmt" : "aaf-badge-st-U"}">${esc(L(`${count}/${MAX_COMMENTS} inline comment${count === 1 ? "" : "s"}`, `${count}/${MAX_COMMENTS} góp ý theo dòng`))}</span>
               <span class="aaf-badge ${byteBadge.cls} ${hasContent ? "" : "hidden"}" data-byte-counter>${esc(byteBadge.text)}</span>
-              ${count ? `<button type="button" class="btn-sm" data-toggle-preview>${showPreview ? "Hide list" : "Review list"}</button><button type="button" class="btn-sm" data-clear-all>Clear all</button>` : `<span class="muted">Click any line number or + to attach inline review notes</span>`}
+              ${count ? `<button type="button" class="btn-sm" data-toggle-preview>${esc(showPreview ? L("Hide list", "Ẩn danh sách") : L("Review list", "Xem danh sách"))}</button><button type="button" class="btn-sm" data-clear-all>${esc(L("Clear all", "Xoá hết"))}</button>` : `<span class="muted">${esc(L("Click any line number or + to attach inline review notes", "Bấm số dòng hoặc dấu + để thêm góp ý duyệt mã"))}</span>`}
             </div>
             ${statusMsg ? `<span class="aaf-sticky-msg ${esc(statusMsg.kind)}">${esc(statusMsg.text)}</span>` : ""}
           </div>
           ${previewHtml}
           <div class="aaf-sticky-row">
-            <input type="text" class="aaf-sticky-note" data-base-note placeholder="Optional summary note for the agent…" value="${esc(baseNote)}" ${submitting || isTerminal || isReadOnly ? "disabled" : ""}>
+            <input type="text" class="aaf-sticky-note" data-base-note placeholder="${esc(L("Optional summary note for the agent…", "Ghi chú tóm tắt cho agent (tuỳ chọn)…"))}" value="${esc(baseNote)}" ${submitting || isTerminal || isReadOnly ? "disabled" : ""}>
             <div class="aaf-sticky-actions">${actionButtons}</div>
           </div>
         </div>
@@ -625,18 +648,18 @@
       root.innerHTML = `
         <div class="aaf-diff-summary">
           <div class="aaf-diff-stats">
-            <strong>${totalFiles} file${totalFiles === 1 ? "" : "s"} changed</strong>
+            <strong>${esc(L(`${totalFiles} file${totalFiles === 1 ? "" : "s"} changed`, `${totalFiles} tệp thay đổi`))}</strong>
             <span class="aaf-stat-add">+${totalAdd}</span>
             <span class="aaf-stat-del">-${totalDel}</span>
-            ${lockedCount > 0 ? `<span class="aaf-badge aaf-badge-lock">🔒 ${lockedCount} HEAD-LOCKED</span>` : ""}
-            ${resp.truncated ? `<span class="aaf-badge aaf-badge-trunc">Truncated</span>` : ""}
+            ${lockedCount > 0 ? `<span class="aaf-badge aaf-badge-lock">🔒 ${esc(L(`${lockedCount} HEAD-LOCKED`, `${lockedCount} KHOÁ BẢO VỆ`))}</span>` : ""}
+            ${resp.truncated ? `<span class="aaf-badge aaf-badge-trunc">${esc(L("Truncated", "Đã cắt ngắn"))}</span>` : ""}
           </div>
           <div class="aaf-diff-controls">
-            <button type="button" data-toggle-wrap>${wrapLines ? "Disable wrap" : "Wrap lines"}</button>
-            <button type="button" data-toggle-all>${allCollapsed ? "Expand all" : "Collapse all"}</button>
+            <button type="button" data-toggle-wrap>${esc(wrapLines ? L("Disable wrap", "Tắt xuống dòng") : L("Wrap lines", "Tự xuống dòng"))}</button>
+            <button type="button" data-toggle-all>${esc(allCollapsed ? L("Expand all", "Mở tất cả") : L("Collapse all", "Thu gọn hết"))}</button>
           </div>
         </div>
-        ${files.length > 1 || lockedCount > 0 ? `<div class="aaf-jump-bar" role="navigation" aria-label="Changed files">${jumpPillsHtml}</div>` : ""}
+        ${files.length > 1 || lockedCount > 0 ? `<div class="aaf-jump-bar" role="navigation" aria-label="${esc(L("Changed files", "Các tệp thay đổi"))}">${jumpPillsHtml}</div>` : ""}
         <div class="aaf-file-list" style="display:flex;flex-direction:column;gap:10px">
           ${files.map((f, idx) => renderFileCardHtml(f, idx)).join("")}
         </div>
@@ -681,7 +704,10 @@
       }
 
       const limitErr = comments.length >= MAX_COMMENTS
-        ? `Maximum ${MAX_COMMENTS} inline comments reached. Edit or remove an existing comment first.`
+        ? L(
+            `Maximum ${MAX_COMMENTS} inline comments reached. Edit or remove an existing comment first.`,
+            `Đã đạt tối đa ${MAX_COMMENTS} góp ý theo dòng. Hãy sửa hoặc xoá bớt một góp ý trước.`
+          )
         : "";
       statusMsg = null;
       activeComposer = {
@@ -706,7 +732,7 @@
       const text = (ta ? ta.value : activeComposer.draftText || "").trim();
       activeComposer.draftText = ta ? ta.value : activeComposer.draftText;
       if (!text) {
-        activeComposer.error = "Please enter a comment before saving.";
+        activeComposer.error = L("Please enter a comment before saving.", "Vui lòng nhập góp ý trước khi lưu.");
         render(true);
         return;
       }
@@ -719,7 +745,10 @@
         return;
       }
       if (comments.length >= MAX_COMMENTS) {
-        activeComposer.error = `Maximum ${MAX_COMMENTS} inline comments reached. Remove one before adding more.`;
+        activeComposer.error = L(
+          `Maximum ${MAX_COMMENTS} inline comments reached. Remove one before adding more.`,
+          `Đã đạt tối đa ${MAX_COMMENTS} góp ý theo dòng. Hãy xoá bớt trước khi thêm mới.`
+        );
         render(true);
         return;
       }
@@ -757,12 +786,14 @@
         showPreview = false;
         statusMsg = {
           kind: "ok",
-          text: mode === "rework" ? "Rework request sent." : "Steer feedback sent.",
+          text: mode === "rework"
+            ? L("Rework request sent.", "Đã gửi yêu cầu làm lại.")
+            : L("Steer feedback sent.", "Đã gửi góp ý điều hướng."),
         };
       } catch (err) {
         statusMsg = {
           kind: "err",
-          text: (err && err.message) ? err.message : "Failed to submit comments.",
+          text: (err && err.message) ? err.message : L("Failed to submit comments.", "Gửi góp ý thất bại."),
         };
       } finally {
         submitting = false;
@@ -871,7 +902,10 @@
         const text = formatCommentSummary(exportComments(), baseNote);
         if (!text) return;
         copyFallback(text).then((ok) => {
-          statusMsg = { kind: ok ? "ok" : "err", text: ok ? "Copied comments to clipboard." : "Copy failed." };
+          statusMsg = {
+            kind: ok ? "ok" : "err",
+            text: ok ? L("Copied comments to clipboard.", "Đã sao chép góp ý.") : L("Copy failed.", "Sao chép thất bại."),
+          };
           render(false);
         });
         return;

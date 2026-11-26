@@ -184,7 +184,35 @@
   }
 
   function isViLang() {
-    return Boolean(typeof window !== "undefined" && window.AafI18n && window.AafI18n.getLang() === "vi");
+    try {
+      if (typeof window !== "undefined" && window.AafI18n && typeof window.AafI18n.getLang === "function") {
+        return window.AafI18n.getLang() === "vi";
+      }
+      if (typeof localStorage !== "undefined") {
+        return localStorage.getItem("aaf_ui_lang") === "vi";
+      }
+    } catch (_) {}
+    return false;
+  }
+  const sL = (en, vi) => (isViLang() ? vi : en);
+
+  const STAGE_LABEL_VI = {
+    spec: "Yêu cầu",
+    plan: "Kế hoạch",
+    implement: "Viết mã",
+    gate: "Kiểm định",
+    proof: "Minh chứng",
+    audit: "Kiểm toán",
+    review: "Chờ duyệt",
+    done: "Hoàn tất",
+  };
+  function stageLabel(node) {
+    if (!node) return sL("Stage", "Bước");
+    if (isViLang()) {
+      const k = String(node.id || "").trim().toLowerCase();
+      if (Object.prototype.hasOwnProperty.call(STAGE_LABEL_VI, k)) return STAGE_LABEL_VI[k];
+    }
+    return node.label || node.id || sL("Stage", "Bước");
   }
 
   function statusVisual(st) {
@@ -229,10 +257,10 @@
       epochSec = epochSec / 1000;
     }
     const diff = Math.max(0, Math.round(Date.now() / 1000 - epochSec));
-    if (diff < 45) return "vừa xong";
-    if (diff < 3600) return `${Math.floor(diff / 60)}p trước`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}g trước`;
-    return `${Math.floor(diff / 86400)}ng trước`;
+    if (diff < 45) return sL("just now", "vừa xong");
+    if (diff < 3600) return sL(`${Math.floor(diff / 60)}m ago`, `${Math.floor(diff / 60)}p trước`);
+    if (diff < 86400) return sL(`${Math.floor(diff / 3600)}h ago`, `${Math.floor(diff / 3600)}g trước`);
+    return sL(`${Math.floor(diff / 86400)}d ago`, `${Math.floor(diff / 86400)}ng trước`);
   }
 
   function clipText(str, maxLen) {
@@ -355,16 +383,17 @@
       if (attempts > 1) metaParts.push(`×${attempts}`);
       else if (n.executor && st !== "pending") metaParts.push(clipText(n.executor, 10));
       const metaTxt = metaParts.join(" · ");
-      const titleTip = `${i + 1}. ${n.label || n.id} (${vis.label})${durTxt ? " · " + durTxt : ""}${n.detail ? "\n" + n.detail : ""}`;
+      const nodeLbl = stageLabel(n);
+      const titleTip = `${i + 1}. ${nodeLbl} (${vis.label})${durTxt ? " · " + durTxt : ""}${n.detail ? "\n" + n.detail : ""}`;
 
       return `
         <div class="aaf-pipe-cell ${st === "passed" ? "edge-ok" : ""}" role="listitem">
-          <button type="button" class="aaf-pipe-node st-${st}${isCur ? " is-current" : ""}" data-node-idx="${i}" title="${esc(titleTip)}" aria-label="${esc(`${i + 1}. ${n.label || n.id}: ${vis.label}`)}">
+          <button type="button" class="aaf-pipe-node st-${st}${isCur ? " is-current" : ""}" data-node-idx="${i}" title="${esc(titleTip)}" aria-label="${esc(`${i + 1}. ${nodeLbl}: ${vis.label}`)}">
             <div class="aaf-pipe-node-top">
               <span class="aaf-pipe-step">${esc(stepIcon)}</span>
               ${rightBadge}
             </div>
-            <div class="aaf-pipe-label">${esc(n.label || n.id || "Stage")}</div>
+            <div class="aaf-pipe-label">${esc(nodeLbl)}</div>
             <div class="aaf-pipe-meta">${esc(metaTxt)}</div>
           </button>
         </div>
@@ -373,8 +402,8 @@
 
     const reworksHtml = reworkEdges.length
       ? `<div class="aaf-pipe-reworks">${reworkEdges.map((r) => {
-          const fromLbl = nodes[r.fromIdx].label || nodes[r.fromIdx].id;
-          const toLbl = nodes[r.toIdx].label || nodes[r.toIdx].id;
+          const fromLbl = stageLabel(nodes[r.fromIdx]);
+          const toLbl = stageLabel(nodes[r.toIdx]);
           return `<span class="aaf-pipe-rw-pill">↻ ${esc(fromLbl)} → ${esc(toLbl)}${r.count > 1 ? ` ×${r.count}` : ""}</span>`;
         }).join("")}</div>`
       : "";
@@ -389,7 +418,7 @@
         <div class="aaf-pipe-banner-top">
           <div class="aaf-pipe-now">
             <span class="aaf-pipe-live-dot${bannerPulsing ? " pulsing" : ""}" style="background:${curVis.stroke};color:${curVis.stroke}"></span>
-            <span class="aaf-pipe-now-title">${esc(stepPrefix)} · ${esc(curNode.label || curNode.id)}</span>
+            <span class="aaf-pipe-now-title">${esc(stepPrefix)} · ${esc(stageLabel(curNode))}</span>
             <span class="aaf-st-pill aaf-st-${curSt}">${esc(curVis.label)}</span>
           </div>
           <span class="aaf-pipe-prog-meta">${esc(progLabel)}</span>
@@ -407,7 +436,7 @@
         <div class="aaf-pipe-legend">
           <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--ok)"></span>${esc(vi ? "Đã qua" : "Passed")}</span>
           <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--info,var(--accent))"></span>${esc(vi ? "Đang chạy" : "Running")}</span>
-          <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--warn)"></span>${esc(vi ? "Chờ / Rework" : "Waiting / Rework")}</span>
+          <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--warn)"></span>${esc(vi ? "Chờ / Làm lại" : "Waiting / Rework")}</span>
           <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--err)"></span>${esc(vi ? "Lỗi" : "Failed")}</span>
           <span class="aaf-pipe-leg-item"><span class="aaf-pipe-dot" style="background:var(--slate,var(--muted))"></span>${esc(vi ? "Chờ / Bỏ qua" : "Pending / Skipped")}</span>
         </div>
@@ -445,19 +474,19 @@
           <div class="aaf-pipe-detail">
             <div class="aaf-pipe-detail-head">
               <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
-                <strong>${esc(`${idx + 1}. ${node.label || node.id}`)}</strong>
+                <strong>${esc(`${idx + 1}. ${stageLabel(node)}`)}</strong>
                 <span class="aaf-st-pill aaf-st-${st}">${esc(vis.label)}</span>
                 ${node.kind ? `<span class="mono muted">${esc(node.kind)}</span>` : ""}
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                 ${tabLabel ? `<button type="button" class="btn-primary btn-sm" data-open-node-tab>${esc(vi ? `Mở tab ${tabLabel} →` : `Open ${tabLabel} →`)}</button>` : ""}
-                <button type="button" class="btn-sm" data-close-detail aria-label="Close detail">✕</button>
+                <button type="button" class="btn-sm" data-close-detail aria-label="${esc(vi ? "Đóng chi tiết" : "Close detail")}">✕</button>
               </div>
             </div>
             <div class="aaf-pipe-detail-meta">
               ${node.attempts != null ? `<span>${esc(vi ? "Lượt" : "Attempts")}: <b>${esc(node.attempts)}</b></span>` : ""}
               ${durTxt ? `<span>${esc(vi ? "Thời lượng" : "Duration")}: <b>${esc(durTxt)}</b></span>` : ""}
-              ${node.executor ? `<span>Executor: <span class="mono">${esc(node.executor)}</span></span>` : ""}
+              ${node.executor ? `<span>${esc(vi ? "Bộ chạy" : "Executor")}: <span class="mono">${esc(node.executor)}</span></span>` : ""}
               ${node.account_id ? `<span>${esc(vi ? "Tài khoản" : "Account")}: <span class="mono">${esc(node.account_id)}</span></span>` : ""}
             </div>
             ${node.detail ? `<div class="aaf-pipe-detail-body">${esc(node.detail)}</div>` : `<div class="muted" style="font-size:12px">${esc(vi ? "Chưa có chi tiết bổ sung cho bước này." : "No extra detail recorded for this stage.")}</div>`}
@@ -494,7 +523,7 @@
 
     const runs = sopResp && Array.isArray(sopResp.runs) ? sopResp.runs : [];
     if (!runs.length) {
-      containerEl.innerHTML = `<div class="aaf-pipe-empty">Chưa có SOP run nào được ghi nhận.</div>`;
+      containerEl.innerHTML = `<div class="aaf-pipe-empty">${esc(sL("No SOP runs recorded yet.", "Chưa có lượt chạy SOP nào được ghi nhận."))}</div>`;
       return null;
     }
 
@@ -539,7 +568,7 @@
           return `${sep}<button type="button" class="aaf-sop-chip st-${st} ${activeStageIdx === sIdx ? "active" : ""}" data-stage-idx="${sIdx}">
             <span aria-hidden="true">${esc(vis.icon)}</span>
             <span>${esc(stObj.id || ("stage-" + (sIdx + 1)))}</span>
-            ${arts.length ? `<span class="aaf-sop-art-cnt" title="${arts.length} artifact(s)">${arts.length}</span>` : ""}
+            ${arts.length ? `<span class="aaf-sop-art-cnt" title="${esc(sL(`${arts.length} artifact(s)`, `${arts.length} tệp đầu ra`))}">${arts.length}</span>` : ""}
           </button>`;
         }).join("");
 
@@ -549,12 +578,12 @@
         card.innerHTML = `
           <div class="aaf-sop-head">
             <div style="min-width:0">
-              <div class="aaf-sop-title">${esc(run.sop_name || "SOP Run")}</div>
+              <div class="aaf-sop-title">${esc(run.sop_name || sL("SOP Run", "Lượt SOP"))}</div>
               <div class="aaf-sop-sub">${esc(run.run_id || ("run-" + (runIdx + 1)))}${run.updated_at ? ` · ${esc(fmtAgo(run.updated_at))}` : ""}</div>
             </div>
-            <span class="aaf-st-pill aaf-st-${runSt}">${esc(runSt.replace(/_/g, " "))}</span>
+            <span class="aaf-st-pill aaf-st-${runSt}">${esc(statusVisual(runSt).label)}</span>
           </div>
-          ${stages.length ? `<div class="aaf-sop-stages">${chipsHtml}</div>` : `<div class="muted" style="font-size:12px">No stages recorded.</div>`}
+          ${stages.length ? `<div class="aaf-sop-stages">${chipsHtml}</div>` : `<div class="muted" style="font-size:12px">${esc(sL("No stages recorded.", "Chưa ghi nhận bước nào."))}</div>`}
           ${activeStage && (activeStage.summary || activeArts.length) ? `
             <div class="aaf-sop-stage-info">
               <div><strong class="mono">${esc(activeStage.id || "")}</strong>${activeStage.summary ? ` — ${esc(activeStage.summary)}` : ""}</div>
@@ -602,19 +631,6 @@
     if (score >= 60) return "aaf-grade-D";
     return "aaf-grade-F";
   }
-
-  function isViLang() {
-    try {
-      if (typeof window !== "undefined" && window.AafI18n && typeof window.AafI18n.getLang === "function") {
-        return window.AafI18n.getLang() === "vi";
-      }
-      if (typeof localStorage !== "undefined") {
-        return localStorage.getItem("aaf_ui_lang") === "vi";
-      }
-    } catch (_) {}
-    return false;
-  }
-  const sL = (en, vi) => (isViLang() ? vi : en);
 
   function severityMeta(raw) {
     const s = String(raw || "").trim().toLowerCase();

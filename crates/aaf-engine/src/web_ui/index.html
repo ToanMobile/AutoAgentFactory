@@ -349,7 +349,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           <input type="checkbox" id="autoScroll" checked> <span data-i18n="stream.autoScroll">Auto-scroll</span>
         </label>
       </div>
-      <div id="streamStatus" class="muted mono" style="margin-bottom:8px">No run selected.</div>
+      <div id="streamStatus" class="muted mono" style="margin-bottom:8px" data-i18n="stream.noRunSelected">No run selected.</div>
       <div id="streamBox" class="stream-box"></div>
     </div>
   </section>
@@ -741,8 +741,44 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     clearTimeout(toast._t);
     toast._t = setTimeout(() => el.classList.remove("show"), 3200);
   }
+  function runStatusLabel(st) {
+    const s = String(st || "").toLowerCase();
+    if (s === "running") return tr("run.statusRunning");
+    if (s === "succeeded") return tr("run.statusSucceeded");
+    if (s === "failed") return tr("run.statusFailed");
+    if (s === "timed_out") return tr("run.statusTimedOut");
+    if (s === "limit_hit") return tr("run.statusLimitHit");
+    if (s === "killed") return tr("run.statusKilled");
+    return s;
+  }
+  function accountStateLabel(st) {
+    const s = String(st || "").toLowerCase();
+    if (s === "available") return tr("acc.stateAvailable");
+    if (s === "ready") return tr("acc.stateReady");
+    if (s === "leased" || s === "in_use") return tr("acc.stateLeased");
+    if (s === "cooldown") return tr("acc.stateCooldown");
+    if (s === "exhausted" || s === "limit") return tr("acc.stateExhausted");
+    if (s === "unknown") return tr("acc.stateUnknown");
+    return st;
+  }
+  function slotStateLabel(st) {
+    const s = String(st || "").toLowerCase();
+    if (s === "busy" || s === "active" || s === "running") return tr("slot.busy");
+    if (s === "idle" || s === "free") return tr("slot.idle");
+    if (s === "paused" || s === "stopped") return tr("slot.paused");
+    return st;
+  }
+  function actionLabel(act) {
+    const a = String(act || "").toLowerCase();
+    if (a === "rework") return tr("modal.actRework");
+    if (a === "steer") return tr("modal.actSteer");
+    if (a === "unblock") return tr("modal.actUnblock");
+    if (a === "cancel") return tr("modal.actCancel");
+    if (a === "unfreeze") return tr("modal.actUnfreeze");
+    return act;
+  }
   async function copyText(text, label) {
-    try { await navigator.clipboard.writeText(text); toast("Copied " + (label || text)); }
+    try { await navigator.clipboard.writeText(text); toast(tr("toast.copied", { label: label || text })); }
     catch (_) {
       const ta = document.createElement("textarea");
       ta.value = text;
@@ -751,8 +787,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       ta.select();
       try {
         const ok = document.execCommand("copy");
-        toast(ok ? ("Copied " + (label || text)) : "Copy failed");
-      } catch (_) { toast("Copy failed"); }
+        toast(ok ? tr("toast.copied", { label: label || text }) : tr("toast.copyFailed"));
+      } catch (_) { toast(tr("toast.copyFailed")); }
       ta.remove();
     }
   }
@@ -1270,7 +1306,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           });
           toast(payload.all ? tr("repo.toastAll") : tr("repo.toastRepos", { repos: [...selectedRepos].join(", ") }));
           await refreshAll();
-        } catch (e) { toast("Error: " + e.message); }
+        } catch (e) { toast(tr("toast.error", { msg: e.message })); }
         finally { btn.disabled = false; }
       };
     }
@@ -1591,9 +1627,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             : "";
           const updated = !isRunning && t.updated_at ? `<span>· ${esc(ago(t.updated_at))}</span>` : "";
           const chk = isBl && !ro ? `<input type="checkbox" class="kchk" data-chk="${esc(t.id)}" aria-label="${esc(tr("board.selectAria", { id: t.id }))}" ${checked ? "checked" : ""}>` : "";
-          const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : "";
+          const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">${esc(tr("board.planBadge"))}</span>` : "";
           const quickBtn = isBl && !ro
-            ? `<div class="kcard-acts"><button type="button" class="btn-primary" data-quick-ready="${esc(t.id)}">→ Ready</button></div>`
+            ? `<div class="kcard-acts"><button type="button" class="btn-primary" data-quick-ready="${esc(t.id)}">${esc(tr("board.quickReady"))}</button></div>`
             : (t.needs_plan_approval && !ro
                 ? `<div class="kcard-acts"><button type="button" class="btn-ok" data-quick-plan="${esc(t.id)}">${esc(tr("board.approvePlan"))}</button></div>`
                 : (t.state === "blocked" && !ro
@@ -1689,14 +1725,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const repoBadge = t.repo_name ? `<span class="pill pill-slate">${esc(t.repo_name)}</span>` : "";
       const fpBadge = t.fingerprint ? `<span class="mono" style="font-size:11px;color:var(--muted)">${esc(t.fingerprint)}</span>` : "";
       const needYouBadge = isNeedYouTask(t) ? `<span class="pill pill-blocked">${esc(/needs?\s*you/i.test(t.blocked_detail || "") ? tr("tab.needYou") : tr("board.needHuman"))}</span>` : "";
-      const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">Plan</span>` : "";
+      const planBadge = t.needs_plan_approval ? `<span class="pill pill-review">${esc(tr("board.planBadge"))}</span>` : "";
       const specBody = cleanSpec(t.spec_description || "");
       const specPreview = specBody.length > 320 ? specBody.slice(0, 320) + "…" : specBody;
       const totalDur = (!isRunning && (t.state === "done" || t.state === "review") && Number(t.total_duration_secs) > 0)
         ? `<span>⏱ ${esc(dur(t.total_duration_secs))}${(Number(t.run_count) || 0) > 1 ? ` (${esc(tr("board.runsCount", { n: t.run_count }))})` : ""}</span>`
         : "";
       const updated = t.updated_at ? `<span>${esc(tr("board.updated", { time: ago(t.updated_at) }))}</span>` : "";
-      const quickReady = t.state === "backlog" && !ro ? `<button type="button" class="btn-primary btn-sm" data-quick-ready="${esc(t.id)}">→ Ready</button>` : "";
+      const quickReady = t.state === "backlog" && !ro ? `<button type="button" class="btn-primary btn-sm" data-quick-ready="${esc(t.id)}">${esc(tr("board.quickReady"))}</button>` : "";
       const quickPlan = t.needs_plan_approval && !ro ? `<button type="button" class="btn-ok btn-sm" data-quick-plan="${esc(t.id)}">${esc(tr("board.approvePlan"))}</button>` : "";
       const quickUnblock = t.state === "blocked" && !t.needs_plan_approval && !ro ? `<button type="button" class="btn-primary btn-sm" data-quick-unblock="${esc(t.id)}">${esc(tr("board.unblock"))}</button>` : "";
       return `<div class="task-row" data-id="${esc(t.id)}" tabindex="0" role="button">
@@ -1835,7 +1871,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const shortId = String(r.id || "").slice(0, 8);
     const statusHtml = isRunningRow
       ? `<span class="pill ${runnerLive ? "pill-ok" : "pill-err"}" style="font-size:10.5px;padding:1px 6px">${esc(runnerLive ? tr("live.running") : tr("live.stopped"))}</span>`
-      : `<strong>${esc(r.status)}</strong>`;
+      : `<strong>${esc(runStatusLabel(r.status))}</strong>`;
     return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
       <span style="font-size:12.5px;overflow-wrap:anywhere"><span class="mono muted">${esc(shortId)}</span> · ${statusHtml} <span class="muted">(${esc(r.executor)})${elapsedHtml}</span></span>
       <div style="display:flex;gap:5px;flex:none"><button class="btn-sm" data-run="${esc(r.id)}">${esc(tr("drawer.streamBtn"))}</button></div>
@@ -1856,7 +1892,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const ro = Boolean(meta.read_only);
     const latestBranch = runs.length ? (runs[runs.length - 1].branch || "") : "";
     $("drawerCopyBranch").classList.toggle("hidden", !latestBranch);
-    $("drawerCopyBranch").onclick = () => copyText(latestBranch, "branch " + latestBranch);
+    $("drawerCopyBranch").onclick = () => copyText(latestBranch, tr("drawer.branchLabel", { name: latestBranch }));
 
     if (drawerTab === "overview") {
       const specText = cleanSpec(typeof t.spec === "string" ? t.spec : (t.spec && t.spec.description) || "");
@@ -1962,13 +1998,13 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         if (df.available && window.AafDiffUI && typeof window.AafDiffUI.renderStructuredDiff === "function") {
           $("drawerBody").innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-              <span class="mono muted">${esc(df.branch || df.worktree_path || "Worktree diff")}</span>
+              <span class="mono muted">${esc(df.branch || df.worktree_path || tr("drawer.worktreeDiff"))}</span>
               <div style="display:flex;gap:6px">
                 ${df.branch ? `<button class="btn-sm" id="diffCopyBr" type="button">${esc(tr("drawer.copyBranch"))}</button>` : ""}
               </div>
             </div>
             <div id="diffStructuredBox"></div>`;
-          if ($("diffCopyBr")) $("diffCopyBr").onclick = () => copyText(df.branch, "branch " + df.branch);
+          if ($("diffCopyBr")) $("diffCopyBr").onclick = () => copyText(df.branch, tr("drawer.branchLabel", { name: df.branch }));
           const diffBox = $("diffStructuredBox");
           window.AafDiffUI.renderStructuredDiff(
             diffBox,
@@ -1989,7 +2025,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
                 method: "POST",
                 body: JSON.stringify({ action, task_id: taskId, note, comments: payloadComments }),
               });
-              toast("Submitted " + action);
+              toast(tr("toast.submittedAction", { action: actionLabel(action) }));
               await refreshAll();
               await refreshOpenContext();
             },
@@ -2084,14 +2120,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             ${rec.width && rec.height ? `<span class="pill pill-slate">${esc(rec.width)}×${esc(rec.height)}</span>` : ""}
             ${rec.recorded_at ? `<span class="muted" style="font-size:12px">${esc(ago(rec.recorded_at))}</span>` : ""}
           </div>
-          ${flows.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.proofFlows", { n: flows.length }))}</div>${flows.map((f) => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>${esc(f.name)}</span><span class="pill ${f.passed ? "pill-ok" : "pill-err"}">${f.passed ? "PASS" : "FAIL"}</span></div>`).join("")}</div>` : ""}
+          ${flows.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.proofFlows", { n: flows.length }))}</div>${flows.map((f) => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>${esc(f.name)}</span><span class="pill ${f.passed ? "pill-ok" : "pill-err"}">${esc(f.passed ? tr("proof.pass") : tr("proof.fail"))}</span></div>`).join("")}</div>` : ""}
           <div id="proofImgsBox" class="proof-grid">${imgs.length ? `<div class="muted">${esc(tr("drawer.loadingImgs", { n: imgs.length }))}</div>` : `<div class="muted">${esc(tr("drawer.noImgOnDisk"))}</div>`}</div>`;
         if (imgs.length) {
           const urls = await Promise.all(imgs.map((im) => fetchImageDataUrl(im.url).then((src) => ({ name: im.name, src })).catch((e) => ({ name: im.name, err: e.message }))));
           if (renderSeq !== drawerRenderSeq || drawerTab !== "proof") return;
           $("proofImgsBox").innerHTML = urls.map((u) => (u.src && /^data:image\/png;base64,/i.test(u.src))
             ? `<div><div class="mono muted" style="margin-bottom:4px">${esc(u.name)}</div><img class="proof-img" src="${esc(u.src)}" alt="${esc(u.name)}"></div>`
-            : `<div class="muted">${esc(u.name)}: ${esc(u.err || "invalid image data")}</div>`
+            : `<div class="muted">${esc(u.name)}: ${esc(u.err || tr("drawer.invalidImgData"))}</div>`
           ).join("");
         }
       } catch (e) {
@@ -2266,12 +2302,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     try {
       await api("/api/action", { method: "POST", body: JSON.stringify({ action, task_id: taskId, note: "" }) });
       selectedBacklog.delete(taskId);
-      toast(`${action === "ready" ? "Moved to Ready" : action === "approve_plan" ? "Plan approved" : action}: ${taskId}`);
+      toast(action === "ready"
+        ? tr("toast.movedToReady", { id: taskId })
+        : action === "approve_plan"
+          ? tr("toast.planApproved", { id: taskId })
+          : action === "unblock"
+            ? tr("toast.unblockedOne", { id: taskId })
+            : tr("toast.mutateDoneTask", { action: actionLabel(action), id: taskId }));
       if (closeAfter) closeDrawer();
       await refreshAll();
       await refreshOpenContext();
     } catch (e) {
-      toast("Error: " + e.message);
+      toast(tr("toast.error", { msg: e.message }));
       if (btnEl) { btnEl.disabled = false; btnEl.textContent = orig; }
     }
   }
@@ -2604,7 +2646,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <span class="pill pill-info">${esc(tr("machine.memPressure", { val: memPressureLabel(hs.memory_pressure) }))}</span>
       </div>
       ${slots.length ? `<div class="table-wrap"><table><thead><tr><th>${esc(tr("machine.thSlot"))}</th><th>${esc(tr("machine.thState"))}</th><th>${esc(tr("machine.thPgid"))}</th><th>${esc(tr("machine.thLabel"))}</th><th>${esc(tr("machine.thRam"))}</th></tr></thead><tbody>${slots.map((s) =>
-        `<tr><td class="mono">#${esc(s.slot)}</td><td>${esc(s.state)}</td><td class="mono">${esc(s.pgid ?? "—")}</td><td>${esc(s.label ?? "—")}</td><td class="mono">${esc(s.reserved_ram_mb ?? "—")}</td></tr>`
+        `<tr><td class="mono">#${esc(s.slot)}</td><td>${esc(slotStateLabel(s.state))}</td><td class="mono">${esc(s.pgid ?? "—")}</td><td>${esc(s.label ?? "—")}</td><td class="mono">${esc(s.reserved_ram_mb ?? "—")}</td></tr>`
       ).join("")}</tbody></table></div>` : `<div class="muted">${esc(tr("machine.noSlots"))}</div>`}`;
 
     const fmtTok = (v) => (typeof v === "number" && Number.isFinite(v) ? `${v.toLocaleString()} tok` : "—");
@@ -2629,9 +2671,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const controls = !ro ? `<td><div style="display:flex;gap:4px">${
         inCd
           ? `<button type="button" class="btn-ok btn-sm" ${dis} data-acc-clear="${esc(acctKey)}">${esc(tr("acc.clearCd"))}</button>`
-          : `<button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="5">5m</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="15">15m</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="300">5h</button>`
+          : `<button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="5">${esc(tr("acc.cd5m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="15">${esc(tr("acc.cd15m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="300">${esc(tr("acc.cd5h"))}</button>`
       }</div></td>` : "";
-      return `<tr><td><strong>${esc(a.name)}</strong></td><td>${esc(a.provider)}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":(inCd?"pill-blocked":"pill-running")}">${esc(st)}</span></td><td class="mono">${esc(untilStr(a.cooldown_until))}</td><td>${cell5h}</td><td>${cell7d}</td>${controls}</tr>`;
+      return `<tr><td><strong>${esc(a.name)}</strong></td><td>${esc(a.provider)}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":(inCd?"pill-blocked":"pill-running")}">${esc(accountStateLabel(st))}</span></td><td class="mono">${esc(untilStr(a.cooldown_until))}</td><td>${cell5h}</td><td>${cell7d}</td>${controls}</tr>`;
     }).join("")}</tbody></table>` : `<div class="muted">${esc(tr("acc.noAccounts"))}</div>`;
 
     $("accountsBox").querySelectorAll("[data-acc-clear]").forEach((btn) => {
@@ -2642,9 +2684,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         renderMachine(true);
         try {
           await api("/api/action", { method: "POST", body: JSON.stringify({ action: "account_clear", task_id: key, note: "" }) });
-          toast("Cleared cooldown");
+          toast(tr("toast.clearedCooldown"));
           await refreshAll();
-        } catch (e) { toast("Error: " + e.message); }
+        } catch (e) { toast(tr("toast.error", { msg: e.message })); }
         finally { pendingAccounts.delete(key); renderMachine(true); }
       };
     });
@@ -2656,9 +2698,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         renderMachine(true);
         try {
           await api("/api/action", { method: "POST", body: JSON.stringify({ action: "account_cooldown", task_id: key, note: btn.dataset.mins }) });
-          toast(`Cooldown set (${btn.dataset.mins}m)`);
+          toast(tr("toast.setCooldown", { mins: btn.dataset.mins }));
           await refreshAll();
-        } catch (e) { toast("Error: " + e.message); }
+        } catch (e) { toast(tr("toast.error", { msg: e.message })); }
         finally { pendingAccounts.delete(key); renderMachine(true); }
       };
     });
@@ -2753,7 +2795,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
     const warnMsgs = [];
     if (data.switcher_error) warnMsgs.push("CC Switcher: " + data.switcher_error);
-    if (sw && sw.health && sw.health.quotaSyncError) warnMsgs.push("Quota sync: " + sw.health.quotaSyncError);
+    if (sw && sw.health && sw.health.quotaSyncError) warnMsgs.push(tr("acc.quotaSyncErr", { msg: sw.health.quotaSyncError }));
     if ($("accWarnBox")) {
       $("accWarnBox").innerHTML = warnMsgs.length
         ? `<div class="acc-warn">${warnMsgs.map((m) => esc(m)).join(" · ")}</div>`
@@ -2804,7 +2846,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         const used7 = rem7 !== null ? 100 - rem7 : null;
         const stPill = isAct
           ? `<span class="pill pill-ok">${esc(tr("acc.inUse"))}</span>`
-          : (p.isFrozen ? `<span class="pill pill-blocked">${esc(p.status || "LIMIT")}</span>` : `<span class="pill pill-slate">${esc(p.status || tr("acc.ready"))}</span>`);
+          : (p.isFrozen ? `<span class="pill pill-blocked">${esc(p.status || tr("acc.limit"))}</span>` : `<span class="pill pill-slate">${esc(p.status || tr("acc.ready"))}</span>`);
         const liveTag = p.quota && p.quota.live
           ? ` · <span style="color:var(--ok);font-weight:600">LIVE</span>`
           : (p.quotaStale ? ` · <span style="color:var(--warn);font-weight:600">STALE</span>` : "");
@@ -2839,7 +2881,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_switch", task_id: btn.dataset.ccSwitch, note: "" }) });
             toast(tr("toast.switchedTo", { id: btn.dataset.ccSwitch }));
             await loadAccountsPanel(false);
-          } catch (e) { toast("Error: " + e.message); }
+          } catch (e) { toast(tr("toast.error", { msg: e.message })); }
           finally { btn.disabled = false; }
         };
       });
@@ -2882,7 +2924,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             const res = await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_assign", task_id: repoPath, note: acc }) });
             toast(res.message || tr("toast.assignedRepo", { acc }));
             await loadAccountsPanel(false);
-          } catch (e) { toast("Error: " + e.message); }
+          } catch (e) { toast(tr("toast.error", { msg: e.message })); }
           finally { btn.disabled = false; }
         };
       });
@@ -2893,7 +2935,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
             await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_remove", task_id: btn.dataset.repoRm, note: "" }) });
             toast(tr("toast.removedRepo"));
             await loadAccountsPanel(false);
-          } catch (e) { toast("Error: " + e.message); }
+          } catch (e) { toast(tr("toast.error", { msg: e.message })); }
           finally { btn.disabled = false; }
         };
       });
@@ -2997,17 +3039,17 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("ccRotateBtn").onclick = async () => {
       $("ccRotateBtn").disabled = true;
       try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_rotate", task_id: "", note: "" }) }); toast(tr("toast.rotated")); await loadAccountsPanel(false); }
-      catch (e) { toast("Error: " + e.message); } finally { $("ccRotateBtn").disabled = false; }
+      catch (e) { toast(tr("toast.error", { msg: e.message })); } finally { $("ccRotateBtn").disabled = false; }
     };
     $("ccUnfreezeBtn").onclick = async () => {
       $("ccUnfreezeBtn").disabled = true;
       try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_unfreeze", task_id: "", note: "" }) }); toast(tr("toast.unfrozen")); await loadAccountsPanel(false); }
-      catch (e) { toast("Error: " + e.message); } finally { $("ccUnfreezeBtn").disabled = false; }
+      catch (e) { toast(tr("toast.error", { msg: e.message })); } finally { $("ccUnfreezeBtn").disabled = false; }
     };
     $("ccBalanceBtn").onclick = async () => {
       $("ccBalanceBtn").disabled = true;
       try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_balance", task_id: "", note: "even" }) }); toast(tr("toast.balanced")); await loadAccountsPanel(false); }
-      catch (e) { toast("Error: " + e.message); } finally { $("ccBalanceBtn").disabled = false; }
+      catch (e) { toast(tr("toast.error", { msg: e.message })); } finally { $("ccBalanceBtn").disabled = false; }
     };
 
     $("sortBy").value = sortBy;
@@ -3043,7 +3085,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           toast(tr("toast.autoRunOff"));
         }
         await refreshAll();
-      } catch (e) { toast("Error: " + e.message); }
+      } catch (e) { toast(tr("toast.error", { msg: e.message })); }
       finally { btn.disabled = false; }
     };
     $("stopStreamRunBtn").onclick = () => { if (activeRunId) promptStopRun(activeRunId); };
@@ -3100,7 +3142,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       try {
         const res = await modalHandler();
         if (seq === modalSeq && res !== false) closeModal(true);
-      } catch (e) { toast("Error: " + e.message); }
+      } catch (e) { toast(tr("toast.error", { msg: e.message })); }
       finally {
         if (seq === modalSeq) {
           modalBusy = false;
