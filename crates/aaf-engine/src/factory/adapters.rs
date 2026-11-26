@@ -166,14 +166,18 @@ impl GateRunner for RealGate {
         if current_fp != receipt.tree_fp {
             return false;
         }
-        if self.cfg.proof.required
-            && crate::proof::verify_proof(
-                &canon,
-                &self.data_dir,
-                &self.cfg.proof,
-                Some(&current_fp),
-            )
-            .is_err()
+        if crate::proof::proof_needed_for_worktree(
+            &canon,
+            &self.cfg.proof,
+            &self.cfg.gate.base_ref,
+            Some(&base.diff_target),
+        ) && crate::proof::verify_proof(
+            &canon,
+            &self.data_dir,
+            &self.cfg.proof,
+            Some(&current_fp),
+        )
+        .is_err()
         {
             return false;
         }

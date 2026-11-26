@@ -527,6 +527,7 @@ fn acquire_shared(
     read_group: &dyn Fn(u32) -> Result<Option<GroupState>, Unreadable>,
 ) -> io::Result<Result<SlotGuard, Busy>> {
     if draining(data_dir) {
+        orphan_reap::reap_dead_slots(data_dir, ceiling, read_group);
         return Ok(Err(Busy::Draining));
     }
     let mut mine = None;

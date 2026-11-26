@@ -212,6 +212,7 @@ impl Throttle<'_> {
             // Phase B: acquire a heavy slot.
             let mut slot_backoff = Backoff::new(self.jitter_seed);
             let mut drain: Option<DrainGuard> = None;
+            let mut empty_drain_polls: u8 = 0;
             let mut ticket: Option<WaitTicket> = None;
             let mut slot_waited = false;
             let slot = loop {
@@ -234,6 +235,7 @@ impl Throttle<'_> {
                     // Measured in the meantime: it no longer needs the machine
                     // to itself, and would shut itself out.
                     drain = None;
+                    empty_drain_polls = 0;
                 } else {
                     // Unmeasured / exclusive commands use `drain.lock` instead of
                     // the measured FIFO ticket queue.
@@ -325,13 +327,28 @@ impl Throttle<'_> {
                                 _ => {}
                             }
                         }
-                        if admission == Admission::Unmeasured
-                            && drain.is_none()
-                            && waited(now) >= DRAIN_AFTER_SECS
-                        {
-                            // Failing to drain only costs fairness: the wait
-                            // goes on as before.
-                            drain = slots::try_drain(data_dir).ok().flatten();
+                        if admission == Admission::Unmeasured {
+                            let any_slot_locked =
+                                slots::free_slot_count(data_dir, ceiling) < ceiling;
+                            if any_slot_locked {
+                                empty_drain_polls = 0;
+                                if drain.is_none() && waited(now) >= DRAIN_AFTER_SECS {
+                                    // Failing to drain only costs fairness: the wait
+                                    // goes on as before.
+                                    drain = slots::try_drain(data_dir).ok().flatten();
+                                }
+                            } else if drain.is_some() {
+                                // No live slot is flock-held while we still failed to
+                                // acquire alone. Keep `drain` for one fast retry in
+                                // case a live holder just exited, then release it so
+                                // a sandboxed guest stuck on an unreadable orphan lock
+                                // cannot block host processes from reaping it.
+                                empty_drain_polls = empty_drain_polls.saturating_add(1);
+                                if empty_drain_polls >= 2 {
+                                    drain = None;
+                                    empty_drain_polls = 0;
+                                }
+                            }
                         }
                         let event = Progress::WaitingForSlot {
                             label,

@@ -79,6 +79,42 @@ pub fn proof_triggered(cfg: &ProofConfig, changed_paths: &[String]) -> bool {
     changed_paths.iter().any(|path| set.is_match(path))
 }
 
+/// Returns `true` when `cfg` requires a verified proof for the diff in `worktree`.
+///
+/// Mirrors `gate::run_gate`: returns `false` when `!cfg.required`, `true` when
+/// `cfg.trigger_globs` is empty, and otherwise inspects the worktree diff
+/// against `base_sha` (or `base_ref`) with [`proof_triggered`], failing closed
+/// to `true` if git inspection fails.
+pub fn proof_needed_for_worktree(
+    worktree: &Path,
+    cfg: &ProofConfig,
+    base_ref: &str,
+    base_sha: Option<&str>,
+) -> bool {
+    if !cfg.required {
+        return false;
+    }
+    if cfg.trigger_globs.is_empty() {
+        return true;
+    }
+    let target = match base_sha.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sha) => sha.to_string(),
+        None => match crate::gate::base::resolve(worktree, base_ref, crate::gate::GIT_TIMEOUT) {
+            Ok(base) => base.diff_target,
+            Err(_) => return true,
+        },
+    };
+    let Ok(set) = crate::gate::changes::collect(worktree, &target, crate::gate::GIT_TIMEOUT) else {
+        return true;
+    };
+    let changed_paths: Vec<String> = set
+        .changes
+        .iter()
+        .flat_map(|ch| std::iter::once(ch.path.clone()).chain(ch.old_path.iter().cloned()))
+        .collect();
+    proof_triggered(cfg, &changed_paths)
+}
+
 /// Destination path for a host-captured proof PNG under
 /// `$AAF_DATA_DIR/proofs/<repo_id>/<safe_tree_fp>.png`.
 pub fn captured_proof_image_path(data_dir: &Path, repo_root: &Path, tree_fp: &str) -> PathBuf {

@@ -93,16 +93,21 @@ pub(crate) fn has_behavioral_red_unproven(receipt: &Receipt) -> bool {
         .any(|r| r.contains("behavioral_red_unproven") || r.contains("behavioral red unproven"))
 }
 
-/// True when proof is not required or the signed proof for `(worktree, tree_fp)` verifies.
+/// True when proof is not required for this diff or the signed proof for
+/// `(worktree, tree_fp)` verifies.
 pub(crate) fn proof_verified(deps: &Deps, worktree: &Path, receipt: &Receipt) -> bool {
-    !deps.settings.repo.proof.required
-        || crate::proof::verify_proof(
-            worktree,
-            &deps.settings.data_dir,
-            &deps.settings.repo.proof,
-            Some(&receipt.tree_fp),
-        )
-        .is_ok()
+    !crate::proof::proof_needed_for_worktree(
+        worktree,
+        &deps.settings.repo.proof,
+        &deps.settings.repo.gate.base_ref,
+        receipt.base_sha.as_deref(),
+    ) || crate::proof::verify_proof(
+        worktree,
+        &deps.settings.data_dir,
+        &deps.settings.repo.proof,
+        Some(&receipt.tree_fp),
+    )
+    .is_ok()
 }
 
 fn same_repo_root(a: &Path, b: &Path) -> bool {
