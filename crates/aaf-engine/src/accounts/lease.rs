@@ -49,10 +49,7 @@ impl Lease {
     /// check-and-acquire operations (e.g. `next_where_keeping_one`) across
     /// concurrent `aaf run` processes so two repos cannot both observe the same
     /// spare slot and drain the pool to zero.
-    pub fn acquire_blocking(
-        leases_dir: &Path,
-        lock_name: &str,
-    ) -> Result<Lease, AccountsError> {
+    pub fn acquire_blocking(leases_dir: &Path, lock_name: &str) -> Result<Lease, AccountsError> {
         if !is_safe_file_stem(lock_name) {
             return Err(AccountsError::InvalidAccountId(lock_name.to_string()));
         }

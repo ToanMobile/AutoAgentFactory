@@ -365,7 +365,11 @@ mod tests {
         assert_eq!(db.get_task("t-1").unwrap().state, TaskState::Done);
 
         let evs = db
-            .events_for_task_by_kinds("t-1", &[EventKind::TaskStateChanged, EventKind::MergeResult], 10)
+            .events_for_task_by_kinds(
+                "t-1",
+                &[EventKind::TaskStateChanged, EventKind::MergeResult],
+                10,
+            )
             .unwrap();
         assert_eq!(evs.len(), 2);
     }
@@ -430,7 +434,8 @@ mod tests {
             })
         ));
         assert!(matches!(
-            db.complete_task_manual_atomic("t-gate", &opts, 200).unwrap(),
+            db.complete_task_manual_atomic("t-gate", &opts, 200)
+                .unwrap(),
             Err(DoneRefusal::ActiveState {
                 state: TaskState::Gating,
                 ..
