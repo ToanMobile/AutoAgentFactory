@@ -76,6 +76,18 @@ pub fn scan(repo_root: &Path, cfg: &RepoConfig, release: bool) -> StoreComplianc
     privacy::scan(repo_root, &inventory, &mut sink);
     sink.platform = Some("expo");
     expo::scan(repo_root, &inventory, min_sdk, &mut sink);
+    sink.platform = None;
+
+    let already_unresolved: HashSet<String> = sink
+        .unresolved
+        .iter()
+        .filter_map(|e| unresolved_path(e).map(normalize_rel_path))
+        .collect();
+    for (path, problem) in &inventory.symlink_problems {
+        if !already_unresolved.contains(&normalize_rel_path(path)) {
+            sink.unreadable(path, problem);
+        }
+    }
 
     StoreComplianceReport::from_findings(sink.findings, sink.unresolved)
 }

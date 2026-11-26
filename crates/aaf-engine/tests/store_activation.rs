@@ -24,6 +24,33 @@ const DEBUGGABLE: &str = r#"<manifest xmlns:android="http://schemas.android.com/
 </manifest>
 "#;
 
+/// Same shape as the `ios002_tp` fixture, compiling `Storage.swift`.
+const STORAGE_PBXPROJ: &str = r#"// !$*UTF8*$!
+{
+	objects = {
+		AA0000000000000000000001 /* Storage.swift */ = {isa = PBXFileReference; path = Storage.swift; sourceTree = "<group>"; };
+		AA00000000000000000000Debug /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		AA00000000000000000000Release /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+	};
+}
+"#;
+
 fn write(path: &Path, content: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, content).unwrap();
@@ -115,6 +142,224 @@ fn symlinks_are_not_followed() {
     // The same tree reached without a link is found.
     let report = scan(outside.path(), &RepoConfig::default(), true);
     assert_eq!(report.status, StoreStatus::Blocked);
+}
+
+/// Android library module: enough for the scanner to treat the tree as mobile.
+#[cfg(unix)]
+fn mobile_repo() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        &tmp.path().join("lib/build.gradle"),
+        "plugins { id 'com.android.library' }\n",
+    );
+    write(
+        &tmp.path().join("lib/src/main/AndroidManifest.xml"),
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" />\n",
+    );
+    tmp
+}
+
+#[cfg(unix)]
+fn ln(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) {
+    std::os::unix::fs::symlink(src, dst).unwrap();
+}
+
+#[cfg(unix)]
+fn unreadable(path: &str, reason: &str) -> String {
+    format!("STORE-000 {path}: File could not be checked: {reason}.")
+}
+
+/// Exactly one STORE-000 warning, and the status it leaves.
+#[cfg(unix)]
+fn assert_only_link(report: &aaf_domain::gate::StoreComplianceReport, entry: &str) {
+    assert_eq!(report.status, StoreStatus::Clear, "{report:#?}");
+    assert_eq!(report.critical, 0, "{report:#?}");
+    assert_eq!(report.warnings, 1, "{report:#?}");
+    assert_eq!(report.unresolved, vec![entry.to_string()], "{report:#?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_symlink_is_unresolved_but_non_input_and_excluded_links_are_not() {
+    let tmp = mobile_repo();
+    let outside = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("app/src")).unwrap();
+    write(&root.join("docs/notes.md"), "hello\n");
+    write(
+        &outside.path().join("android-main/AndroidManifest.xml"),
+        DEBUGGABLE,
+    );
+    ln(
+        outside.path().join("android-main"),
+        root.join("app/src/main"),
+    );
+    ln(root.join("docs/notes.md"), root.join("README.md"));
+    // Excluded by name, or inside a directory the walk never enters.
+    ln(outside.path(), root.join("Pods"));
+    fs::create_dir_all(root.join("node_modules")).unwrap();
+    ln(outside.path(), root.join("node_modules/foo"));
+    // Dangling: nothing to stat, stays silent.
+    ln(outside.path().join("missing"), root.join("gone"));
+
+    let report = scan(root, &RepoConfig::default(), true);
+    let entry = unreadable(
+        "app/src/main",
+        "symbolic link to a directory is not followed",
+    );
+    assert_only_link(&report, &entry);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_that_cannot_be_stated_is_unresolved_unless_its_directory_is_skipped() {
+    let tmp = mobile_repo();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("app")).unwrap();
+    // `a -> a`: stat fails with ELOOP, not NotFound.
+    ln("loop", root.join("app/loop"));
+    fs::create_dir_all(root.join("node_modules")).unwrap();
+    ln("loop", root.join("node_modules/loop"));
+    ln("Pods", root.join("Pods"));
+
+    let report = scan(root, &RepoConfig::default(), true);
+    assert_eq!(report.status, StoreStatus::Clear, "{report:#?}");
+    assert_eq!(report.critical, 0, "{report:#?}");
+    assert_eq!(report.warnings, 1, "{report:#?}");
+    assert_eq!(report.unresolved.len(), 1, "{report:#?}");
+    // The OS error text differs between platforms; the rest is exact.
+    let prefix =
+        "STORE-000 app/loop: File could not be checked: symbolic link could not be checked: ";
+    assert!(report.unresolved[0].starts_with(prefix), "{report:#?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_links_the_walk_would_skip_as_directories_are_not_reported() {
+    let tmp = mobile_repo();
+    let outside = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("app/shared-res")).unwrap();
+    fs::create_dir_all(root.join("app/src/main")).unwrap();
+    fs::create_dir_all(root.join("rust")).unwrap();
+    write(
+        &outside.path().join("cargo-target/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    );
+    ln("../../shared-res", root.join("app/src/main/res"));
+    ln(
+        outside.path().join("cargo-target"),
+        root.join("rust/target"),
+    );
+    // Walked as a directory, so the link is reported.
+    ln("../../shared-res", root.join("app/src/main/assets"));
+
+    let report = scan(root, &RepoConfig::default(), true);
+    let entry = unreadable(
+        "app/src/main/assets",
+        "symbolic link to a directory is not followed",
+    );
+    assert_only_link(&report, &entry);
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_inputs_their_scanner_skips_are_not_reported() {
+    let tmp = mobile_repo();
+    let root = tmp.path();
+    let manifest = root.join("lib/src/main/AndroidManifest.xml");
+    write(&root.join("ios/App/Real.swift"), "import Foundation\n");
+    for rel in [
+        "app/src/debug/AndroidManifest.xml",
+        "app/src/test/AndroidManifest.xml",
+        "app/src/androidTest/AndroidManifest.xml",
+        "app/src/main/AndroidManifest.xml",
+    ] {
+        fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+        ln(&manifest, root.join(rel));
+    }
+    fs::create_dir_all(root.join("ios/AppTests")).unwrap();
+    ln(
+        root.join("ios/App/Real.swift"),
+        root.join("ios/AppTests/Mock.swift"),
+    );
+
+    let report = scan(root, &RepoConfig::default(), true);
+    let entry = unreadable(
+        "app/src/main/AndroidManifest.xml",
+        "symbolic link is not followed",
+    );
+    assert_only_link(&report, &entry);
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_kotlin_is_reported_only_in_an_apple_source_set() {
+    let tmp = mobile_repo();
+    let root = tmp.path();
+    write(&root.join("shared/Real.kt"), "package p\n");
+    for set in ["iosMain", "commonMain"] {
+        let dir = root.join(format!("shared/src/{set}/kotlin/p"));
+        fs::create_dir_all(&dir).unwrap();
+        ln(root.join("shared/Real.kt"), dir.join("A.kt"));
+    }
+
+    let report = scan(root, &RepoConfig::default(), true);
+    let entry = unreadable(
+        "shared/src/iosMain/kotlin/p/A.kt",
+        "symbolic link is not followed",
+    );
+    assert_only_link(&report, &entry);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_apple_source_is_unresolved_not_dropped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write(
+        &tmp.path().join("ios/App.xcodeproj/project.pbxproj"),
+        STORAGE_PBXPROJ,
+    );
+    let source = "import Foundation\n\nfunc seen() -> Bool {\n    UserDefaults.standard.bool(forKey: \"seen\")\n}\n";
+    write(&outside.path().join("Storage.swift"), source);
+    let link = tmp.path().join("ios/App/Storage.swift");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    ln(outside.path().join("Storage.swift"), &link);
+
+    let report = scan(tmp.path(), &RepoConfig::default(), true);
+    let entry = unreadable("ios/App/Storage.swift", "symbolic link is not followed");
+    assert_only_link(&report, &entry);
+
+    // The same file in place is read and blocks (IOS-002).
+    fs::remove_file(&link).unwrap();
+    write(&link, source);
+    let report = scan(tmp.path(), &RepoConfig::default(), true);
+    assert_eq!(report.status, StoreStatus::Blocked, "{report:#?}");
+    assert_eq!(report.critical, 1, "{report:#?}");
+    assert!(report.unresolved.is_empty(), "{report:#?}");
+    let critical: Vec<(&str, &str)> = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .map(|f| (f.rule.as_str(), f.file.as_str()))
+        .collect();
+    assert_eq!(critical, vec![("IOS-002", "ios/App/Storage.swift")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn non_mobile_repo_with_symlinked_package_json_is_not_applicable_without_unresolved() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(&tmp.path().join("target.json"), r#"{"name":"web-app"}"#);
+    ln(
+        tmp.path().join("target.json"),
+        tmp.path().join("package.json"),
+    );
+
+    let report = scan(tmp.path(), &RepoConfig::default(), true);
+    assert_eq!(report.status, StoreStatus::NotApplicable, "{report:#?}");
+    assert!(report.unresolved.is_empty(), "{report:#?}");
 }
 
 #[test]

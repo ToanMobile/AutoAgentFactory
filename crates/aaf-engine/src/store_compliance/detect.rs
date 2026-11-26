@@ -3,10 +3,12 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use super::kmp;
+use super::android::{self, Placement};
 use super::text::{read_text, rel_str};
+use super::{kmp, privacy};
 
 /// Deep enough for `ios/App/Sources/Feature/...`, shallow enough to stay bounded.
 const MAX_DEPTH: usize = 20;
@@ -62,8 +64,13 @@ pub(crate) struct Inventory {
     pub pubspecs: Vec<PathBuf>,
     pub package_jsons: Vec<PathBuf>,
     pub unity_settings: Vec<PathBuf>,
-    /// Directories that could not be listed, or the walk limit that was hit.
+    /// Directories or entries that could not be inspected, or the walk limit
+    /// that was hit.
     pub problems: Vec<(String, String)>,
+    /// Symlinked scanner inputs, and directory symlinks or symlinks that
+    /// could not be stat-ed, skipped without following; merged into `unresolved` only after a mobile platform is
+    /// detected.
+    pub symlink_problems: Vec<(String, String)>,
 }
 
 fn is_excluded_dir(name: &str, parent_is_unity: bool) -> bool {
@@ -94,21 +101,63 @@ pub(crate) fn walk(root: &Path) -> Inventory {
                 continue;
             }
         };
-        // `DirEntry::file_type` does not follow symlinks, so a link is neither
-        // a file nor a directory here and is skipped.
+        // Convention plugins keep the build logic we read in `src/main/kotlin`.
+        let in_source_set = !in_convention_build(&rel)
+            && rel
+                .parent()
+                .is_some_and(|p| p.file_name().is_some_and(|n| n == "src"));
         let mut files = Vec::new();
         let mut dirs = Vec::new();
+        let mut links = Vec::new();
+        let mut dir_links = Vec::new();
+        let mut type_errors = Vec::new();
+        // `DirEntry::file_type` does not follow symlinks: regular files and
+        // directories are walked normally; a symlink named like an input its
+        // scanner would read is recorded without stat-ing the target; other
+        // symlinks are only stat-ed to record the ones that point to a
+        // directory or cannot be checked (never read or walked into); I/O
+        // errors are reported as walk problems.
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             match entry.file_type() {
                 Ok(t) if t.is_dir() => dirs.push(name),
                 Ok(t) if t.is_file() => files.push(name),
-                _ => {}
+                Ok(t) if t.is_symlink() => {
+                    if input_slot(&mut inv, &rel, &name).is_some() && !scanner_skips(&rel, &name) {
+                        links.push((name, "symbolic link is not followed".to_string()));
+                        continue;
+                    }
+                    // `entry.path()` keeps a non-UTF-8 name intact.
+                    match fs::metadata(entry.path()) {
+                        Ok(m) if m.is_dir() => dir_links.push((
+                            name,
+                            "symbolic link to a directory is not followed".to_string(),
+                        )),
+                        Ok(_) => {}
+                        // Dangling: there is nothing behind it to scan.
+                        Err(e) if e.kind() == ErrorKind::NotFound => {}
+                        Err(e) => dir_links
+                            .push((name, format!("symbolic link could not be checked: {e}"))),
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => type_errors.push((name, e.to_string())),
             }
         }
         files.sort();
         dirs.sort();
-        seen += files.len() + dirs.len();
+        let is_unity =
+            dirs.iter().any(|d| d == "Assets") && dirs.iter().any(|d| d == "ProjectSettings");
+        // A directory link is reported only where a real directory of the
+        // same name would be walked.
+        links.extend(
+            dir_links
+                .into_iter()
+                .filter(|(n, _)| !skips_dir(&rel, n, is_unity, &dir.join(n), in_source_set)),
+        );
+        links.sort();
+        type_errors.sort();
+        seen += files.len() + dirs.len() + links.len() + type_errors.len();
         if seen > MAX_ENTRIES {
             inv.problems.push((
                 rel_str(&rel),
@@ -116,30 +165,18 @@ pub(crate) fn walk(root: &Path) -> Inventory {
             ));
             break;
         }
-        // Convention plugins keep the build logic we read in `src/main/kotlin`.
-        let in_source_set = !in_convention_build(&rel)
-            && rel
-                .parent()
-                .is_some_and(|p| p.file_name().is_some_and(|n| n == "src"));
-        let is_unity =
-            dirs.iter().any(|d| d == "Assets") && dirs.iter().any(|d| d == "ProjectSettings");
+        for (name, err) in type_errors {
+            inv.problems.push((rel_str(&rel.join(name)), err));
+        }
+        for (name, problem) in links {
+            inv.symlink_problems
+                .push((rel_str(&rel.join(name)), problem));
+        }
         for name in &files {
             classify(&mut inv, &rel, name);
         }
         for name in dirs.iter().rev() {
-            if is_excluded_dir(name, is_unity) {
-                continue;
-            }
-            if name == "target" && is_cargo_target_dir(&dir.join(name)) {
-                continue;
-            }
-            // The Kotlin of an Apple source set is app code that reaches the
-            // Apple SDK; every other source set stays unread.
-            let apple_kotlin = name == "kotlin"
-                && rel
-                    .file_name()
-                    .is_some_and(|set| kmp::is_apple_source_set(&set.to_string_lossy()));
-            if in_source_set && SOURCE_SET_DIRS.contains(&name.as_str()) && !apple_kotlin {
+            if skips_dir(&rel, name, is_unity, &dir.join(name), in_source_set) {
                 continue;
             }
             if depth + 1 > MAX_DEPTH {
@@ -162,6 +199,32 @@ pub(crate) fn walk(root: &Path) -> Inventory {
     inv
 }
 
+/// Whether the walk leaves the directory `name` of `rel` unvisited. Shared by
+/// real directories and directory links so both follow the same rules.
+fn skips_dir(rel: &Path, name: &str, is_unity: bool, path: &Path, in_source_set: bool) -> bool {
+    if is_excluded_dir(name, is_unity) || (name == "target" && is_cargo_target_dir(path)) {
+        return true;
+    }
+    // The Kotlin of an Apple source set is app code that reaches the Apple
+    // SDK; every other source set stays unread.
+    let apple_kotlin = name == "kotlin"
+        && rel
+            .file_name()
+            .is_some_and(|set| kmp::is_apple_source_set(&set.to_string_lossy()));
+    in_source_set && SOURCE_SET_DIRS.contains(&name) && !apple_kotlin
+}
+
+/// A linked input that its scanner would skip as a regular file: debug and
+/// test manifests (`android::scan`), Apple test sources (`privacy::scan`).
+fn scanner_skips(rel: &Path, name: &str) -> bool {
+    let path = rel.join(name);
+    match name.rsplit_once('.').map(|(_, e)| e) {
+        _ if name == "AndroidManifest.xml" => android::classify(&path).1 == Placement::Skip,
+        Some("swift" | "m" | "mm") => privacy::in_test_dir(&path),
+        _ => false,
+    }
+}
+
 /// Inside a `buildSrc` or `build-logic` included build.
 fn in_convention_build(dir: &Path) -> bool {
     dir.components().any(|c| {
@@ -170,35 +233,40 @@ fn in_convention_build(dir: &Path) -> bool {
     })
 }
 
-fn classify(inv: &mut Inventory, dir: &Path, name: &str) {
-    let path = dir.join(name);
-    let in_convention = in_convention_build(dir);
+/// Inventory slot for a scanner input file (manifests, build scripts, plists,
+/// configs, convention plugin sources, Apple app sources). Shared by
+/// `classify` and symlink reporting so watched filenames have a single source
+/// of truth.
+fn input_slot<'a>(inv: &'a mut Inventory, dir: &Path, name: &str) -> Option<&'a mut Vec<PathBuf>> {
     let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-    if in_convention && matches!(ext, "kt" | "kts" | "gradle" | "groovy" | "java") {
-        inv.convention_sources.push(path);
-        return;
+    if in_convention_build(dir) && matches!(ext, "kt" | "kts" | "gradle" | "groovy" | "java") {
+        return Some(&mut inv.convention_sources);
     }
     match name {
-        "AndroidManifest.xml" => inv.manifests.push(path),
-        "build.gradle" | "build.gradle.kts" => inv.gradle_files.push(path),
-        "Info.plist" => inv.info_plists.push(path),
-        "project.pbxproj" => inv.pbxprojs.push(path),
-        "PrivacyInfo.xcprivacy" => inv.privacy_manifests.push(path),
-        "InfoPlist.strings" | "InfoPlist.xcstrings" => inv.infoplist_strings.push(path),
-        "app.json" => inv.app_jsons.push(path),
+        "AndroidManifest.xml" => Some(&mut inv.manifests),
+        "build.gradle" | "build.gradle.kts" => Some(&mut inv.gradle_files),
+        "Info.plist" => Some(&mut inv.info_plists),
+        "project.pbxproj" => Some(&mut inv.pbxprojs),
+        "PrivacyInfo.xcprivacy" => Some(&mut inv.privacy_manifests),
+        "InfoPlist.strings" | "InfoPlist.xcstrings" => Some(&mut inv.infoplist_strings),
+        "app.json" => Some(&mut inv.app_jsons),
         "app.config.js" | "app.config.ts" | "app.config.mjs" | "app.config.cjs" => {
-            inv.app_configs.push(path);
+            Some(&mut inv.app_configs)
         }
-        "pubspec.yaml" => inv.pubspecs.push(path),
-        "package.json" => inv.package_jsons.push(path),
+        "pubspec.yaml" => Some(&mut inv.pubspecs),
+        "package.json" => Some(&mut inv.package_jsons),
         "ProjectSettings.asset" if dir.ends_with("ProjectSettings") => {
-            inv.unity_settings.push(path);
+            Some(&mut inv.unity_settings)
         }
-        _ if matches!(ext, "swift" | "m" | "mm") => inv.apple_sources.push(path),
-        _ if ext == "kt" && kmp::in_apple_source_set(dir) => {
-            inv.kotlin_apple_sources.push(path);
-        }
-        _ => {}
+        _ if matches!(ext, "swift" | "m" | "mm") => Some(&mut inv.apple_sources),
+        _ if ext == "kt" && kmp::in_apple_source_set(dir) => Some(&mut inv.kotlin_apple_sources),
+        _ => None,
+    }
+}
+
+fn classify(inv: &mut Inventory, dir: &Path, name: &str) {
+    if let Some(slot) = input_slot(inv, dir, name) {
+        slot.push(dir.join(name));
     }
 }
 
