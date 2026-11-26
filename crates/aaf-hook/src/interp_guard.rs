@@ -15,7 +15,7 @@ mod writes;
 use parse::{
     Interp, classify_interpreter, extract_delimited_commands, extract_literals,
     extract_space_call_commands, has_space_call, inline_payloads, interp_spec,
-    normalize_api_haystack,
+    next_space_delimited_cluster, normalize_api_haystack,
 };
 use scope::{
     extract_api_arg_slices, has_any, has_shell_exec_api, is_safe_py_mktemp_arg, safe_py_mktemp_vars,
@@ -80,15 +80,29 @@ pub(crate) fn reads_program_from_stdin(cmd: &Cmd) -> bool {
             continue;
         }
         if arg.starts_with('-') && arg.len() > 1 {
+            let mut chars = arg.chars();
+            chars.next();
             let mut step = 1;
-            for (at, c) in arg.char_indices().skip(1) {
+            while let Some(c) = chars.next() {
                 let mut buf = [0; 4];
                 if names_program(interp, c.encode_utf8(&mut buf)) {
                     return false;
                 }
+                let rest = chars.as_str();
                 if spec.other_valued_short.contains(c) {
-                    if at + c.len_utf8() == arg.len() {
+                    if rest.is_empty() {
                         step = 2;
+                    }
+                    break;
+                }
+                if spec.attached_one_char_short.contains(c) {
+                    let _ = chars.next();
+                    continue;
+                }
+                if spec.attached_space_delimited_short.contains(c) {
+                    if let Some(next_cluster) = next_space_delimited_cluster(rest) {
+                        chars = next_cluster.chars();
+                        continue;
                     }
                     break;
                 }

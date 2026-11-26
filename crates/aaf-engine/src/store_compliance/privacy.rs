@@ -98,7 +98,7 @@ fn category_on_line(line: &str) -> Option<usize> {
 }
 
 /// Unit and UI test targets are never part of the uploaded app.
-fn in_test_dir(rel: &Path) -> bool {
+pub(super) fn in_test_dir(rel: &Path) -> bool {
     rel.components().any(|c| {
         let c = c.as_os_str().to_string_lossy();
         c == "Tests" || c == "Test" || c.ends_with("Tests")
