@@ -328,30 +328,41 @@ fn tree_fp_with_layout_using(call: &GitCall<'_>, layout: &GitLayout) -> Result<S
     };
     // A run that was killed could not clean up after itself.
     stale::sweep(&layout.git_dir, std::process::id(), &stale::process_alive);
-    let seq = TEMP_INDEX_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tag = format!("{}-{seq}", std::process::id());
-    let temp = layout.git_dir.join(format!("{}{tag}", stale::INDEX_PREFIX));
-    let objects = layout
-        .git_dir
-        .join(format!("{}{tag}", stale::OBJECTS_PREFIX));
     let tree = (|| {
-        fs::create_dir_all(&objects)?;
-        if layout.index.exists() {
-            // Start from the real index so unchanged files are not re-hashed.
-            fs::copy(&layout.index, &temp)?;
-            // Keep the real index's mtime. Git re-hashes an entry ("racily
-            // clean") only when its mtime is not older than the index file's
-            // own; a fresh mtime (Linux `fs::copy`) would trust the stat of a
-            // same-size edit made in the second of the last index write.
-            let mtime = fs::metadata(&layout.index)?.modified()?;
-            fs::File::options()
-                .write(true)
-                .open(&temp)?
-                .set_modified(mtime)?;
+        // Start from the real index so unchanged files are not re-hashed.
+        // Only a regular file: copying `/dev/zero` or a FIFO never ends.
+        let not_file = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "git index is not a regular file",
+            )
+        };
+        let source = match fs::metadata(&layout.index) {
+            // Checked before opening too: opening a FIFO blocks until a writer.
+            Ok(meta) if !meta.is_file() => return Err(not_file().into()),
+            Ok(_) => Some(fs::File::open(&layout.index)?),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err.into()),
+        };
+        if let Some(src) = &source
+            && !src.metadata()?.is_file()
+        {
+            return Err(not_file().into());
+        }
+        // Dropped on every way out of this closure: removes what it made.
+        let mut temp = TempEntries::reserve(&layout.git_dir, source.is_some())?;
+        // Closed before git runs: git renames its lock file over it.
+        if let (Some(mut src), Some(mut dst)) = (source, temp.copy_to.take()) {
+            io::copy(&mut src, &mut dst)?;
+            // Keep the real index's mtime, set after the last write. Git
+            // re-hashes an entry ("racily clean") only when its mtime is not
+            // older than the index file's own; a fresh mtime would trust the
+            // stat of a same-size edit made in the second of the last write.
+            dst.set_modified(src.metadata()?.modified()?)?;
         }
         let env = [
-            ("GIT_INDEX_FILE", temp.as_os_str()),
-            ("GIT_OBJECT_DIRECTORY", objects.as_os_str()),
+            ("GIT_INDEX_FILE", temp.index.as_os_str()),
+            ("GIT_OBJECT_DIRECTORY", temp.objects.as_os_str()),
             (
                 "GIT_ALTERNATE_OBJECT_DIRECTORIES",
                 layout.objects.as_os_str(),
@@ -378,11 +389,96 @@ fn tree_fp_with_layout_using(call: &GitCall<'_>, layout: &GitLayout) -> Result<S
         })?;
         git(&["write-tree"], &env)
     })();
-    // Cleanup only: the fingerprint is already decided.
-    let _ = fs::remove_file(&temp);
-    let _ = fs::remove_file(temp.with_extension("lock"));
-    let _ = fs::remove_dir_all(&objects);
     Ok(format!("git-tree:{}", tree?))
+}
+
+/// Most names one run tries for its temporary entries before giving up.
+const TEMP_NAME_TRIES: u32 = 16;
+
+/// The temporary index and object directory of one `tree_fp` run, under
+/// names this run found free in the git directory, which the agent can
+/// write. A name already taken (a planted link included) is never written
+/// through nor removed: the run moves on to another name. Dropping this
+/// removes the entries; cleanup only, the fingerprint is already decided.
+struct TempEntries {
+    index: PathBuf,
+    objects: PathBuf,
+    /// The index, made empty by this run, when there is a real one to copy.
+    /// With no real index the name stays absent: git refuses an empty index
+    /// file and writes the first one itself.
+    copy_to: Option<fs::File>,
+}
+
+impl TempEntries {
+    fn reserve(git_dir: &Path, copy: bool) -> io::Result<Self> {
+        let free = |path: &Path| match fs::symlink_metadata(path) {
+            Ok(_) => Ok(false),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(err) => Err(err),
+        };
+        for _ in 0..TEMP_NAME_TRIES {
+            let (objects, index) = temp_names(git_dir);
+            // Not recursive: fails on any entry already there, links too.
+            match fs::DirBuilder::new().create(&objects) {
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                made => made?,
+            }
+            // The object directory is ours from here; the index not yet.
+            let mut entries = TempEntries {
+                index: PathBuf::new(),
+                objects,
+                copy_to: None,
+            };
+            if !free(&index.with_extension("lock"))? || !(copy || free(&index)?) {
+                continue;
+            }
+            if copy {
+                let made = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&index);
+                match made {
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                    made => entries.copy_to = Some(made?),
+                }
+            }
+            entries.index = index;
+            return Ok(entries);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free name for a temporary index in the git directory",
+        ))
+    }
+}
+
+impl Drop for TempEntries {
+    fn drop(&mut self) {
+        if !self.index.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.index);
+            let _ = fs::remove_file(self.index.with_extension("lock"));
+        }
+        let _ = fs::remove_dir_all(&self.objects);
+    }
+}
+
+/// The object directory and index names, each `<prefix><pid>-<seq>-<nonce>`.
+/// The nonces come from the OS-seeded keys of `RandomState`, so the agent
+/// cannot plant links at names ahead of time, and are drawn apart: the object
+/// directory, made first, must not give away the name of the index, which
+/// stays absent until git writes it. The pid stays first: `stale` reads it
+/// back to sweep a killed run's files.
+fn temp_names(git_dir: &Path) -> (PathBuf, PathBuf) {
+    use std::hash::BuildHasher;
+    let seq = TEMP_INDEX_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let name = |prefix: &str| {
+        let nonce = std::hash::RandomState::new().hash_one((seq, nanos, prefix));
+        git_dir.join(format!("{prefix}{}-{seq}-{nonce:016x}", std::process::id()))
+    };
+    (name(stale::OBJECTS_PREFIX), name(stale::INDEX_PREFIX))
 }
 
 const LEGACY_FP_PREFIX: &str = "aaf-fp-";
