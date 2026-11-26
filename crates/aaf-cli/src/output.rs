@@ -105,8 +105,14 @@ pub fn emit(json_mode: bool, command: &str, result: &CmdResult, duration_ms: u64
 
 /// A progress line while a command is still working. stderr only: in JSON
 /// mode stdout carries nothing but the final object.
+///
+/// A notice is advisory: when stderr is gone (a reader that took the first
+/// line and closed the pipe) the line is dropped instead of panicking, so a
+/// waiting `aaf slot` or `aaf gate` still runs its command and returns its
+/// exit code.
 pub fn notice(command: &str, line: &str) {
-    eprintln!("aaf {command}: {line}");
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "aaf {command}: {line}");
 }
 
 #[cfg(test)]

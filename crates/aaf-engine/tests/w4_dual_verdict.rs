@@ -19,8 +19,8 @@ use aaf_engine::cross_audit::dual_verdict::{
     parse_and_validate_dual_review,
 };
 use aaf_engine::cross_audit::prompt::{
-    DIFF_BEGIN, DIFF_END, PRIOR_BEGIN, PRIOR_END, SPEC_BEGIN, SPEC_END, TRUNCATION_MARKER,
-    build_format_repair_prompt,
+    DIFF_BEGIN, DIFF_END, MAX_DIFF_BYTES, PRIOR_BEGIN, PRIOR_END, SPEC_BEGIN, SPEC_END,
+    TRUNCATION_MARKER, build_format_repair_prompt,
 };
 use aaf_engine::cross_audit::{AuditInput, has_file_line_reference};
 use aaf_engine::factory::audit_backend::{
@@ -464,8 +464,9 @@ fn truncation_marker_in_small_diff_passes_and_oversized_diff_is_inconclusive() {
     );
 
     let mut huge = String::from(SAMPLE_DIFF);
-    huge.push_str(&"+// padding line to exceed 200 KiB truncation threshold\n".repeat(4200));
-    assert!(huge.len() > 200 * 1024);
+    let pad = "+// padding line to exceed the truncation threshold\n";
+    huge.push_str(&pad.repeat(MAX_DIFF_BYTES / pad.len() + 1));
+    assert!(huge.len() > MAX_DIFF_BYTES);
     let out_huge =
         parse_and_validate_dual_review(&clean, &checklist, &huge, None, true, 95, 90, 100);
     assert!(

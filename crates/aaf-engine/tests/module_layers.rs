@@ -25,7 +25,7 @@ const ALLOWED: &[(&str, &str)] = &[
     ("gate", "confine_core git proof store_compliance throttle"),
     ("gc", "config db gate gc_audits git process telemetry"),
     ("gc_audits", "db git"),
-    ("git", "confine_core process"),
+    ("git", "config confine_core process"),
     ("github_board", "detector factory process"),
     ("github_poll", "factory github_board process"),
     ("handover", "cross_audit db gate git proof"),
