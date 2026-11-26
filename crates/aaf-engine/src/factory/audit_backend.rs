@@ -17,7 +17,9 @@ use serde_json::json;
 mod policy;
 
 pub use super::rework_filter::{findings_from_review_issues, is_valid_rework_finding};
-pub use policy::{audit_cmd_is_claude, resolve_audit_policy, same_audit_provider};
+pub use policy::{
+    audit_cmd_is_claude, fill_default_reviewers, resolve_audit_policy, same_audit_provider,
+};
 
 /// Effective audit provider name from config (`[cross_audit].executor` when
 /// non-empty, `"custom"` when only `executor_cmd` is set, `"claude"` when

@@ -81,8 +81,8 @@ impl RealGate {
     }
 }
 
-impl GateRunner for RealGate {
-    fn run(&self, tree: &Path) -> PortResult<Receipt> {
+impl RealGate {
+    fn run_mode(&self, tree: &Path, mode: GateMode) -> PortResult<Receipt> {
         // A worktree the factory made holds what an agent wrote: files it
         // hid from the fingerprint (`.git/info/exclude`, a global excludes
         // file, a self-ignoring `.gitignore`) are deleted before and after
@@ -104,12 +104,22 @@ impl GateRunner for RealGate {
             &self.data_dir,
             tree,
             &self.cfg,
-            GateMode::Scoped,
+            mode,
             &*self.clock,
             &self.machine,
             &|event| (self.progress)(tree, event),
         )
         .map_err(|e| PortError::Io(e.to_string()))
+    }
+}
+
+impl GateRunner for RealGate {
+    fn run(&self, tree: &Path) -> PortResult<Receipt> {
+        self.run_mode(tree, GateMode::Scoped)
+    }
+
+    fn run_full(&self, tree: &Path) -> PortResult<Receipt> {
+        self.run_mode(tree, GateMode::Full)
     }
 
     fn head_lock(&self, tree: &Path) -> PortResult<HeadLockReport> {

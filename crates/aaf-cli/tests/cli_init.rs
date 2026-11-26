@@ -54,7 +54,10 @@ fn init_writes_config_registers_hook_and_ignores_the_local_file() {
     assert_eq!(out["gate_unverified_until_commands_set"], json!(false));
 
     let config = fs::read_to_string(sb.repo.join(".autofactory/config.toml")).unwrap();
-    assert!(config.contains("test_scoped = \"cargo test\""), "{config}");
+    assert!(
+        config.contains("test_scoped = \"cargo test {affected_packages}\""),
+        "{config}"
+    );
 
     let settings = settings(&sb.repo);
     let ours = our_entries(&settings);

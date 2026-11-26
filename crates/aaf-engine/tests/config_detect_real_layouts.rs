@@ -390,9 +390,10 @@ fn root_marker_wins_over_a_gradle_build_one_directory_down() {
         ("mobile/app/src/main/AndroidManifest.xml", "<manifest/>"),
     ]);
     assert_eq!(d.profile, "rust");
-    // What CI of a Rust workspace runs: every member, test targets included.
+    // The scoped lint covers the touched members (the gate widens it to
+    // every member when a manifest changes), test targets included.
     assert_eq!(
         d.commands.lint,
-        "cargo clippy --workspace --all-targets -- -D warnings"
+        "cargo clippy {affected_packages} --all-targets -- -D warnings"
     );
 }

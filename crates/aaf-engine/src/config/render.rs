@@ -249,6 +249,15 @@ require_plan_approval = {pipe_require_approval}
 max_audit_reworks = {pipe_max_audit_reworks}
 # Automatic rework rounds from PR CI failures or owner review threads (default 2, max 3, 0 = off).
 max_pr_rework_rounds = {pipe_max_pr_rework_rounds}
+
+# Full gate on the base branch while `aaf run --auto` has nothing to do; skipped
+# when the base is unchanged (or changed only docs) since the last green one. A
+# red result opens a P0 \"Sửa main\" task and holds auto-merge until it is green.
+[full_gate]
+# Hours between two full runs. 0 = off.
+cooldown_hours = {fg_cooldown}
+# Days after which it runs even while tasks are running. 0 = only when idle.
+max_days = {fg_max_days}
 ",
         gh_enabled = github.enabled,
         gh_repo = quoted(&github.repo),
@@ -266,6 +275,8 @@ max_pr_rework_rounds = {pipe_max_pr_rework_rounds}
         pipe_require_approval = pipeline.require_plan_approval,
         pipe_max_audit_reworks = pipeline.max_audit_reworks,
         pipe_max_pr_rework_rounds = pipeline.max_pr_rework_rounds,
+        fg_cooldown = defaults.full_gate.cooldown_hours,
+        fg_max_days = defaults.full_gate.max_days,
     );
     leave_builtin_keys_out(&out)
 }

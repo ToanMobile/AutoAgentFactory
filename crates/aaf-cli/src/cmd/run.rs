@@ -311,6 +311,12 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             cfg.repo.cross_audit.executor = resolved;
         }
     }
+    if let Some(warning) = aaf_engine::factory::fill_default_reviewers(
+        &mut cfg.repo.cross_audit,
+        &cfg.repo.run.executor,
+    ) {
+        cfg.warnings.push(warning);
+    }
     let run_exec = cfg.repo.run.executor.trim();
     let audit_exec = configured_audit_provider(run_exec, &cfg.repo.cross_audit);
     if cfg.repo.cross_audit.require_different_provider && same_audit_provider(run_exec, audit_exec)
@@ -493,6 +499,7 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             {
                 eprintln!("aaf: issue import: {e}");
             }
+            full_gate_tick(&deps);
             !stop::sleep_or_stop(AUTO_POLL, &should_stop)
         },
         // What an interrupted run left alive still carries its AAF_RUN_ID or
@@ -549,4 +556,22 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
             .push_str(&format!("\nauto-split: {auto_split_count} root task(s)"));
     }
     Ok(out)
+}
+
+/// The idle full gate on the base branch (`[full_gate]`); only what it did
+/// is printed, a skip is silent.
+fn full_gate_tick(deps: &aaf_engine::factory::Deps) {
+    use aaf_engine::factory::full_gate::{self, Outcome};
+    match full_gate::tick(deps) {
+        Ok(Outcome::Skipped(_)) => {}
+        Ok(Outcome::DocsOnly { sha }) => eprintln!("aaf: full gate: {sha} changed only docs"),
+        Ok(Outcome::Green { sha }) => eprintln!("aaf: full gate: {sha} is green"),
+        Ok(Outcome::Flaky { sha, task_id }) => {
+            eprintln!("aaf: full gate: {sha} has a flaky test, task {task_id}")
+        }
+        Ok(Outcome::Red { sha, task_id }) => eprintln!(
+            "aaf: full gate: {sha} is red, task {task_id} opened; auto-merge held until green"
+        ),
+        Err(e) => eprintln!("aaf: full gate: {e}"),
+    }
 }

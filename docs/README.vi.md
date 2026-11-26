@@ -142,7 +142,7 @@ Repo không ghi key nào trong `.autofactory/config.toml` thì nhận giá trị
 | 5 | `pipeline.require_plan_approval` | Người phải duyệt plan trước | `false` |
 | 6 | `cross_audit.score_gate` | Chặn merge khi điểm audit dưới ngưỡng | `true` |
 | 7 | `cross_audit.audit_scope` | Khi nào audit sau gate: `head_lock`, `large` (từ 3 file hoặc trên 200 LOC), `always` | `"large"` |
-| 8 | `cross_audit.dual_review` | 2 reviewer độc lập | `true` |
+| 8 | `cross_audit.dual_review` | 2 reviewer độc lập. Không khai báo `[[cross_audit.reviewers]]` thì tự lấy `[run].executor` và auditor auto; máy chỉ có 1 provider thì chạy 1 audit và `aaf run` cảnh báo | `true` |
 | 9 | `cross_audit.require_different_provider` | Dừng thay vì audit bằng chính account của agent | `false` |
 | 10 | `gate.red_green_oracle` | Test mới phải fail trước khi sửa và pass sau khi sửa: `off`, `warn`, `block` | `"warn"` |
 | 11 | `proof.required` | Ảnh chụp làm bằng chứng cho thay đổi UI mobile | `false` |
@@ -151,8 +151,9 @@ Repo không ghi key nào trong `.autofactory/config.toml` thì nhận giá trị
 | 14 | `notifications.webhook_url` | Webhook JSON khi có sự kiện (`""` = tắt) | `""` |
 | 15 | `safety.owner_github_allowlist` | GitHub login được biến issue thành task | `[]` |
 | 16 | `cost_guard.daily_token_cap`, `spike_factor` | Trần token 24h và đóng băng khi token 1h tăng đột biến (`0` = tắt) | `0`, `0` |
+| 17 | `full_gate.cooldown_hours`, `max_days` | Gate full trên main khi `aaf run --auto` rảnh, tối đa 1 lần mỗi cooldown; quá `max_days` thì chạy cả lúc bận. Đỏ thì tạo task P0 "Sửa main" và tạm dừng auto-merge tới khi xanh (`0` = tắt) | `24`, `7` |
 
-Gate chỉ test các crate Rust bị ảnh hưởng: `{affected_packages}` trong `commands.lint` / `commands.test_scoped` được thay bằng `-p <crate>` cho các member bị đổi và mọi member phụ thuộc vào chúng. Nếu diff đụng manifest, `Cargo.lock`, `build.rs` hoặc file nằm ngoài các member thì nó thành `--workspace`. Full suite chạy lúc release bằng `aaf gate --release`; upload lên store, push tag và `gh release create` đều bắt buộc phải có receipt này.
+Gate chỉ test các crate Rust bị ảnh hưởng: `{affected_packages}` trong `commands.lint` / `commands.test_scoped` được thay bằng `-p <crate>` cho các member bị đổi và mọi member phụ thuộc vào chúng. Nếu diff đụng manifest, `Cargo.lock`, `build.rs` hoặc file nằm ngoài các member thì nó thành `--workspace`. Full suite chạy trên main khi `aaf run --auto` rảnh (dòng 17): bỏ qua nếu main không đổi hoặc chỉ đổi docs kể từ lần xanh gần nhất; fail thì chạy lại lệnh test một lần để tách test flaky (task P2) khỏi lỗi thật (task P0, tạm dừng auto-merge, task sửa vẫn merge). Lệnh của nó dùng chung khe lệnh nặng và chạy ở `nice`. Release vẫn chạy `aaf gate --release`; upload lên store, push tag và `gh release create` đều bắt buộc phải có receipt này.
 
 ## Chống quá tải máy
 

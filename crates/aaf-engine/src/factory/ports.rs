@@ -21,6 +21,11 @@ pub trait GateRunner: Send + Sync {
     /// worktree holding several task branches. May block for a long time
     /// (machine load control); that wait is not a failure.
     fn run(&self, tree: &Path) -> PortResult<Receipt>;
+    /// [`GateRunner::run`] in full mode: the whole suite and `lint_full`.
+    /// Used only for the idle full gate on the base branch.
+    fn run_full(&self, _tree: &Path) -> PortResult<Receipt> {
+        Err(PortError::Invalid("full gate not supported".to_string()))
+    }
     /// Head-lock state of `tree` without running any command.
     fn head_lock(&self, tree: &Path) -> PortResult<HeadLockReport>;
     /// Verifies that a cached `Clear` receipt still authentically covers `tree`
@@ -135,6 +140,11 @@ pub trait GitOps: Send + Sync {
     fn rebase(&self, worktree: &TaskWorktree) -> PortResult<Vec<String>>;
     /// Current tip of the base branch.
     fn base_sha(&self) -> PortResult<String>;
+    /// Moves a kept worktree to `sha`, dropping tracked and untracked
+    /// changes but keeping ignored files (the build cache).
+    fn reset_to(&self, _worktree: &TaskWorktree, _sha: &str) -> PortResult<()> {
+        Err(PortError::Invalid("reset_to not supported".to_string()))
+    }
     /// Lands the branch through the merge queue; `regate` judges the rebased
     /// tree.
     fn merge(

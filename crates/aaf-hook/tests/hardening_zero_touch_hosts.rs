@@ -66,7 +66,7 @@ fn run_hook_bin(
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_aaf-hook"));
     cmd.args(args)
         .env_clear()
-            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("AAF_DATA_DIR", data_dir)
         .env("HOME", home)

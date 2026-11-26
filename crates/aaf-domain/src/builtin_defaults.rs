@@ -33,6 +33,14 @@ pub struct BuiltinDefaults {
     pub notifications: NotificationsDefaults,
     pub safety: SafetyDefaults,
     pub unblocker: UnblockerDefaults,
+    pub full_gate: FullGateDefaults,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FullGateDefaults {
+    pub cooldown_hours: u64,
+    pub max_days: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,7 +194,7 @@ impl From<RunConfigRaw> for crate::config::RunConfig {
 }
 
 /// Tier-2 sections the layer fills.
-const REPO_SECTIONS: [&str; 7] = [
+const REPO_SECTIONS: [&str; 8] = [
     "run",
     "cross_audit",
     "pipeline",
@@ -194,6 +202,7 @@ const REPO_SECTIONS: [&str; 7] = [
     "proof",
     "github",
     "unblocker",
+    "full_gate",
 ];
 /// Tier-1 sections the layer fills.
 const GLOBAL_SECTIONS: [&str; 3] = ["telegram", "notifications", "safety"];
@@ -247,7 +256,11 @@ fn layered(file: toml::Table, sections: &[&str], on: bool) -> toml::Table {
 
 /// `(section, key, value as TOML)` of every tier-2 scalar the layer sets,
 /// in file order (`unblocker.cost_guard` is the section of its two keys).
+/// Empty while the layer is off, so what is rendered is what is parsed.
 pub fn repo_entries() -> Vec<(String, String, String)> {
+    if layer_off() {
+        return Vec::new();
+    }
     fn walk(prefix: &str, table: &toml::Table, out: &mut Vec<(String, String, String)>) {
         for (key, value) in table {
             match value {
@@ -315,6 +328,8 @@ mod tests {
         assert_eq!(repo.cross_audit.executor, d.cross_audit.executor);
         assert_eq!(repo.pipeline.plan_stage, d.pipeline.plan_stage);
         assert_eq!(repo.gate.red_green_oracle, d.gate.red_green_oracle);
+        assert_eq!(repo.full_gate.cooldown_hours, d.full_gate.cooldown_hours);
+        assert_eq!(repo.full_gate.max_days, d.full_gate.max_days);
         let global = crate::config::GlobalConfig::deserialize(layered(
             toml::Table::new(),
             &GLOBAL_SECTIONS,
@@ -327,7 +342,10 @@ mod tests {
         assert!(!repo.run.auto_merge && !repo.run.land.auto_lands());
         assert_eq!(repo.run.max_parallel, 3);
         let repo = parse_repo_with("[run]\nland = \"pr\"\n", true).unwrap();
-        assert!(!repo.run.auto_merge, "land = pr turns the built-in auto-merge off");
+        assert!(
+            !repo.run.auto_merge,
+            "land = pr turns the built-in auto-merge off"
+        );
     }
 
     #[test]

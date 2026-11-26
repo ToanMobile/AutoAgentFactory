@@ -237,7 +237,7 @@ fn board_graph_works_read_only_on_empty_db_and_renders_json_and_ascii() {
         .args(["board", "graph"])
         .current_dir(&fx.repo)
         .env_clear()
-            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", fx.root().join("home"))
         .env("AAF_DATA_DIR", &fx.data)

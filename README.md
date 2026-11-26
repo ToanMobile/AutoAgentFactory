@@ -225,7 +225,7 @@ What a repository gets when its `.autofactory/config.toml` leaves a key out. The
 | 5 | `pipeline.require_plan_approval` | A person approves the plan first | `false` |
 | 6 | `cross_audit.score_gate` | Block the merge when the audit score is below the thresholds | `true` |
 | 7 | `cross_audit.audit_scope` | When the post-gate audit runs: `head_lock`, `large` (≥ 3 files or > 200 LOC), `always` | `"large"` |
-| 8 | `cross_audit.dual_review` | Two independent reviewers | `true` |
+| 8 | `cross_audit.dual_review` | Two independent reviewers. Without `[[cross_audit.reviewers]]` they are `[run].executor` and the resolved auditor; with only one provider installed, one audit runs and `aaf run` warns | `true` |
 | 9 | `cross_audit.require_different_provider` | Stop instead of auditing with the agent's own account | `false` |
 | 10 | `gate.red_green_oracle` | New tests must fail before and pass after the fix: `off`, `warn`, `block` | `"warn"` |
 | 11 | `proof.required` | Screenshot proof for mobile UI changes | `false` |
@@ -234,8 +234,9 @@ What a repository gets when its `.autofactory/config.toml` leaves a key out. The
 | 14 | `notifications.webhook_url` | JSON webhook for events (`""` = off) | `""` |
 | 15 | `safety.owner_github_allowlist` | GitHub logins whose issues may become tasks | `[]` |
 | 16 | `cost_guard.daily_token_cap`, `spike_factor` | 24 h token cap and 1 h spike freeze (`0` = off) | `0`, `0` |
+| 17 | `full_gate.cooldown_hours`, `max_days` | Full gate on the base branch while `aaf run --auto` is idle, at most once per cooldown; after `max_days` it runs even while busy. Red opens a P0 "Sửa main" task and holds auto-merge until green (`0` = off) | `24`, `7` |
 
-The gate scopes Rust tests to what changed: `{affected_packages}` in `commands.lint` / `commands.test_scoped` becomes `-p <crate>` for the touched workspace members and everything that depends on them, or `--workspace` when the diff touches a manifest, `Cargo.lock`, a `build.rs` or a path outside the members. The full suite runs at release: `aaf gate --release`, which store uploads, tag pushes and `gh release create` require.
+The gate scopes Rust tests to what changed: `{affected_packages}` in `commands.lint` / `commands.test_scoped` becomes `-p <crate>` for the touched workspace members and everything that depends on them, or `--workspace` when the diff touches a manifest, `Cargo.lock`, a `build.rs` or a path outside the members. The whole suite runs on the base branch while `aaf run --auto` has nothing to do (row 17): skipped when the base is unchanged or changed only docs since the last green run, retried once to tell a flaky test (a P2 task) from a real failure (a P0 task, auto-merge held, the fix task still lands). Its commands share the heavy-command slots and run at `nice`. Release still runs `aaf gate --release`, which store uploads, tag pushes and `gh release create` require.
 
 ## 📚 Learn more
 

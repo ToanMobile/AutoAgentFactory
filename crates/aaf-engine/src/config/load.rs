@@ -214,7 +214,8 @@ pub fn load_global(config_dir: &Path) -> Result<GlobalConfig, ConfigError> {
 
 /// Tier 1 at `path` with the built-in defaults layer under it.
 fn read_global_at(path: &Path, sources: &mut Vec<String>) -> Result<GlobalConfig, ConfigError> {
-    let text = read_tier_with_text::<GlobalConfig>(path, sources)?.map_or(String::new(), |(_, t)| t);
+    let text =
+        read_tier_with_text::<GlobalConfig>(path, sources)?.map_or(String::new(), |(_, t)| t);
     parse_layered(path, &text, aaf_domain::builtin_defaults::parse_global)
 }
 
@@ -243,7 +244,11 @@ fn read_global(
 ) -> Result<GlobalConfig, ConfigError> {
     Ok(match &inputs.global_config {
         Some(path) => read_global_at(path, sources)?,
-        None => parse_layered(Path::new("<built-in>"), "", aaf_domain::builtin_defaults::parse_global)?,
+        None => parse_layered(
+            Path::new("<built-in>"),
+            "",
+            aaf_domain::builtin_defaults::parse_global,
+        )?,
     })
 }
 

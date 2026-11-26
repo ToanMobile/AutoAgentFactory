@@ -26,7 +26,9 @@ score_gate = true
 # [7] Khi nào audit sau gate: "head_lock" (chỉ khi đụng file khoá), "large"
 # (thêm diff >= 3 file hoặc > 200 dòng code), "always" (mọi task).
 audit_scope = "large"
-# [8] true = 2 reviewer độc lập (tốn gấp đôi token audit).
+# [8] true = 2 reviewer độc lập (tốn gấp đôi token audit). Không khai báo
+# [[cross_audit.reviewers]] thì tự lấy [run].executor và auditor "auto"; máy chỉ
+# có 1 provider thì chạy 1 audit, kèm cảnh báo.
 dual_review = true
 # [9] true = không có provider khác thì dừng thay vì audit bằng chính account đó.
 require_different_provider = false
@@ -73,3 +75,13 @@ owner_github_allowlist = []
 daily_token_cap = 0
 # [16] Đóng băng khi token 1h gấp N lần bình thường. 0 = tắt.
 spike_factor = 0
+
+[full_gate]
+# [17] Gate full trên main khi `aaf run --auto` rảnh (không còn task Ready,
+# Running, Gating), bỏ qua nếu main không đổi hoặc chỉ đổi docs. Fail thì tạo
+# task P0 "Sửa main" và tạm dừng auto-merge (task sửa vẫn merge) tới khi xanh.
+# Số giờ tối thiểu giữa 2 lần full. 0 = tắt hẳn.
+cooldown_hours = 24
+# Quá số ngày này chưa full thì chạy luôn dù đang có task (vẫn chờ slot máy).
+# 0 = chỉ chạy lúc rảnh.
+max_days = 7

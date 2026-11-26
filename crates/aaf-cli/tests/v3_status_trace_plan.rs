@@ -112,7 +112,7 @@ fn status_and_trace_and_plan_commands_succeed_with_expected_json() {
         .arg("status")
         .current_dir(&fx.repo)
         .env_clear()
-            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", fx.root().join("home"))
         .env("AAF_DATA_DIR", &fx.data)

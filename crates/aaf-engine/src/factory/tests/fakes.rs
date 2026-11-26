@@ -60,6 +60,10 @@ pub struct GateState {
     pub latch: Option<Latch>,
     /// Told the task ids of every gate run as it starts.
     pub ran: Option<Sender<Vec<String>>>,
+    /// Full gate runs on the base: red, and whether a rerun then passes.
+    pub full_red: bool,
+    pub full_flaky: bool,
+    pub full_runs: u32,
 }
 
 pub struct FakeGate {
@@ -104,6 +108,29 @@ impl FakeGate {
 }
 
 impl GateRunner for FakeGate {
+    fn run_full(&self, tree: &Path) -> PortResult<Receipt> {
+        let mut state = self.state.lock().unwrap();
+        state.full_runs += 1;
+        Ok(if state.full_red {
+            receipt(
+                tree,
+                GateStatus::Blocked,
+                vec!["test_full failed".to_string()],
+            )
+        } else {
+            receipt(tree, GateStatus::Clear, Vec::new())
+        })
+    }
+    fn rerun_failed_test(
+        &self,
+        _tree: &Path,
+        _receipt: &Receipt,
+    ) -> PortResult<Option<crate::unblocker::RerunResult>> {
+        // Only the full-gate tests set this; every other test keeps the
+        // trait's "no rerun" answer.
+        let flaky = self.state.lock().unwrap().full_flaky;
+        Ok(flaky.then_some(crate::unblocker::RerunResult { runs: 2, passed: 1 }))
+    }
     fn run(&self, tree: &Path) -> PortResult<Receipt> {
         let ids = self.git.ids(tree);
         let latch = {
