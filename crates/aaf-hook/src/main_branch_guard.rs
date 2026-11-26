@@ -67,6 +67,19 @@ fn is_inside_root(path: &Path, root: &Path, ctx: &Ctx) -> bool {
     paths::is_inside(&real_path, root)
 }
 
+fn nearest_existing_ancestor(mut probe: &Path) -> &Path {
+    while fs::symlink_metadata(probe).is_err() {
+        let Some(parent) = probe.parent() else {
+            break;
+        };
+        if parent == probe || parent.as_os_str().is_empty() {
+            break;
+        }
+        probe = parent;
+    }
+    probe
+}
+
 fn target_repo_root(path: &Path, ctx: &Ctx) -> Option<PathBuf> {
     if let Some(root) = ctx.root()
         && is_inside_root(path, &root, ctx)
@@ -78,7 +91,11 @@ fn target_repo_root(path: &Path, ctx: &Ctx) -> Option<PathBuf> {
     {
         return Some(root);
     }
-    let probe = path.parent().unwrap_or(path);
+    let raw_probe = path.parent().unwrap_or(path);
+    if !raw_probe.is_absolute() {
+        return None;
+    }
+    let probe = nearest_existing_ancestor(raw_probe);
     if probe.is_absolute()
         && let Some(root) = (ctx.env.repo_root)(probe)
         && is_inside_root(path, &root, ctx)
@@ -121,4 +138,33 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let root = (ctx.env.repo_root)(&target_dir)?;
     let branch = protected_primary_branch(&root)?;
     Some(deny(&branch))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+
+    use super::nearest_existing_ancestor;
+
+    #[test]
+    fn nearest_existing_ancestor_climbs_missing_subdirs_and_stops_at_root() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let existing = dir.path().join("primary/notes");
+        fs::create_dir_all(&existing)?;
+
+        // Existing directory returns itself.
+        assert_eq!(nearest_existing_ancestor(&existing), existing.as_path());
+
+        // Missing nested descendants climb back to the nearest existing ancestor.
+        let missing = existing.join("2026-11-27/sub/deep");
+        assert_eq!(nearest_existing_ancestor(&missing), existing.as_path());
+
+        // Filesystem root terminates cleanly.
+        let root = Path::new("/");
+        assert_eq!(nearest_existing_ancestor(root), root);
+
+        Ok(())
+    }
 }
