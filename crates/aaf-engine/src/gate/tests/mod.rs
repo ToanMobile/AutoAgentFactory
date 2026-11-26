@@ -2,6 +2,7 @@
 //! files do not trip the static rules when the gate runs on this repository.
 
 mod head_lock;
+mod head_lock_dir;
 mod hidden;
 mod pipeline;
 mod private;
