@@ -258,7 +258,7 @@ pub fn run_command_with_env_and_removals(
     .map(|(res, _)| res)
 }
 
-fn run_command_confined(
+pub(crate) fn run_command_confined(
     repo_root: &Path,
     name: &str,
     command: &str,
@@ -391,13 +391,13 @@ fn record_confine_mode(unconfined: &mut Option<String>, mode: ConfineMode) {
 }
 
 #[derive(Clone, Copy)]
-struct CommandEnv<'a> {
-    extra: &'a [(&'a str, &'a str)],
-    remove: &'a [&'a str],
+pub(crate) struct CommandEnv<'a> {
+    pub(crate) extra: &'a [(&'a str, &'a str)],
+    pub(crate) remove: &'a [&'a str],
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_heavy(
+pub(crate) fn run_heavy(
     repo_root: &Path,
     name: &str,
     command: &str,

@@ -123,6 +123,7 @@ fn run_plan_in_tree(
         repo_root: &tree.path,
         profile: &profile,
         proof_required: deps.settings.repo.proof.required,
+        repo_memory: None,
     };
     run.request.prompt = build_plan_prompt(task, &env_ctx);
     let outcome = worker::invoke_runner_with(deps, runner, task, &run)?;

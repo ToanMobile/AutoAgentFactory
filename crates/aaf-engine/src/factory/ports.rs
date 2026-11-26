@@ -49,6 +49,13 @@ pub trait GateRunner: Send + Sync {
     ) -> PortResult<Option<RerunResult>> {
         Ok(None)
     }
+    /// Runs optional deterministic pre-gate formatter (`commands.autofix`)
+    /// loaded strictly from `base_sha`. Defaults to `Skipped` for fakes.
+    fn run_autofix(&self, _tree: &Path) -> PortResult<crate::gate::autofix::AutofixOutcome> {
+        Ok(crate::gate::autofix::AutofixOutcome::Skipped {
+            reason: "autofix not supported".to_string(),
+        })
+    }
 }
 
 /// An integration worktree: the base plus every branch that merged cleanly.

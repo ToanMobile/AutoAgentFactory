@@ -371,6 +371,7 @@ fn agent(
         repo_root: &worktree.path,
         profile: &profile,
         proof_required: deps.settings.repo.proof.required,
+        repo_memory: None,
     };
     let mut prompt = build_prompt_with_context(&task, &worktree.branch, &env_ctx);
     if let Some(ref plan) = converged_plan {
@@ -420,6 +421,22 @@ fn agent(
             return Ok(Next::Blocked);
         }
         if deps.git.has_changes(&worktree)? {
+            if let Ok(crate::gate::autofix::AutofixOutcome::Formatted { .. }) =
+                deps.gate.run_autofix(&worktree.path)
+            {
+                if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
+                    unblock::block_untried(deps, task_id, &problem)?;
+                    return Ok(Next::Blocked);
+                }
+                if let Err(error) = deps
+                    .git
+                    .commit_all(&worktree, crate::gate::autofix::AUTOFIX_COMMIT_MSG)
+                {
+                    return after_commit_failure(
+                        deps, task_id, &worktree, outcome, error, grant, routed,
+                    );
+                }
+            }
             deps.move_to(task_id, TaskState::Gating, None, "agent run finished")?;
             return Ok(Next::Gate(GateJob {
                 task_id: task_id.to_string(),

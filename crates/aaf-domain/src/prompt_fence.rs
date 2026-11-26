@@ -21,6 +21,8 @@ pub const SPEC_BEGIN: &str = "<<<AAF_UNTRUSTED_SPEC_BEGIN>>>";
 pub const SPEC_END: &str = "<<<AAF_UNTRUSTED_SPEC_END>>>";
 pub const PLAN_BEGIN: &str = "<<<AAF_UNTRUSTED_PLAN_BEGIN>>>";
 pub const PLAN_END: &str = "<<<AAF_UNTRUSTED_PLAN_END>>>";
+pub const MEMORY_BEGIN: &str = "<<<AAF_UNTRUSTED_MEMORY_BEGIN>>>";
+pub const MEMORY_END: &str = "<<<AAF_UNTRUSTED_MEMORY_END>>>";
 
 /// Repository runtime hints appended to an agent prompt.
 #[derive(Debug, Clone)]
@@ -28,6 +30,10 @@ pub struct PromptContext<'a> {
     pub repo_root: &'a Path,
     pub profile: &'a str,
     pub proof_required: bool,
+    /// Optional preloaded, symlink-safe `.autofactory/memory.md` content
+    /// populated by `factory` so `plan_debate` consumes it without adding a
+    /// `plan_debate -> factory` dependency edge.
+    pub repo_memory: Option<&'a str>,
 }
 
 /// Rewrites every occurrence of [`GUARD`], in any ASCII case, so the text

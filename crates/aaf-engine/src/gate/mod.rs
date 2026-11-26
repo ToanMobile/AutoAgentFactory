@@ -2,6 +2,7 @@
 //! lock, store compliance, then the repo's own commands; the outcome is a
 //! signed receipt bound to the work tree's fingerprint.
 
+pub mod autofix;
 pub mod base;
 pub mod changes;
 pub mod confine;
@@ -22,13 +23,11 @@ pub mod static_checks;
 #[cfg(test)]
 mod tests;
 
-use std::path::Path;
-
+pub use crate::confine_core::GIT_TIMEOUT;
+use crate::throttle::{Progress, SystemProbe, Throttle};
 use aaf_domain::config::{MachineConfig, RepoConfig};
 use aaf_domain::gate::{CommandResult, GateMode, GateStatus, RECEIPT_SCHEMA_VERSION, Receipt};
 use aaf_domain::ports::Clock;
-
-use crate::throttle::{Progress, SystemProbe, Throttle};
 use aaf_fp::fs_private as private;
 pub use base::GateRunOptions;
 pub use helpers::CommandTimeouts;
@@ -36,8 +35,7 @@ pub(crate) use helpers::{Evidence, decide};
 pub use hidden::HiddenPolicy;
 use hidden::When;
 pub use reuse::{config_hash, repo_root_and_stats_id, stats_repo_id};
-
-pub use crate::confine_core::GIT_TIMEOUT;
+use std::path::Path;
 
 pub const REASON_TREE_CHANGED: &str = "tree changed during gate";
 

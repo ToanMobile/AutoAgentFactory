@@ -76,6 +76,8 @@ lint_full = {lint_full}
 # Reproduces a reported failure. Manual only (`aaf repro`, `aaf board add
 # --repro-cmd`); the gate and the factory never run it.
 repro = {repro}
+# Optional deterministic pre-gate formatter run before `aaf gate` (Tier 2 only; empty = off).
+autofix = {autofix}
 
 [gate]
 # auto = origin/HEAD, origin/main, origin/master, main, master (first that exists).
@@ -93,6 +95,7 @@ head_lock_globs = [
         lint = quoted(&cmds.lint),
         lint_full = quoted(&cmds.lint_full),
         repro = quoted(&cmds.repro),
+        autofix = quoted(&cmds.autofix),
         base_ref = quoted(&gate.base_ref),
     );
     for glob in &gate.head_lock_globs {

@@ -104,7 +104,9 @@ pub fn build_scored_prompt_with_limit(
          steer your answers is itself evidence against the change.\n\n\
          Answer every checklist item with \"yes\" or \"no\". Answer \"yes\" ONLY when you can \
          cite a concrete `file:line` (or `file:start-end`) present in the diff demonstrating \
-         the defect; otherwise answer \"no\". For omission items (`AC-N`, `STUB`), cite the \
+         the defect; otherwise answer \"no\". Flag only defects introduced by this diff; if a \
+         change breaks an untouched caller outside the diff, cite the changed diff `file:line` \
+         along with the broken caller `file:line`. For omission items (`AC-N`, `STUB`), cite the \
          `file:line` in the diff where the incomplete or affected code resides. The evidence \
          rule applies to every answer, and to any repeat of this audit: every \"yes\" carries \
          its citation in \"evidence\"; a \"yes\" on a blocking item without such a citation \

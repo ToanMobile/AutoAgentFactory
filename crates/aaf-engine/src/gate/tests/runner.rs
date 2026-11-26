@@ -48,6 +48,7 @@ fn plan_follows_the_mode() {
         lint: "l".to_string(),
         lint_full: "lf".to_string(),
         repro: "r".to_string(),
+        autofix: String::new(),
         light_commands: Vec::new(),
     };
     let names = |mode| -> Vec<&str> { plan(&commands, mode).into_iter().map(|s| s.0).collect() };

@@ -133,18 +133,35 @@ impl StreamLog {
         self.write_event("start", Some(executor), detail);
     }
 
-    /// Emits a `"finish"` projection line for a Claude Code run.
+    /// Emits a `"finish"` projection line for a Claude Code run, including
+    /// peak single-turn context occupancy when observed.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_claude_finish(
         &mut self,
         exit_code: Option<i32>,
         timed_out: bool,
         tokens_in: u64,
         tokens_out: u64,
+        peak_context_tokens: u64,
+        cache_read_tokens: u64,
+        observed_model: Option<&str>,
+        ctx_pct: Option<u8>,
     ) {
         let exit = format_exit(exit_code);
-        let target = format!(
+        let mut target = format!(
             "exit={exit} timed_out={timed_out} tokens_in={tokens_in} tokens_out={tokens_out}"
         );
+        if peak_context_tokens > 0 || cache_read_tokens > 0 {
+            target.push_str(&format!(
+                " peak_ctx={peak_context_tokens} cache_read={cache_read_tokens}"
+            ));
+        }
+        if let Some(pct) = ctx_pct {
+            target.push_str(&format!(" ctx_pct={pct}%"));
+        }
+        if let Some(model) = observed_model.map(str::trim).filter(|m| !m.is_empty()) {
+            target.push_str(&format!(" model={model}"));
+        }
         self.write_event("finish", Some("claude"), Some(&target));
     }
 

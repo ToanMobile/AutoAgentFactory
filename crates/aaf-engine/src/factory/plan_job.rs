@@ -136,10 +136,12 @@ fn run_plan_turn_in(
         return Ok(Next::Blocked);
     }
     let profile = crate::config::effective_profile(&deps.settings.repo, root);
+    let repo_memory = super::prompt::load_repo_memory(root);
     let repo_ctx = PromptContext {
         repo_root: root,
         profile: &profile,
         proof_required: deps.settings.repo.proof.required,
+        repo_memory: repo_memory.as_ref().map(|(body, _)| body.as_str()),
     };
     let steering: Vec<String> = task
         .context_notes
@@ -251,7 +253,7 @@ fn run_and_parse<T>(
                     && worker::ensure_budget(ctx.deps, &ctx.task.root_id)?.check()
                         == BudgetCheck::Ok =>
             {
-                let repair = build_plan_format_repair_prompt(ctx.role, &err, schema);
+                let repair = build_plan_format_repair_prompt(ctx.role, &err, "");
                 prompt = format!("{base_prompt}\n\n{repair}");
             }
             Err(err) => return Ok(Parsed::Exit(record_failure(ctx, Some(&run_id), &err)?)),

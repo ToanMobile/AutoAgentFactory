@@ -57,6 +57,7 @@ fn commands(build: &str, test_scoped: &str, test_full: &str, lint: &str) -> Comm
         lint_full: String::new(),
         // A repro command is specific to the reported failure; never guessed.
         repro: String::new(),
+        autofix: String::new(),
         light_commands: Vec::new(),
     }
 }

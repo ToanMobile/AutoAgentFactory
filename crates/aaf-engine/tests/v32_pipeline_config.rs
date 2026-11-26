@@ -175,6 +175,7 @@ fn plan_prompt_and_read_only_sandbox_policy() {
         repo_root: dir.path(),
         profile: "rust",
         proof_required: false,
+        repo_memory: None,
     };
     let prompt = build_plan_prompt(&task, &ctx);
     for needle in [

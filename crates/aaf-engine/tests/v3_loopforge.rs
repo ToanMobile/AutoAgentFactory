@@ -299,6 +299,7 @@ fn pr_body_with_proof_sanitizes_markdown_and_prompt_includes_repo_env() {
             repo_root: tmp.path(),
             profile: "android",
             proof_required: true,
+            repo_memory: None,
         },
     );
     assert!(prompt.contains("## Repo environment"), "{prompt}");

@@ -386,10 +386,29 @@ pub fn protected_name(path: &Path) -> Option<&'static str> {
         .and_then(Path::file_name)
         .and_then(|p| p.to_str())
         .map(fold)?;
-    NESTED
+    if let Some(hit) = NESTED
         .iter()
         .find(|(dir, file)| parent == *dir && name == *file)
         .map(|(_, file)| *file)
+    {
+        return Some(hit);
+    }
+    // Protect any file under `.autofactory/roles/**` (APFS case-folded).
+    let mut prev_autofactory = false;
+    for comp in path.parent()?.components() {
+        if let Component::Normal(seg) = comp
+            && let Some(s) = seg.to_str()
+        {
+            let folded = fold(s);
+            if prev_autofactory && folded == "roles" {
+                return Some(".autofactory/roles/*");
+            }
+            prev_autofactory = folded == ".autofactory";
+        } else {
+            prev_autofactory = false;
+        }
+    }
+    None
 }
 
 pub fn has_glob(text: &str) -> bool {

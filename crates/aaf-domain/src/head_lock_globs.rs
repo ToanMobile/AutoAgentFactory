@@ -47,6 +47,8 @@ pub const RUNNER_CONFIG_GLOBS: &[&str] = &[
     "**/rust-toolchain*",
     "**/clippy.toml",
     "**/.clippy.toml",
+    "**/rustfmt.toml",
+    "**/.rustfmt.toml",
     // Python packaging / runner / linter
     "**/pyproject.toml",
     "**/setup.cfg",
@@ -64,10 +66,21 @@ pub const RUNNER_CONFIG_GLOBS: &[&str] = &[
     // Dart / Flutter
     "**/pubspec.yaml",
     "**/analysis_options.yaml",
-    // JS / TS e2e and lint
+    // JS / TS e2e, lint, formatter, and ignore configs
     "**/playwright.config.*",
     "**/eslint.config.*",
     "**/.eslintrc*",
+    "**/.eslintignore",
+    "**/.prettierignore",
+    "**/.stylelintignore",
+    "**/.markdownlintignore",
+    "**/biome.json",
+    "**/biome.jsonc",
+    "**/.prettierrc*",
+    "**/prettier.config.*",
+    "**/stylelint.config.*",
+    "**/.stylelintrc*",
+    "**/oxlint.config.*",
     // Swift, Fastlane, Unity
     "**/Package.swift",
     "**/fastlane/**",
@@ -93,7 +106,7 @@ pub const CI_AND_MANIFEST_GLOBS: &[&str] = &[
 /// its own guard (`.claude/settings.json` registers `aaf-hook`) and, once
 /// merged, what runs in the owner's own sessions outside any sandbox.
 /// Part of the default `head_lock_globs`.
-pub const AGENT_CONFIG_GLOBS: [&str; 22] = [
+pub const AGENT_CONFIG_GLOBS: [&str; 23] = [
     "**/.claude/**",
     "**/CLAUDE.md",
     "**/.mcp.json",
@@ -106,6 +119,7 @@ pub const AGENT_CONFIG_GLOBS: [&str; 22] = [
     "**/.opencode/**",
     "**/opencode.json",
     "**/.autofactory/sops/**",
+    "**/.autofactory/roles/**",
     "**/.husky/**",
     "**/.githooks/**",
     "**/.pre-commit-config.*",

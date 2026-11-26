@@ -226,7 +226,15 @@ impl GitOps for RealGit {
 
     fn diff(&self, worktree: &TaskWorktree) -> PortResult<String> {
         let range = format!("{}...HEAD", self.start());
-        git(&worktree.path, &["diff", &range]).map_err(err)
+        let args = [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            &range,
+        ];
+        git(&worktree.path, &args).map_err(err)
     }
 
     fn integrate(&self, task_ids: &[String]) -> PortResult<Integration> {

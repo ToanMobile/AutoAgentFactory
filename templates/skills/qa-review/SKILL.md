@@ -25,12 +25,12 @@ When `AAF_RUN_ID` is set, you are running headlessly with no human present. This
 
 4. **7 Golden Standards (`G1..G7`, `/100`), `MechanicalScore` & Evidence Tags (v3.2)**
    - Score every criterion `G1..G7` out of `100` and state a concrete deduction reason whenever a score is `< 100`:
-     - `G1`: Correctness & Edge Cases
-     - `G2`: Architecture & Modularity
-     - `G3`: Error Handling & Observability
-     - `G4`: Security & Trust Boundaries
-     - `G5`: Performance & Resource Hygiene
-     - `G6`: Tests & Verification Quality
-     - `G7`: Readability, Diff Scope & Maintainability
+     - `G1`: Root Cause & Architecture
+     - `G2`: Security & Trust Boundaries
+     - `G3`: Correctness & Edge Cases
+     - `G4`: Test Quality & Oracle Proof
+     - `G5`: Performance & Resource Lifecycle
+     - `G6`: Code Hygiene & Modularity
+     - `G7`: Observability & Handover Readiness
    - **`MechanicalScore` (`/100`)**: computed deterministically from the signed gate receipt, static/store findings, proof verification, and reviewer independence (`same_account`). Effective score is `min(MechanicalScore, LLM average)`. When `[cross_audit].score_gate = true`, passing requires `effective_score >= min_average_score` (default `95`) and every `G1..G7 >= min_criterion_score` (default `90`).
    - **Evidence Tagging**: tag every tool-executed gate/test/static/proof/mechanical metric with `[tự chạy]` and every LLM-judged score or qualitative assessment with `[agent báo]`. Never omit gaps or present `[agent báo]` claims as `[tự chạy]`.

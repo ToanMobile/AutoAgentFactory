@@ -401,6 +401,7 @@ fn prompt_framing_strips_debate_fields_and_neutralises_delimiters() {
         repo_root: tmp.path(),
         profile: "rust",
         proof_required: false,
+        repo_memory: None,
     };
     let author = build_author_prompt(&task, 1, None, None, &[], &[], &ctx);
     assert_eq!(author.matches("<<<AAF_UNTRUSTED_SPEC_END>>>").count(), 1);

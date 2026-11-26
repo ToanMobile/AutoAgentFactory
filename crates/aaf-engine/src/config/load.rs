@@ -31,12 +31,13 @@ const ENV_MIN_ANDROID_TARGET_SDK: &str = "AAF_MIN_ANDROID_TARGET_SDK";
 const ENV_AUTO_MERGE: &str = "AAF_AUTO_MERGE";
 const ENV_MAX_PARALLEL: &str = "AAF_MAX_PARALLEL";
 /// Not supported on purpose; looked up only to tell the user they had no effect.
-const ENV_COMMANDS: [&str; 5] = [
+const ENV_COMMANDS: [&str; 6] = [
     "AAF_COMMANDS_BUILD",
     "AAF_COMMANDS_TEST_SCOPED",
     "AAF_COMMANDS_TEST_FULL",
     "AAF_COMMANDS_LINT",
     "AAF_COMMANDS_REPRO",
+    "AAF_COMMANDS_AUTOFIX",
 ];
 
 /// Everything [`load`] reads from the outside world, so tests never touch

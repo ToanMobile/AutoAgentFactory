@@ -201,6 +201,24 @@ impl GateRunner for RealGate {
         Some((fp, base.sha))
     }
 
+    fn run_autofix(&self, tree: &Path) -> PortResult<gate::autofix::AutofixOutcome> {
+        let policy = if self.made_by_the_factory(tree) {
+            HiddenPolicy::Remove
+        } else {
+            HiddenPolicy::Warn
+        };
+        gate::autofix::run_autofix(
+            &self.data_dir,
+            tree,
+            &self.cfg,
+            policy,
+            &*self.clock,
+            &self.machine,
+            &|event| (self.progress)(tree, event),
+        )
+        .map_err(|e| PortError::Io(e.to_string()))
+    }
+
     fn rerun_failed_test(&self, tree: &Path, receipt: &Receipt) -> PortResult<Option<RerunResult>> {
         if !is_pure_test_failure(receipt) {
             return Ok(None);
