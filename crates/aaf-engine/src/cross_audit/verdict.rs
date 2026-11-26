@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use aaf_domain::gate::GoldenScore;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::checklist::Item;
 use super::diff_hunks::{DiffHunks, evidence_in_diff, has_file_line_reference};
@@ -46,6 +46,13 @@ pub struct ScoredParse {
     pub scores: Vec<GoldenScore>,
 }
 
+fn deserialize_null_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAnswers {
@@ -59,7 +66,7 @@ struct RawAnswers {
 struct RawAnswer {
     id: String,
     answer: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     evidence: String,
 }
 
@@ -68,7 +75,7 @@ struct RawAnswer {
 struct RawGoldenScore {
     id: String,
     score: u8,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     deduction_reason: String,
 }
 
@@ -189,6 +196,7 @@ fn extract_answers_json(text: &str) -> Result<RawAnswers, String> {
     let text = cleaned.as_ref();
     let bytes = text.as_bytes();
     let mut found: Option<RawAnswers> = None;
+    let mut last_schema_err: Option<String> = None;
     let mut candidates = 0usize;
     let mut i = 0usize;
     while i < bytes.len() {
@@ -221,7 +229,10 @@ fn extract_answers_json(text: &str) -> Result<RawAnswers, String> {
                 found = Some(parsed);
                 i = end;
             }
-            Err(_) => {
+            Err(err) => {
+                if slice.contains("\"answers\"") {
+                    last_schema_err = Some(err.to_string());
+                }
                 if serde_json::from_str::<serde_json::Value>(slice).is_ok() {
                     i = end;
                 } else {
@@ -230,7 +241,22 @@ fn extract_answers_json(text: &str) -> Result<RawAnswers, String> {
             }
         }
     }
-    found.ok_or_else(|| "no valid audit JSON object found".to_string())
+    found.ok_or_else(|| match last_schema_err {
+        Some(err) => format!("no valid audit JSON object found ({err})"),
+        None => {
+            let preview: String = text
+                .trim()
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(140)
+                .collect();
+            if preview.is_empty() {
+                "no valid audit JSON object found (empty response)".to_string()
+            } else {
+                format!("no valid audit JSON object found (preview: {preview})")
+            }
+        }
+    })
 }
 
 /// Extracts the single audit JSON object of `text` (bounded, fail-closed).

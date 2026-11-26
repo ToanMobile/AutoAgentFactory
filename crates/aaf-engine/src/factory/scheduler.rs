@@ -248,7 +248,9 @@ impl<'a> Scheduler<'a> {
             let coding_limit = self.coding_parallel_limit();
             let aux_limit = self.aux_parallel_limit();
             if self.state.total_active() > 0 || self.state.in_gate > 0 {
-                let msg = if self.mode == Mode::Auto
+                let poll_for_work = self.mode == Mode::Auto
+                    || (self.mode == Mode::Drain && !self.state.jobs.is_empty());
+                let msg = if poll_for_work
                     && !frozen
                     && !halted
                     && !stopping

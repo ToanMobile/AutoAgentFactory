@@ -91,8 +91,10 @@ pub(super) struct RunTotals {
     pub(super) stale_running_runs: u64,
     pub(super) audit_tok: u64,
     pub(super) audit_runs: u64,
+    pub(super) audit_measured_runs: u64,
     pub(super) coding_tok: u64,
     pub(super) coding_runs: u64,
+    pub(super) coding_measured_runs: u64,
     pub(super) other_tok: u64,
     pub(super) other_runs: u64,
 }
@@ -348,10 +350,16 @@ pub(crate) fn collect_token_diagnostics(
 
         if is_audit {
             totals.audit_runs += 1;
+            if tot > 0 {
+                totals.audit_measured_runs += 1;
+            }
             totals.audit_tok = totals.audit_tok.saturating_add(tot);
             bump_max(&mut audit_last_at, run_ts);
         } else if !is_non_coding_aux(&r.executor) {
             totals.coding_runs += 1;
+            if tot > 0 {
+                totals.coding_measured_runs += 1;
+            }
             totals.coding_tok = totals.coding_tok.saturating_add(tot);
         } else {
             totals.other_runs += 1;

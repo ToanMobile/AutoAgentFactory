@@ -54,21 +54,31 @@ Script **đồng bộ trực tiếp với `/api/report?since=24` của `http://1
 - **First-Pass Gate & Cross-Audit:** `studio_ops:quality:low_first_pass_gate` (`< 70%` WARN, `< 40%` ANOMALY khi `>= 3` task), `studio_ops:quality:high_cross_audit_fail_rate` (`> 45%` WARN khi `>= 3` audit).
 - **Điểm cơ học & Oracle:** `mech_avg`, `audit_effective_avg`, `llm_avg`, phát hiện ngay **`studio_ops:quality:clear_gate_with_mechanical_score_zero`** (gate `CLEAR` nhưng `mechanical_score == 0`), `studio_ops:quality:vacuous_test_warnings` (`>= 3` trong 24h), và **`studio_ops:quality:high_rework_churn`** (task `running`/`gating` có `unblock_cycles >= 4`).
 
-### B. Trụ cột Tốc độ & Thông lượng (Speed, Slots & Stalls — từ Studio `ops_diagnostics.speed`)
-- **Độ trễ & Thông lượng:** `done_1h`, `done_24h`, `coding_dur` (p50/p90), `audit_dur` (p50), `gate_dur` (p50/p90), `gate_avg` (`studio_ops:speed:slow_gate_avg` `> 3m` WARN, `> 7m` ANOMALY), `lead_time` (p50).
-- **Hàng đợi Heavy Slot & Deadlock:** Studio probe trực tiếp `$AAF_DATA_DIR/throttle/`:
-  - `studio_ops:speed:dead_orphan_heavy_slots` (file `heavy.*.lock` không có flock nhưng còn nội dung PGID đã chết).
-  - `studio_ops:speed:heavy_slot_drain_deadlock` (`drain.lock` bị giữ khi `active_slots == 0`).
+### B. Trụ cột Tốc độ & Thông lượng (Speed, Slots & Stalls — từ Health `ops_diagnostics.speed`)
+- **Độ trễ & Thông lượng:** `done_1h`, `done_24h`, `coding_dur` (p50/p90 — đã loại `plan`/`split`), `audit_dur` (p50), `gate_dur` (p50/p90), `gate_avg` (`studio_ops:speed:slow_gate_avg` `> 3m` WARN, `> 7m` ANOMALY), `lead_time` (p50).
+- **Hàng đợi Heavy Slot & Deadlock:** Health probe trực tiếp `$AAF_DATA_DIR/throttle/` (gồm cả host `heavy.*.lock` và Seatbelt `guest/heavy.*.rec`):
+  - `studio_ops:speed:dead_orphan_heavy_slots` (lock hoặc guest `.rec` chứa PGID đã chết).
+  - `studio_ops:speed:heavy_slot_drain_deadlock` (`drain.lock` giữ khi `active_slots == 0 && waiters > 0 && oldest_wait >= 30s`).
   - `studio_ops:speed:heavy_slot_queue_slow` / `heavy_slot_queue_stalled` (`oldest_wait >= 3m` WARN / `>= 5m` ANOMALY).
-- **Worker treo im (`studio_ops:speed:stalled_worker`):** kiểm tra mtime của `streams/<run_id>.jsonl` cho từng run `running` (`>= 8m` không có output mới → WARN; `>= 15m` → ANOMALY).
+- **Task bị kẹt, Đói tài khoản & Vòng lặp (`studio_ops:speed:*`):**
+  - `account_pool_exhausted`: toàn bộ tài khoản đang leased/cooling hoặc supervisor báo `waiting for an account` khi còn task `ready`/`gating` (HIGH nếu toàn bộ tài khoản cạn sạch).
+  - `stuck_gating_tasks`: task kẹt trong `gating` `>= 20p` (WARN) / `>= 45p` (HIGH), kèm nguyên nhân cụ thể (`all_accounts_leased`, `all_accounts_cooling`, `waiting_for_account`, `heavy_slot_waiting`, `audit_or_worker_running`, `idle_post_gate_no_run`).
+  - `gating_spin_loop`: task lặp `>= 3` sự kiện `gate_result` trong 30p mà không thoát khỏi `gating` (HIGH).
+  - `worker_command_loop`: worker lặp cùng 1 tool/target `>= 5` lần liên tiếp trong stream tail 16 KiB (HIGH).
+  - `stalled_worker`: `streams/<run_id>.jsonl` im lặng `>= 5p` (WARN) / `>= 10p` (HIGH), kèm `last_tool: last_target` và `waiting_on_slot`.
+  - `long_running_worker`: worker chạy liên tục `>= 25p` (WARN) / `>= 40p` (HIGH).
+  - `dag_upstream_bottleneck`: 1 blocker đang chặn `>= 2` task `ready` phía sau (WARN).
+  - `stale_review_tasks`: task nằm ở `review` `>= 4h` chưa được duyệt/merge (WARN).
 
-### C. Trụ cột Hiệu quả Token & Chi phí (Token Efficiency — từ Studio `token_diagnostics` + `ops_diagnostics.efficiency`)
+### C. Trụ cột Hiệu quả Token & Chi phí (Token Efficiency — từ Health `token_diagnostics` + `ops_diagnostics.efficiency`)
 - Đồng bộ 100% từ `/health` (`/api/report?since=24`): `total_tokens`, tỷ lệ `in:out`, `wasted%`, `audit%`, `avg_coding_tokens`, `avg_audit_tokens`, `burn_rate` (`5m`/`1h`/`24h`), `unmeas_long`, `zero_tok`, `dup_audits`, và **top 3 task đốt nhiều token nhất**.
-- Cảnh báo hiệu quả: `studio_ops:efficiency:high_tokens_per_done` (`> 450K tok/done`), `studio_ops:efficiency:high_burn_zero_done` (`> 800K tok` mà `0 done`), `token_spike_since_prev_tick` (`> +180K` / `<= 15p`), `token_burn_spike_1h` (`> 350K` / `1h`), `accounts_in_cooldown`.
+- Cảnh báo hiệu quả: `studio_ops:efficiency:high_tokens_per_done` (`> 450K tok/done`, mẫu số chỉ tính task `done` có run thật), `studio_ops:efficiency:high_burn_zero_done` (`> 800K tok` mà `0 done`), `token_spike_since_prev_tick` (`> +180K` / `<= 15p`), `token_burn_spike_1h` (theo `burn_rate.spike_limit_1h` hoặc mặc định `> 350K` / `1h`), `accounts_in_cooldown`.
 
-### D. Trụ cột Sức khoẻ Hệ thống & Rò rỉ (Memory / FD / WAL / Board)
-- `ui_memory_leak_trend` / `ui_fd_leak_trend` (tăng 5 tick liên tiếp `>= +20 MB` / `>= +32 FDs` trên cùng PID), `ui_memory_high`, `ui_fds_high`.
-- `orphan_worker_process`, `system_memory_pressure` (`free < 15%`), `high_swap_usage` (`> 6 GB`), `sqlite_wal_bloat` (`> 64 MB`).
+### D. Trụ cột Sức khoẻ Hệ thống, OS & Đồng bộ (Memory / FD / WAL / Disk / Daemons)
+- `health_sync_failed`: UI `/api/health` sống nhưng `/api/report?since=24` timeout/lỗi HTTP (ANOMALY ngay lập tức + tự kích hoạt fallback SQLite/FS cho `stuck_gating`, `stalled_worker`, `long_running_worker`, `queue/*.wait`).
+- `ui_memory_leak_trend` / `ui_fd_leak_trend` (tăng 5 tick liên tiếp `>= +20 MB` / `>= +32 FDs` trên cùng PID), `ui_memory_high`, `ui_fds_high`, `ui_log_panic_or_fatal` (panic/fatal trong 15p cuối của `aaf-ui.log`).
+- `low_disk_space` (`< 15 GiB` hoặc `>= 88%` WARN; `< 5 GiB` hoặc `>= 95%` ANOMALY), `orphan_gradle_daemons` / `gradle_daemons_high` (tổng số & RSS của `GradleDaemon`/`KotlinCompileDaemon`).
+- `orphan_running_runs_no_aaf_run` (DB có run `running` nhưng `active_aaf_run_procs == 0` — phát hiện crash `aaf run` tức thì 0 giây), `supervisor_repo_backoff` (repo bị backoff trong `/api/status`), `orphan_worker_process`, `system_memory_pressure` (`free < 15%`), `high_swap_usage` (`> 6 GB`), `sqlite_wal_bloat` (`> 64 MB`).
 - `cockpit_ui_unreachable`, `factory_frozen`, `factory_blocked_tasks` (chỉ báo lỗi factory thật, bỏ qua `needs_human`/`dependency`).
 
 ---
@@ -102,8 +112,12 @@ Nếu chưa có, gọi tool `schedule`:
 
 | Cảnh báo | Nơi điều tra trong `/Volumes/Data/Toan/AutoAgentFactory` |
 |---|---|
-| `speed:heavy_slot_drain_deadlock` / `dead_orphan_heavy_slots` | `crates/aaf-engine/src/throttle/` (`slots.rs`, `slots/orphan_reap.rs`, `admit.rs`, `drain.rs`) |
-| `speed:slow_gate_avg` / `stalled_worker` / `heavy_slot_queue_slow` | `scripts/aaf_scoped_test.sh` của repo đích, `crates/aaf-engine/src/throttle/` (`pools.rs`, `queue.rs`), `streams/<run_id>.jsonl` |
+| `speed:heavy_slot_drain_deadlock` / `dead_orphan_heavy_slots` | `crates/aaf-engine/src/throttle/` (`slots.rs`, `slots/orphan_reap.rs`, `admit.rs`, `drain.rs`), `throttle/guest/*.rec` |
+| `speed:account_pool_exhausted` / `stuck_gating_tasks` / `gating_spin_loop` | `crates/aaf-cli/src/cmd/run/stage_wiring.rs` (`with_audit_reserve`), `crates/aaf-engine/src/factory/scheduler/dispatch.rs`, `aaf accounts list` |
+| `speed:worker_command_loop` / `stalled_worker` / `long_running_worker` | `streams/<run_id>.jsonl`, `crates/aaf-engine/src/executors/claude.rs`, `crates/aaf-cli/src/cmd/ui/studio_ops/probes.rs` |
+| `speed:slow_gate_avg` / `heavy_slot_queue_slow` / `dag_upstream_bottleneck` | `scripts/aaf_scoped_test.sh` của repo đích, `crates/aaf-engine/src/throttle/` (`pools.rs`, `queue.rs`), `aaf board list` |
+| `health_sync_failed` / `ui_log_panic_or_fatal` | `crates/aaf-cli/src/cmd/ui/studio.rs`, `report_cache.rs` (singleflight), `~/Library/Logs/aaf-ui.log` |
+| `low_disk_space` / `orphan_gradle_daemons` | `aaf gc --all`, `./gradlew --stop`, `df -h`, `~/.cache/autofactory/worktrees` |
 | `quality:clear_gate_with_mechanical_score_zero` | `crates/aaf-engine/src/factory/post_audit/helpers.rs`, `crates/aaf-engine/src/proof/capture.rs`, `crates/aaf-engine/src/cross_audit/scoring.rs` |
 | `quality:low_first_pass_gate` / `high_cross_audit_fail_rate` / `high_rework_churn` | `crates/aaf-engine/src/factory/post_audit.rs`, `crates/aaf-engine/src/factory/prompt.rs`, `crates/aaf-engine/src/cross_audit/prompt.rs` |
 | `ui_memory_leak_trend` / `runtime:ui_memory_high` / `ui_fd_leak_trend` | `crates/aaf-engine/src/web_ui/` (`sse.rs`, `server.rs`), `crates/aaf-cli/src/cmd/ui/report_cache.rs` |

@@ -219,8 +219,28 @@ impl<'a> Scheduler<'a> {
                 }
             }
         }
+        let has_deferred_audit = deferred.iter().any(|j| {
+            matches!(
+                j,
+                Job::Audit { .. }
+                    | Job::PostAudit { .. }
+                    | Job::DualReviewTurn { .. }
+                    | Job::AdjudicateTurn { .. }
+            )
+        });
+        // When gating tasks are in-flight (about to need Cross-Audit) or an audit
+        // job was just deferred waiting for an account, cap concurrent new coding
+        // turns to 1 (or 0 once a coding turn is already active) so Ready coding
+        // tasks cannot steal every free account and starve tasks 1 step from Done.
+        let eff_coding_limit = if has_deferred_audit {
+            0
+        } else if self.state.in_gate > 0 {
+            coding_limit.min(1)
+        } else {
+            coding_limit
+        };
         let (mut board_slot, mut swept_for_cap) = (None, false);
-        while self.state.coding_active < coding_limit {
+        while self.state.coding_active < eff_coding_limit {
             if board_slot.is_none() {
                 board_slot = Some(self.load_tick_board()?);
             }

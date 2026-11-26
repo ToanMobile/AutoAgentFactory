@@ -27,6 +27,7 @@ pub(super) struct StatusCache {
 pub(super) struct UiCaches {
     pub(super) status: Mutex<StatusCache>,
     pub(super) status_refresh: Mutex<()>,
+    pub(super) report_refresh: Mutex<()>,
     pub(super) pressure: Mutex<Option<(Instant, Option<Pressure>)>>,
     pub(super) report: ReportCache,
     pub(super) doctor: DoctorCache,

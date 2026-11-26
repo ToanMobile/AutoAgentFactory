@@ -323,3 +323,47 @@ fn oversized_diff_is_cut_with_a_marker() {
     assert_eq!(exact.len(), MAX_DIFF_BYTES);
     assert!(!build_prompt(&input(&exact, false)).contains(TRUNCATION_MARKER));
 }
+
+#[test]
+fn null_optional_strings_parse_and_schema_error_is_preserved() {
+    let checklist = build_checklist(&spec(), false);
+    let answers: Vec<serde_json::Value> = checklist
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "id": item.id,
+                "answer": "no",
+                "evidence": serde_json::Value::Null,
+            })
+        })
+        .collect();
+    let scores: Vec<serde_json::Value> = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+        .into_iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "score": 100,
+                "deduction_reason": serde_json::Value::Null,
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({ "answers": answers, "scores": scores }).to_string();
+    let parsed = aaf_engine::cross_audit::parse_scored_verdict(&payload, &checklist, true);
+    assert!(
+        parsed.verdict.is_pass(),
+        "null evidence/deduction_reason must parse as empty"
+    );
+    assert_eq!(parsed.scores.len(), 7);
+
+    // Unknown top-level field must still fail closed AND surface exact serde schema error for repair.
+    let bad = payload.replacen("{\"answers\"", "{\"verdict\":\"PASS\",\"answers\"", 1);
+    match parse_verdict(&bad, &checklist) {
+        AuditVerdict::Inconclusive { reason } => {
+            assert!(
+                reason.contains("unknown field"),
+                "expected exact serde schema error in reason, got: {reason}"
+            );
+        }
+        other => panic!("expected inconclusive, got {other:?}"),
+    }
+}

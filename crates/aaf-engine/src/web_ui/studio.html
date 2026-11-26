@@ -191,7 +191,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     <select id="repoScope" class="hidden" aria-label="Repository scope" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:13px"><option value="">All repos</option></select>
     <a id="needBtn" class="needbtn" href="/?view=review" title="Open review &amp; blocked queue on Cockpit"><span id="needBtnLabel">Need You</span> <span class="badge" id="needCount">0</span></a>
     <div class="seg" id="period" aria-label="Time window">
-      <button data-h="24">24h</button><button data-h="168" class="on" id="p7d">7 days</button><button data-h="720" id="p30d">30 days</button><button data-h="" id="pAll">All</button>
+      <button data-h="24" class="on">24h</button><button data-h="168" id="p7d">7 days</button><button data-h="720" id="p30d">30 days</button><button data-h="" id="pAll">All</button>
     </div>
     <button id="refresh" title="Refresh">↻<span class="hide-sm" id="refreshLabel"> Refresh</span></button>
     <button id="theme" title="Toggle Light / Dark">◐<span class="hide-sm"> Theme</span></button>
@@ -237,6 +237,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     </div>
     <div id="opsAlerts"></div>
     <div id="opsMetrics" class="tok-grid"></div>
+    <div id="opsLiveWrap"></div>
   </section>
 
   <section class="card hidden" id="runtimeHealthCard">
@@ -358,7 +359,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   let lang = "en";
   const isVi = () => lang === "vi";
   const L = (en, vi) => (lang === "vi" ? vi : en);
-  let token = "", hours = "168", repoFilter = "", timer = null, tasks = [], breakdown = [], byRepo = [], gateTaxonomy = [], blockedUpstream = [], tokenDiag = null, opsDiag = null, runtimeHealth = null, lastStatus = null, lastReport = null, lastScoreVal = null, isReadOnly = false, metaLoaded = false, knownRepos = [], lastTbReposKey = "", drawerSeq = 0, streamSeq = 0, refreshSeq = 0, refreshAbort = null, lastFocus = null, authChan = null, bootedViaChannel = false;
+  let token = "", hours = "24", repoFilter = "", timer = null, tasks = [], breakdown = [], byRepo = [], gateTaxonomy = [], blockedUpstream = [], tokenDiag = null, opsDiag = null, runtimeHealth = null, lastStatus = null, lastReport = null, lastScoreVal = null, isReadOnly = false, metaLoaded = false, knownRepos = [], lastTbReposKey = "", drawerSeq = 0, streamSeq = 0, refreshSeq = 0, refreshAbort = null, lastFocus = null, authChan = null, bootedViaChannel = false;
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
@@ -1113,11 +1114,15 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     }
     $("opsAlerts").innerHTML = alerts.length
       ? `<div class="alert-list" style="margin-bottom:12px">` + alerts.map((a) => {
-          const chips = Array.isArray(a.task_ids) && a.task_ids.length
-            ? `<div class="alert-tasks">${a.task_ids.slice(0, 6).map((tid) => `<button type="button" class="chip-btn" data-task="${esc(tid)}">${esc(tid)}</button>`).join("")}</div>`
+          const allIds = Array.isArray(a.task_ids) ? a.task_ids : [];
+          const moreCnt = Math.max(0, allIds.length - 6);
+          const chips = allIds.length
+            ? `<div class="alert-tasks">${allIds.slice(0, 6).map((tid) => `<button type="button" class="chip-btn" data-task="${esc(tid)}">${esc(tid)}</button>`).join("")}${moreCnt ? `<span class="pill" style="font-size:11px">+${num(moreCnt)} more</span>` : ""}</div>`
             : "";
           const histTag = a.active_recent === false ? ` <span class="pill" style="font-size:11px">${esc(L("historical", "lịch sử"))}</span>` : "";
-          return `<div class="alert-item sev-${esc(a.severity || "medium")}"${a.active_recent === false ? ' style="opacity:.78"' : ""}><div class="alert-top"><span class="pill ${a.severity === "high" || a.severity === "critical" ? "err" : "warn"}">${esc((a.category ? a.category + ":" : "") + (a.code || "ops"))}</span>${histTag}<span>${esc(a.title || "")}</span></div><div class="alert-detail">${esc(a.detail || "")}</div>${chips}</div>`;
+          const recHtml = a.recommendation ? `<div class="alert-rec">${esc(L("Tip: ", "Gợi ý: "))}${esc(a.recommendation)}</div>` : "";
+          const cliHtml = a.cli_cmd ? cmd(a.cli_cmd) : "";
+          return `<div class="alert-item sev-${esc(a.severity || "medium")}"${a.active_recent === false ? ' style="opacity:.78"' : ""}><div class="alert-top"><span class="pill ${a.severity === "high" || a.severity === "critical" ? "err" : "warn"}">${esc((a.category ? a.category + ":" : "") + (a.code || "ops"))}</span>${histTag}<span>${esc(a.title || "")}</span></div><div class="alert-detail">${esc(a.detail || "")}</div>${recHtml}${cliHtml}${chips}</div>`;
         }).join("") + `</div>`
       : "";
     const activeCodes = new Set(alerts.filter((a) => a.active_recent !== false).map((a) => a.code));
@@ -1126,9 +1131,22 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const deadOrph = Array.isArray(sp.dead_orphan_slots) ? sp.dead_orphan_slots.length : 0;
     const stalledList = Array.isArray(sp.stalled_workers) ? sp.stalled_workers : [];
     const stalledN = stalledList.length;
+    const stuckList = Array.isArray(sp.stuck_gating_tasks) ? sp.stuck_gating_tasks : [];
+    const stuckGateN = stuckList.length;
+    const spinList = Array.isArray(sp.gating_spin_tasks) ? sp.gating_spin_tasks : [];
+    const spinGateN = spinList.length;
+    const longList = Array.isArray(sp.long_running_workers) ? sp.long_running_workers : [];
+    const longRunN = longList.length;
+    const loopList = Array.isArray(sp.looping_workers) ? sp.looping_workers : [];
+    const loopN = loopList.length;
+    const dagList = Array.isArray(sp.dag_bottlenecks) ? sp.dag_bottlenecks : [];
+    const acctPool = sp.account_pool || {};
+    const acctAvail = Number(acctPool.total_available) || 0;
+    const acctTot = Number(acctPool.total_accounts) || 0;
+    const acctWait = Number(acctPool.waiting_for_account) || 0;
     const hasHighStall = stalledList.some((w) => w && w.severity === "high");
-    const slotErr = deadOrph > 0 || activeCodes.has("heavy_slot_drain_deadlock") || activeCodes.has("heavy_slot_queue_stalled") || hasHighStall;
-    const slotWarn = !slotErr && (activeCodes.has("heavy_slot_queue_slow") || stalledN > 0);
+    const slotErr = deadOrph > 0 || activeCodes.has("heavy_slot_drain_deadlock") || activeCodes.has("heavy_slot_queue_stalled") || activeCodes.has("gating_spin_loop") || activeCodes.has("worker_command_loop") || activeCodes.has("account_pool_exhausted") || hasHighStall || alerts.some((a) => (a.code === "stuck_gating_tasks" || a.code === "long_running_worker") && (a.severity === "high" || a.severity === "critical"));
+    const slotWarn = !slotErr && (activeCodes.has("heavy_slot_queue_slow") || activeCodes.has("dag_upstream_bottleneck") || stalledN > 0 || stuckGateN > 0 || longRunN > 0 || loopN > 0 || acctWait > 0);
     const gateAvgS = sp.gate_avg_secs != null ? Number(sp.gate_avg_secs) : 0;
     const spErr = activeCodes.has("slow_gate_avg") && gateAvgS > 420;
     const spWarn = !spErr && activeCodes.has("slow_gate_avg");
@@ -1139,6 +1157,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const tpdTxt = ef.tokens_per_done != null ? compact(ef.tokens_per_done) : "—";
     const ioTxt = ef.in_out_ratio != null ? `${Number(ef.in_out_ratio).toFixed(1)}:1` : "—";
     const topTask = Array.isArray(ef.top_token_tasks) && ef.top_token_tasks.length ? ef.top_token_tasks[0] : null;
+    const acctTxt = acctTot > 0 ? ` · acct ${num(acctAvail)}/${num(acctTot)}${acctWait ? ` (${num(acctWait)} wait)` : ""}` : "";
     $("opsMetrics").innerHTML = `
       <div class="tok-tile ${qBad ? "err-tile" : (qWarn ? "warn-tile" : "")}">
         <span class="tl">${esc(L("Quality · Mechanical & Audit", "Chất lượng · Điểm cơ học & Audit"))}</span>
@@ -1151,15 +1170,52 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
         <span class="ts">coding p50 ${sp.coding_dur_p50_secs != null ? dur(sp.coding_dur_p50_secs) : "—"} (p90 ${sp.coding_dur_p90_secs != null ? dur(sp.coding_dur_p90_secs) : "—"}) · gate p50 ${sp.gate_dur_p50_secs != null ? dur(sp.gate_dur_p50_secs) : "—"} (avg ${sp.gate_avg_secs != null ? dur(sp.gate_avg_secs) : "—"})</span>
       </div>
       <div class="tok-tile ${slotErr ? "err-tile" : (slotWarn ? "warn-tile" : "")}">
-        <span class="tl">${esc(L("Heavy Slots · Queue · Stalls", "Heavy Slot · Hàng đợi · Worker treo"))}</span>
+        <span class="tl">${esc(L("Heavy Slots · Accounts · Stuck", "Heavy Slot · Tài khoản · Kẹt task"))}</span>
         <span class="tv">${num(sp.active_slots)} ${esc(L("active", "đang chạy"))} · ${num(sp.waiters)} ${esc(L("waiting", "chờ"))}${sp.draining ? " · drain" : ""}</span>
-        <span class="ts">${esc(L("oldest wait:", "chờ lâu nhất:"))} ${sp.waiters ? dur(sp.oldest_wait_secs) : "0s"} · ${esc(L("dead orphans:", "orphan chết:"))} ${num(deadOrph)} · ${esc(L("stalled:", "treo:"))} ${num(stalledN)}</span>
+        <span class="ts">${esc(L("stuck gate:", "kẹt gate:"))} ${num(stuckGateN)}${spinGateN ? ` (spin ${num(spinGateN)})` : ""} · ${esc(L("stalled:", "treo:"))} ${num(stalledN)}${loopN ? ` · loop: ${num(loopN)}` : ""} · ${esc(L("long:", "lâu:"))} ${num(longRunN)} · ${esc(L("orphans:", "orphan:"))} ${num(deadOrph)}${acctTxt}</span>
       </div>
       <div class="tok-tile ${efWarn ? "warn-tile" : ""}">
         <span class="tl">${esc(L("Token Efficiency · Per Done Task", "Hiệu quả Token · Mỗi task xong"))}</span>
         <span class="tv">${esc(tpdTxt)} / ${esc(L("done", "task"))} · ${esc(ioTxt)}</span>
         <span class="ts">${topTask ? `${esc(L("Top:", "Cao nhất:"))} <button type="button" class="chip-btn" data-task="${esc(topTask.id)}">${esc(topTask.id)}</button> (${compact(topTask.tokens_total)}, ${num(topTask.runs_total)} runs)` : esc(L("No token burn in window", "Chưa có đốt token trong kỳ"))}</span>
       </div>`;
+    const liveRows = [];
+    for (const s of stuckList.slice(0, 6)) {
+      liveRows.push({ kind: "stuck_gating", sev: s.severity === "high" ? "err" : "warn", tid: s.task_id, rid: "", detail: s.cause || "gating", durTxt: dur(s.age_secs) });
+    }
+    for (const s of spinList.slice(0, 4)) {
+      liveRows.push({ kind: "gating_spin", sev: "err", tid: s.task_id, rid: "", detail: `${num(s.gate_count_30m)} gate_result in 30m`, durTxt: "30m" });
+    }
+    for (const w of loopList.slice(0, 4)) {
+      liveRows.push({ kind: "cmd_loop", sev: "err", tid: w.task_id, rid: w.run_id || "", detail: `×${num(w.repeat_count)} ${w.signature || ""}`, durTxt: "loop" });
+    }
+    for (const w of stalledList.slice(0, 6)) {
+      const toolInfo = w.last_tool ? `${w.last_tool}${w.last_target ? `: ${w.last_target}` : ""}` : (w.last_type || "no stream");
+      liveRows.push({ kind: "stalled_worker", sev: w.severity === "high" ? "err" : "warn", tid: w.task_id, rid: w.run_id || "", detail: `${toolInfo}${w.waiting_on_slot ? " (waiting heavy slot)" : ""}`, durTxt: `idle ${dur(w.idle_secs)}` });
+    }
+    for (const w of longList.slice(0, 4)) {
+      const toolInfo = w.last_tool ? `${w.last_tool}${w.last_target ? `: ${w.last_target}` : ""}` : (w.last_type || "running");
+      liveRows.push({ kind: "long_run", sev: w.severity === "high" ? "err" : "warn", tid: w.task_id, rid: w.run_id || "", detail: toolInfo, durTxt: dur(w.age_secs) });
+    }
+    for (const b of dagList.slice(0, 4)) {
+      liveRows.push({ kind: "dag_blocker", sev: "warn", tid: b.blocker_id, rid: "", detail: `${num(b.blocked_count)} downstream ready waiting (${b.blocker_state || "?"})`, durTxt: `×${num(b.blocked_count)}` });
+    }
+    const liveWrap = $("opsLiveWrap");
+    if (liveWrap) {
+      if (liveRows.length) {
+        liveWrap.innerHTML = `<div class="sect" style="margin-top:12px">${esc(L(`Live Bottlenecks & Stuck Tasks (${liveRows.length})`, `Nút thắt & Task đang kẹt (${liveRows.length})`))}</div>
+          <div class="table-wrap"><table><thead><tr><th>${esc(L("Type", "Loại"))}</th><th>Task</th><th>${esc(L("Cause / Last Activity", "Nguyên nhân / Hoạt động cuối"))}</th><th class="n">${esc(L("Age / Idle", "Thời gian"))}</th><th class="n">${esc(L("Inspect", "Kiểm tra"))}</th></tr></thead><tbody>` +
+          liveRows.map((r) => `<tr>
+            <td><span class="pill ${r.sev}">${esc(r.kind)}</span></td>
+            <td><button type="button" class="chip-btn" data-task="${esc(r.tid)}">${esc(r.tid)}</button></td>
+            <td class="wrap muted" style="font-size:13px">${esc(r.detail)}</td>
+            <td class="n mono">${esc(r.durTxt)}</td>
+            <td class="n"><button type="button" class="btn-xs" data-open-task="${esc(r.tid)}" data-open-run="${esc(r.rid)}">${r.rid ? esc(L("View log", "Xem log")) : esc(L("Details", "Chi tiết"))}</button></td>
+          </tr>`).join("") + `</tbody></table></div>`;
+      } else {
+        liveWrap.innerHTML = "";
+      }
+    }
   }
 
   function renderRuntimeHealth(rh) {
@@ -1176,7 +1232,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       badge.textContent = alerts.length ? L(`${alerts.length} resource alert${alerts.length > 1 ? "s" : ""}`, `${alerts.length} cảnh báo tài nguyên`) : L("Healthy", "Ổn định");
     }
     $("rtAlerts").innerHTML = alerts.length
-      ? `<div class="alert-list" style="margin-bottom:12px">` + alerts.map((a) => `<div class="alert-item sev-${esc(a.severity || "medium")}"><div class="alert-top"><span class="pill ${a.severity === "high" ? "err" : "warn"}">${esc(a.code || "runtime")}</span><span>${esc(a.title || "")}</span></div><div class="alert-detail">${esc(a.detail || "")}</div></div>`).join("") + `</div>`
+      ? `<div class="alert-list" style="margin-bottom:12px">` + alerts.map((a) => `<div class="alert-item sev-${esc(a.severity || "medium")}"><div class="alert-top"><span class="pill ${a.severity === "high" || a.severity === "critical" ? "err" : "warn"}">${esc(a.code || "runtime")}</span><span>${esc(a.title || "")}</span></div><div class="alert-detail">${esc(a.detail || "")}</div></div>`).join("") + `</div>`
       : "";
     const walHigh = (Number(sq.wal_bytes) || 0) >= 64 * 1024 * 1024;
     const rssHigh = (Number(p.rss_mb) || 0) >= 256;
@@ -1436,8 +1492,6 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const taskOf = (id) => tasks.find((t) => t.id === id) || null;
     const runs = (st.recent_runs || []).slice(0, 6);
     const accounts = st.accounts || [];
-    const watchMap = {};
-    for (const wa of (st.watch_accounts || [])) { if (wa && wa.id) watchMap[wa.id] = wa; }
     const t = st.throttle || {};
     const hs = st.heavy_slots || {};
     const sup = st.supervisor || {};
@@ -1447,9 +1501,13 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const waitersTxt = Number(t.waiters) > 0
       ? `<span class="pill warn">${num(t.waiters)} đang chờ${t.oldest_wait_secs ? ` (${dur(t.oldest_wait_secs)})` : ""}</span>`
       : "0";
-    const supTxt = sup.enabled === true
+    const boEntries = Object.entries(sup.backoff || {}).filter(([, v]) => Number(v) > 0);
+    const boPills = boEntries.length
+      ? " " + boEntries.map(([r, s]) => `<span class="pill warn">backoff ${esc(r)} ${num(s)}s</span>`).join(" ")
+      : "";
+    const supTxt = (sup.enabled === true
       ? `<span class="pill ok">Bật</span>${Array.isArray(sup.active_repos) && sup.active_repos.length ? ` (${esc(sup.active_repos.join(", "))})` : " (idle)"}`
-      : (sup.enabled === false ? `<span class="pill warn">Đang tắt</span>` : "—");
+      : (sup.enabled === false ? `<span class="pill warn">Đang tắt</span>` : "—")) + boPills;
     let html = `<dl class="kv">
       <dt>Auto-Runner (Supervisor)</dt><dd>${supTxt}</dd>
       <dt>Slot build nặng</dt><dd>${num(t.throttle_slots)} đang chạy · chờ: ${waitersTxt}${hs.memory_pressure && hs.memory_pressure !== "normal" ? ` · <span class="pill err">RAM ${esc(hs.memory_pressure)}</span>` : ""}</dd>
@@ -1596,15 +1654,24 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       renderStages(r.stages);
       renderExecutors(r.executors, r.estimated_cost_usd, r.cost_basis);
       renderBlocked(r.top_blocked);
-    } else if (!breakdown.length) {
-      $("taskBreakdown").innerHTML = `<div class="empty">${esc(L("Could not load task breakdown.", "Không tải được thống kê task."))}</div>`;
-      if ($("tokAlertBadge")) $("tokAlertBadge").textContent = L("Load error", "Lỗi tải dữ liệu");
+    } else {
+      if (!breakdown.length) {
+        $("taskBreakdown").innerHTML = `<div class="empty">${esc(L("Could not load task breakdown.", "Không tải được thống kê task."))}</div>`;
+      }
+      if ($("tokAlertBadge")) { $("tokAlertBadge").className = "pill err"; $("tokAlertBadge").textContent = L("Sync failed (stale)", "Lỗi đồng bộ (dữ liệu cũ)"); }
+      if ($("opsHealthBadge")) { $("opsHealthBadge").className = "pill err"; $("opsHealthBadge").textContent = L("Sync failed (stale)", "Lỗi đồng bộ (dữ liệu cũ)"); }
+      if ($("rtHealthBadge")) { $("rtHealthBadge").className = "pill err"; $("rtHealthBadge").textContent = L("Sync failed (stale)", "Lỗi đồng bộ (dữ liệu cũ)"); }
     }
     renderLive(lastStatus);
-    $("foot").textContent = L(
-      "Updated at " + new Date().toLocaleTimeString() + " · auto-refreshes every 15s",
-      "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây"
-    );
+    $("foot").textContent = errors.length
+      ? L(
+          "Sync error at " + new Date().toLocaleTimeString() + " (showing cached/partial data) · retrying in 15s",
+          "Lỗi đồng bộ lúc " + new Date().toLocaleTimeString() + " (đang hiện dữ liệu cũ/thiếu) · thử lại sau 15 giây"
+        )
+      : L(
+          "Updated at " + new Date().toLocaleTimeString() + " · auto-refreshes every 15s",
+          "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây"
+        );
   }
 
   function schedule() {

@@ -33,6 +33,7 @@ use crate::ctx::Ctx;
 const STATE_FILE: &str = "ui-supervisor.json";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const BASE_BACKOFF_SECS: u64 = 15;
+const GATING_MAX_BACKOFF_SECS: u64 = 30;
 const MAX_BACKOFF_SECS: u64 = 300;
 const RAPID_EXIT_SECS: u64 = 10;
 
@@ -160,11 +161,11 @@ impl UiSupervisor {
         if rapid_ok.is_empty() {
             return;
         }
-        let outcomes: Vec<(String, bool)> = rapid_ok
+        let outcomes: Vec<(String, bool, bool)> = rapid_ok
             .into_iter()
             .map(|repo| {
-                let pending = repo_has_pending_tasks(&self.ro_db, &repo);
-                (repo, pending)
+                let (pending, gating) = repo_pending_flags(&self.ro_db, &repo);
+                (repo, pending, gating)
             })
             .collect();
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -425,33 +426,36 @@ fn tick(sup: &UiSupervisor) {
             Ok(slot) => {
                 guard.workers.insert(repo, slot);
             }
-            Err(_) => record_failure(&mut guard, repo),
+            Err(_) => record_failure(&mut guard, repo, MAX_BACKOFF_SECS),
         }
     }
     sync_caffeinate(&mut guard);
 }
 
-fn repo_has_pending_tasks(ro_db: &SharedRoDb, repo_root: &str) -> bool {
+fn repo_pending_flags(ro_db: &SharedRoDb, repo_root: &str) -> (bool, bool) {
     let Ok(Some(db)) = ro_db.get() else {
-        return false;
+        return (false, false);
     };
-    [TaskState::Ready, TaskState::Running, TaskState::Gating]
-        .into_iter()
-        .any(|state| {
-            db.list_tasks(Some(repo_root), Some(state))
-                .is_ok_and(|tasks| !tasks.is_empty())
-        })
+    let gating = db
+        .list_tasks(Some(repo_root), Some(TaskState::Gating))
+        .is_ok_and(|t| !t.is_empty());
+    let pending = gating
+        || [TaskState::Ready, TaskState::Running].into_iter().any(|s| {
+            db.list_tasks(Some(repo_root), Some(s))
+                .is_ok_and(|t| !t.is_empty())
+        });
+    (pending, gating)
 }
 
-fn compute_backoff_secs(failures: u32) -> u64 {
+fn compute_backoff_secs(failures: u32, max_secs: u64) -> u64 {
     let shift = failures.saturating_sub(1).min(5);
-    (BASE_BACKOFF_SECS.saturating_mul(1_u64 << shift)).min(MAX_BACKOFF_SECS)
+    (BASE_BACKOFF_SECS.saturating_mul(1_u64 << shift)).min(max_secs)
 }
 
-fn record_failure(inner: &mut Inner, repo: String) {
+fn record_failure(inner: &mut Inner, repo: String, max_secs: u64) {
     let cnt = inner.failures.entry(repo.clone()).or_insert(0);
     *cnt = cnt.saturating_add(1);
-    let secs = compute_backoff_secs(*cnt);
+    let secs = compute_backoff_secs(*cnt, max_secs);
     inner
         .backoff_until
         .insert(repo, Instant::now() + Duration::from_secs(secs));
@@ -468,24 +472,35 @@ fn reap_finished_raw(inner: &mut Inner) -> Vec<String> {
         }
     }
     let mut rapid_ok = Vec::new();
+    let mut freed_accounts = false;
     for (repo, ok, rapid) in done {
         inner.workers.remove(&repo);
         if ok && !rapid {
             inner.failures.remove(&repo);
             inner.backoff_until.remove(&repo);
+            freed_accounts = true;
         } else if ok {
             rapid_ok.push(repo);
         } else {
-            record_failure(inner, repo);
+            record_failure(inner, repo, MAX_BACKOFF_SECS);
         }
+    }
+    if freed_accounts {
+        // A peer repo just finished real work and released accounts; wake waiting repos promptly.
+        inner.backoff_until.clear();
     }
     rapid_ok
 }
 
-fn apply_rapid_exit_outcomes(inner: &mut Inner, outcomes: Vec<(String, bool)>) {
-    for (repo, still_pending) in outcomes {
+fn apply_rapid_exit_outcomes(inner: &mut Inner, outcomes: Vec<(String, bool, bool)>) {
+    for (repo, still_pending, has_gating) in outcomes {
         if still_pending {
-            record_failure(inner, repo);
+            let cap = if has_gating {
+                GATING_MAX_BACKOFF_SECS
+            } else {
+                MAX_BACKOFF_SECS
+            };
+            record_failure(inner, repo, cap);
         } else {
             inner.failures.remove(&repo);
             inner.backoff_until.remove(&repo);
@@ -528,7 +543,6 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        // Wait briefly so try_wait() observes exit status immediately in reap_finished.
         for _ in 0..50 {
             if child.try_wait().unwrap().is_some() {
                 break;
@@ -538,54 +552,43 @@ mod tests {
         child
     }
 
+    fn slot_at(spawned_at: Instant) -> WorkerSlot {
+        WorkerSlot {
+            child: spawn_exit_zero(),
+            repo_name: "demo-repo".into(),
+            spawned_at,
+        }
+    }
+
     #[test]
     fn rapid_exit_zero_only_backs_off_when_pending_work_remains() {
         let mut inner = empty_inner();
         let repo = "/tmp/demo-repo".to_string();
+        let peer = "/tmp/peer-repo".to_string();
 
-        // 1. Rapid exit 0 while tasks still remain -> triggers backoff to stop 5s busy-loop.
-        inner.workers.insert(
-            repo.clone(),
-            WorkerSlot {
-                child: spawn_exit_zero(),
-                repo_name: "demo-repo".into(),
-                spawned_at: Instant::now(),
-            },
-        );
-        let rapid = reap_finished_raw(&mut inner);
-        assert_eq!(rapid, vec![repo.clone()]);
-        apply_rapid_exit_outcomes(&mut inner, vec![(repo.clone(), true)]);
-        assert_eq!(inner.failures.get(&repo), Some(&1));
-        assert!(inner.backoff_until.contains_key(&repo));
+        // 1. Rapid exit 0 while gating tasks remain -> backoff capped at GATING_MAX_BACKOFF_SECS.
+        for _ in 0..5 {
+            inner.workers.insert(repo.clone(), slot_at(Instant::now()));
+            assert_eq!(reap_finished_raw(&mut inner), vec![repo.clone()]);
+            apply_rapid_exit_outcomes(&mut inner, vec![(repo.clone(), true, true)]);
+        }
+        assert_eq!(inner.failures.get(&repo), Some(&5));
+        let rem = inner.backoff_until[&repo].saturating_duration_since(Instant::now());
+        assert!(rem <= Duration::from_secs(GATING_MAX_BACKOFF_SECS));
 
-        // 2. Rapid exit 0 when repo drained cleanly (no pending tasks) -> clears backoff.
-        inner.workers.insert(
-            repo.clone(),
-            WorkerSlot {
-                child: spawn_exit_zero(),
-                repo_name: "demo-repo".into(),
-                spawned_at: Instant::now(),
-            },
-        );
-        let rapid = reap_finished_raw(&mut inner);
-        assert_eq!(rapid, vec![repo.clone()]);
-        apply_rapid_exit_outcomes(&mut inner, vec![(repo.clone(), false)]);
-        assert!(!inner.failures.contains_key(&repo));
-        assert!(!inner.backoff_until.contains_key(&repo));
+        // 2. Rapid exit 0 when repo drained cleanly -> clears backoff.
+        inner.workers.insert(repo.clone(), slot_at(Instant::now()));
+        assert_eq!(reap_finished_raw(&mut inner), vec![repo.clone()]);
+        apply_rapid_exit_outcomes(&mut inner, vec![(repo.clone(), false, false)]);
+        assert!(!inner.failures.contains_key(&repo) && !inner.backoff_until.contains_key(&repo));
 
-        // 3. Sustained run exiting 0 (>= RAPID_EXIT_SECS) -> immediately clears backoff.
-        record_failure(&mut inner, repo.clone());
+        // 3. Sustained peer run exiting 0 clears backoff on waiting sibling repos too.
+        record_failure(&mut inner, repo.clone(), MAX_BACKOFF_SECS);
         inner.workers.insert(
-            repo.clone(),
-            WorkerSlot {
-                child: spawn_exit_zero(),
-                repo_name: "demo-repo".into(),
-                spawned_at: Instant::now() - Duration::from_secs(RAPID_EXIT_SECS + 1),
-            },
+            peer,
+            slot_at(Instant::now() - Duration::from_secs(RAPID_EXIT_SECS + 1)),
         );
-        let rapid = reap_finished_raw(&mut inner);
-        assert!(rapid.is_empty());
-        assert!(!inner.failures.contains_key(&repo));
+        assert!(reap_finished_raw(&mut inner).is_empty());
         assert!(!inner.backoff_until.contains_key(&repo));
     }
 }

@@ -1,31 +1,32 @@
-//! Unified 4-pillar Quality, Speed/Slot, and Token-Efficiency diagnostics for
-//! `/studio` (`GET /api/report`) and `/aaf_heath` (Single Source of Truth).
+//! Unified 4-pillar Quality, Speed/Slot, Account-Starvation, and Token-Efficiency
+//! diagnostics for `/health` (legacy `/studio`, `GET /api/report`) and `/aaf_heath`.
 //!
 //! Zero `unsafe`, zero `tokio`, zero `unwrap`/`expect` in non-test code.
 
 mod alerts;
+mod probes;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeSet, HashMap};
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::time::{Duration, UNIX_EPOCH};
 
+use aaf_domain::account::AccountState;
 use aaf_domain::event::{EventKind, FactoryEvent};
-use aaf_domain::run::{RunRecord, RunStatus};
+use aaf_domain::run::RunRecord;
 use aaf_domain::task::{Task, TaskState};
-use aaf_engine::executors::reaper::validate_run_id;
-use aaf_engine::telemetry::{FactoryReport, scan_throttle};
-use aaf_engine::throttle::{GroupControl, SystemGroup};
+use aaf_engine::telemetry::FactoryReport;
 use serde_json::{Value, json};
 
 use self::alerts::{AlertFacts, collect_ops_alerts};
+use self::probes::{detect_worker_issues, inspect_slots_and_orphans, summarize_account_pool};
 use super::studio_tokens::is_audit_executor;
 
-const STALL_WARN_SECS: u64 = 480;
-const STALL_HIGH_SECS: u64 = 900;
-const STALL_NO_STREAM_SECS: u64 = 300;
+const STUCK_GATING_WARN_SECS: u64 = 1200;
+const STUCK_GATING_HIGH_SECS: u64 = 2700;
+const GATING_SPIN_WINDOW_SECS: i64 = 1800;
+const GATING_SPIN_MIN_GATES: u64 = 3;
+const STALE_REVIEW_WARN_SECS: u64 = 14_400;
 const REWORK_CHURN_MIN_CYCLES: u32 = 4;
 
 pub(super) struct OpsInput<'a> {
@@ -33,6 +34,8 @@ pub(super) struct OpsInput<'a> {
     pub tasks: &'a [Task],
     pub runs_by_task: &'a HashMap<String, Vec<RunRecord>>,
     pub events: &'a [FactoryEvent],
+    pub accounts: &'a [AccountState],
+    pub blocked_upstream: &'a [(String, String)],
     pub report: &'a FactoryReport,
     pub token_diagnostics: &'a Value,
     pub breakdown: &'a [Value],
@@ -67,11 +70,25 @@ pub(super) fn empty_ops_diagnostics() -> Value {
             "gate_samples": 0,
             "active_slots": 0,
             "draining": false,
-            "drain_age_secs": 0,
             "waiters": 0,
             "oldest_wait_secs": 0,
             "dead_orphan_slots": [],
             "stalled_workers": [],
+            "stuck_gating_tasks": [],
+            "gating_spin_tasks": [],
+            "long_running_workers": [],
+            "looping_workers": [],
+            "stale_review_tasks": [],
+            "dag_bottlenecks": [],
+            "account_pool": {
+                "by_provider": [],
+                "total_accounts": 0,
+                "total_available": 0,
+                "total_leased": 0,
+                "total_cooling": 0,
+                "waiting_for_account": 0,
+                "waiting_repos": [],
+            },
         },
         "efficiency": {
             "tokens_per_done": null,
@@ -101,149 +118,111 @@ fn mean_round1(vals: &[u64]) -> Option<f64> {
     Some((avg * 10.0).round() / 10.0)
 }
 
-fn parse_pgid(text: &str) -> Option<u32> {
-    text.lines().find_map(|ln| {
-        ln.trim()
-            .strip_prefix("pgid=")
-            .and_then(|v| v.trim().parse::<u32>().ok())
-    })
+fn is_aux_non_coding(executor: &str) -> bool {
+    executor.eq_ignore_ascii_case("plan") || executor.eq_ignore_ascii_case("split")
 }
 
-struct SlotProbe {
-    active_slots: usize,
-    draining: bool,
-    drain_age_secs: u64,
-    waiters: usize,
-    oldest_wait_secs: u64,
-    dead_orphan_slots: Vec<String>,
-}
-
-fn inspect_slots_and_orphans(data_dir: Option<&Path>, now: i64) -> SlotProbe {
-    let Some(dir) = data_dir else {
-        return SlotProbe {
-            active_slots: 0,
-            draining: false,
-            drain_age_secs: 0,
-            waiters: 0,
-            oldest_wait_secs: 0,
-            dead_orphan_slots: Vec::new(),
-        };
-    };
-    let (snap, entries) = scan_throttle(dir);
-    let mut dead_orphans = Vec::new();
-    for entry in entries {
-        if entry.locked || !fs::metadata(&entry.path).is_ok_and(|m| m.len() > 0) {
-            continue;
+fn classify_gating_cause(
+    acct: &probes::AccountPoolSummary,
+    slot_probe: &probes::SlotProbe,
+    has_active_run: bool,
+) -> &'static str {
+    if has_active_run {
+        "audit_or_worker_running"
+    } else if acct.total_accounts > 0 && acct.total_available == 0 {
+        if acct.total_leased > 0 {
+            "all_accounts_leased"
+        } else {
+            "all_accounts_cooling"
         }
-        let text = fs::read_to_string(&entry.path).unwrap_or_default();
-        let pgid = parse_pgid(&text);
-        let is_dead = match pgid {
-            Some(id) => matches!(SystemGroup.read_group_state(id), Ok(None)),
-            None => true,
-        };
-        if is_dead {
-            let label = match pgid {
-                Some(id) => format!("heavy.{}.lock(pgid={id})", entry.slot),
-                None => format!("heavy.{}.lock(pgid=none)", entry.slot),
-            };
-            dead_orphans.push(label);
-        }
-    }
-    let now_time = UNIX_EPOCH + Duration::from_secs(u64::try_from(now.max(0)).unwrap_or(0));
-    let drain_age_secs = if snap.drain_lock_present {
-        fs::metadata(dir.join("throttle").join("drain.lock"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|mt| now_time.duration_since(mt).ok())
-            .map_or(0, |d| d.as_secs())
+    } else if acct.waiting_for_account > 0 {
+        "waiting_for_account"
+    } else if slot_probe.waiters > 0 || slot_probe.draining {
+        "heavy_slot_waiting"
     } else {
-        0
-    };
-    SlotProbe {
-        active_slots: snap.throttle_slots,
-        draining: snap.drain_lock_present,
-        drain_age_secs,
-        waiters: snap.waiters,
-        oldest_wait_secs: snap.oldest_wait_secs.unwrap_or(0),
-        dead_orphan_slots: dead_orphans,
+        "idle_post_gate_no_run"
     }
-}
-
-fn detect_stalled_workers(
-    data_dir: Option<&Path>,
-    runs_by_task: &HashMap<String, Vec<RunRecord>>,
-    now: i64,
-) -> Vec<Value> {
-    let Some(dir) = data_dir else {
-        return Vec::new();
-    };
-    let streams_dir = dir.join("streams");
-    let now_time = UNIX_EPOCH + Duration::from_secs(u64::try_from(now.max(0)).unwrap_or(0));
-    let mut stalled = Vec::new();
-    for runs in runs_by_task.values() {
-        for r in runs.iter().filter(|r| r.status == RunStatus::Running) {
-            if validate_run_id(&r.id).is_err() {
-                continue;
-            }
-            let stream_path = streams_dir.join(format!("{}.jsonl", r.id));
-            if let Ok(meta) = fs::metadata(&stream_path)
-                && let Ok(mtime) = meta.modified()
-            {
-                let idle = now_time
-                    .duration_since(mtime)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                if idle >= STALL_WARN_SECS {
-                    let sev = if idle >= STALL_HIGH_SECS {
-                        "high"
-                    } else {
-                        "medium"
-                    };
-                    stalled.push(json!({
-                        "task_id": r.task_id,
-                        "run_id": r.id,
-                        "idle_secs": idle,
-                        "severity": sev,
-                    }));
-                }
-            } else {
-                let age = u64::try_from(now.saturating_sub(r.started_at).max(0)).unwrap_or(0);
-                if age >= STALL_NO_STREAM_SECS {
-                    let sev = if age >= STALL_HIGH_SECS {
-                        "high"
-                    } else {
-                        "medium"
-                    };
-                    stalled.push(json!({
-                        "task_id": r.task_id,
-                        "run_id": r.id,
-                        "idle_secs": age,
-                        "severity": sev,
-                    }));
-                }
-            }
-        }
-    }
-    stalled.sort_by(|a, b| {
-        b["idle_secs"]
-            .as_u64()
-            .unwrap_or(0)
-            .cmp(&a["idle_secs"].as_u64().unwrap_or(0))
-    });
-    stalled
 }
 
 pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
     let since_1h = input.now.saturating_sub(3600);
-    let (mut done_1h, mut done_window) = (0u64, 0u64);
+    let since_spin = input.now.saturating_sub(GATING_SPIN_WINDOW_SECS);
+    let slot_probe = inspect_slots_and_orphans(input.data_dir);
+    let worker_probe = detect_worker_issues(input.data_dir, input.runs_by_task, input.now);
+    let acct_pool = summarize_account_pool(
+        input.data_dir,
+        input.accounts,
+        input.runs_by_task,
+        input.now,
+    );
+
+    let mut task_meta: HashMap<&str, (TaskState, Option<&str>)> =
+        HashMap::with_capacity(input.tasks.len());
+    let (mut done_1h, mut done_window, mut done_with_runs) = (0u64, 0u64, 0u64);
+    let (mut open_ready_or_gating, mut open_gating_count) = (0usize, 0usize);
     let (mut churn_labels, mut churn_ids) = (Vec::new(), Vec::new());
+    let mut gating_ids: BTreeSet<String> = BTreeSet::new();
+    let mut stuck_gating_tasks: Vec<Value> = Vec::new();
+    let mut stale_review_tasks: Vec<Value> = Vec::new();
+
     for t in input.tasks {
+        task_meta.insert(
+            t.id.as_str(),
+            (
+                t.state,
+                t.blocked_reason
+                    .as_ref()
+                    .map(aaf_domain::blocked::BlockedReason::kind),
+            ),
+        );
         if t.state == TaskState::Done {
             if t.updated_at >= since_1h {
                 done_1h += 1;
             }
             if input.since.is_none_or(|c| t.updated_at >= c) {
                 done_window += 1;
+                if input
+                    .runs_by_task
+                    .get(&t.id)
+                    .is_some_and(|rs| !rs.is_empty())
+                {
+                    done_with_runs += 1;
+                }
+            }
+        }
+        if matches!(t.state, TaskState::Ready | TaskState::Gating) {
+            open_ready_or_gating += 1;
+        }
+        if t.state == TaskState::Gating {
+            open_gating_count += 1;
+            gating_ids.insert(t.id.clone());
+            let age = u64::try_from(input.now.saturating_sub(t.updated_at).max(0)).unwrap_or(0);
+            if age >= STUCK_GATING_WARN_SECS {
+                let sev = if age >= STUCK_GATING_HIGH_SECS {
+                    "high"
+                } else {
+                    "medium"
+                };
+                let has_run = input.runs_by_task.get(&t.id).is_some_and(|rs| {
+                    rs.iter()
+                        .any(|r| r.status == aaf_domain::run::RunStatus::Running)
+                });
+                let cause = classify_gating_cause(&acct_pool, &slot_probe, has_run);
+                stuck_gating_tasks.push(json!({
+                    "task_id": t.id,
+                    "age_secs": age,
+                    "severity": sev,
+                    "cause": cause,
+                }));
+            }
+        }
+        if t.state == TaskState::Review {
+            let age = u64::try_from(input.now.saturating_sub(t.updated_at).max(0)).unwrap_or(0);
+            if age >= STALE_REVIEW_WARN_SECS {
+                stale_review_tasks.push(json!({
+                    "task_id": t.id,
+                    "age_secs": age,
+                }));
             }
         }
         if matches!(t.state, TaskState::Running | TaskState::Gating)
@@ -253,6 +232,45 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
             churn_ids.push(t.id.clone());
         }
     }
+    stuck_gating_tasks.sort_by(|a, b| {
+        b["age_secs"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&a["age_secs"].as_u64().unwrap_or(0))
+    });
+    stale_review_tasks.sort_by(|a, b| {
+        b["age_secs"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&a["age_secs"].as_u64().unwrap_or(0))
+    });
+
+    let mut blocker_groups: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, blocker) in input.blocked_upstream {
+        *blocker_groups.entry(blocker.as_str()).or_insert(0) += 1;
+    }
+    let mut dag_bottlenecks: Vec<Value> = blocker_groups
+        .into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .map(|(blocker, count)| {
+            let (st, reason) = task_meta
+                .get(blocker)
+                .copied()
+                .map_or(("unknown", None), |(s, r)| (s.as_str(), r));
+            json!({
+                "blocker_id": blocker,
+                "blocker_state": st,
+                "blocker_reason": reason,
+                "blocked_count": count,
+            })
+        })
+        .collect();
+    dag_bottlenecks.sort_by(|a, b| {
+        b["blocked_count"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&a["blocked_count"].as_u64().unwrap_or(0))
+    });
 
     let (mut code_durs, mut audit_durs) = (Vec::new(), Vec::new());
     for runs in input.runs_by_task.values() {
@@ -261,7 +279,7 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
             let dur = u64::try_from(ended.saturating_sub(r.started_at).max(0)).unwrap_or(0);
             if is_audit_executor(&r.executor) {
                 audit_durs.push(dur);
-            } else if !r.executor.eq_ignore_ascii_case("plan") {
+            } else if !is_aux_non_coding(&r.executor) {
                 code_durs.push(dur);
             }
         }
@@ -270,6 +288,7 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
     let (mut gate_durs, mut mech_scores, mut eff_scores, mut llm_avgs) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut clear_zero_tasks: BTreeSet<String> = BTreeSet::new();
+    let mut recent_gates_by_task: HashMap<String, u64> = HashMap::new();
     let (mut clear_zero_count, mut vacuous_warns) = (0u64, 0u64);
     let (mut clear_zero_last_at, mut vacuous_last_at): (Option<i64>, Option<i64>) = (None, None);
 
@@ -279,6 +298,12 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
         };
         match ev.kind {
             EventKind::GateResult => {
+                if ev.created_at >= since_spin
+                    && let Some(tid) = &ev.task_id
+                    && gating_ids.contains(tid)
+                {
+                    *recent_gates_by_task.entry(tid.clone()).or_insert(0) += 1;
+                }
                 if let Some(ms) = payload.get("duration_ms").and_then(Value::as_u64) {
                     gate_durs.push((ms + 500) / 1000);
                 }
@@ -314,6 +339,12 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
                 }
             }
             EventKind::CrossAudit => {
+                let skip = payload.get("short_circuited").and_then(Value::as_bool) == Some(true)
+                    || payload.get("retry").and_then(Value::as_bool) == Some(true)
+                    || payload.get("reused_from").is_some_and(|v| !v.is_null());
+                if skip {
+                    continue;
+                }
                 if let Some(eff) = payload.get("effective_score").and_then(Value::as_u64) {
                     eff_scores.push(eff);
                 }
@@ -325,8 +356,17 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
         }
     }
 
-    let slot_probe = inspect_slots_and_orphans(input.data_dir, input.now);
-    let stalled_workers = detect_stalled_workers(input.data_dir, input.runs_by_task, input.now);
+    let mut gating_spin_tasks: Vec<Value> = recent_gates_by_task
+        .into_iter()
+        .filter(|(_, count)| *count >= GATING_SPIN_MIN_GATES)
+        .map(|(tid, count)| json!({ "task_id": tid, "gate_count_30m": count }))
+        .collect();
+    gating_spin_tasks.sort_by(|a, b| {
+        b["gate_count_30m"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&a["gate_count_30m"].as_u64().unwrap_or(0))
+    });
 
     let td_sum = input.token_diagnostics.get("summary");
     let total_tokens = td_sum
@@ -341,7 +381,14 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
         .and_then(|s| s.get("tokens_out"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let tokens_per_done = (done_window > 0 && total_tokens > 0).then(|| total_tokens / done_window);
+    // Use `done_with_runs` so archived historical done tasks with zero runs in the
+    // current window (e.g., after `/aaf-studio-reset`) never dilute tokens_per_done.
+    let tpd_denom = if done_with_runs > 0 {
+        done_with_runs
+    } else {
+        done_window
+    };
+    let tokens_per_done = (tpd_denom > 0 && total_tokens > 0).then(|| total_tokens / tpd_denom);
     let in_out_ratio =
         (tokens_out > 0).then(|| ((tokens_in as f64 / tokens_out as f64) * 10.0).round() / 10.0);
 
@@ -395,11 +442,19 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
         churn_ids: &churn_ids,
         dead_orphan_slots: &slot_probe.dead_orphan_slots,
         draining: slot_probe.draining,
-        drain_age_secs: slot_probe.drain_age_secs,
         active_slots: slot_probe.active_slots,
         waiters: slot_probe.waiters,
         oldest_wait_secs: slot_probe.oldest_wait_secs,
-        stalled_workers: &stalled_workers,
+        stalled_workers: &worker_probe.stalled_workers,
+        stuck_gating_tasks: &stuck_gating_tasks,
+        gating_spin_tasks: &gating_spin_tasks,
+        long_running_workers: &worker_probe.long_running_workers,
+        looping_workers: &worker_probe.looping_workers,
+        stale_review_tasks: &stale_review_tasks,
+        dag_bottlenecks: &dag_bottlenecks,
+        account_pool: &acct_pool,
+        open_ready_or_gating,
+        open_gating_count,
         gate_avg_secs,
         done_window,
         total_tokens,
@@ -432,11 +487,25 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
             "gate_samples": gate_durs.len(),
             "active_slots": slot_probe.active_slots,
             "draining": slot_probe.draining,
-            "drain_age_secs": slot_probe.drain_age_secs,
             "waiters": slot_probe.waiters,
             "oldest_wait_secs": slot_probe.oldest_wait_secs,
             "dead_orphan_slots": slot_probe.dead_orphan_slots,
-            "stalled_workers": stalled_workers,
+            "stalled_workers": worker_probe.stalled_workers,
+            "stuck_gating_tasks": stuck_gating_tasks,
+            "gating_spin_tasks": gating_spin_tasks,
+            "long_running_workers": worker_probe.long_running_workers,
+            "looping_workers": worker_probe.looping_workers,
+            "stale_review_tasks": stale_review_tasks,
+            "dag_bottlenecks": dag_bottlenecks,
+            "account_pool": {
+                "by_provider": acct_pool.by_provider,
+                "total_accounts": acct_pool.total_accounts,
+                "total_available": acct_pool.total_available,
+                "total_leased": acct_pool.total_leased,
+                "total_cooling": acct_pool.total_cooling,
+                "waiting_for_account": acct_pool.waiting_for_account,
+                "waiting_repos": acct_pool.waiting_repos,
+            },
         },
         "efficiency": {
             "tokens_per_done": tokens_per_done,

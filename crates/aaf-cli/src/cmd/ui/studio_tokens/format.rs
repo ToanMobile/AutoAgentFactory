@@ -38,8 +38,18 @@ pub(super) fn build_diagnostics_payload(
     let total_tokens = t.total_in.saturating_add(t.total_out);
     let wasted_pct = pct(t.wasted_tok, total_tokens);
     let audit_pct = pct(t.audit_tok, total_tokens);
-    let avg_audit_tokens = t.audit_tok.checked_div(t.audit_runs).unwrap_or(0);
-    let avg_coding_tokens = t.coding_tok.checked_div(t.coding_runs).unwrap_or(0);
+    let audit_denom = if t.audit_measured_runs > 0 {
+        t.audit_measured_runs
+    } else {
+        t.audit_runs
+    };
+    let coding_denom = if t.coding_measured_runs > 0 {
+        t.coding_measured_runs
+    } else {
+        t.coding_runs
+    };
+    let avg_audit_tokens = t.audit_tok.checked_div(audit_denom).unwrap_or(0);
+    let avg_coding_tokens = t.coding_tok.checked_div(coding_denom).unwrap_or(0);
 
     json!({
         "summary": {

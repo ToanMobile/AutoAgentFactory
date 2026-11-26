@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use aaf_domain::ports::{Clock, RunStore, TaskStore};
+use aaf_domain::ports::{AccountStore, Clock, RunStore, TaskStore};
 use aaf_domain::run::{RunRecord, RunStatus};
 use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::Db;
@@ -228,6 +228,13 @@ pub(super) fn cached_report_json(
     caches: &UiCaches,
 ) -> Result<Value, String> {
     let effective_repo = resolve_requested_repo(db, scoped_repo, requested_repo)?;
+    if let Ok(cached) = caches.report.get_or_generation(effective_repo, since_hours) {
+        return Ok(cached);
+    }
+    let _refresh_guard = caches
+        .report_refresh
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let start_gen = match caches.report.get_or_generation(effective_repo, since_hours) {
         Ok(cached) => return Ok(cached),
         Err(g) => g,
@@ -308,8 +315,9 @@ pub(crate) fn report_json_with_diag(
                     &blocked_map,
                 );
                 let repos = collect_repo_rollup(&tasks, &runs_by_task, &extras, &blocked_map);
+                let accounts = db.list_accounts().unwrap_or_default();
                 let blocked_json: Vec<Value> = blocked_pairs
-                    .into_iter()
+                    .iter()
                     .take(20)
                     .map(|(tid, by)| json!({ "task_id": tid, "blocked_by": by }))
                     .collect();
@@ -325,6 +333,8 @@ pub(crate) fn report_json_with_diag(
                     tasks: &tasks,
                     runs_by_task: &runs_by_task,
                     events: &recent_evs,
+                    accounts: &accounts,
+                    blocked_upstream: &blocked_pairs,
                     report: &report,
                     token_diagnostics: &diag,
                     breakdown: &tb,

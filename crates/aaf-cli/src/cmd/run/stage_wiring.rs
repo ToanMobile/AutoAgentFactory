@@ -8,7 +8,8 @@ use std::sync::Arc;
 use aaf_domain::account::ProviderKind;
 use aaf_domain::config::{CrossAuditConfig, RunConfig};
 use aaf_domain::pipeline::{ReviewerConfig, StageModelConfig, is_known_real_reviewer};
-use aaf_domain::ports::AgentRunner;
+use aaf_domain::ports::{AgentRunner, TaskStore};
+use aaf_domain::task::TaskState;
 use aaf_engine::config::EffectiveConfig;
 use aaf_engine::db::Db;
 use aaf_engine::executors::{self, ExecEnv, agy::AgyRunner};
@@ -106,7 +107,19 @@ pub(super) fn build_pool_for_provider(
         max_concurrent_per_account: max_conc,
         provider,
     };
-    let pool: Arc<dyn AccountPool> = Arc::new(SelectingPool::new(rp, acc.selection, repo, db_arc));
+    let mut selecting = SelectingPool::new(rp, acc.selection, repo, db_arc);
+    let reserve_db = db.clone();
+    let has_gating = Arc::new(move || {
+        reserve_db
+            .list_tasks(None, Some(TaskState::Gating))
+            .is_ok_and(|tasks| !tasks.is_empty())
+    });
+    selecting = if is_agy {
+        selecting.with_strict_audit_reserve(has_gating)
+    } else {
+        selecting.with_audit_reserve(has_gating)
+    };
+    let pool: Arc<dyn AccountPool> = Arc::new(selecting);
     if is_agy {
         Arc::new(AntigravityLockedPool::new(pool, ctx.data_dir.clone()))
     } else {
@@ -264,4 +277,123 @@ pub(super) fn build_native_audit_backend(
         .unwrap_or_else(|| build_pool_for_provider(ctx, repo, cfg, db, &key));
     let target = StageTarget::new(prov, cmd, model, effort, runner, accounts);
     Ok(Some(to_audit(&target)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use aaf_domain::account::AccountProfile;
+    use aaf_domain::config::{GlobalConfig, RepoConfig};
+    use aaf_domain::ports::{AccountStore, TaskStore};
+    use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
+    use aaf_engine::factory::Purpose;
+
+    #[test]
+    fn provider_pool_reserves_last_account_for_gating_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("aaf.db")).unwrap();
+        for (id, name) in [("claude_code-a", "a"), ("claude_code-b", "b")] {
+            let cfg_dir = dir.path().join(format!("cfg-{name}"));
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            db.upsert_account(&AccountProfile {
+                id: id.into(),
+                provider: ProviderKind::ClaudeCode,
+                config_dir: cfg_dir.to_string_lossy().into_owned(),
+                name: name.into(),
+            })
+            .unwrap();
+        }
+        let mut gating = Task::new_root(
+            "t-gate",
+            "/tmp/repo-a",
+            "gating task",
+            ImmutableSpec {
+                description: String::new(),
+                acceptance: Vec::new(),
+            },
+            Priority::P1,
+            100,
+        );
+        gating.state = TaskState::Gating;
+        db.insert_task(&gating).unwrap();
+
+        let ctx = Ctx {
+            cwd: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+            worktrees_dir: dir.path().join("wt"),
+            config_dir: dir.path().to_path_buf(),
+            path_var: std::ffi::OsString::new(),
+            run_id: None,
+            stdin_is_tty: false,
+            aaf_env: Vec::new(),
+        };
+        let cfg = EffectiveConfig {
+            global: GlobalConfig::default(),
+            repo: RepoConfig::default(),
+            sources: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let pool = build_pool_for_provider(
+            &ctx,
+            Path::new("/tmp/repo-b"),
+            &cfg,
+            &db,
+            &ProviderKey::from_executor("claude"),
+        );
+
+        // First coding work leases 1 of 2 accounts; second coding work must NOT steal
+        // the last remaining account while a Gating task exists in another repo...
+        let _held = pool
+            .acquire_for("t-coding-1", Purpose::Work)
+            .unwrap()
+            .expect("first work should lease 1 of 2 accounts");
+        assert!(
+            pool.acquire_for("t-coding-2", Purpose::Work)
+                .unwrap()
+                .is_none(),
+            "stage_wiring pool must reserve the last account when any task is Gating"
+        );
+        // ...while Audit MUST still be able to claim the reserved second account.
+        assert!(
+            pool.acquire_for("t-gate", Purpose::Audit)
+                .unwrap()
+                .is_some(),
+            "audit acquisition must still succeed on the reserved account"
+        );
+
+        // Single-account Antigravity pool uses strict Finish-First reservation:
+        // Work (plan challenger) yields even the sole slot when any task is Gating.
+        let agy_dir = dir.path().join("cfg-agy");
+        std::fs::create_dir_all(&agy_dir).unwrap();
+        db.upsert_account(&AccountProfile {
+            id: "antigravity-sole".into(),
+            provider: ProviderKind::Antigravity,
+            config_dir: agy_dir.to_string_lossy().into_owned(),
+            name: "agy".into(),
+        })
+        .unwrap();
+        let agy_pool = build_pool_for_provider(
+            &ctx,
+            Path::new("/tmp/repo-b"),
+            &cfg,
+            &db,
+            &ProviderKey::from_executor("antigravity"),
+        );
+        assert!(
+            agy_pool
+                .acquire_for("t-plan-ready", Purpose::Work)
+                .unwrap()
+                .is_none(),
+            "sole Antigravity slot must be reserved for Gating Audit over Ready plan Work"
+        );
+        assert!(
+            agy_pool
+                .acquire_for("t-gate", Purpose::Audit)
+                .unwrap()
+                .is_some(),
+            "Gating Audit must immediately acquire the sole Antigravity slot"
+        );
+    }
 }

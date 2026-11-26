@@ -27,6 +27,9 @@ pub struct SelectingPool {
     /// Optional Finish-First predicate: when `true` and `Purpose::Work` asks
     /// for a slot, keep at least one other ready slot free for `Purpose::Audit`.
     audit_reserve: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// When `true` (used for single-account read-only providers like Antigravity),
+    /// `Purpose::Work` yields even the sole slot whenever `audit_reserve` fires.
+    reserve_strict: bool,
 }
 
 /// The binding as `aaf accounts next` and `aaf doctor` show it.
@@ -60,6 +63,7 @@ impl SelectingPool {
             history,
             first_use: Mutex::new(None),
             audit_reserve: None,
+            reserve_strict: false,
         }
     }
 
@@ -71,6 +75,19 @@ impl SelectingPool {
         should_reserve: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         self.audit_reserve = Some(should_reserve);
+        self.reserve_strict = false;
+        self
+    }
+
+    /// Strict Finish-First reservation for single-account auxiliary providers
+    /// (e.g. Antigravity shared between `plan` challenger and `Gating` audit):
+    /// yields even the sole slot to `Purpose::Audit` while `should_reserve()` is true.
+    pub fn with_strict_audit_reserve(
+        mut self,
+        should_reserve: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        self.audit_reserve = Some(should_reserve);
+        self.reserve_strict = true;
         self
     }
 
@@ -83,6 +100,9 @@ impl SelectingPool {
         reserve_one: bool,
         allow: &dyn Fn(&AccountProfile) -> bool,
     ) -> PortResult<Option<Grant>> {
+        if reserve_one && self.reserve_strict {
+            return Ok(None);
+        }
         if reserve_one {
             self.inner.acquire_where_reserving_one(allow)
         } else {
@@ -564,6 +584,9 @@ mod tests {
         gating_pending.store(true, Ordering::Relaxed);
         db.set_cooldown("claude-b", Some(9_000)).unwrap();
         let solo = pool.acquire_for("t-work-3", Purpose::Work).unwrap();
-        assert_eq!(solo.as_ref().and_then(super::Grant::account_id), Some("claude-a"));
+        assert_eq!(
+            solo.as_ref().and_then(super::Grant::account_id),
+            Some("claude-a")
+        );
     }
 }
