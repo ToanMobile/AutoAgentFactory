@@ -18,6 +18,7 @@ pub(crate) mod reuse;
 pub mod runner;
 pub mod rust_scope;
 pub mod static_checks;
+mod static_patch;
 #[cfg(test)]
 mod tests;
 

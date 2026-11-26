@@ -513,12 +513,17 @@ pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
         let is_test = is_test_path(&file.path);
         let ext = extension(&file.path);
         let is_doc = is_doc_path(&file.path);
+        let is_patch = super::static_patch::is_patch_path(&file.path);
         let mut previous: Option<(u32, &str)> = None;
         for (number, text) in &file.lines {
             let is_comment = is_comment_line(&file.path, text);
+            let quoted = is_patch && !super::static_patch::is_added_patch_line(text);
             let mut hits: Vec<(usize, u32, bool)> = Vec::new();
             for (index, patterns) in rules.rules.iter().enumerate() {
                 let spec = &SPECS[index];
+                if quoted && !super::static_patch::applies_to_quoted_patch_line(spec.id) {
+                    continue;
+                }
                 if spec.skip_tests && is_test {
                     continue;
                 }
@@ -543,6 +548,7 @@ pub fn scan(files: &[AddedLines]) -> Result<StaticReport, GateError> {
             }
             if !is_doc
                 && !is_comment
+                && !quoted
                 && let Some((prev_number, prev_text)) = previous
                 && !is_comment_line(&file.path, prev_text)
                 && prev_number.checked_add(1) == Some(*number)

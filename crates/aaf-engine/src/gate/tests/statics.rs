@@ -504,3 +504,40 @@ fn only_a_nul_in_the_first_8000_diffed_bytes_marks_a_binary() {
         assert_eq!(lines_head_has_nul(&file), expected, "pad {pad}");
     }
 }
+
+// A `.patch`/`.diff` file is new content, but only its `+` lines are code it
+// adds; context (` `) and removed (`-`) lines quote code that already exists
+// elsewhere. Quality rules must not fire on them; secret rules still must,
+// because the patch file itself carries the secret into the repository.
+#[test]
+fn patch_context_and_removed_lines_skip_quality_rules() {
+    let swallow = concat!("} catch (_: Throwable) {", "}");
+    let lazy = concat!("// ... existing ", "code ...");
+    for path in ["red/BUG-1.patch", "fix.diff"] {
+        let report = scan_text(
+            path,
+            &[
+                "--- a/src/A.kt",
+                "+++ b/src/A.kt",
+                &format!("     {swallow}"),
+                &format!("-    {lazy}"),
+            ],
+        );
+        assert!(report.findings.is_empty(), "{path}: {:?}", report.findings);
+    }
+}
+
+#[test]
+fn patch_added_lines_still_get_quality_rules() {
+    let rules = rules_hit(
+        "red/BUG-1.patch",
+        concat!("+    } catch (_: Throwable) {", "}"),
+    );
+    assert_eq!(rules, vec!["ERR-001"]);
+}
+
+#[test]
+fn patch_context_lines_still_get_secret_rules() {
+    let line = format!("     const K = \"{}\";", fake_secret());
+    assert_eq!(rules_hit("red/BUG-1.patch", &line), vec!["SEC-001"]);
+}
