@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -188,37 +188,38 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     <span class="pill" id="factory">…</span>
   </div>
   <div class="controls">
-    <select id="repoScope" class="hidden" aria-label="Phạm vi repo" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:13px"><option value="">Tất cả repo</option></select>
-    <a id="needBtn" class="needbtn" href="/?view=review" title="Mở danh sách cần duyệt &amp; bị chặn trên Cockpit">Cần bạn xử lý <span class="badge" id="needCount">0</span></a>
-    <div class="seg" id="period" aria-label="Khoảng thời gian">
-      <button data-h="24">24h</button><button data-h="168" class="on">7 ngày</button><button data-h="720">30 ngày</button><button data-h="">Tất cả</button>
+    <select id="repoScope" class="hidden" aria-label="Repository scope" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:13px"><option value="">All repos</option></select>
+    <a id="needBtn" class="needbtn" href="/?view=review" title="Open review &amp; blocked queue on Cockpit"><span id="needBtnLabel">Need You</span> <span class="badge" id="needCount">0</span></a>
+    <div class="seg" id="period" aria-label="Time window">
+      <button data-h="24">24h</button><button data-h="168" class="on" id="p7d">7 days</button><button data-h="720" id="p30d">30 days</button><button data-h="" id="pAll">All</button>
     </div>
-    <button id="refresh" title="Làm mới">↻<span class="hide-sm"> Làm mới</span></button>
-    <button id="theme" title="Đổi Sáng / Tối">◐<span class="hide-sm"> Theme</span></button>
+    <button id="refresh" title="Refresh">↻<span class="hide-sm" id="refreshLabel"> Refresh</span></button>
+    <button id="theme" title="Toggle Light / Dark">◐<span class="hide-sm"> Theme</span></button>
+    <button id="langBtn" class="mono" type="button" title="Switch language (EN / VI)">EN</button>
     <button id="copyTokBtn" class="hidden" type="button" title="Copy session token">Copy Token</button>
-    <button id="lockBtn" class="hidden" type="button" title="Khoá phiên và xoá token">Khoá</button>
-    <a class="btnlink" href="/?view=accounts" title="Quản lý Tài khoản &amp; Quota">Tài khoản</a>
-    <a class="btnlink" href="/" title="Về bảng Kanban Dashboard">Dashboard →</a>
+    <button id="lockBtn" class="hidden" type="button" title="Lock session and clear token">Lock</button>
+    <a class="btnlink" id="accountsLink" href="/?view=accounts" title="Manage Accounts &amp; Quota">Accounts</a>
+    <a class="btnlink" id="dashLink" href="/" title="Back to Kanban Dashboard">Dashboard →</a>
   </div>
 </header>
 <main>
   <div class="card err" id="err"></div>
   <div class="banner" id="frozenBanner" style="border-color:var(--err);background:var(--err-bg);color:var(--err)"><span id="frozenBannerText"></span><span id="frozenBannerCmd"></span></div>
-  <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/">Mở trên Dashboard →</a></div>
+  <div class="banner" id="banner"><span id="bannerText"></span><a id="bannerBtn" class="btnlink" href="/">Open on Dashboard →</a></div>
   <section class="grid" id="kpis"></section>
 
   <section class="card hidden" id="repoRollupCard">
-    <div class="head"><div><h2>Tổng quan theo Repo</h2><div class="sub">Trạng thái task, luồng bị chặn upstream, tỷ lệ lãng phí token và Auto-Runner từng repo. Bấm vào 1 repo để lọc toàn trang Studio.</div></div></div>
+    <div class="head"><div><h2 id="repoRollupTitle">Repository Overview</h2><div class="sub" id="repoRollupSub">Task status, upstream blockers, token waste rate, and Auto-Runner per repository. Click a row to filter Studio.</div></div></div>
     <div id="repoRollup" class="table-wrap"></div>
   </section>
 
   <section class="card" id="tokenDiagCard">
     <div class="head">
       <div>
-        <h2>Chẩn đoán &amp; Cảnh báo Token</h2>
-        <div class="sub">Phát hiện đốt token lãng phí (failed / timed_out / killed / limit_hit), rò rỉ 0/0 token dài (&ge;30s), tỷ trọng Cross-Audit, audit lặp cùng <code>tree_fp</code>, tốc độ đốt 5p/1h/24h (Cost Guard) và lượt chạy bất thường. Bấm <b>Xem log</b> để soi tool calls bên trong từng lượt chạy.</div>
+        <h2 id="tokDiagTitle">Token Burn Diagnostics &amp; Alerts</h2>
+        <div class="sub" id="tokDiagSub">Detects wasted tokens (failed / timed_out / killed / limit_hit), long 0/0 token leaks (&ge;30s), Cross-Audit share, duplicate <code>tree_fp</code> audits, 5m/1h/24h burn rate (Cost Guard), and anomalous runs. Click <b>View log</b> to inspect tool calls.</div>
       </div>
-      <span class="pill" id="tokAlertBadge">Đang phân tích…</span>
+      <span class="pill" id="tokAlertBadge">Analyzing…</span>
     </div>
     <div id="tokAlerts"></div>
     <div id="tokMetrics" class="tok-grid"></div>
@@ -227,7 +228,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   </section>
 
   <section class="card hidden" id="runtimeHealthCard">
-    <div class="head"><div><h2>Sức khoẻ hệ thống &amp; Tài nguyên</h2><div class="sub">Giám sát RAM (RSS), file descriptors, SQLite DB/WAL, dung lượng log/stream và worktree tồn đọng — đồng bộ trực tiếp với <code>/aaf_heath</code>.</div></div><span class="pill ok" id="rtHealthBadge">Ổn định</span></div>
+    <div class="head"><div><h2 id="rtHealthTitle">Runtime &amp; Resource Health</h2><div class="sub" id="rtHealthSub">Monitors RSS memory, open file descriptors, SQLite DB/WAL size, stream/log disk usage, and lingering worktrees.</div></div><span class="pill ok" id="rtHealthBadge">Healthy</span></div>
     <div id="rtAlerts"></div>
     <div id="rtMetrics" class="tok-grid"></div>
   </section>
@@ -237,99 +238,104 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   <section class="card">
     <div class="head">
       <div>
-        <h2>Thống kê chi tiết từng task</h2>
-        <div class="sub">Thời gian agent chạy, số lượt chạy, lượng token tiêu thụ, tài khoản sử dụng và nguyên nhân bị chặn (blocked) của từng task. Bấm vào 1 dòng để xem chi tiết mọi lượt chạy.</div>
+        <h2 id="tbTitle">Per-Task Breakdown</h2>
+        <div class="sub" id="tbSub">Agent runtime, run count, token consumption, account used, and blocked reason per task. Click any row to inspect runs.</div>
       </div>
     </div>
     <div class="tb-filters">
-      <input id="tbSearch" type="search" placeholder="Tìm theo ID, tên task, repo, nguyên nhân blocked…">
-      <select id="tbRepo" aria-label="Lọc theo repo"><option value="">Tất cả repo</option></select>
-      <select id="tbState" aria-label="Lọc theo trạng thái">
-        <option value="">Tất cả trạng thái</option>
-        <option value="token_warn">Có lãng phí / cảnh báo token</option>
-        <option value="blocked">Đang bị Blocked</option>
-        <option value="running">Đang chạy (Running/Gating)</option>
-        <option value="review">Chờ Review</option>
-        <option value="done">Hoàn thành (Done)</option>
-        <option value="ready">Sẵn sàng (Ready)</option>
+      <input id="tbSearch" type="search" placeholder="Search by ID, title, repo, blocked reason…">
+      <select id="tbRepo" aria-label="Filter by repository"><option value="">All repos</option></select>
+      <select id="tbState" aria-label="Filter by state">
+        <option value="">All states</option>
+        <option value="token_warn">Token waste / alerts</option>
+        <option value="blocked">Blocked</option>
+        <option value="running">Running / Gating</option>
+        <option value="review">In Review</option>
+        <option value="done">Done</option>
+        <option value="ready">Ready</option>
         <option value="backlog">Backlog</option>
-        <option value="cancelled">Đã huỷ (Cancelled)</option>
+        <option value="cancelled">Cancelled</option>
       </select>
-      <select id="tbSort" aria-label="Sắp xếp">
-        <option value="tokens_desc">Sắp xếp: Token nhiều nhất</option>
-        <option value="wasted_desc">Sắp xếp: Lãng phí nhiều nhất</option>
-        <option value="dur_desc">Sắp xếp: Chạy lâu nhất</option>
-        <option value="blocked_first">Sắp xếp: Blocked lên đầu</option>
-        <option value="updated_desc">Sắp xếp: Mới cập nhật nhất</option>
-        <option value="runs_desc">Sắp xếp: Nhiều lượt chạy nhất</option>
+      <select id="tbSort" aria-label="Sort by">
+        <option value="tokens_desc">Sort: Most tokens</option>
+        <option value="wasted_desc">Sort: Most wasted</option>
+        <option value="dur_desc">Sort: Longest duration</option>
+        <option value="blocked_first">Sort: Blocked first</option>
+        <option value="updated_desc">Sort: Recently updated</option>
+        <option value="runs_desc">Sort: Most runs</option>
       </select>
     </div>
     <div id="tbSummary" class="tb-summary"></div>
-    <div id="taskBreakdown" class="table-wrap"><div class="empty">Đang tải thống kê từng task…</div></div>
+    <div id="taskBreakdown" class="table-wrap"><div class="empty">Loading task breakdown…</div></div>
   </section>
 
   <section class="two">
     <div class="card">
-      <h2>Thời gian trung bình ở mỗi giai đoạn</h2>
-      <div class="explain-box">
-        <strong>Giải thích chỉ số:</strong>
-        <b>Trung vị (p50)</b> = một nửa (50%) số task đi qua giai đoạn này nhanh hơn mức này (thời gian điển hình).
-        <b>Ngưỡng chậm (p90)</b> = 90% số task xong trong mức này, chỉ 10% task phức tạp/kẹt kéo dài lâu hơn.
+      <h2 id="stagesTitle">Time per Stage</h2>
+      <div class="explain-box" id="stagesExplain">
+        <strong>Metrics guide:</strong>
+        <b>Median (p50)</b> = half (50%) of tasks finish this stage faster (typical time).
+        <b>Slow tail (p90)</b> = 90% of tasks finish within this threshold; only 10% take longer.
       </div>
       <div id="stages"></div>
-      <div class="legend"><span>Trung vị — 50% task xong dưới mức này (p50)</span><span class="p90">Ngưỡng chậm — 90% task xong dưới mức này (p90)</span></div>
+      <div class="legend" id="stagesLegend"><span>Median — 50% finish faster (p50)</span><span class="p90">Slow tail — 90% finish within (p90)</span></div>
     </div>
     <div class="card">
-      <h2>Agent &amp; tiêu thụ Token / Chi phí</h2>
-      <div class="sub">Tổng lượt chạy, lượt lỗi, thời gian chạy và lượng token theo từng CLI agent</div>
+      <h2 id="execTitle">Agents &amp; Token / Cost Breakdown</h2>
+      <div class="sub" id="execSub">Total runs, failures, wall time, and token usage per CLI agent</div>
       <div id="executors"></div>
     </div>
   </section>
 
   <section class="two">
-    <div class="card"><h2>Nguyên nhân các task bị Blocked</h2><div id="blocked"></div></div>
-    <div class="card"><h2>Trạng thái xưởng hiện tại</h2><div id="live"></div></div>
+    <div class="card"><h2 id="blockedTitle">Blocked Task Reasons</h2><div id="blocked"></div></div>
+    <div class="card"><h2 id="liveTitle">Live Factory Status</h2><div id="live"></div></div>
   </section>
 
   <section class="card">
     <div class="head">
-      <div><h2>Kiểm tra sức khoẻ máy &amp; repo</h2><div class="sub">Chạy lệnh <span class="mono">aaf doctor</span> (chọn repo để kiểm tra cả hook, MCP &amp; worktree)</div></div>
+      <div><h2 id="doctorTitle">Machine &amp; Repo Health Check</h2><div class="sub" id="doctorSub">Run <span class="mono">aaf doctor</span> (select a repo to check hooks, MCP &amp; worktrees)</div></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <select id="doctorRepo" class="hidden" aria-label="Repo cho aaf doctor" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:13px"><option value="">Mặc định máy</option></select>
-        <button id="runDoctor">Chạy kiểm tra</button>
+        <select id="doctorRepo" class="hidden" aria-label="Repo for aaf doctor" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:13px"><option value="">Machine default</option></select>
+        <button id="runDoctor">Run checks</button>
       </div>
     </div>
-    <div id="doctor" class="empty">Bấm “Chạy kiểm tra” để chạy aaf doctor.</div>
+    <div id="doctor" class="empty">Click “Run checks” to run aaf doctor.</div>
   </section>
   <p class="muted" id="foot"></p>
 </main>
 <div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
   <div class="scrim" id="scrim"></div>
   <div class="panel">
-    <div class="ph"><div><h2 id="drawerTitle"></h2><div class="muted" id="drawerSub"></div></div><button id="drawerClose" aria-label="Đóng">✕</button></div>
+    <div class="ph"><div><h2 id="drawerTitle"></h2><div class="muted" id="drawerSub"></div></div><button id="drawerClose" aria-label="Close">✕</button></div>
     <div class="pb" id="drawerBody"></div>
   </div>
 </div>
 <div id="auth" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="card">
   <h2 id="authTitle">Session token</h2>
-  <p class="muted">Dán token từ lệnh <span class="mono">aaf ui --service-url</span> hoặc mở link bookmark Cockpit.</p>
+  <p class="muted" id="authHint">Paste the token from <span class="mono">aaf ui --service-url</span> or open your Cockpit bookmark link.</p>
   <div style="display:flex;gap:6px;align-items:center;margin:10px 0">
     <input id="tok" type="password" placeholder="Bearer token…" style="flex:1;min-width:0">
-    <button id="tokPaste" type="button" title="Dán token từ clipboard">Paste</button>
+    <button id="tokPaste" type="button" title="Paste token from clipboard">Paste</button>
   </div>
   <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:6px 0 8px;cursor:pointer"><input type="checkbox" id="rememberTok" checked> Remember on this device</label>
   <p class="muted" style="font-size:12px;margin:0 0 8px">iPhone PWA: Add to Home Screen first, then paste token once.</p>
   <div id="authErr"></div>
-  <button id="tokOk">Mở khoá</button>
+  <button id="tokOk">Unlock</button>
 </div></div>
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="/assets/pipeline.js"></script>
 <script>
 (() => {
-  const TOKEN_KEY = "aaf_ui_token", REMEMBER_KEY = "aaf_ui_remember", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period";
+  const TOKEN_KEY = "aaf_ui_token", REMEMBER_KEY = "aaf_ui_remember", THEME_KEY = "aaf_ui_theme", PERIOD_KEY = "aaf_studio_period", LANG_KEY = "aaf_ui_lang";
   const STATE_CLASS = { done:"ok", running:"info", gating:"info", review:"warn", blocked:"err", ready:"", backlog:"", cancelled:"" };
-  const STATE_LABEL = { queued:"Chờ hàng đợi", done:"Hoàn thành", running:"Đang chạy", gating:"Đang chạy Gate", review:"Chờ Review", blocked:"Bị Blocked", ready:"Sẵn sàng", backlog:"Backlog", cancelled:"Đã huỷ" };
-  const REASON_LABEL = {
+  const STATE_LABEL_EN = { queued:"Queued", done:"Done", running:"Running", gating:"Gating", review:"In Review", blocked:"Blocked", ready:"Ready", backlog:"Backlog", cancelled:"Cancelled" };
+  const STATE_LABEL_VI = { queued:"Chờ hàng đợi", done:"Hoàn thành", running:"Đang chạy", gating:"Đang chạy Gate", review:"Chờ Review", blocked:"Bị Blocked", ready:"Sẵn sàng", backlog:"Backlog", cancelled:"Đã huỷ" };
+  const REASON_LABEL_EN = {
+    gate_failed:"Gate verification failed", needs_human:"Needs human intervention", dependency:"Waiting on upstream task", merge_conflict:"Git merge conflict",
+    flaky_test:"Flaky test failure", stuck:"Agent stuck / looping", budget_exceeded:"Root budget exceeded", infra:"Infrastructure / environment error", quota:"Account quota limit (429)",
+  };
+  const REASON_LABEL_VI = {
     gate_failed:"Gate kiểm thử thất bại", needs_human:"Cần người can thiệp", dependency:"Đang chờ task khác xong", merge_conflict:"Xung đột Git merge",
     flaky_test:"Test chập chờn (Flaky)", stuck:"Agent bị kẹt/lặp", budget_exceeded:"Hết ngân sách lượt chạy", infra:"Lỗi hạ tầng / môi trường", quota:"Hết quota tài khoản (429)",
   };
@@ -337,11 +343,116 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
   const isValidToken = (t) => typeof t === "string" && t.length > 0 && /^[\x21-\x7E]+$/.test(t);
-  let token = "", hours = "168", repoFilter = "", timer = null, tasks = [], breakdown = [], byRepo = [], gateTaxonomy = [], blockedUpstream = [], tokenDiag = null, runtimeHealth = null, lastStatus = null, isReadOnly = false, metaLoaded = false, knownRepos = [], lastTbReposKey = "", drawerSeq = 0, streamSeq = 0, refreshSeq = 0, refreshAbort = null, lastFocus = null, authChan = null, bootedViaChannel = false;
+  let lang = "en";
+  const isVi = () => lang === "vi";
+  const L = (en, vi) => (lang === "vi" ? vi : en);
+  let token = "", hours = "168", repoFilter = "", timer = null, tasks = [], breakdown = [], byRepo = [], gateTaxonomy = [], blockedUpstream = [], tokenDiag = null, runtimeHealth = null, lastStatus = null, lastReport = null, lastScoreVal = null, isReadOnly = false, metaLoaded = false, knownRepos = [], lastTbReposKey = "", drawerSeq = 0, streamSeq = 0, refreshSeq = 0, refreshAbort = null, lastFocus = null, authChan = null, bootedViaChannel = false;
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
   function del(kind, key) { try { kind.removeItem(key); } catch (_) {} }
+
+  function applyStaticLang() {
+    document.documentElement.lang = lang;
+    if ($("langBtn")) {
+      $("langBtn").textContent = lang.toUpperCase();
+      $("langBtn").title = L("Switch language (EN / VI)", "Đổi ngôn ngữ (EN / VI)");
+    }
+    if ($("needBtnLabel")) $("needBtnLabel").textContent = L("Need You", "Cần bạn xử lý");
+    if ($("p7d")) $("p7d").textContent = L("7 days", "7 ngày");
+    if ($("p30d")) $("p30d").textContent = L("30 days", "30 ngày");
+    if ($("pAll")) $("pAll").textContent = L("All", "Tất cả");
+    if ($("refreshLabel")) $("refreshLabel").textContent = L(" Refresh", " Làm mới");
+    if ($("lockBtn")) $("lockBtn").textContent = L("Lock", "Khoá");
+    if ($("accountsLink")) $("accountsLink").textContent = L("Accounts", "Tài khoản");
+    if ($("bannerBtn")) $("bannerBtn").textContent = L("Open on Dashboard →", "Mở trên Dashboard →");
+    if ($("repoRollupTitle")) $("repoRollupTitle").textContent = L("Repository Overview", "Tổng quan theo Repo");
+    if ($("repoRollupSub")) $("repoRollupSub").textContent = L("Task status, upstream blockers, token waste rate, and Auto-Runner per repository. Click a row to filter Studio.", "Trạng thái task, luồng bị chặn upstream, tỷ lệ lãng phí token và Auto-Runner từng repo. Bấm vào 1 repo để lọc toàn trang Studio.");
+    if ($("tokDiagTitle")) $("tokDiagTitle").textContent = L("Token Burn Diagnostics & Alerts", "Chẩn đoán & Cảnh báo Token");
+    if ($("tokDiagSub")) $("tokDiagSub").innerHTML = L(
+      "Detects wasted tokens (failed / timed_out / killed / limit_hit), long 0/0 token leaks (&ge;30s), Cross-Audit share, duplicate <code>tree_fp</code> audits, 5m/1h/24h burn rate (Cost Guard), and anomalous runs. Click <b>View log</b> to inspect tool calls.",
+      "Phát hiện đốt token lãng phí (failed / timed_out / killed / limit_hit), rò rỉ 0/0 token dài (&ge;30s), tỷ trọng Cross-Audit, audit lặp cùng <code>tree_fp</code>, tốc độ đốt 5p/1h/24h (Cost Guard) và lượt chạy bất thường. Bấm <b>Xem log</b> để soi tool calls bên trong từng lượt chạy."
+    );
+    if ($("rtHealthTitle")) $("rtHealthTitle").textContent = L("Runtime & Resource Health", "Sức khoẻ hệ thống & Tài nguyên");
+    if ($("rtHealthSub")) $("rtHealthSub").innerHTML = L(
+      "Monitors RSS memory, open file descriptors, SQLite DB/WAL size, stream/log disk usage, and lingering worktrees.",
+      "Giám sát RAM (RSS), file descriptors, SQLite DB/WAL, dung lượng log/stream và worktree tồn đọng — đồng bộ trực tiếp với <code>/aaf_heath</code>."
+    );
+    if ($("tbTitle")) $("tbTitle").textContent = L("Per-Task Breakdown", "Thống kê chi tiết từng task");
+    if ($("tbSub")) $("tbSub").textContent = L("Agent runtime, run count, token consumption, account used, and blocked reason per task. Click any row to inspect runs.", "Thời gian agent chạy, số lượt chạy, lượng token tiêu thụ, tài khoản sử dụng và nguyên nhân bị chặn (blocked) của từng task. Bấm vào 1 dòng để xem chi tiết mọi lượt chạy.");
+    if ($("tbSearch")) $("tbSearch").placeholder = L("Search by ID, title, repo, blocked reason…", "Tìm theo ID, tên task, repo, nguyên nhân blocked…");
+    if ($("tbState")) {
+      const opts = $("tbState").options;
+      const labels = isVi()
+        ? ["Tất cả trạng thái","Có lãng phí / cảnh báo token","Đang bị Blocked","Đang chạy (Running/Gating)","Chờ Review","Hoàn thành (Done)","Sẵn sàng (Ready)","Backlog","Đã huỷ (Cancelled)"]
+        : ["All states","Token waste / alerts","Blocked","Running / Gating","In Review","Done","Ready","Backlog","Cancelled"];
+      for (let i = 0; i < Math.min(opts.length, labels.length); i++) opts[i].textContent = labels[i];
+    }
+    if ($("tbSort")) {
+      const opts = $("tbSort").options;
+      const labels = isVi()
+        ? ["Sắp xếp: Token nhiều nhất","Sắp xếp: Lãng phí nhiều nhất","Sắp xếp: Chạy lâu nhất","Sắp xếp: Blocked lên đầu","Sắp xếp: Mới cập nhật nhất","Sắp xếp: Nhiều lượt chạy nhất"]
+        : ["Sort: Most tokens","Sort: Most wasted","Sort: Longest duration","Sort: Blocked first","Sort: Recently updated","Sort: Most runs"];
+      for (let i = 0; i < Math.min(opts.length, labels.length); i++) opts[i].textContent = labels[i];
+    }
+    if ($("stagesTitle")) $("stagesTitle").textContent = L("Time per Stage", "Thời gian trung bình ở mỗi giai đoạn");
+    if ($("stagesExplain")) $("stagesExplain").innerHTML = L(
+      "<strong>Metrics guide:</strong> <b>Median (p50)</b> = half (50%) of tasks finish this stage faster (typical time). <b>Slow tail (p90)</b> = 90% of tasks finish within this threshold; only 10% take longer.",
+      "<strong>Giải thích chỉ số:</strong> <b>Trung vị (p50)</b> = một nửa (50%) số task đi qua giai đoạn này nhanh hơn mức này (thời gian điển hình). <b>Ngưỡng chậm (p90)</b> = 90% số task xong trong mức này, chỉ 10% task phức tạp/kẹt kéo dài lâu hơn."
+    );
+    if ($("stagesLegend")) $("stagesLegend").innerHTML = L(
+      '<span>Median — 50% finish faster (p50)</span><span class="p90">Slow tail — 90% finish within (p90)</span>',
+      '<span>Trung vị — 50% task xong dưới mức này (p50)</span><span class="p90">Ngưỡng chậm — 90% task xong dưới mức này (p90)</span>'
+    );
+    if ($("execTitle")) $("execTitle").textContent = L("Agents & Token / Cost Breakdown", "Agent & tiêu thụ Token / Chi phí");
+    if ($("execSub")) $("execSub").textContent = L("Total runs, failures, wall time, and token usage per CLI agent", "Tổng lượt chạy, lượt lỗi, thời gian chạy và lượng token theo từng CLI agent");
+    if ($("blockedTitle")) $("blockedTitle").textContent = L("Blocked Task Reasons", "Nguyên nhân các task bị Blocked");
+    if ($("liveTitle")) $("liveTitle").textContent = L("Live Factory Status", "Trạng thái xưởng hiện tại");
+    if ($("doctorTitle")) $("doctorTitle").textContent = L("Machine & Repo Health Check", "Kiểm tra sức khoẻ máy & repo");
+    if ($("doctorSub")) $("doctorSub").innerHTML = L(
+      'Run <span class="mono">aaf doctor</span> (select a repo to check hooks, MCP &amp; worktrees)',
+      'Chạy lệnh <span class="mono">aaf doctor</span> (chọn repo để kiểm tra cả hook, MCP &amp; worktree)'
+    );
+    if ($("runDoctor")) $("runDoctor").textContent = L("Run checks", "Chạy kiểm tra");
+    if ($("authHint")) $("authHint").innerHTML = L(
+      'Paste the token from <span class="mono">aaf ui --service-url</span> or open your Cockpit bookmark link.',
+      'Dán token từ lệnh <span class="mono">aaf ui --service-url</span> hoặc mở link bookmark Cockpit.'
+    );
+    if ($("tokOk")) $("tokOk").textContent = L("Unlock", "Mở khoá");
+  }
+
+  function rerenderAll() {
+    applyStaticLang();
+    renderNeedBadge();
+    if (lastStatus) {
+      const frozen = Boolean(lastStatus.frozen);
+      const supPaused = lastStatus.supervisor && lastStatus.supervisor.enabled === false;
+      $("factory").className = "pill " + (frozen ? "err" : (supPaused ? "warn" : "ok"));
+      $("factory").textContent = frozen ? L("Frozen", "Đang đóng băng") : (supPaused ? L("Supervisor off", "Supervisor tắt") : L("Active", "Đang hoạt động"));
+    }
+    if (lastReport) {
+      lastTbReposKey = "";
+      syncBreakdownRepoSelect();
+      renderKpis(lastReport);
+      renderRepoRollup();
+      renderTokenDiagnostics(tokenDiag);
+      renderRuntimeHealth(runtimeHealth);
+      if (lastScoreVal && window.AafPipelineUI && typeof window.AafPipelineUI.renderStudioScore === "function") {
+        window.AafPipelineUI.renderStudioScore($("scoreBox"), lastScoreVal);
+      }
+      renderTaskBreakdown();
+      renderStages(lastReport.stages);
+      renderExecutors(lastReport.executors, lastReport.estimated_cost_usd, lastReport.cost_basis);
+      renderBlocked(lastReport.top_blocked);
+    }
+    renderLive(lastStatus);
+    if ($("foot").textContent) {
+      $("foot").textContent = L(
+        "Updated at " + new Date().toLocaleTimeString() + " · auto-refreshes every 15s",
+        "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây"
+      );
+    }
+  }
 
   function cleanSpec(raw) {
     let s = String(raw || "");
@@ -360,7 +471,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   function ago(ts) {
     if (!ts) return "";
     const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
-    return s < 45 ? "vừa xong" : dur(s) + " trước";
+    return s < 45 ? L("just now", "vừa xong") : dur(s) + L(" ago", " trước");
   }
   const pct = (v) => v == null ? "—" : Number(v).toFixed(0) + "%";
   const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
@@ -371,8 +482,14 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     if (v >= 1e3) return (v / 1e3).toFixed(v >= 1e5 ? 0 : 1) + "k";
     return v.toLocaleString();
   }
-  const reasonLabel = (k) => (Object.hasOwn(REASON_LABEL, k) ? REASON_LABEL[k] : String(k || "").replace(/_/g, " "));
-  const stateLabel = (s) => (Object.hasOwn(STATE_LABEL, s) ? STATE_LABEL[s] : s);
+  const reasonLabel = (k) => {
+    const map = isVi() ? REASON_LABEL_VI : REASON_LABEL_EN;
+    return Object.hasOwn(map, k) ? map[k] : String(k || "").replace(/_/g, " ");
+  };
+  const stateLabel = (s) => {
+    const map = isVi() ? STATE_LABEL_VI : STATE_LABEL_EN;
+    return Object.hasOwn(map, s) ? map[s] : s;
+  };
   const pill = (s) => `<span class="pill ${Object.hasOwn(STATE_CLASS, s) ? STATE_CLASS[s] : ""}">${esc(stateLabel(s))}</span>`;
   function fmtBytes(b) {
     b = Number(b) || 0;
@@ -556,9 +673,12 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     $("banner").style.display = n ? "flex" : "none";
     if (n) {
       const parts = [];
-      if (blocked) parts.push(`${blocked} đang bị blocked`);
-      if (n - blocked) parts.push(`${n - blocked} đang chờ review`);
-      $("bannerText").textContent = `${n} task cần bạn xử lý: ${parts.join(", ")}`;
+      if (blocked) parts.push(L(`${blocked} blocked`, `${blocked} đang bị blocked`));
+      if (n - blocked) parts.push(L(`${n - blocked} awaiting review`, `${n - blocked} đang chờ review`));
+      $("bannerText").textContent = L(
+        `${n} task${n > 1 ? "s" : ""} need your attention: ${parts.join(", ")}`,
+        `${n} task cần bạn xử lý: ${parts.join(", ")}`
+      );
     }
   }
 
@@ -758,24 +878,25 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const wastedPct = s ? (Number(s.wasted_pct) || 0) : 0;
     const wastedLevel = s ? String(s.wasted_level || "ok") : "ok";
     const tokHead = hasApiCost ? usd(r.estimated_cost_usd) : (totTok ? compact(totTok) + " tok" : "0 tok");
+    const wasteWord = L("wasted", "lãng phí");
     const tokSub = hasApiCost
-      ? `${compact(tokIn)} in · ${compact(tokOut)} out${wastedTok ? ` · lãng phí ${wastedPct.toFixed(0)}%` : ""}`
-      : `${compact(tokIn)} in · ${compact(tokOut)} out · Subscription${wastedTok ? ` · lãng phí ${wastedPct.toFixed(0)}%` : ""}`;
+      ? `${compact(tokIn)} in · ${compact(tokOut)} out${wastedTok ? ` · ${wasteWord} ${wastedPct.toFixed(0)}%` : ""}`
+      : `${compact(tokIn)} in · ${compact(tokOut)} out · Subscription${wastedTok ? ` · ${wasteWord} ${wastedPct.toFixed(0)}%` : ""}`;
     $("kpis").innerHTML = [
-      kpi("Cần bạn xử lý", num(n), n ? "mở trên Cockpit" : "không có việc chờ", { action: "needs", hot: n > 0 }),
-      kpi("Task hoàn thành", num(r.tasks_done), `${num(c.total)} task cập nhật trong kỳ`),
-      kpi("Tỷ lệ tự động", pct(a.autonomy_rate_pct), `${num(a.done_without_human)}/${num(a.done_tasks)} tự xong không cần can thiệp`),
-      kpi("Gate đạt lần đầu", pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? `Gate mất ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}` : "tỷ lệ pass lượt 1"),
-      kpi("Thời gian hoàn thành", lt.samples ? dur(lt.p50_secs) : "—", lt.samples ? `trung vị · 90% dưới ${dur(lt.p90_secs)}` : "từ lúc tạo → xong"),
-      kpi(hasApiCost ? "Token & Chi phí" : "Tổng Token tiêu thụ", tokHead, tokSub, { hot: wastedLevel === "err" }),
+      kpi(L("Need You", "Cần bạn xử lý"), num(n), n ? L("open on Cockpit", "mở trên Cockpit") : L("nothing waiting", "không có việc chờ"), { action: "needs", hot: n > 0 }),
+      kpi(L("Tasks Done", "Task hoàn thành"), num(r.tasks_done), L(`${num(c.total)} tasks updated in period`, `${num(c.total)} task cập nhật trong kỳ`)),
+      kpi(L("Autonomy Rate", "Tỷ lệ tự động"), pct(a.autonomy_rate_pct), L(`${num(a.done_without_human)}/${num(a.done_tasks)} completed hands-free`, `${num(a.done_without_human)}/${num(a.done_tasks)} tự xong không cần can thiệp`)),
+      kpi(L("First-Pass Gate", "Gate đạt lần đầu"), pct(a.gate_first_pass_rate_pct), a.gate_avg_duration_ms != null ? L(`Gate avg ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}`, `Gate mất ~${dur(Math.round(a.gate_avg_duration_ms / 1000))}`) : L("first-attempt pass rate", "tỷ lệ pass lượt 1")),
+      kpi(L("Lead Time", "Thời gian hoàn thành"), lt.samples ? dur(lt.p50_secs) : "—", lt.samples ? L(`median · 90% under ${dur(lt.p90_secs)}`, `trung vị · 90% dưới ${dur(lt.p90_secs)}`) : L("created → done", "từ lúc tạo → xong")),
+      kpi(hasApiCost ? L("Tokens & Cost", "Token & Chi phí") : L("Total Tokens", "Tổng Token tiêu thụ"), tokHead, tokSub, { hot: wastedLevel === "err" }),
     ].join("");
   }
 
   function renderTokenDiagnostics(diag) {
     const badge = $("tokAlertBadge");
     if (!diag || !diag.summary) {
-      if (badge) { badge.className = "pill"; badge.textContent = "Chưa có dữ liệu"; }
-      $("tokAlerts").innerHTML = `<div class="empty">Chưa có dữ liệu token trong kỳ này.</div>`;
+      if (badge) { badge.className = "pill"; badge.textContent = L("No data", "Chưa có dữ liệu"); }
+      $("tokAlerts").innerHTML = `<div class="empty">${esc(L("No token data in this period.", "Chưa có dữ liệu token trong kỳ này."))}</div>`;
       $("tokMetrics").innerHTML = "";
       $("tokTopRunsWrap").innerHTML = "";
       $("tokSubWrap").innerHTML = "";
@@ -786,26 +907,26 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const critN = alerts.filter((a) => a.severity === "critical").length;
     const highN = alerts.filter((a) => a.severity === "high").length;
     if (badge) {
-      if (critN) { badge.className = "pill err"; badge.textContent = `${alerts.length}${diag.alerts_truncated ? "+" : ""} cảnh báo (${critN} nghiêm trọng)`; }
-      else if (highN) { badge.className = "pill err"; badge.textContent = `${alerts.length}${diag.alerts_truncated ? "+" : ""} cảnh báo (${highN} mức cao)`; }
-      else if (alerts.length) { badge.className = "pill warn"; badge.textContent = `${alerts.length}${diag.alerts_truncated ? "+" : ""} lưu ý token`; }
-      else { badge.className = "pill ok"; badge.textContent = "Ổn định · 0 cảnh báo"; }
+      if (critN) { badge.className = "pill err"; badge.textContent = L(`${alerts.length}${diag.alerts_truncated ? "+" : ""} alerts (${critN} critical)`, `${alerts.length}${diag.alerts_truncated ? "+" : ""} cảnh báo (${critN} nghiêm trọng)`); }
+      else if (highN) { badge.className = "pill err"; badge.textContent = L(`${alerts.length}${diag.alerts_truncated ? "+" : ""} alerts (${highN} high)`, `${alerts.length}${diag.alerts_truncated ? "+" : ""} cảnh báo (${highN} mức cao)`); }
+      else if (alerts.length) { badge.className = "pill warn"; badge.textContent = L(`${alerts.length}${diag.alerts_truncated ? "+" : ""} token notices`, `${alerts.length}${diag.alerts_truncated ? "+" : ""} lưu ý token`); }
+      else { badge.className = "pill ok"; badge.textContent = L("Healthy · 0 alerts", "Ổn định · 0 cảnh báo"); }
     }
     if (!alerts.length) {
-      $("tokAlerts").innerHTML = `<div class="explain-box" style="border-color:var(--ok);background:var(--ok-bg);color:var(--ok)"><b>Không phát hiện bất thường đốt token</b> trong khoảng thời gian đã chọn.</div>`;
+      $("tokAlerts").innerHTML = `<div class="explain-box" style="border-color:var(--ok);background:var(--ok-bg);color:var(--ok)">${L("<b>No token burn anomalies detected</b> in the selected time window.", "<b>Không phát hiện bất thường đốt token</b> trong khoảng thời gian đã chọn.")}</div>`;
     } else {
-      const sevLabel = (v) => v === "critical" ? "NGHIÊM TRỌNG" : (v === "high" ? "CAO" : "LƯU Ý");
+      const sevLabel = (v) => v === "critical" ? L("CRITICAL", "NGHIÊM TRỌNG") : (v === "high" ? L("HIGH", "CAO") : L("NOTICE", "LƯU Ý"));
       const sevCls = (v) => v === "critical" || v === "high" ? "err" : "warn";
       $("tokAlerts").innerHTML = `<div class="alert-list">` + alerts.map((a) => {
         const chips = Array.isArray(a.task_ids) && a.task_ids.length
           ? `<div class="alert-tasks">${a.task_ids.map((tid) => `<button type="button" class="chip-btn" data-task="${esc(tid)}">${esc(tid)}</button>`).join("")}</div>`
           : "";
-        const histTag = a.active_recent === false ? ` <span class="pill" style="font-size:11px">lịch sử</span>` : "";
+        const histTag = a.active_recent === false ? ` <span class="pill" style="font-size:11px">${esc(L("historical", "lịch sử"))}</span>` : "";
         const cliBox = a.cli_cmd ? cmd(a.cli_cmd) : "";
         return `<div class="alert-item sev-${esc(a.severity || "medium")}"${a.active_recent === false ? ' style="opacity:.78"' : ""}>
           <div class="alert-top"><span class="pill ${sevCls(a.severity)}">${esc(sevLabel(a.severity))}</span>${histTag}<span>${esc(a.title || "")}</span></div>
           <div class="alert-detail">${esc(a.detail || "")}</div>
-          ${a.recommendation ? `<div class="alert-rec">Gợi ý: ${esc(a.recommendation)}</div>` : ""}
+          ${a.recommendation ? `<div class="alert-rec">${esc(L("Tip: ", "Gợi ý: "))}${esc(a.recommendation)}</div>` : ""}
           ${cliBox}${chips}
         </div>`;
       }).join("") + `</div>`;
@@ -824,46 +945,46 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const staleRun = Number(s.stale_running_runs) || 0;
     const anomCls = staleRun > 0 || unmeasLong >= 2 ? "err-tile" : (dupExtra > 0 ? "warn-tile" : "");
     const burnNotes = [];
-    if (br.config_error) burnNotes.push(`Lỗi đọc config Cost Guard (${br.config_error})`);
-    else if (cap24 > 0) burnNotes.push(`Trần 24h: ${rawPct24}% (${compact(cap24)})${br.spike_limit_1h ? ` · ngưỡng 1h: ${compact(br.spike_limit_1h)}` : ""}`);
-    else burnNotes.push("Cost Guard chưa đặt trần 24h");
-    if (br.cost_paused_until) burnNotes.push(`tạm dừng tới ${new Date(Number(br.cost_paused_until) * 1000).toLocaleTimeString()}`);
-    else if (br.cost_paused_stale) burnNotes.push("cờ pause cũ đã hết hạn");
-    if (br.factory_frozen) burnNotes.push("xưởng đang ĐÓNG BĂNG");
+    if (br.config_error) burnNotes.push(L(`Cost Guard config error (${br.config_error})`, `Lỗi đọc config Cost Guard (${br.config_error})`));
+    else if (cap24 > 0) burnNotes.push(L(`24h cap: ${rawPct24}% (${compact(cap24)})${br.spike_limit_1h ? ` · 1h spike: ${compact(br.spike_limit_1h)}` : ""}`, `Trần 24h: ${rawPct24}% (${compact(cap24)})${br.spike_limit_1h ? ` · ngưỡng 1h: ${compact(br.spike_limit_1h)}` : ""}`));
+    else burnNotes.push(L("Cost Guard 24h cap not set", "Cost Guard chưa đặt trần 24h"));
+    if (br.cost_paused_until) burnNotes.push(L(`paused until ${new Date(Number(br.cost_paused_until) * 1000).toLocaleTimeString()}`, `tạm dừng tới ${new Date(Number(br.cost_paused_until) * 1000).toLocaleTimeString()}`));
+    else if (br.cost_paused_stale) burnNotes.push(L("expired pause flag", "cờ pause cũ đã hết hạn"));
+    if (br.factory_frozen) burnNotes.push(L("factory FROZEN", "xưởng đang ĐÓNG BĂNG"));
     const burnNote = burnNotes.join(" · ");
     const lhPart = Number(s.limit_hit_tokens) > 0 ? ` · limit ${compact(s.limit_hit_tokens)}` : "";
 
     $("tokMetrics").innerHTML = `
       <div class="tok-tile ${wastedCls}">
-        <span class="tl">Token lãng phí (lỗi/timeout/kill/limit)</span>
+        <span class="tl">${esc(L("Wasted Tokens (fail/timeout/kill/limit)", "Token lãng phí (lỗi/timeout/kill/limit)"))}</span>
         <span class="tv">${compact(s.wasted_tokens)} <span style="font-size:14px;font-weight:600">(${(Number(s.wasted_pct) || 0).toFixed(1)}%)</span></span>
-        <span class="ts">${num(s.wasted_runs)} lượt: fail ${compact(s.failed_tokens)} · timeout ${compact(s.timed_out_tokens)} · kill ${compact(s.killed_tokens)}${lhPart}</span>
+        <span class="ts">${num(s.wasted_runs)} ${esc(L("runs", "lượt"))}: fail ${compact(s.failed_tokens)} · timeout ${compact(s.timed_out_tokens)} · kill ${compact(s.killed_tokens)}${lhPart}</span>
       </div>
       <div class="tok-tile ${auditCls}">
-        <span class="tl">Tỷ trọng Cross-Audit</span>
+        <span class="tl">${esc(L("Cross-Audit Share", "Tỷ trọng Cross-Audit"))}</span>
         <span class="tv">${compact(s.audit_tokens)} <span style="font-size:14px;font-weight:600">(${(Number(s.audit_pct) || 0).toFixed(1)}%)</span></span>
-        <span class="ts">${num(s.audit_runs)} lượt · TB ${compact(s.avg_audit_tokens)}/audit vs ${compact(s.avg_coding_tokens)}/code${s.audit_rejected_tokens ? ` · fail hợp lệ ${compact(s.audit_rejected_tokens)}` : ""}</span>
+        <span class="ts">${num(s.audit_runs)} ${esc(L("runs · avg", "lượt · TB"))} ${compact(s.avg_audit_tokens)}/audit vs ${compact(s.avg_coding_tokens)}/code${s.audit_rejected_tokens ? ` · ${esc(L("valid reject", "fail hợp lệ"))} ${compact(s.audit_rejected_tokens)}` : ""}</span>
       </div>
       <div class="tok-tile ${burnCls}">
-        <span class="tl">Tốc độ đốt toàn máy (5p / 1h / 24h)</span>
+        <span class="tl">${esc(L("Machine Burn Rate (5m / 1h / 24h)", "Tốc độ đốt toàn máy (5p / 1h / 24h)"))}</span>
         <span class="tv">${compact(br.tokens_last_5m || 0)} / ${compact(br.tokens_last_1h)} / ${compact(br.tokens_last_24h)}</span>
         <span class="ts">${esc(burnNote)}</span>
         ${cap24 > 0 ? `<div class="prog ${rawPct24 >= 90 ? "err" : (rawPct24 >= 75 ? "warn" : "")}"><b style="width:${barPct24}%"></b></div>` : ""}
       </div>
       <div class="tok-tile ${anomCls}">
-        <span class="tl">Audit lặp · rò rỉ 0-tok · treo</span>
-        <span class="tv">${num(dupExtra)} lặp · ${num(unmeasLong)} dài 0-tok${staleRun ? ` · ${num(staleRun)} treo` : ""}</span>
-        <span class="ts">${num(s.duplicate_audit_groups)} cặp tree_fp lặp · ${num(zFail)} lỗi 0-tok / ${num(s.total_runs)} lượt</span>
+        <span class="tl">${esc(L("Duplicate Audit · 0-tok Leaks · Stale", "Audit lặp · rò rỉ 0-tok · treo"))}</span>
+        <span class="tv">${num(dupExtra)} ${esc(L("dup", "lặp"))} · ${num(unmeasLong)} ${esc(L("long 0-tok", "dài 0-tok"))}${staleRun ? ` · ${num(staleRun)} ${esc(L("stale", "treo"))}` : ""}</span>
+        <span class="ts">${num(s.duplicate_audit_groups)} ${esc(L("dup tree_fp groups", "cặp tree_fp lặp"))} · ${num(zFail)} ${esc(L("0-tok fails", "lỗi 0-tok"))} / ${num(s.total_runs)} ${esc(L("runs", "lượt"))}</span>
       </div>`;
 
     const topRuns = Array.isArray(diag.top_runs) ? diag.top_runs : [];
     if (topRuns.length) {
-      $("tokTopRunsWrap").innerHTML = `<div class="sect" style="margin-top:4px">Top ${topRuns.length} lượt chạy đốt nhiều token nhất</div>
+      $("tokTopRunsWrap").innerHTML = `<div class="sect" style="margin-top:4px">${esc(L(`Top ${topRuns.length} highest-token runs`, `Top ${topRuns.length} lượt chạy đốt nhiều token nhất`))}</div>
         <div class="table-wrap"><table><thead><tr>
-          <th>Task / Repo</th><th>Executor</th><th>Trạng thái</th><th class="n">Thời gian</th><th class="n">Token (in/out)</th><th class="n">Bắt đầu</th><th class="n">Stream log</th>
+          <th>Task / Repo</th><th>Executor</th><th>${esc(L("Status", "Trạng thái"))}</th><th class="n">${esc(L("Duration", "Thời gian"))}</th><th class="n">${esc(L("Tokens (in/out)", "Token (in/out)"))}</th><th class="n">${esc(L("Started", "Bắt đầu"))}</th><th class="n">Stream log</th>
         </tr></thead><tbody>` + topRuns.map((r) => {
-          const tag = r.audit_rejected ? ` <span class="pill warn">audit fail</span>` : (r.wasted && r.tokens_total > 0 ? ` <span class="pill err">lãng phí</span>` : "");
-          const logBtn = `<button type="button" class="btn-xs" data-open-task="${esc(r.task_id)}" data-open-run="${r.has_stream_log ? esc(r.run_id) : ""}">${r.has_stream_log ? "Xem log" : "Chi tiết"}</button>`;
+          const tag = r.audit_rejected ? ` <span class="pill warn">audit fail</span>` : (r.wasted && r.tokens_total > 0 ? ` <span class="pill err">${esc(L("wasted", "lãng phí"))}</span>` : "");
+          const logBtn = `<button type="button" class="btn-xs" data-open-task="${esc(r.task_id)}" data-open-run="${r.has_stream_log ? esc(r.run_id) : ""}">${r.has_stream_log ? esc(L("View log", "Xem log")) : esc(L("Details", "Chi tiết"))}</button>`;
           const acctLabel = r.account_name || r.account_id || "";
           return `<tr data-task="${esc(r.task_id)}">
             <td class="wrap" style="min-width:200px"><button type="button" class="row-link" data-task="${esc(r.task_id)}">${esc(r.task_title || r.task_id)}</button><div class="tb-sub"><span class="mono">${esc(r.task_id)}</span>${r.repo_name ? ` · <span class="pill" style="font-size:11px;padding:1px 6px">${esc(r.repo_name)}</span>` : ""}</div></td>
@@ -882,10 +1003,10 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const subCards = [];
     const byAcct = Array.isArray(diag.by_account) ? diag.by_account : [];
     if (byAcct.length) {
-      subCards.push(`<div><div class="sect" style="margin-top:0">Token theo Tài khoản</div><div class="table-wrap"><table>
-        <thead><tr><th>Tài khoản</th><th class="n">Lượt</th><th class="n">Tổng token</th><th class="n">Lãng phí</th></tr></thead><tbody>` +
+      subCards.push(`<div><div class="sect" style="margin-top:0">${esc(L("Tokens by Account", "Token theo Tài khoản"))}</div><div class="table-wrap"><table>
+        <thead><tr><th>${esc(L("Account", "Tài khoản"))}</th><th class="n">${esc(L("Runs", "Lượt"))}</th><th class="n">${esc(L("Total tokens", "Tổng token"))}</th><th class="n">${esc(L("Wasted", "Lãng phí"))}</th></tr></thead><tbody>` +
         byAcct.slice().sort((a, b) => (b.tokens_total || 0) - (a.tokens_total || 0)).map((a) =>
-          `<tr><td><b>${esc(a.account_name || a.account_id)}</b>${a.account_name && a.account_name !== a.account_id ? `<div class="tb-sub mono">${esc(a.account_id)}</div>` : ""}</td><td class="n">${num(a.runs)}${a.wasted_runs ? `<div class="tb-sub" style="color:var(--err)">${num(a.wasted_runs)} lỗi${a.limit_hit_runs ? ` · LH:${num(a.limit_hit_runs)}` : ""}</div>` : ""}</td><td class="n" title="${num(a.tokens_in)} in / ${num(a.tokens_out)} out"><b>${compact(a.tokens_total)}</b></td><td class="n">${a.wasted_tokens ? `<span style="color:var(--err);font-weight:600">${compact(a.wasted_tokens)}</span> <span class="tb-sub">(${(Number(a.wasted_pct) || 0).toFixed(0)}%)</span>` : "0"}</td></tr>`
+          `<tr><td><b>${esc(a.account_name || a.account_id)}</b>${a.account_name && a.account_name !== a.account_id ? `<div class="tb-sub mono">${esc(a.account_id)}</div>` : ""}</td><td class="n">${num(a.runs)}${a.wasted_runs ? `<div class="tb-sub" style="color:var(--err)">${num(a.wasted_runs)} ${esc(L("fail", "lỗi"))}${a.limit_hit_runs ? ` · LH:${num(a.limit_hit_runs)}` : ""}</div>` : ""}</td><td class="n" title="${num(a.tokens_in)} in / ${num(a.tokens_out)} out"><b>${compact(a.tokens_total)}</b></td><td class="n">${a.wasted_tokens ? `<span style="color:var(--err);font-weight:600">${compact(a.wasted_tokens)}</span> <span class="tb-sub">(${(Number(a.wasted_pct) || 0).toFixed(0)}%)</span>` : "0"}</td></tr>`
         ).join("") + `</tbody></table></div></div>`);
     }
     const budWatch = Array.isArray(diag.budget_watch) ? diag.budget_watch : [];
@@ -967,7 +1088,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     if (badge) {
       const hasHigh = alerts.some((a) => a.severity === "high" || a.severity === "critical");
       badge.className = "pill " + (hasHigh ? "err" : (alerts.length ? "warn" : "ok"));
-      badge.textContent = alerts.length ? `${alerts.length} cảnh báo tài nguyên` : "Ổn định";
+      badge.textContent = alerts.length ? L(`${alerts.length} resource alert${alerts.length > 1 ? "s" : ""}`, `${alerts.length} cảnh báo tài nguyên`) : L("Healthy", "Ổn định");
     }
     $("rtAlerts").innerHTML = alerts.length
       ? `<div class="alert-list" style="margin-bottom:12px">` + alerts.map((a) => `<div class="alert-item sev-${esc(a.severity || "medium")}"><div class="alert-top"><span class="pill ${a.severity === "high" ? "err" : "warn"}">${esc(a.code || "runtime")}</span><span>${esc(a.title || "")}</span></div><div class="alert-detail">${esc(a.detail || "")}</div></div>`).join("") + `</div>`
@@ -977,7 +1098,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const wtOrph = Number(wt.orphan_closed_count) || 0;
     $("rtMetrics").innerHTML = `
       <div class="tok-tile ${rssHigh ? "err-tile" : ""}">
-        <span class="tl">Tiến trình aaf ui (PID ${num(p.pid)})</span>
+        <span class="tl">${esc(L(`aaf ui Process (PID ${num(p.pid)})`, `Tiến trình aaf ui (PID ${num(p.pid)})`))}</span>
         <span class="tv">${p.rss_mb != null ? num(p.rss_mb) + " MiB" : "—"} · ${p.open_fds != null ? num(p.open_fds) + " FDs" : "—"}</span>
         <span class="ts">Uptime: ${dur(p.uptime_secs || 0)}</span>
       </div>
@@ -993,7 +1114,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       </div>
       <div class="tok-tile ${wtOrph > 0 ? "warn-tile" : ""}">
         <span class="tl">Git Worktrees</span>
-        <span class="tv">${num(wt.dir_count)} dirs${wtOrph ? ` · ${num(wtOrph)} đã đóng` : ""}</span>
+        <span class="tv">${num(wt.dir_count)} dirs${wtOrph ? ` · ${num(wtOrph)} ${esc(L("closed", "đã đóng"))}` : ""}</span>
         <span class="ts mono" style="overflow-wrap:anywhere">${esc(wt.dir || "")}</span>
       </div>`;
   }
@@ -1005,7 +1126,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const key = repos.join("\n");
     if (key === lastTbReposKey) return;
     lastTbReposKey = key;
-    sel.innerHTML = `<option value="">Tất cả repo (${repos.length})</option>` + repos.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
+    sel.innerHTML = `<option value="">${esc(L(`All repos (${repos.length})`, `Tất cả repo (${repos.length})`))}</option>` + repos.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
     if (prev && repos.includes(prev)) sel.value = prev;
   }
 
@@ -1060,15 +1181,15 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const sumWastedPct = sumTot > 0 ? ((sumWasted * 100) / sumTot).toFixed(1) : "0.0";
     const cntBlk = list.filter((t) => t.state === "blocked").length;
     $("tbSummary").innerHTML = `
-      <span class="pill">${num(list.length)} task</span>
-      <span class="pill info">Tổng thời gian chạy: ${dur(sumDur)}</span>
-      <span class="pill">Tổng token: ${compact(sumTot)} (${compact(sumIn)} in / ${compact(sumOut)} out)</span>
-      ${sumWasted ? `<span class="pill ${Number(sumWastedPct) >= 20 ? "err" : "warn"}">Lãng phí: ${compact(sumWasted)} (${sumWastedPct}%)</span>` : ""}
-      ${cntBlk ? `<span class="pill err">${num(cntBlk)} bị Blocked</span>` : `<span class="pill ok">0 bị Blocked</span>`}`;
+      <span class="pill">${num(list.length)} ${esc(L("tasks", "task"))}</span>
+      <span class="pill info">${esc(L("Total runtime:", "Tổng thời gian chạy:"))} ${dur(sumDur)}</span>
+      <span class="pill">${esc(L("Total tokens:", "Tổng token:"))} ${compact(sumTot)} (${compact(sumIn)} in / ${compact(sumOut)} out)</span>
+      ${sumWasted ? `<span class="pill ${Number(sumWastedPct) >= 20 ? "err" : "warn"}">${esc(L("Wasted:", "Lãng phí:"))} ${compact(sumWasted)} (${sumWastedPct}%)</span>` : ""}
+      ${cntBlk ? `<span class="pill err">${num(cntBlk)} ${esc(L("Blocked", "bị Blocked"))}</span>` : `<span class="pill ok">0 ${esc(L("Blocked", "bị Blocked"))}</span>`}`;
 
     if (!list.length) {
       const noFilter = !q && !repo && !st;
-      $("taskBreakdown").innerHTML = `<div class="empty">${noFilter ? "Chưa có task nào trong kỳ này." : "Không có task nào khớp bộ lọc."}</div>`;
+      $("taskBreakdown").innerHTML = `<div class="empty">${esc(noFilter ? L("No tasks in this period.", "Chưa có task nào trong kỳ này.") : L("No tasks match your filters.", "Không có task nào khớp bộ lọc."))}</div>`;
       return;
     }
     const totalPages = Math.max(1, Math.ceil(list.length / TB_PAGE_SIZE));
@@ -1078,19 +1199,19 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     const shown = list.slice(startIdx, startIdx + TB_PAGE_SIZE);
     const pagerHtml = totalPages > 1
       ? `<div class="tb-pager">
-          <span>Hiển thị <b>${num(startIdx + 1)}–${num(startIdx + shown.length)}</b> / ${num(list.length)} task · Trang <b>${tbPage}</b> / ${totalPages}</span>
+          <span>${esc(L("Showing", "Hiển thị"))} <b>${num(startIdx + 1)}–${num(startIdx + shown.length)}</b> / ${num(list.length)} ${esc(L("tasks · Page", "task · Trang"))} <b>${tbPage}</b> / ${totalPages}</span>
           <div class="tb-pager-btns">
-            <button type="button" data-tb-page="${tbPage - 1}" ${tbPage <= 1 ? "disabled" : ""}>‹ Trước</button>
+            <button type="button" data-tb-page="${tbPage - 1}" ${tbPage <= 1 ? "disabled" : ""}>${esc(L("‹ Prev", "‹ Trước"))}</button>
             ${pageWindow(tbPage, totalPages).map((p) => p === "…"
               ? `<span class="tb-pager-dots">…</span>`
               : `<button type="button" data-tb-page="${p}" class="${p === tbPage ? "on" : ""}" aria-current="${p === tbPage ? "page" : "false"}">${p}</button>`
             ).join("")}
-            <button type="button" data-tb-page="${tbPage + 1}" ${tbPage >= totalPages ? "disabled" : ""}>Sau ›</button>
+            <button type="button" data-tb-page="${tbPage + 1}" ${tbPage >= totalPages ? "disabled" : ""}>${esc(L("Next ›", "Sau ›"))}</button>
           </div>
         </div>`
-      : `<div class="tb-pager"><span>Hiển thị <b>1–${num(shown.length)}</b> / ${num(list.length)} task</span></div>`;
+      : `<div class="tb-pager"><span>${esc(L("Showing", "Hiển thị"))} <b>1–${num(shown.length)}</b> / ${num(list.length)} ${esc(L("tasks", "task"))}</span></div>`;
     $("taskBreakdown").innerHTML = `<table><thead><tr>
-      <th>Task</th><th>Trạng thái</th><th class="n">Thời gian chạy</th><th class="n">Lượt chạy</th><th class="n">Token tiêu thụ</th><th>Agent / Tài khoản</th><th>Nguyên nhân Blocked / Lỗi</th>
+      <th>Task</th><th>${esc(L("State", "Trạng thái"))}</th><th class="n">${esc(L("Runtime", "Thời gian chạy"))}</th><th class="n">${esc(L("Runs", "Lượt chạy"))}</th><th class="n">${esc(L("Tokens", "Token tiêu thụ"))}</th><th>${esc(L("Agent / Account", "Agent / Tài khoản"))}</th><th>${esc(L("Blocked / Notes", "Nguyên nhân Blocked / Lỗi"))}</th>
     </tr></thead><tbody>` + shown.map((t) => {
       const blkKind = t.blocked_kind ? reasonLabel(t.blocked_kind) : "";
       const notes = [];
@@ -1350,15 +1471,15 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       const frozen = Boolean((lastStatus && lastStatus.frozen) || (board.status === "fulfilled" && board.value.frozen));
       const supPaused = lastStatus && lastStatus.supervisor && lastStatus.supervisor.enabled === false;
       $("factory").className = "pill " + (frozen ? "err" : (supPaused ? "warn" : "ok"));
-      $("factory").textContent = frozen ? "Đang đóng băng" : (supPaused ? "Supervisor tắt" : "Đang hoạt động");
+      $("factory").textContent = frozen ? L("Frozen", "Đang đóng băng") : (supPaused ? L("Supervisor off", "Supervisor tắt") : L("Active", "Đang hoạt động"));
       $("factory").title = frozen
-        ? (isReadOnly ? "Chạy aaf board unfreeze trên terminal" : "Chạy aaf board unfreeze hoặc gỡ đóng băng trên Cockpit")
-        : (supPaused ? "Auto-Runner đang tắt trên Cockpit" : "Xưởng sẵn sàng nhận việc");
+        ? (isReadOnly ? L("Run aaf board unfreeze in terminal", "Chạy aaf board unfreeze trên terminal") : L("Run aaf board unfreeze or unfreeze on Cockpit", "Chạy aaf board unfreeze hoặc gỡ đóng băng trên Cockpit"))
+        : (supPaused ? L("Auto-Runner is off on Cockpit", "Auto-Runner đang tắt trên Cockpit") : L("Factory ready for work", "Xưởng sẵn sàng nhận việc"));
       const fb = $("frozenBanner");
       if (fb) {
         fb.style.display = frozen ? "flex" : "none";
         if (frozen) {
-          $("frozenBannerText").textContent = "Xưởng đang ĐÓNG BĂNG — mọi task tự động đang tạm dừng.";
+          $("frozenBannerText").textContent = L("Factory is FROZEN — all autonomous runs are paused.", "Xưởng đang ĐÓNG BĂNG — mọi task tự động đang tạm dừng.");
           $("frozenBannerCmd").innerHTML = cmd("aaf board unfreeze");
         }
       }
@@ -1366,6 +1487,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     renderNeedBadge();
     if (rep.status === "fulfilled") {
       const r = rep.value.report || {};
+      lastReport = r;
       breakdown = Array.isArray(rep.value.task_breakdown) ? rep.value.task_breakdown : [];
       byRepo = Array.isArray(rep.value.by_repo) ? rep.value.by_repo : [];
       gateTaxonomy = Array.isArray(rep.value.gate_failure_taxonomy) ? rep.value.gate_failure_taxonomy : [];
@@ -1378,6 +1500,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       renderTokenDiagnostics(tokenDiag);
       renderRuntimeHealth(runtimeHealth);
       const scoreVal = r.score !== undefined ? r.score : rep.value.score;
+      lastScoreVal = scoreVal || null;
       if (scoreVal && window.AafPipelineUI && typeof window.AafPipelineUI.renderStudioScore === "function") {
         $("scoreBox").classList.remove("hidden");
         window.AafPipelineUI.renderStudioScore($("scoreBox"), scoreVal);
@@ -1387,11 +1510,14 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       renderExecutors(r.executors, r.estimated_cost_usd, r.cost_basis);
       renderBlocked(r.top_blocked);
     } else if (!breakdown.length) {
-      $("taskBreakdown").innerHTML = `<div class="empty">Không tải được thống kê task.</div>`;
-      if ($("tokAlertBadge")) $("tokAlertBadge").textContent = "Lỗi tải dữ liệu";
+      $("taskBreakdown").innerHTML = `<div class="empty">${esc(L("Could not load task breakdown.", "Không tải được thống kê task."))}</div>`;
+      if ($("tokAlertBadge")) $("tokAlertBadge").textContent = L("Load error", "Lỗi tải dữ liệu");
     }
     renderLive(lastStatus);
-    $("foot").textContent = "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây";
+    $("foot").textContent = L(
+      "Updated at " + new Date().toLocaleTimeString() + " · auto-refreshes every 15s",
+      "Cập nhật lúc " + new Date().toLocaleTimeString() + " · tự làm mới mỗi 15 giây"
+    );
   }
 
   function schedule() {
@@ -1405,6 +1531,16 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 
   async function init() {
     initAuthChannel();
+    const savedLang = load(localStorage, LANG_KEY);
+    lang = savedLang === "vi" ? "vi" : "en";
+    applyStaticLang();
+    if ($("langBtn")) {
+      $("langBtn").onclick = () => {
+        lang = lang === "vi" ? "en" : "vi";
+        store(localStorage, LANG_KEY, lang);
+        rerenderAll();
+      };
+    }
     const theme = load(localStorage, THEME_KEY);
     if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
     else if (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.dataset.theme = "dark";

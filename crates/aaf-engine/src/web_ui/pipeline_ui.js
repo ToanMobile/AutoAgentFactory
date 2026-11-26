@@ -603,20 +603,37 @@
     return "aaf-grade-F";
   }
 
+  function isViLang() {
+    try {
+      if (typeof window !== "undefined" && window.AafI18n && typeof window.AafI18n.getLang === "function") {
+        return window.AafI18n.getLang() === "vi";
+      }
+      if (typeof localStorage !== "undefined") {
+        return localStorage.getItem("aaf_ui_lang") === "vi";
+      }
+    } catch (_) {}
+    return false;
+  }
+  const sL = (en, vi) => (isViLang() ? vi : en);
+
   function severityMeta(raw) {
     const s = String(raw || "").trim().toLowerCase();
     if (s === "critical" || s === "high" || s === "err" || s === "error" || s === "p0") {
-      return { cls: "sev-high", pillCls: "aaf-st-failed", label: s === "critical" ? "Nghiêm trọng" : "Cao" };
+      return {
+        cls: "sev-high",
+        pillCls: "aaf-st-failed",
+        label: s === "critical" ? sL("Critical", "Nghiêm trọng") : sL("High", "Cao"),
+      };
     }
     if (s === "medium" || s === "med" || s === "warn" || s === "warning" || s === "p1") {
-      return { cls: "sev-medium", pillCls: "aaf-st-waiting_human", label: "Trung bình" };
+      return { cls: "sev-medium", pillCls: "aaf-st-waiting_human", label: sL("Medium", "Trung bình") };
     }
-    return { cls: "sev-low", pillCls: "aaf-st-running", label: "Thấp" };
+    return { cls: "sev-low", pillCls: "aaf-st-running", label: sL("Low", "Thấp") };
   }
 
   function renderPillarsHtml(pillars) {
     if (!Array.isArray(pillars) || !pillars.length) {
-      return `<div class="aaf-pipe-empty">Chưa có dữ liệu trụ cột đánh giá.</div>`;
+      return `<div class="aaf-pipe-empty">${esc(sL("No score pillar data available yet.", "Chưa có dữ liệu trụ cột đánh giá."))}</div>`;
     }
     return `<div class="aaf-pillars">` + pillars.map((p) => {
       const active = p.active !== false;
@@ -635,7 +652,7 @@
             </span>
             ${active
               ? `<span class="aaf-pillar-val">${esc(fmtNum(val))} / ${esc(fmtNum(maxS))} <span class="muted" style="font-weight:500">(${Math.round(pct)}%)</span></span>`
-              : `<span class="aaf-st-pill aaf-st-pending">Không áp dụng</span>`}
+              : `<span class="aaf-st-pill aaf-st-pending">${esc(sL("N/A", "Không áp dụng"))}</span>`}
           </div>
           <div class="aaf-pillar-track" role="progressbar" aria-valuenow="${active ? Math.round(pct) : 0}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(p.label || p.key || "Pillar")}">
             ${active ? `<div class="aaf-pillar-fill" style="width:${pct.toFixed(1)}%;background:${barColor}"></div>` : ""}
@@ -649,11 +666,11 @@
   function renderBottlenecksHtml(bottlenecks) {
     const items = Array.isArray(bottlenecks) ? bottlenecks.slice(0, 3) : [];
     if (!items.length) {
-      return `<div class="aaf-bn-ok">✓ Không phát hiện điểm nghẽn nổi bật trong kỳ này.</div>`;
+      return `<div class="aaf-bn-ok">✓ ${esc(sL("No notable bottlenecks detected in this period.", "Không phát hiện điểm nghẽn nổi bật trong kỳ này."))}</div>`;
     }
     return `
       <div>
-        <div class="aaf-bn-head">Top ${items.length} điểm nghẽn cần ưu tiên</div>
+        <div class="aaf-bn-head">${esc(sL(`Top ${items.length} priority bottleneck${items.length > 1 ? "s" : ""}`, `Top ${items.length} điểm nghẽn cần ưu tiên`))}</div>
       </div>
       <div class="aaf-bn-grid">
         ${items.map((b) => {
@@ -664,9 +681,9 @@
                 <span class="aaf-st-pill ${sev.pillCls}">${esc(sev.label)}</span>
                 ${b.key ? `<span class="mono muted" style="font-size:11px">${esc(b.key)}</span>` : ""}
               </div>
-              <div class="aaf-bn-title">${esc(b.title || b.key || "Điểm nghẽn")}</div>
+              <div class="aaf-bn-title">${esc(b.title || b.key || sL("Bottleneck", "Điểm nghẽn"))}</div>
               ${b.detail ? `<div class="aaf-bn-detail">${esc(b.detail)}</div>` : ""}
-              ${b.recommendation ? `<div class="aaf-bn-rec"><strong>Khuyến nghị:</strong> ${esc(b.recommendation)}</div>` : ""}
+              ${b.recommendation ? `<div class="aaf-bn-rec"><strong>${esc(sL("Recommendation:", "Khuyến nghị:"))}</strong> ${esc(b.recommendation)}</div>` : ""}
             </article>
           `;
         }).join("")}
@@ -687,15 +704,16 @@
       containerEl.innerHTML = `
         <div class="aaf-score-wrap">
           <div class="aaf-insuff">
-            <svg class="aaf-gauge-svg" style="width:96px;height:96px;flex:none" viewBox="0 0 120 120" role="img" aria-label="Chưa đủ dữ liệu">
+            <svg class="aaf-gauge-svg" style="width:96px;height:96px;flex:none" viewBox="0 0 120 120" role="img" aria-label="${esc(sL("Insufficient data", "Chưa đủ dữ liệu"))}">
               <circle cx="60" cy="60" r="48" fill="none" stroke="var(--border)" stroke-width="10" stroke-dasharray="6 6" />
               <text x="60" y="66" text-anchor="middle" font-size="24" font-weight="700" font-family="var(--sans)" fill="var(--muted)">—</text>
             </svg>
             <div class="aaf-insuff-body">
-              <div class="aaf-insuff-title">Chưa đủ dữ liệu để chấm điểm xưởng</div>
+              <div class="aaf-insuff-title">${esc(sL("Not enough data for Factory Score", "Chưa đủ dữ liệu để chấm điểm xưởng"))}</div>
               <div class="aaf-insuff-sub">
-                Hiện mới có <strong>${esc(evaluated)}</strong> task được đánh giá trong kỳ này.
-                Khi có thêm task hoàn thành hoặc chạy qua gate, bảng điểm 0–100 cùng top điểm nghẽn sẽ tự động hiển thị tại đây.
+                ${isViLang()
+                  ? `Hiện mới có <strong>${esc(evaluated)}</strong> task được đánh giá trong kỳ này. Khi có thêm task hoàn thành hoặc chạy qua gate, bảng điểm 0–100 cùng top điểm nghẽn sẽ tự động hiển thị tại đây.`
+                  : `Only <strong>${esc(evaluated)}</strong> task(s) evaluated in this period. Once more tasks complete or pass the gate, the 0–100 score and top bottlenecks appear here automatically.`}
               </div>
             </div>
           </div>
@@ -718,7 +736,7 @@
       <div class="aaf-score-wrap">
         <div class="aaf-score-top">
           <div class="aaf-gauge-box">
-            <svg class="aaf-gauge-svg" viewBox="0 0 160 160" role="img" aria-label="Điểm xưởng ${Math.round(scoreVal)} trên 100, hạng ${esc(grade)}">
+            <svg class="aaf-gauge-svg" viewBox="0 0 160 160" role="img" aria-label="${esc(sL(`Factory Score ${Math.round(scoreVal)} out of 100, Grade ${grade}`, `Điểm xưởng ${Math.round(scoreVal)} trên 100, hạng ${grade}`))}">
               <circle cx="80" cy="80" r="${radius}" fill="none" stroke="var(--border)" stroke-width="13" opacity="0.55" />
               <circle cx="80" cy="80" r="${radius}" fill="none" stroke="${color}" stroke-width="13" stroke-linecap="round"
                 stroke-dasharray="${circ.toFixed(2)}" stroke-dashoffset="${dashOffset.toFixed(2)}"
@@ -727,8 +745,8 @@
               <text x="80" y="101" text-anchor="middle" font-size="13" font-weight="600" font-family="var(--mono)" fill="var(--muted)">/ 100</text>
             </svg>
             <div class="aaf-grade-row">
-              <span class="aaf-grade-pill ${gradeClass(grade, scoreVal)}">Hạng ${esc(grade)}</span>
-              <span class="muted" style="font-size:12px">${esc(evaluated)} task đánh giá</span>
+              <span class="aaf-grade-pill ${gradeClass(grade, scoreVal)}">${esc(sL(`Grade ${grade}`, `Hạng ${grade}`))}</span>
+              <span class="muted" style="font-size:12px">${esc(sL(`${evaluated} evaluated tasks`, `${evaluated} task đánh giá`))}</span>
             </div>
           </div>
           <div>

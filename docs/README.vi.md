@@ -8,16 +8,28 @@
 
 `aaf` là một CLI Rust cho người chạy nhiều coding agent **tự động 100% 24/7** trên một máy: lập kế hoạch DAG (`aaf board`), cô lập từng task trên git worktree + sandbox (`aaf run --auto`), cổng kiểm định ký HMAC ngoài sandbox (`aaf gate`), tự chữa lỗi (`Unblocker` tự retry/split/đổi account), hook bảo vệ đa host cho Claude Code, Codex CLI, Gemini CLI, Antigravity và OpenCode (`aaf-hook`), hàng chờ toàn máy cho lệnh build nặng (`aaf slot`), và **Cockpit + Studio PWA** dùng mượt trên cả Desktop lẫn iPhone qua **Tailscale Serve + Telegram Deep-Link** (`aaf ui --install-service --allow-actions --tailscale --qr`).
 
-<details>
-<summary>📸 Ảnh chụp màn hình Cockpit & Studio (Desktop & Mobile PWA)</summary>
+## 🔄 Sơ đồ Workflow chi tiết trên 1 Task
 
-| Desktop Cockpit Kanban | Desktop Pipeline SVG DAG | Desktop Inline Diff Review |
+Mỗi task đi qua vòng đời xác định gồm **6 giai đoạn** (`Scheduler → Plan Debate → Implementer Sandbox → Quality Gate → Cross-Audit / Dual-Review → Landing & Handover`), kèm **8 bước kiểm chứng Quality Gate ký HMAC** và **Thang tự chữa lỗi T2 → T5**:
+
+<p align="center">
+  <img src="images/task-workflow-vi.png" alt="AutoAgentFactory — Sơ đồ Workflow chi tiết trên 1 Task" width="100%" />
+</p>
+
+<details open>
+<summary>📸 Ảnh chụp màn hình Cockpit & Studio v0.4.0 (Desktop & Mobile PWA)</summary>
+
+| Desktop Cockpit Kanban | Desktop Pipeline 8 bước vừa màn hình | Desktop Inline Diff Review |
 |---|---|---|
-| ![Cockpit Kanban](images/cockpit-kanban.png) | ![Pipeline DAG](images/cockpit-pipeline.png) | ![Inline Diff](images/cockpit-diff.png) |
+| ![Cockpit Kanban](images/vi/cockpit-kanban.png) | ![Pipeline 8 bước](images/vi/cockpit-pipeline.png) | ![Inline Diff](images/vi/cockpit-diff.png) |
 
-| Studio Factory Score (Light) | Studio Factory Score (Dark) | iPhone PWA Cockpit | iPhone PWA Pipeline |
-|---|---|---|---|
-| ![Studio Light](images/studio.png) | ![Studio Dark](images/studio-dark.png) | ![Mobile Cockpit](images/mobile-cockpit-board.png) | ![Mobile Pipeline](images/mobile-cockpit-pipeline.png) |
+| Studio Chẩn đoán Token (Light) | Studio Chẩn đoán Token (Dark) |
+|---|---|
+| ![Studio Light](images/vi/studio.png) | ![Studio Dark](images/vi/studio-dark.png) |
+
+| 📱 iPhone PWA Cockpit | 📱 iPhone PWA Pipeline 8 bước | 📱 iPhone PWA Studio (Dark) |
+|---|---|---|
+| <img src="images/vi/mobile-cockpit-board.png" alt="Mobile Cockpit" width="240" /> | <img src="images/vi/mobile-cockpit-pipeline.png" alt="Mobile Pipeline" width="240" /> | <img src="images/vi/mobile-studio.png" alt="Mobile Studio" width="240" /> |
 
 </details>
 

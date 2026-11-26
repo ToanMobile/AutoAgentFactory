@@ -31,6 +31,12 @@ English · [Tiếng Việt](docs/README.vi.md) · [Quickstart](docs/QUICKSTART.m
 4. **Signed Gate + Proof + Dual Cross-Audit:** `aaf gate` runs outside the sandbox over head-locked tests/CI and writes an HMAC-signed `CLEAR` receipt using a key agents cannot read.
 5. **Self-Healing Unblocker & Auto-Merge:** When a gate fails, the Unblocker automatically retries, splits oversized tasks, or escalates executors before ever bothering a human — then auto-merges or opens a clean PR and exports an acceptance handover report.
 
+### 🔄 Detailed Single-Task Execution Workflow
+
+Every task moves deterministically through a 6-stage pipeline (`Scheduler → Plan Debate → Implementer Sandbox → Quality Gate → Cross-Audit / Dual-Review → Landing & Handover`), backed by an 8-step HMAC-signed Quality Gate and a 4-tier self-healing Unblocker Ladder (`T2 → T5`):
+
+<img src="docs/images/task-workflow.png" alt="AutoAgentFactory — Detailed Single-Task Execution Workflow (6-Stage Pipeline, 8-Step Quality Gate, T2-T5 Unblocker Ladder)" width="100%" />
+
 <details>
 <summary>Compact Mermaid flow reference</summary>
 
@@ -121,37 +127,37 @@ aaf ui --install-service --allow-actions --tailscale --qr
 
 ### Desktop — Cockpit Kanban Board
 
-Live SSE-synced board across `Backlog → Ready → Running → Gating → Review → Blocked → Done`, with one-click **Auto-Run** toggle, **Need You** triage, live agent stream, accounts, and SOP workflow runs.
+Live SSE-synced board across `Backlog → Ready → Running → Gating → Review → Blocked → Done`, with one-click **Auto-Run** toggle, live coding timer & **Stop / Live Stream** controls, bilingual **EN / VI** switcher, **Soft-Archive** cleanup for completed tasks, accounts, and SOP workflow runs.
 
 ![AutoAgentFactory Desktop Cockpit Kanban Board](docs/images/cockpit-kanban.png)
 
-### Desktop — 8-Stage Execution Pipeline DAG & Structured Inline Diff Review
+### Desktop — Fit-to-Screen 8-Stage Execution Pipeline & Structured Inline Diff Review
 
-Inspect every task's deterministic `Spec → Plan → Implement → Gate → Proof → Audit → Review → Done` SVG DAG, then review structured diffs with `head_locked` badges, secret redaction, and **inline line-level review comments** (`Send as Steer` or `Request Rework`).
+Inspect every task's deterministic `Spec → Plan → Implement → Gate → Proof → Audit → Review → Done` fit-to-screen stepper grid (with zero horizontal scrolling), then review structured diffs with `head_locked` badges, secret redaction, and **inline line-level review comments** (`Send as Steer` or `Request Rework`).
 
 <table>
   <tr>
-    <th width="50%">🧭 Task Execution Pipeline (SVG DAG)</th>
+    <th width="50%">🧭 Fit-to-Screen 8-Stage Pipeline</th>
     <th width="50%">🔍 Structured Diff & Inline Line Review</th>
   </tr>
   <tr>
-    <td><img src="docs/images/cockpit-pipeline.png" alt="Desktop Task Pipeline SVG DAG" width="100%" /></td>
+    <td><img src="docs/images/cockpit-pipeline.png" alt="Desktop Fit-to-Screen 8-Stage Task Pipeline" width="100%" /></td>
     <td><img src="docs/images/cockpit-diff.png" alt="Desktop Structured Diff with Inline Comment" width="100%" /></td>
   </tr>
 </table>
 
-### Desktop — AAF Studio & 5-Pillar Factory Score (Light & Dark)
+### Desktop — AAF Studio, Token Burn Diagnostics & 5-Pillar Factory Score (Light & Dark)
 
-Deterministic **Post-Run Factory Score (0–100, Grade A–F)** combining First-Pass Gate (`30%`), Autonomy Discipline (`25%`), Cross-Audit Integrity (`20%`), Block Health (`15%`), and Flow Efficiency (`10%`) — plus automatic **Top-3 Bottlenecks** and per-task token/latency breakdowns.
+Real-time **Token Burn Diagnostics** (wasted tokens, cross-audit ratio, 5m/1h/24h burn rate, duplicate `tree_fp` / 0-token leak detection, and per-run **Stream Log** inspector) alongside the deterministic **5-Pillar Factory Score (0–100, Grade A–F)** and automatic Top-3 Bottlenecks.
 
 <table>
   <tr>
-    <th width="50%">☀️ Studio — Factory Score (Light)</th>
-    <th width="50%">🌙 Studio — Factory Score (Dark)</th>
+    <th width="50%">☀️ Studio — Token Diagnostics & Score (Light)</th>
+    <th width="50%">🌙 Studio — Token Diagnostics & Score (Dark)</th>
   </tr>
   <tr>
-    <td><img src="docs/images/studio.png" alt="AAF Studio Light Mode with 93/100 Grade A Factory Score" width="100%" /></td>
-    <td><img src="docs/images/studio-dark.png" alt="AAF Studio Dark Mode with 93/100 Grade A Factory Score" width="100%" /></td>
+    <td><img src="docs/images/studio.png" alt="AAF Studio Light Mode with Token Burn Diagnostics and KPIs" width="100%" /></td>
+    <td><img src="docs/images/studio-dark.png" alt="AAF Studio Dark Mode with Token Burn Diagnostics and KPIs" width="100%" /></td>
   </tr>
 </table>
 
@@ -162,17 +168,19 @@ Scan the `--qr` code from your Mac, tap **Share → Add to Home Screen** on iPho
 <div align="center">
 <table>
   <tr>
-    <th>📱 Mobile Cockpit PWA (Bottom Nav)</th>
-    <th>📱 Mobile Task Pipeline & Deep-Link</th>
+    <th>📱 Mobile Cockpit PWA</th>
+    <th>📱 Fit-to-Screen Pipeline</th>
+    <th>📱 Mobile Studio (Dark)</th>
   </tr>
   <tr>
-    <td align="center"><img src="docs/images/mobile-cockpit-board.png" alt="Mobile iPhone PWA Cockpit Kanban Board" width="300" /></td>
-    <td align="center"><img src="docs/images/mobile-cockpit-pipeline.png" alt="Mobile iPhone PWA Task Pipeline DAG" width="300" /></td>
+    <td align="center"><img src="docs/images/mobile-cockpit-board.png" alt="Mobile iPhone PWA Cockpit Kanban Board" width="250" /></td>
+    <td align="center"><img src="docs/images/mobile-cockpit-pipeline.png" alt="Mobile iPhone PWA Fit-to-Screen 8-Stage Task Pipeline" width="250" /></td>
+    <td align="center"><img src="docs/images/mobile-studio.png" alt="Mobile iPhone PWA AAF Studio Dark Mode" width="250" /></td>
   </tr>
 </table>
 </div>
 
-<sub>Screenshots use live demo data captured directly from `aaf ui --service --allow-actions` on Desktop (1440×900) and iPhone PWA (390×844).</sub>
+<sub>Screenshots use live demo data captured directly from `aaf ui --service --allow-actions` (`v0.4.0`) on Desktop (1440px @2x) and iPhone PWA (390×844 @2x).</sub>
 
 ## 🧰 Everyday commands
 
