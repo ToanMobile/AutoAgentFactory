@@ -166,7 +166,7 @@ impl GateRunner for RealGate {
         if current_fp != receipt.tree_fp {
             return false;
         }
-        if crate::proof::proof_needed_for_worktree(
+        if crate::gate::proof_need::proof_needed_for_worktree(
             &canon,
             &self.cfg.proof,
             &self.cfg.gate.base_ref,

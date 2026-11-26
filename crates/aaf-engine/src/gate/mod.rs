@@ -14,6 +14,7 @@ pub mod oracle_classify;
 mod oracle_control;
 pub(crate) mod oracle_worktree;
 pub(crate) mod proc;
+pub mod proof_need;
 pub(crate) mod reuse;
 pub mod runner;
 pub mod rust_scope;

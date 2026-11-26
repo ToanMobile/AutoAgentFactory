@@ -215,10 +215,7 @@ mod tests {
             None
         );
 
-        let not_anc = FakeRunner::new(vec![
-            ok(&merged_json("MERGED", "main", false)),
-            fail(1, ""),
-        ]);
+        let not_anc = FakeRunner::new(vec![ok(&merged_json("MERGED", "main", false)), fail(1, "")]);
         assert_eq!(
             verify_merged_pr(&not_anc, Path::new("/tmp"), &pr, "main", "origin/main").unwrap(),
             None

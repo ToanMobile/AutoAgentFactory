@@ -186,12 +186,10 @@ impl Scheduler<'_> {
                 "merge_commit_oid": merged.merge_commit_oid,
             });
             let why = format!("pull request #{} merged into the base", merged.pr_number);
-            if !deps.store.complete_review_task(
-                &task.id,
-                &why,
-                Some(&merge_payload),
-                deps.now(),
-            )? {
+            if !deps
+                .store
+                .complete_review_task(&task.id, &why, Some(&merge_payload), deps.now())?
+            {
                 continue;
             }
             if let Ok(Some((wt, local_head))) = deps.git.existing_worktree_head(&task.id)

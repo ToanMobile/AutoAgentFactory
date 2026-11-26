@@ -22,8 +22,8 @@ fn setup_review_with_pr(world: &World, id: &str, url: &str) {
     ] {
         world.db.set_state(id, state, None, ts).unwrap();
     }
-    let ev = FactoryEvent::new(EventKind::PrOpened, json!({ "url": url }).to_string(), 125)
-        .for_task(id);
+    let ev =
+        FactoryEvent::new(EventKind::PrOpened, json!({ "url": url }).to_string(), 125).for_task(id);
     world.db.emit(&ev).unwrap();
 }
 

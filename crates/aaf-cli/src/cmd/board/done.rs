@@ -50,11 +50,7 @@ pub fn run(args: &DoneArgs, ctx: &Ctx) -> CmdResult {
     if let Some(0) = args.pr {
         return Err(CmdError::new("--pr must be a positive pull request number"));
     }
-    let commit = args
-        .commit
-        .as_deref()
-        .map(validate_commit)
-        .transpose()?;
+    let commit = args.commit.as_deref().map(validate_commit).transpose()?;
 
     let db = open_db(ctx)?;
     let now = SystemClock.now();
