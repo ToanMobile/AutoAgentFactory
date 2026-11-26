@@ -241,7 +241,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
         closed.extend(git_dir::OBEYED.iter().map(|name| root.join(name)));
     }
     for git_dir in &git_dirs {
-        closed.extend(git_dir::protected_closed_paths(git_dir, run_worktree));
+        closed.extend(git_dir::protected_closed_paths(git_dir, run_worktree)?);
     }
     closed.extend(deny_keychain.clone());
     closed.extend(worktree.iter().map(|worktree| worktree.join(".git")));
