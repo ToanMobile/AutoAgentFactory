@@ -40,6 +40,10 @@ pub struct GcArgs {
     /// Base ref for `--merged-branches` (overrides `gate.base_ref` / auto).
     #[arg(long, value_name = "REF")]
     pub base: Option<String>,
+    /// Reap stale `running` runs (marking them `killed`) and return zombie
+    /// `running` tasks to `ready` on idle repositories not holding `.run.lock`.
+    #[arg(long)]
+    pub reap_stale: bool,
 }
 
 fn resolve_repo(args: &GcArgs, ctx: &Ctx) -> Result<Option<PathBuf>, CmdError> {
@@ -102,6 +106,13 @@ fn format_report(report: &GcReport) -> String {
             report.merged_branches_deleted.len()
         ));
     }
+    if !report.reaped_stale_runs.is_empty() || !report.recovered_running_tasks.is_empty() {
+        lines.push(format!(
+            "reaped stale: {} run(s), recovered {} running task(s)",
+            report.reaped_stale_runs.len(),
+            report.recovered_running_tasks.len()
+        ));
+    }
     if !report.warnings.is_empty() {
         lines.push(format!("warnings: {}", report.warnings.join("; ")));
     }
@@ -123,8 +134,14 @@ pub fn run(args: &GcArgs, ctx: &Ctx) -> CmdResult {
         cwd: Some(ctx.cwd.clone()),
         merged_branches: args.merged_branches,
         base: args.base.clone(),
+        reap_stale: args.reap_stale,
     };
     let report = run_gc(&ctx.data_dir, &ctx.worktrees_dir, &opts).map_err(|e| err("gc", e))?;
+    if !opts.dry_run && opts.reap_stale {
+        for run_id in &report.reaped_stale_runs {
+            let _ = aaf_engine::executors::reaper::reap(run_id);
+        }
+    }
     let mut out = CmdOutput::ok("ok", format_report(&report));
     let Value::Object(fields) = serde_json::to_value(&report).map_err(|e| err("gc report", e))?
     else {

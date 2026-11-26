@@ -2,7 +2,30 @@
 //!
 //! Separated from `claude.rs` to keep executor files concise and easy to audit.
 
-use aaf_domain::ports::{AgentRequest, PortError, PortResult};
+use aaf_domain::ports::{AgentRequest, InfraFailure, InfraKind, PortError, PortResult};
+
+/// Wording Claude Code CLI emits when OAuth token refresh or macOS Keychain
+/// persistence fails (e.g. inside Seatbelt sandbox when an access token expires).
+/// Matched only on API-flagged errors or zero-token failed runs so agent prose
+/// never triggers false positives.
+const OAUTH_AUTH_WORDING: [&str; 5] = [
+    "failed to refresh oauth token",
+    "can't save to the keychain",
+    "oauth token has expired",
+    "invalid authentication credentials",
+    "not logged in · please run /login",
+];
+
+pub(super) fn auth_wording_infra(text: &str, max_chars: usize) -> Option<InfraFailure> {
+    let lower = text.to_lowercase();
+    OAUTH_AUTH_WORDING
+        .iter()
+        .any(|words| lower.contains(words))
+        .then(|| InfraFailure {
+            kind: InfraKind::Auth,
+            raw: text.chars().take(max_chars).collect(),
+        })
+}
 
 /// Write, web, and notebook tools disabled on `read_only` Claude runs.
 ///

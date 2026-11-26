@@ -18,6 +18,7 @@ mod refs;
 mod review;
 mod scratch;
 mod squash;
+mod stale_runs;
 mod task_clean;
 
 use std::collections::{BTreeSet, HashSet};
@@ -86,6 +87,7 @@ pub struct GcOptions {
     pub cwd: Option<PathBuf>,
     pub merged_branches: bool,
     pub base: Option<String>,
+    pub reap_stale: bool,
 }
 
 impl Default for GcOptions {
@@ -100,6 +102,7 @@ impl Default for GcOptions {
             cwd: None,
             merged_branches: false,
             base: None,
+            reap_stale: false,
         }
     }
 }
@@ -132,6 +135,10 @@ pub struct GcReport {
     pub completed_review_tasks: Vec<String>,
     #[serde(default)]
     pub removed_merge_refs: usize,
+    #[serde(default)]
+    pub reaped_stale_runs: Vec<String>,
+    #[serde(default)]
+    pub recovered_running_tasks: Vec<String>,
 }
 
 struct RepoLockGuard {
@@ -260,20 +267,29 @@ pub fn run_gc(
         dry_run: opts.dry_run,
         ..GcReport::default()
     };
-    let (all_tasks, running_runs, active_db_tree_fps) = collect_db_state(data_dir)?;
+    let (all_tasks, mut running_runs, active_db_tree_fps) = collect_db_state(data_dir)?;
     let repos = resolve_target_repos(opts, &all_tasks);
     let now = SystemTime::now();
 
     for repo in repos {
         let repo_label = repo.display().to_string();
+        let lock_ids = collect_repo_lock_ids(&repo, &all_tasks);
         if !repo.is_dir() || aaf_fp::repo_root(&repo).is_err() {
+            stale_runs::reap_missing_repo_stale_runs(
+                &repo,
+                data_dir,
+                &lock_ids,
+                opts,
+                now,
+                &mut running_runs,
+                &mut report,
+            )?;
             report
                 .warnings
                 .push(format!("{repo_label}: skipped (not a git repository)"));
             continue;
         }
         let repo_id = aaf_fp::repo_id(&repo);
-        let lock_ids = collect_repo_lock_ids(&repo, &all_tasks);
         let Some(_locks) = try_lock_repo_set(data_dir, &lock_ids, opts.dry_run)? else {
             report.skipped_busy.push(repo_label);
             continue;
@@ -291,6 +307,15 @@ pub fn run_gc(
             }
         };
         report.repos_scanned.push(repo_label);
+        stale_runs::reap_repo_if_enabled(
+            &repo,
+            data_dir,
+            &fresh_tasks,
+            opts,
+            now,
+            &mut running_runs,
+            &mut report,
+        );
         clean_repo(
             &repo,
             &repo_id,

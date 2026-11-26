@@ -165,11 +165,12 @@ impl AgentRunner for ClaudeCodeRunner {
         )?;
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         let summary = guard.0.summary();
-        let exit_code = if summary.is_error && output.exit_code == Some(0) {
-            Some(1)
-        } else {
-            output.exit_code
-        };
+        let exit_code =
+            if (summary.is_error || summary.infra.is_some()) && output.exit_code == Some(0) {
+                Some(1)
+            } else {
+                output.exit_code
+            };
         guard.1.write_claude_finish(
             exit_code,
             output.timed_out,
@@ -178,6 +179,16 @@ impl AgentRunner for ClaudeCodeRunner {
         );
         let mut limit_hit = summary.limit_hit.filter(|_| !output.timed_out);
         let mut infra = summary.infra.filter(|_| !output.timed_out);
+        if exit_code != Some(0)
+            && !output.timed_out
+            && summary.tokens_in == 0
+            && summary.tokens_out == 0
+            && limit_hit.is_none()
+            && infra.is_none()
+        {
+            infra = auth_wording_infra(&summary.final_text)
+                .or_else(|| auth_wording_infra(&output.tail));
+        }
         if exit_code != Some(0)
             && !output.timed_out
             && !summary.saw_result
@@ -266,7 +277,8 @@ impl StreamParser {
                 if structured.is_some() {
                     self.api_error = structured;
                 } else if event.get("error").is_some() || flagged {
-                    self.api_error = network_wording_infra(flagged, &text);
+                    self.api_error =
+                        network_wording_infra(flagged, &text).or_else(|| auth_wording_infra(&text));
                 }
                 if let Some(usage) = message.and_then(|m| m.get("usage")) {
                     let id = message
@@ -307,8 +319,14 @@ impl StreamParser {
                     || subtype == Some("error_max_structured_output_retries");
                 let api_err = is_error
                     && event.get("terminal_reason").and_then(Value::as_str) == Some("api_error");
+                let tokens = event.get("usage").map(usage_tokens).unwrap_or_default();
                 let infra = structured_infra(&event, raw_result)
-                    .or_else(|| network_wording_infra(api_err, raw_result));
+                    .or_else(|| network_wording_infra(api_err, raw_result))
+                    .or_else(|| {
+                        (is_error || tokens == (0, 0))
+                            .then(|| auth_wording_infra(raw_result))
+                            .flatten()
+                    });
                 self.result = Some(ResultEvent {
                     text,
                     is_error,
@@ -317,7 +335,7 @@ impl StreamParser {
                         .or_else(|| event.get("status_code"))
                         .and_then(Value::as_i64),
                     infra,
-                    tokens: event.get("usage").map(usage_tokens).unwrap_or_default(),
+                    tokens,
                 });
             }
             Some("rate_limit_event") => {
@@ -398,13 +416,37 @@ impl StreamParser {
     /// `server_error`), or whose result carries HTTP 401/403/5xx. A run that
     /// was served in the end, or that hit a limit (handled as a limit), is none.
     fn infra(&self) -> Option<InfraFailure> {
-        if self.result.as_ref().is_some_and(|r| !r.is_error) || self.limit_hit().is_some() {
+        if self.limit_hit().is_some() {
+            return None;
+        }
+        if let Some(res) = &self.result
+            && !res.is_error
+        {
+            // Claude CLI can emit subtype="success" (is_error=false) with 0/0
+            // tokens when OAuth Keychain refresh fails before reaching the API.
+            if res.tokens == (0, 0)
+                && res
+                    .infra
+                    .as_ref()
+                    .is_some_and(|i| i.kind == InfraKind::Auth)
+            {
+                return res.infra.clone();
+            }
             return None;
         }
         if let Some(failure) = &self.api_error {
             return Some(failure.clone());
         }
-        self.result.as_ref()?.infra.clone()
+        if let Some(res) = &self.result {
+            return res.infra.clone();
+        }
+        let zero_tokens = self
+            .assistant_usage
+            .values()
+            .all(|&(tok_in, tok_out)| tok_in == 0 && tok_out == 0);
+        zero_tokens
+            .then(|| auth_wording_infra(&self.last_assistant_text))
+            .flatten()
     }
 }
 
@@ -482,6 +524,12 @@ fn structured_infra(
         kind,
         raw: detail.chars().take(RAW_LIMIT_CHARS).collect(),
     })
+}
+
+/// Wording Claude Code CLI emits when OAuth token refresh or macOS Keychain
+/// persistence fails (delegated to `claude_flags`).
+fn auth_wording_infra(text: &str) -> Option<InfraFailure> {
+    super::claude_flags::auth_wording_infra(text, RAW_LIMIT_CHARS)
 }
 
 fn network_wording_infra(flagged: bool, text: &str) -> Option<InfraFailure> {

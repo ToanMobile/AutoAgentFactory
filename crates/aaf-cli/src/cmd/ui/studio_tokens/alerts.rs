@@ -330,8 +330,8 @@ pub(super) fn build_alerts(i: AlertInputs<'_>) -> Vec<TokenAlert> {
                 }
             ),
             detail,
-            "Mở stream log của task liên quan hoặc kiểm tra `aaf status --all` để dừng/reap lượt treo.",
-            Some("aaf status --all".into()),
+            "Chạy `aaf gc --all --reap-stale` để dọn an toàn các lượt `running` bị treo trên repo đang nghỉ (bỏ qua repo đang giữ `.run.lock`).",
+            Some("aaf gc --all --reap-stale".into()),
             Some(i.now),
             !i.supervisor_paused,
             i.stale_running_tasks.iter().take(4).cloned().collect(),
