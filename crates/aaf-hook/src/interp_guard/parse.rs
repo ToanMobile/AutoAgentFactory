@@ -55,8 +55,24 @@ pub(super) struct InterpSpec {
     pub(super) code_long: &'static [&'static str],
     pub(super) other_valued_short: &'static str,
     pub(super) attached_only_short: &'static str,
+    /// Short flags that consume at most one attached character and then resume
+    /// scanning the remainder of the cluster (e.g. Ruby `-Kue`).
+    pub(super) attached_one_char_short: &'static str,
+    /// Short flags whose attached value terminates at ASCII whitespace, after
+    /// which a following `-...` restarts option-cluster parsing (e.g. Perl
+    /// `'-F: -e'`).
+    pub(super) attached_space_delimited_short: &'static str,
     pub(super) other_valued_long: &'static [&'static str],
     pub(super) node_print: bool,
+}
+
+/// For a space-delimited attached-value flag (e.g. Perl `-F`), returns the
+/// next option cluster (without its leading `-`) when `rest` contains ASCII
+/// whitespace followed by another `-`-prefixed flag cluster.
+pub(super) fn next_space_delimited_cluster(rest: &str) -> Option<&str> {
+    let (_, after_ws) = rest.split_once(|c: char| c.is_ascii_whitespace())?;
+    let trimmed = after_ws.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    trimmed.strip_prefix('-').filter(|s| !s.is_empty())
 }
 
 pub(super) fn interp_spec(interp: Interp) -> InterpSpec {
@@ -66,6 +82,8 @@ pub(super) fn interp_spec(interp: Interp) -> InterpSpec {
             code_long: &[],
             other_valued_short: "WXm",
             attached_only_short: "",
+            attached_one_char_short: "",
+            attached_space_delimited_short: "",
             other_valued_long: &["check-hash-based-pycs"],
             node_print: false,
         },
@@ -74,6 +92,8 @@ pub(super) fn interp_spec(interp: Interp) -> InterpSpec {
             code_long: &["eval", "print"],
             other_valued_short: "rC",
             attached_only_short: "",
+            attached_one_char_short: "",
+            attached_space_delimited_short: "",
             other_valued_long: &[
                 "require",
                 "import",
@@ -88,16 +108,33 @@ pub(super) fn interp_spec(interp: Interp) -> InterpSpec {
         Interp::Perl => InterpSpec {
             code_short: "eE",
             code_long: &[],
-            other_valued_short: "IFMm",
-            attached_only_short: "i",
+            other_valued_short: "IMm",
+            // `-i` and `-F` only accept attached values; a detached `-F` does not
+            // consume the next argument (e.g. `perl -F -e '...'`).
+            attached_only_short: "iF",
+            attached_one_char_short: "",
+            // Perl's `-F`, `-C`, `-D`, and `-i` values stop at ASCII whitespace;
+            // a following `-...` is parsed as a new flag cluster (e.g.
+            // `perl '-F: -e' '...'`, `perl '-CI -e' '...'`). An empty value
+            // never consumes the next argument (`perl -C -e '...'`).
+            attached_space_delimited_short: "FCDi",
             other_valued_long: &[],
             node_print: false,
         },
         Interp::Ruby => InterpSpec {
             code_short: "e",
             code_long: &[],
-            other_valued_short: "IrCFK",
-            attached_only_short: "i",
+            // `-X dir` / `-E enc` take the rest of the word, or the next argument
+            // when bare (`ruby -X /usr -e '...'`, `ruby -E UTF-8 -e '...'`).
+            other_valued_short: "IrCXE",
+            // `-i`, `-F`, `-K`, and `-x` only accept attached values; detached
+            // forms do not consume the next argument (e.g. `ruby -F -e '...'`,
+            // `ruby -K -e '...'`, `ruby -x -e '...'`).
+            attached_only_short: "iFKx",
+            // Ruby's `-K` consumes exactly one attached character and continues
+            // parsing the remaining cluster (e.g. `ruby -Kue '...'`).
+            attached_one_char_short: "K",
+            attached_space_delimited_short: "",
             other_valued_long: &["encoding", "external-encoding", "internal-encoding"],
             node_print: false,
         },
@@ -106,6 +143,8 @@ pub(super) fn interp_spec(interp: Interp) -> InterpSpec {
             code_long: &["run", "process-begin", "process-code", "process-end"],
             other_valued_short: "cdfFz",
             attached_only_short: "",
+            attached_one_char_short: "",
+            attached_space_delimited_short: "",
             other_valued_long: &[
                 "php-ini",
                 "define",
@@ -203,6 +242,17 @@ pub(super) fn inline_payloads(interp: Interp, args: &[String]) -> Vec<String> {
                 if spec.other_valued_short.contains(c) {
                     if rest.is_empty() {
                         step = 2;
+                    }
+                    break;
+                }
+                if spec.attached_one_char_short.contains(c) {
+                    let _ = chars.next();
+                    continue;
+                }
+                if spec.attached_space_delimited_short.contains(c) {
+                    if let Some(next_cluster) = next_space_delimited_cluster(rest) {
+                        chars = next_cluster.chars();
+                        continue;
                     }
                     break;
                 }
