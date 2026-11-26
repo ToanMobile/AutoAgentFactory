@@ -571,3 +571,22 @@ fn compute_auto_parallel_respects_accounts_cores_caps_and_pressure() {
         1
     );
 }
+
+#[test]
+fn apply_multi_repo_fair_share_scales_dynamically_without_monopoly() {
+    use aaf_engine::split::apply_multi_repo_fair_share;
+
+    // Single active repo keeps full auto capacity.
+    assert_eq!(apply_multi_repo_fair_share(4, 4, 1), 4);
+    assert_eq!(apply_multi_repo_fair_share(4, 3, 1), 4);
+    // Two active repos share ready slots without letting one take 100%.
+    assert_eq!(apply_multi_repo_fair_share(4, 4, 2), 2);
+    assert_eq!(apply_multi_repo_fair_share(4, 3, 2), 2);
+    assert_eq!(apply_multi_repo_fair_share(4, 2, 2), 1);
+    assert_eq!(apply_multi_repo_fair_share(4, 6, 2), 3);
+    assert_eq!(apply_multi_repo_fair_share(4, 8, 2), 4);
+    // Three active repos with 6 slots -> 2 each; solo slot never drops to 0.
+    assert_eq!(apply_multi_repo_fair_share(4, 6, 3), 2);
+    assert_eq!(apply_multi_repo_fair_share(4, 1, 2), 1);
+    assert_eq!(apply_multi_repo_fair_share(4, 0, 2), 4);
+}

@@ -183,7 +183,10 @@ fn append_repo_environment(prompt: &mut String, ctx: &PromptContext<'_>) {
     }
     prompt.push_str(
         "- Heavy builds/tests: wrap heavy build or test commands with `aaf slot -- <cmd>` \
-         so they respect machine load limits.\n",
+         so they respect machine load limits. Always run build/test commands in the \
+         foreground — never launch Gradle/builds in the background and poll with \
+         `until ... sleep` loops, and never end your turn with \"Waiting.\" while a \
+         background command is still running.\n",
     );
     if let Some((memory, truncated)) = load_repo_memory(ctx.repo_root) {
         prompt.push_str("\n## Repo memory (.autofactory/memory.md)\n\n");
@@ -503,5 +506,20 @@ mod tests {
             "symlinked secret leaked into prompt: {prompt}"
         );
         assert!(!prompt.contains("## Repo memory"));
+    }
+
+    #[test]
+    fn prompt_forbids_background_build_sleep_polling() {
+        let repo = tempfile::tempdir().expect("repo");
+        let task = sample_task(vec![]);
+        let ctx = PromptContext {
+            repo_root: repo.path(),
+            profile: "android",
+            proof_required: false,
+        };
+        let prompt = build_prompt_with_context(&task, "aaf/t1", &ctx);
+        assert!(prompt.contains("aaf slot -- <cmd>"));
+        assert!(prompt.contains("foreground"));
+        assert!(prompt.contains("until ... sleep"));
     }
 }

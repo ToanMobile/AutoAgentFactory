@@ -357,6 +357,27 @@ pub(super) fn is_head_lock_only_block(receipt: &Receipt) -> bool {
     })
 }
 
+fn already_emitted_clear_gate(deps: &Deps, task_id: &str, receipt: &Receipt) -> bool {
+    if receipt.tree_fp.is_empty() {
+        return false;
+    }
+    let Ok(events) = deps
+        .store
+        .events_for_task_by_kinds(task_id, &[EventKind::GateResult], 1)
+    else {
+        return false;
+    };
+    let Some(last) = events.first() else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&last.payload_json) else {
+        return false;
+    };
+    val.get("status").and_then(|v| v.as_str()) == Some("CLEAR")
+        && val.get("tree_fp").and_then(|v| v.as_str()) == Some(receipt.tree_fp.as_str())
+        && val.get("config_hash").and_then(|v| v.as_str()) == Some(receipt.config_hash.as_str())
+}
+
 pub(crate) fn settle(
     deps: &Deps,
     job: &GateJob,
@@ -378,8 +399,11 @@ pub(crate) fn settle(
     };
     match judged.verdict {
         Verdict::Clear(receipt) => {
-            emit_gate(&receipt)?;
-            if post_audit::needs_post_gate_audit(deps, job, &receipt) {
+            let needs_audit = post_audit::needs_post_gate_audit(deps, job, &receipt);
+            if !(needs_audit && already_emitted_clear_gate(deps, &task.id, &receipt)) {
+                emit_gate(&receipt)?;
+            }
+            if needs_audit {
                 return Ok(Resolution::NeedsPostAudit {
                     receipt: Box::new(receipt),
                 });

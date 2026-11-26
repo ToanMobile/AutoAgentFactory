@@ -460,3 +460,41 @@ fn post_gate_low_score_routes_to_audit_rework_without_writing_pass_verdict() {
     // Audit rework is decoupled from unblocker cycles (Plan v3).
     assert_eq!(db.get_budget("t1").unwrap().cycles_used, 0);
 }
+
+struct BusyPool;
+impl AccountPool for BusyPool {
+    fn acquire(&self) -> PortResult<Option<Grant>> {
+        Ok(None)
+    }
+    fn report_limit(&self, _: &str, _: &LimitHit) -> PortResult<()> {
+        Ok(())
+    }
+    fn profiles(&self) -> PortResult<Vec<AccountProfile>> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn cached_clear_gate_waiting_for_post_audit_account_emits_gate_result_once() {
+    let (_tmp, db, _git, _audit_runner, deps, mut audit) = setup_world("PASS: ok");
+    db.set_state("t1", TaskState::Running, None, 1000).unwrap();
+    db.set_state("t1", TaskState::Gating, None, 1001).unwrap();
+    audit.accounts = Arc::new(BusyPool);
+    let hooks = Hooks {
+        idle: &|| false,
+        reap: &|_| Ok(()),
+    };
+
+    // Two consecutive ticks while PostAudit cannot acquire an account.
+    let _ = run_with_audit(&deps, Some(&audit), Mode::Once, &hooks).unwrap();
+    let _ = run_with_audit(&deps, Some(&audit), Mode::Once, &hooks).unwrap();
+
+    let gate_events = db
+        .events_for_task_by_kinds("t1", &[EventKind::GateResult], 10)
+        .unwrap();
+    assert_eq!(
+        gate_events.len(),
+        1,
+        "repeated cached CLEAR checks waiting for PostAudit must not spam GateResult"
+    );
+}

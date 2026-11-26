@@ -381,6 +381,23 @@ impl RouterPool {
             Ok(next.map(|(profile, lease)| Grant::new(Some(profile), Some(Box::new(lease)))))
         })
     }
+
+    /// Like [`RouterPool::acquire_where`], keeping at least one other ready
+    /// account slot free for pending `PostAudit` jobs when `>= 2` slots exist.
+    pub fn acquire_where_reserving_one(
+        &self,
+        allow: &dyn Fn(&AccountProfile) -> bool,
+    ) -> PortResult<Option<Grant>> {
+        if self.provider_accounts()?.is_empty() {
+            return Ok(Some(Grant::new(None, None)));
+        }
+        self.with_router(|router| {
+            let next = router
+                .next_where_keeping_one(allow)
+                .map_err(|e| PortError::Io(e.to_string()))?;
+            Ok(next.map(|(profile, lease)| Grant::new(Some(profile), Some(Box::new(lease)))))
+        })
+    }
 }
 
 impl AccountPool for RouterPool {

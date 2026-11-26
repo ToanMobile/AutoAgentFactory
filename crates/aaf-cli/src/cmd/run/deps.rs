@@ -5,8 +5,10 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
+use aaf_domain::account::ProviderKind;
 use aaf_domain::config::{AccountSelection, RunConfig};
-use aaf_domain::ports::AgentRunner;
+use aaf_domain::ports::{AccountStore, AgentRunner, Clock, TaskStore};
+use aaf_domain::task::TaskState;
 use aaf_engine::accounts::{self, DiscoveryEnv, Router};
 use aaf_engine::config::{self, EffectiveConfig};
 use aaf_engine::db::Db;
@@ -14,10 +16,11 @@ use aaf_engine::executors::{self, ExecEnv};
 use aaf_engine::factory::adapters::{
     RealGate, RouterPool, SystemClock, WebhookNotifier, provider_for,
 };
+use aaf_engine::factory::audit_backend::{resolve_auto_audit_executor, same_audit_provider};
 use aaf_engine::factory::stage_router::writer_requires_hook;
 use aaf_engine::factory::{Deps, RealGit, SelectingPool, Settings, resolve_base};
 use aaf_engine::hook_settings;
-use aaf_engine::split::compute_auto_parallel;
+use aaf_engine::split::{apply_multi_repo_fair_share, compute_auto_parallel};
 use aaf_engine::throttle::{LoadProbe, SystemProbe};
 
 use super::super::board::store::err;
@@ -104,12 +107,16 @@ pub(super) fn build_deps(
                 }
                 None => 0,
             };
-            compute_auto_parallel(
+            let base_auto = compute_auto_parallel(
                 provider_accounts,
                 max_per_account,
                 cores,
                 SystemProbe::detect().pressure(),
-            )
+            );
+            let ready_slots =
+                count_ready_provider_slots(db, run_provider, max_per_account, clock.now());
+            let active_repos = count_active_repos_for_fair_share(db, &ctx.data_dir, repo);
+            apply_multi_repo_fair_share(base_auto, ready_slots, active_repos)
         }
         Some(ParallelArg::Fixed(n)) => n,
         None => cfg.repo.run.max_parallel,
@@ -135,7 +142,13 @@ pub(super) fn build_deps(
     let profile = config::effective_profile(&cfg.repo, repo);
     // Which account a job may take follows `accounts.selection`; `repo` is
     // the path `tasks.repo_root` holds, so the run history finds it.
-    let pool = Arc::new(SelectingPool::new(
+    let resolved_audit_exec = resolve_auto_audit_executor(
+        &cfg.repo.run.executor,
+        &cfg.repo.cross_audit.executor,
+        &ctx.path_var,
+        &ctx.home,
+    );
+    let mut selecting = SelectingPool::new(
         RouterPool {
             accounts: Arc::new(db.clone()),
             runs: Arc::new(db.clone()),
@@ -147,7 +160,16 @@ pub(super) fn build_deps(
         cfg.global.accounts.selection,
         repo,
         Arc::new(db.clone()),
-    ));
+    );
+    if same_audit_provider(&cfg.repo.run.executor, &resolved_audit_exec) {
+        let reserve_db = db.clone();
+        selecting = selecting.with_audit_reserve(Arc::new(move || {
+            reserve_db
+                .list_tasks(None, Some(TaskState::Gating))
+                .is_ok_and(|tasks| !tasks.is_empty())
+        }));
+    }
+    let pool = Arc::new(selecting);
 
     let deps = Deps {
         store: Arc::new(db.clone()),
@@ -192,4 +214,84 @@ pub(super) fn build_deps(
         },
     };
     Ok((deps, pool))
+}
+
+fn count_ready_provider_slots(
+    db: &Db,
+    provider: Option<ProviderKind>,
+    max_per_account: u32,
+    now: i64,
+) -> usize {
+    let Some(kind) = provider else {
+        return 0;
+    };
+    let ready = db
+        .list_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|state| {
+            state.profile.provider == kind
+                && !state.in_cooldown(now)
+                && Path::new(&state.profile.config_dir).is_dir()
+        })
+        .count();
+    ready.saturating_mul(max_per_account.max(1) as usize)
+}
+
+fn supervisor_allowed_repos(data_dir: &Path) -> Option<BTreeSet<String>> {
+    let raw = std::fs::read_to_string(data_dir.join("ui-supervisor.json")).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let arr = val.get("allowed_repos")?.as_array()?;
+    let set = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| normalize_repo_path(s.trim()))
+        .filter(|s| !s.is_empty())
+        .collect::<BTreeSet<_>>();
+    Some(set)
+}
+
+fn normalize_repo_path(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        raw.to_string()
+    }
+}
+
+fn repo_is_allowed(allowed: Option<&BTreeSet<String>>, repo_root: &str) -> bool {
+    let Some(set) = allowed else {
+        return true;
+    };
+    let canon = normalize_repo_path(repo_root);
+    if set.contains(repo_root) || set.contains(&canon) {
+        return true;
+    }
+    Path::new(repo_root)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| set.contains(name))
+}
+
+fn count_active_repos_for_fair_share(db: &Db, data_dir: &Path, current_repo: &Path) -> usize {
+    let allowed = supervisor_allowed_repos(data_dir);
+    let mut repos = BTreeSet::new();
+    repos.insert(normalize_repo_path(&current_repo.to_string_lossy()));
+    for state in [TaskState::Ready, TaskState::Running, TaskState::Gating] {
+        for task in db.list_tasks(None, Some(state)).unwrap_or_default() {
+            if Path::new(&task.repo_root).is_dir()
+                && repo_is_allowed(allowed.as_ref(), &task.repo_root)
+            {
+                repos.insert(normalize_repo_path(&task.repo_root));
+            }
+        }
+    }
+    repos.len().max(1)
 }

@@ -24,6 +24,9 @@ pub struct SelectingPool {
     /// got. The run that job records comes later, on another thread, and a
     /// second job started in between must not be given a second account.
     first_use: Mutex<Option<String>>,
+    /// Optional Finish-First predicate: when `true` and `Purpose::Work` asks
+    /// for a slot, keep at least one other ready slot free for `Purpose::Audit`.
+    audit_reserve: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// The binding as `aaf accounts next` and `aaf doctor` show it.
@@ -56,6 +59,34 @@ impl SelectingPool {
             repo_root: repo_root.into(),
             history,
             first_use: Mutex::new(None),
+            audit_reserve: None,
+        }
+    }
+
+    /// Enables Finish-First reservation: whenever `should_reserve()` returns
+    /// `true`, `Purpose::Work` leaves at least one other ready slot unleased
+    /// so same-provider `Purpose::Audit` jobs finish without starvation.
+    pub fn with_audit_reserve(
+        mut self,
+        should_reserve: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        self.audit_reserve = Some(should_reserve);
+        self
+    }
+
+    fn should_reserve_for_audit(&self, purpose: Purpose) -> bool {
+        purpose == Purpose::Work && self.audit_reserve.as_ref().is_some_and(|pred| pred())
+    }
+
+    fn acquire_work_where(
+        &self,
+        reserve_one: bool,
+        allow: &dyn Fn(&AccountProfile) -> bool,
+    ) -> PortResult<Option<Grant>> {
+        if reserve_one {
+            self.inner.acquire_where_reserving_one(allow)
+        } else {
+            self.inner.acquire_where(allow)
         }
     }
 
@@ -102,18 +133,18 @@ impl SelectingPool {
             }))
     }
 
-    fn pinned(&self, provider: ProviderKind) -> PortResult<Option<Grant>> {
+    fn pinned(&self, provider: ProviderKind, reserve_one: bool) -> PortResult<Option<Grant>> {
         let Some(bound) = self.resolve(provider, &self.usable()?)? else {
             // No settings entry and no history: the least-used free account
             // becomes the binding.
-            let grant = self.inner.acquire()?;
+            let grant = self.acquire_work_where(reserve_one, &|_| true)?;
             if let Some(id) = grant.as_ref().and_then(Grant::account_id) {
                 self.remember(id);
             }
             return Ok(grant);
         };
         // That account or nothing: busy or cooling down means wait.
-        self.inner.acquire_where(&|p| p.id == bound.account.id)
+        self.acquire_work_where(reserve_one, &|p| p.id == bound.account.id)
     }
 
     fn acquire_for_audit(
@@ -144,6 +175,7 @@ impl SelectingPool {
         provider: ProviderKind,
         task_id: &str,
         purpose: Purpose,
+        reserve_one: bool,
     ) -> PortResult<Option<Grant>> {
         if purpose == Purpose::Audit {
             return self.acquire_for_audit(provider, task_id);
@@ -166,12 +198,12 @@ impl SelectingPool {
             .into_iter()
             .flatten()
         {
-            if let Some(grant) = self.inner.acquire_where(&|p| p.id == preferred)? {
+            if let Some(grant) = self.acquire_work_where(reserve_one, &|p| p.id == preferred)? {
                 return Ok(Some(grant));
             }
         }
         // Limited or busy: move on; the run recorded there makes it stick.
-        self.inner.acquire()
+        self.acquire_work_where(reserve_one, &|_| true)
     }
 
     /// What the repository is bound to right now, without leasing anything.
@@ -215,13 +247,14 @@ impl AccountPool for SelectingPool {
         let Some(provider) = self.inner.provider else {
             return self.inner.acquire();
         };
+        let reserve_one = self.should_reserve_for_audit(purpose);
         match self.selection {
             AccountSelection::LeastUsed if purpose == Purpose::Audit => {
                 self.acquire_for_audit(provider, task_id)
             }
-            AccountSelection::LeastUsed => self.inner.acquire(),
-            AccountSelection::Pinned => self.pinned(provider),
-            AccountSelection::Sticky => self.sticky(provider, task_id, purpose),
+            AccountSelection::LeastUsed => self.acquire_work_where(reserve_one, &|_| true),
+            AccountSelection::Pinned => self.pinned(provider, reserve_one),
+            AccountSelection::Sticky => self.sticky(provider, task_id, purpose, reserve_one),
         }
     }
 
@@ -466,5 +499,71 @@ mod tests {
             .unwrap()
             .expect("independent account should be leased");
         assert_eq!(ind_grant.account_id(), Some("claude-b"));
+    }
+
+    #[test]
+    fn audit_reserve_keeps_one_slot_for_post_audit_and_never_deadlocks_solo() {
+        use std::sync::atomic::AtomicBool;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let db = Db::open(&root.join("aaf.db")).unwrap();
+        for (id, name) in [("claude-a", "a"), ("claude-b", "b")] {
+            let cfg = root.join(format!("home/.{id}"));
+            fs::create_dir_all(&cfg).unwrap();
+            db.upsert_account(&AccountProfile {
+                id: id.into(),
+                provider: ProviderKind::ClaudeCode,
+                config_dir: cfg.to_string_lossy().into_owned(),
+                name: name.into(),
+            })
+            .unwrap();
+        }
+        let store = Arc::new(db.clone());
+        let clock = Arc::new(TestClock(AtomicI64::new(1_000)));
+        let gating_pending = Arc::new(AtomicBool::new(true));
+        let flag = gating_pending.clone();
+        let pool = SelectingPool::new(
+            RouterPool {
+                accounts: store.clone(),
+                runs: store.clone(),
+                clock,
+                leases_dir: root.join("leases"),
+                max_concurrent_per_account: 1,
+                provider: Some(ProviderKind::ClaudeCode),
+            },
+            AccountSelection::Sticky,
+            &repo,
+            store,
+        )
+        .with_audit_reserve(Arc::new(move || flag.load(Ordering::Relaxed)));
+
+        // First coding work acquires one account because another ready slot stays free.
+        let g1 = pool.acquire_for("t-work-1", Purpose::Work).unwrap();
+        assert!(g1.is_some());
+        // Second coding work defers so PostAudit keeps the last free slot.
+        assert!(
+            pool.acquire_for("t-work-2", Purpose::Work)
+                .unwrap()
+                .is_none()
+        );
+        // PostAudit immediately takes the reserved slot!
+        let g_audit = pool.acquire_for("t-gate-1", Purpose::Audit).unwrap();
+        assert!(g_audit.is_some());
+        drop(g_audit);
+
+        // Once gating finishes, coding work can use 100% of slots.
+        gating_pending.store(false, Ordering::Relaxed);
+        let g2 = pool.acquire_for("t-work-2", Purpose::Work).unwrap();
+        assert!(g2.is_some());
+        drop((g1, g2));
+
+        // Solo ready account (other in cooldown): reserve must never deadlock Work.
+        gating_pending.store(true, Ordering::Relaxed);
+        db.set_cooldown("claude-b", Some(9_000)).unwrap();
+        let solo = pool.acquire_for("t-work-3", Purpose::Work).unwrap();
+        assert_eq!(solo.as_ref().and_then(super::Grant::account_id), Some("claude-a"));
     }
 }

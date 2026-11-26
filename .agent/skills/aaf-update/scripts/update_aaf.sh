@@ -321,6 +321,20 @@ if [[ "$(uname -s)" == "Darwin" && -z "${AAF_RUN_ID:-}" && "${AAF_SKIP_UI_SERVIC
       done
     fi
     echo "==> Restarting AAF Cockpit service (com.autoagentfactory.ui ${install_flags[*]:-read-only})..."
+    aaf_db_path="${AAF_DATA_DIR:-$HOME/.local/share/autofactory}/aaf.db"
+    if [[ -f "$aaf_db_path" ]] && command -v python3 >/dev/null 2>&1; then
+      running_summary="$(python3 - "$aaf_db_path" <<'PY' 2>/dev/null || true
+import sqlite3, sys
+c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = list(c.execute("SELECT task_id FROM runs WHERE status='running' ORDER BY started_at ASC"))
+if rows:
+    print(f"{len(rows)} ({', '.join(r[0] for r in rows[:6])})")
+PY
+)"
+      if [[ -n "$running_summary" ]]; then
+        echo "    [WARN] Active running worker(s): ${running_summary} — restarting UI will interrupt them (set AAF_SKIP_UI_SERVICE=1 to keep workers running)." >&2
+      fi
+    fi
     if ! env ${service_env[@]+"${service_env[@]}"} "$AAF_BIN" ui --install-service ${install_flags[@]+"${install_flags[@]}"} >/dev/null; then
       echo "    [WARN] aaf ui --install-service failed (e.g. non-GUI session); skipping UI service restart." >&2
     else

@@ -98,6 +98,57 @@ impl<'a> Router<'a> {
         Ok(None)
     }
 
+    /// Like [`Router::next_where`], but reserves at least one free slot across
+    /// all ready (non-cooldown) accounts of this router when total ready
+    /// capacity is at least 2. Used by `Purpose::Work` when `Gating` tasks are
+    /// waiting for same-provider `PostAudit` so coding runs never starve finish.
+    pub fn next_where_keeping_one(
+        &self,
+        allow: &dyn Fn(&AccountProfile) -> bool,
+    ) -> Result<Option<(AccountProfile, Lease)>, AccountsError> {
+        let now = self.clock.now();
+        let mut ready_ids = Vec::new();
+        let mut candidates = Vec::new();
+        for state in self.accounts.list_accounts()? {
+            if state.in_cooldown(now) || !Path::new(&state.profile.config_dir).is_dir() {
+                continue;
+            }
+            ready_ids.push(state.profile.id.clone());
+            if allow(&state.profile) {
+                let used = self
+                    .runs
+                    .tokens_since(&state.profile.id, now - FIVE_HOURS)?;
+                candidates.push((used, state.profile));
+            }
+        }
+        let total_ready_slots = ready_ids
+            .len()
+            .saturating_mul(self.max_concurrent_per_account as usize);
+        if total_ready_slots < 2 {
+            candidates.sort_by(|a, b| (a.0, &a.1.id).cmp(&(b.0, &b.1.id)));
+            for (_, profile) in candidates {
+                if let Some(lease) = self.acquire_slot(&profile.id)? {
+                    return Ok(Some((profile, lease)));
+                }
+            }
+            return Ok(None);
+        }
+        candidates.sort_by(|a, b| (a.0, &a.1.id).cmp(&(b.0, &b.1.id)));
+        for (_, profile) in candidates {
+            if let Some(lease) = self.acquire_slot(&profile.id)? {
+                let has_spare = ready_ids
+                    .iter()
+                    .any(|id| matches!(self.acquire_slot(id), Ok(Some(_))));
+                if has_spare {
+                    return Ok(Some((profile, lease)));
+                }
+                drop(lease);
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+
     pub fn report_limit(&self, account_id: &str, hit: &LimitHit) -> Result<(), AccountsError> {
         let now = self.clock.now();
         let until = match hit.reset_at {

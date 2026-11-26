@@ -331,6 +331,24 @@ pub fn compute_auto_parallel(
     }
 }
 
+/// Dynamically fair-shares automatic coding parallelism across concurrent active
+/// repositories so one heavy repository never monopolizes 100% of ready account
+/// slots while another repository has pending work. Never hardcodes a fixed cap:
+/// returns `base_parallel` unchanged when only one repository is active.
+pub fn apply_multi_repo_fair_share(
+    base_parallel: u32,
+    ready_slots: usize,
+    active_repos: usize,
+) -> u32 {
+    if active_repos <= 1 || ready_slots == 0 {
+        return base_parallel.max(1);
+    }
+    let fair = ready_slots.div_ceil(active_repos).max(1);
+    let non_monopoly = ready_slots.saturating_sub(1).max(1);
+    let cap = u32::try_from(fair.min(non_monopoly)).unwrap_or(base_parallel);
+    base_parallel.min(cap).max(1)
+}
+
 fn no_split(parent: &Task, dry_run: bool, reason: &str) -> SplitOutcome {
     SplitOutcome {
         parent_id: parent.id.clone(),
