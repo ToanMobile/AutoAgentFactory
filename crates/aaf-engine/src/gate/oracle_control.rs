@@ -96,16 +96,35 @@ pub(super) fn verify_proven(ctx: &ControlContext<'_>) -> Result<OracleVerdict, G
             ));
         }
     };
+    // Filter `AAF_CHANGED_FILES_FILE` to paths that still exist on the pure-base
+    // control tree so newly-added test files removed above are not handed to a
+    // runner that executes every listed path directly, while keeping touched
+    // modules mapped for diff-aware `test_scoped` scripts.
+    let control_changed: BTreeSet<String> = ctx
+        .changes
+        .iter()
+        .filter(|ch| ch.kind != ChangeKind::Deleted && ctx.scratch_path.join(&ch.path).exists())
+        .map(|ch| ch.path.clone())
+        .collect();
+    let control_changed_env = match TestFilesEnv::write(&control_changed) {
+        Ok(env) => env,
+        Err(err) => {
+            return Ok(map_outcome(
+                ctx.oracle_mode,
+                ctx.compile_red_policy,
+                OracleOutcome::Inconclusive(format!("could not prepare control tree: {err}")),
+            ));
+        }
+    };
     let control_path = control_env_file.path_string();
+    let control_changed_path = control_changed_env.path_string();
     let control_env: Vec<(&str, &str)> = ctx
         .extra_env
         .iter()
-        .map(|&(k, v)| {
-            if k == "AAF_TEST_FILES_FILE" {
-                (k, control_path.as_str())
-            } else {
-                (k, v)
-            }
+        .map(|&(k, v)| match k {
+            "AAF_TEST_FILES_FILE" => (k, control_path.as_str()),
+            "AAF_CHANGED_FILES_FILE" => (k, control_changed_path.as_str()),
+            _ => (k, v),
         })
         .collect();
 

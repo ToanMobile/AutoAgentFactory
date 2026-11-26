@@ -442,6 +442,13 @@ pub(crate) fn evaluate_with_options(
     env_files.extend(inline_rust_tests.iter().cloned());
     let test_files_env = TestFilesEnv::write(&env_files)?;
     let test_files_path = test_files_env.path_string();
+    // Mirror the normal gate's `AAF_CHANGED_FILES_FILE` / `AAF_DELETED_FILES_FILE`
+    // so diff-aware `test_scoped` scripts select the exact same subproject and
+    // newly-added test scripts during the reverted-prod oracle check instead of
+    // falling back to an unrelated passing suite (false-positive vacuous test).
+    let diff_env = super::runner::DiffEnvFiles::write(mode, Some(base_sha), changes)?;
+    let changed_files_path = diff_env.changed_path.to_string_lossy().into_owned();
+    let deleted_files_path = diff_env.deleted_path.to_string_lossy().into_owned();
     let mode_str = match mode {
         GateMode::Scoped => "scoped",
         GateMode::Full => "full",
@@ -450,6 +457,8 @@ pub(crate) fn evaluate_with_options(
     let mut extra_env = vec![
         ("AAF_GATE_MODE", mode_str),
         ("AAF_BASE_SHA", base_sha),
+        ("AAF_CHANGED_FILES_FILE", changed_files_path.as_str()),
+        ("AAF_DELETED_FILES_FILE", deleted_files_path.as_str()),
         ("AAF_TEST_FILES_FILE", test_files_path.as_str()),
     ];
     let env_remove: Vec<&str> = if strip_compiler_wrappers {
