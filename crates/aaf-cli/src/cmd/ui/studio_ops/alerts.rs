@@ -3,7 +3,6 @@
 use aaf_engine::telemetry::AutonomyMetrics;
 use serde_json::{Value, json};
 
-use super::REWORK_CHURN_MIN_CYCLES;
 use super::probes::AccountPoolSummary;
 
 const RECENT_WINDOW_SECS: i64 = 3600;
@@ -25,6 +24,7 @@ pub(super) struct AlertFacts<'a> {
     pub vacuous_last_at: Option<i64>,
     pub churn_labels: &'a [String],
     pub churn_ids: &'a [String],
+    pub churn_severe: bool,
     pub dead_orphan_slots: &'a [String],
     pub draining: bool,
     pub active_slots: usize,
@@ -205,11 +205,11 @@ fn collect_quality_alerts(f: &AlertFacts<'_>, alerts: &mut Vec<Value>) {
     if !f.churn_labels.is_empty() {
         push_live(
             alerts,
-            "medium",
+            if f.churn_severe { "high" } else { "medium" },
             "quality",
             "high_rework_churn",
             format!(
-                "{} task đang mở lặp >= {REWORK_CHURN_MIN_CYCLES} chu kỳ rework",
+                "{} task đang mở lặp rework/audit quá nhiều vòng",
                 f.churn_labels.len()
             ),
             f.churn_labels.join(", "),

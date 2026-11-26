@@ -312,20 +312,23 @@ fn maybe_approve_on_unblock(
     task: &Task,
     now: i64,
 ) -> Result<(bool, Option<LatestPlan>), PortError> {
+    if matches!(task.blocked_reason, Some(BlockedReason::BudgetExceeded { .. }))
+        && plan_from_task_notes(task).is_some()
+    {
+        let converged = latest_plan_info(db, &task.id)?.filter(|i| i.plan_contract.is_some());
+        return Ok((true, converged));
+    }
     let Some(BlockedReason::NeedsHuman { why }) = &task.blocked_reason else {
         return Ok((false, None));
     };
-    // Only auto-approve `PLAN_APPROVAL_PREFIX`, never `PLAN_DEBATE_STALLED_PREFIX`.
     let Some(rest) = why.strip_prefix(PLAN_APPROVAL_PREFIX) else {
         return Ok((false, None));
     };
     if let Some(info) = latest_plan_info(db, &task.id)? {
         db.append_context_note(&task.id, &format_approved_plan_note(&info), now)?;
-        let converged = info.plan_contract.is_some().then_some(info);
-        return Ok((true, converged));
+        return Ok((true, info.plan_contract.is_some().then_some(info)));
     }
-    let trimmed = rest.trim();
-    let plan = if trimmed.is_empty() { why } else { trimmed };
+    let plan = if rest.trim().is_empty() { why } else { rest.trim() };
     db.append_context_note(&task.id, &format!("{PLAN_APPROVED_PREFIX} {plan}"), now)?;
     Ok((true, None))
 }

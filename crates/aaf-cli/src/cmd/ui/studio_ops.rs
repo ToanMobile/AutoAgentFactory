@@ -225,10 +225,43 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
                 }));
             }
         }
-        if matches!(t.state, TaskState::Running | TaskState::Gating)
-            && t.unblock_cycles >= REWORK_CHURN_MIN_CYCLES
+    }
+    let mut audit_fails_by_task: HashMap<String, u64> = HashMap::new();
+    for ev in input.events {
+        if ev.kind == EventKind::CrossAudit
+            && let Some(tid) = &ev.task_id
+            && let Ok(p) = serde_json::from_str::<Value>(&ev.payload_json)
         {
-            churn_labels.push(format!("{} (cyc={})", t.id, t.unblock_cycles));
+            let skip = p.get("short_circuited").and_then(Value::as_bool) == Some(true)
+                || p.get("retry").and_then(Value::as_bool) == Some(true)
+                || p.get("reused_from").is_some_and(|v| !v.is_null());
+            let failed = p.get("verdict").and_then(Value::as_str).is_some_and(|v| {
+                let l = v.to_ascii_lowercase();
+                l.starts_with("fail") || l.starts_with("inconclusive")
+            }) || p.get("dual_consensus").and_then(Value::as_bool) == Some(false);
+            if !skip && failed {
+                *audit_fails_by_task.entry(tid.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut churn_severe = false;
+    for t in input.tasks {
+        if !matches!(
+            t.state,
+            TaskState::Ready | TaskState::Running | TaskState::Gating
+        ) {
+            continue;
+        }
+        let runs_n = input.runs_by_task.get(&t.id).map_or(0, Vec::len) as u64;
+        let afails = audit_fails_by_task.get(&t.id).copied().unwrap_or(0);
+        if t.unblock_cycles >= REWORK_CHURN_MIN_CYCLES || afails >= 3 || runs_n >= 10 {
+            if afails >= 3 || runs_n >= 12 {
+                churn_severe = true;
+            }
+            churn_labels.push(format!(
+                "{} (cyc={}, runs={}, audit_fail={})",
+                t.id, t.unblock_cycles, runs_n, afails
+            ));
             churn_ids.push(t.id.clone());
         }
     }
@@ -440,6 +473,7 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
         vacuous_last_at,
         churn_labels: &churn_labels,
         churn_ids: &churn_ids,
+        churn_severe,
         dead_orphan_slots: &slot_probe.dead_orphan_slots,
         draining: slot_probe.draining,
         active_slots: slot_probe.active_slots,

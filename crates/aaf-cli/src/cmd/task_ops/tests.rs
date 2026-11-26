@@ -39,6 +39,40 @@ fn unblock_task_appends_unblocked_note_and_transitions_to_ready() {
 }
 
 #[test]
+fn unblock_budget_exceeded_preserves_already_approved_plan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Db::open(&tmp.path().join("aaf.db")).unwrap();
+    let mut task = Task::new_root(
+        "t-bud",
+        "/repo",
+        "Budget blocked task",
+        ImmutableSpec {
+            description: "desc".into(),
+            acceptance: vec!["ok".into()],
+        },
+        Priority::P1,
+        10,
+    );
+    task.state = TaskState::Blocked;
+    task.blocked_reason = Some(BlockedReason::BudgetExceeded {
+        detail: "root token budget exceeded".into(),
+    });
+    task.context_notes
+        .push("plan_approved: approved plan [plan_contract_hash=abc]".into());
+    db.insert_task(&task).unwrap();
+    let out = unblock_task(&db, "t-bud", "aaf board unblock", "human", 20).unwrap();
+    assert!(
+        out.plan_approved,
+        "unblocking a budget_exceeded task with plan_approved note must preserve the plan"
+    );
+    let events = db.events_for_task("t-bud", 10).unwrap();
+    assert!(
+        !aaf_engine::plan_debate::state::is_human_unblock_event(&events[0]),
+        "preserved plan unblock must not wipe the converged plan epoch"
+    );
+}
+
+#[test]
 fn clear_stale_receipts_preserves_sibling_main_approvals() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");

@@ -574,4 +574,25 @@ fn non_streaming_antigravity_uses_higher_stall_threshold_and_needs_human_dag_is_
     let stalled_16m = out_16m["speed"]["stalled_workers"].as_array().unwrap();
     assert_eq!(stalled_16m.len(), 1);
     assert_eq!(stalled_16m[0]["severity"], "medium");
+
+    // Repeated Cross-Audit failures (>=3) on an open task with low unblock_cycles trigger high churn.
+    let loop_task = make_task("t-loop", TaskState::Ready, 1, now - 600);
+    let fail_evs: Vec<FactoryEvent> = (0..3)
+        .map(|i| {
+            FactoryEvent::new(
+                EventKind::CrossAudit,
+                json!({"verdict": "fail: [P1] G6", "dual_consensus": false}).to_string(),
+                now - 100 + i,
+            )
+            .for_task("t-loop")
+        })
+        .collect();
+    let out_loop = collect_ops_diagnostics(&OpsInput {
+        data_dir: None, tasks: &[loop_task], runs_by_task: &HashMap::new(),
+        events: &fail_evs, accounts: &[], blocked_upstream: &[],
+        report: &report, token_diagnostics: &json!({ "summary": {} }),
+        breakdown: &[], since: Some(now - 86_400), now,
+    });
+    let churn_a = out_loop["alerts"].as_array().unwrap().iter().find(|a| a["code"] == "high_rework_churn").expect("high_rework_churn alert");
+    assert_eq!(churn_a["severity"], "high");
 }

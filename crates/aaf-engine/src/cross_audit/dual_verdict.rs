@@ -182,7 +182,12 @@ pub fn build_dual_review_prompt(
         );
     }
     if score_gate {
-        out.push_str("\nScore 0..=100 on G1..G7 (<100 requires non-empty deduction_reason):\n");
+        out.push_str(
+            "\nScore 0..=100 on G1..G7 (<100 requires non-empty deduction_reason). \
+             Grade strictly on real defects, security, tests, and regressions, but do NOT deduct \
+             or raise P0/P1 solely for obeying explicit hard constraints in SPEC (e.g. forbidden \
+             SQL/file edits or line-count caps) — judge quality within those stated boundaries:\n",
+        );
         for (id, r) in GOLDEN_STANDARDS {
             let _ = writeln!(out, "- {id}: {r}");
         }
