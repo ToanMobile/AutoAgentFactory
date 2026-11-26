@@ -43,7 +43,7 @@ pub(super) fn match_route(method: &str, path: &str) -> Route {
     };
     match path {
         "/" => return exact("GET", Route::Index),
-        "/studio" => return exact("GET", Route::Studio),
+        "/health" | "/studio" => return exact("GET", Route::Studio),
         "/manifest.webmanifest" => return exact("GET", Route::Static(StaticAsset::Manifest)),
         "/apple-touch-icon.png" => return exact("GET", Route::Static(StaticAsset::AppleTouchIcon)),
         "/icon.svg" => return exact("GET", Route::Static(StaticAsset::IconSvg)),

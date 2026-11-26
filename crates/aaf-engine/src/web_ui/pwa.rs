@@ -59,7 +59,7 @@ pub const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="
 pub const MANIFEST_JSON: &str = r##"{
   "name": "AutoAgentFactory Dashboard",
   "short_name": "AAF Dashboard",
-  "description": "AutoAgentFactory Kanban Cockpit & Studio",
+  "description": "AutoAgentFactory Kanban Cockpit & Health",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

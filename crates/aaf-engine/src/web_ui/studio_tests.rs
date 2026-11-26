@@ -79,22 +79,25 @@ fn get(addr: std::net::SocketAddr, path: &str, auth: bool) -> super::tests::RawR
 #[test]
 fn studio_page_is_served_with_the_strict_csp_and_no_data() {
     let (handle, _) = start();
-    let resp = get(handle.addr(), "/studio", false);
-    assert_eq!(resp.status, 200);
-    assert!(resp.body.contains("<title>AAF Studio</title>"));
-    assert!(resp.body.contains("/api/report"));
-    assert!(resp.body.contains("id=\"tokenDiagCard\""));
-    assert!(resp.body.contains("/api/streams/"));
-    assert!(resp.body.contains("wasted_desc"));
-    assert!(!resp.body.contains(TEST_TOKEN));
-    assert_eq!(
-        resp.headers
-            .get("content-security-policy")
-            .map(String::as_str),
-        Some(HTML_CSP)
-    );
-    // No external resource: the CSP would block it anyway.
-    assert!(!resp.body.contains("https://"));
+    for path in ["/health", "/studio"] {
+        let resp = get(handle.addr(), path, false);
+        assert_eq!(resp.status, 200, "route {path}");
+        assert!(resp.body.contains("<title>AAF Health</title>"));
+        assert!(resp.body.contains("/api/report"));
+        assert!(resp.body.contains("id=\"tokenDiagCard\""));
+        assert!(resp.body.contains("id=\"opsHealthCard\""));
+        assert!(resp.body.contains("/api/streams/"));
+        assert!(resp.body.contains("wasted_desc"));
+        assert!(!resp.body.contains(TEST_TOKEN));
+        assert_eq!(
+            resp.headers
+                .get("content-security-policy")
+                .map(String::as_str),
+            Some(HTML_CSP)
+        );
+        // No external resource: the CSP would block it anyway.
+        assert!(!resp.body.contains("https://"));
+    }
     handle.join();
 }
 

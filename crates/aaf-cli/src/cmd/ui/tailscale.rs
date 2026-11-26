@@ -307,14 +307,15 @@ pub(crate) fn attach_remote_output(
     };
     let remote_url = orig.pairing_url(token);
     let remote_clean = orig.clean_url();
-    let remote_studio = orig.studio_url(token);
+    let remote_health = orig.health_url(token);
     let card = render_remote_pairing_card(orig, token, read_only, include_qr);
     out.text.push('\n');
     out.text.push_str(&card);
     out.field("public_url", json!(orig.canonical))
         .field("remote_clean_url", json!(remote_clean))
         .field("remote_url", json!(remote_url))
-        .field("remote_studio_url", json!(remote_studio))
+        .field("remote_health_url", json!(remote_health))
+        .field("remote_studio_url", json!(remote_health))
 }
 
 #[cfg(test)]

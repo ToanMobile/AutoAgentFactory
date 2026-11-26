@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use super::actions::format_blocked_detail;
 use super::report_cache::UiCaches;
+use super::studio_ops::{OpsInput, collect_ops_diagnostics, empty_ops_diagnostics};
 use super::studio_repos::{collect_repo_rollup, resolve_requested_repo};
 use super::studio_tokens::helpers::safe_run_duration;
 use super::studio_tokens::{
@@ -29,9 +30,9 @@ use crate::ctx::{Ctx, SystemClock};
 type RunsByTask = HashMap<String, Vec<RunRecord>>;
 const LESSONS_EVENT_LIMIT: u32 = 2000;
 
-/// The `/studio` link next to a pairing URL (`http://h:p/#token=…`).
+/// The `/health` link next to a pairing URL (`http://h:p/#token=…`).
 pub(crate) fn studio_url(pairing_url: &str) -> String {
-    pairing_url.replacen("/#token=", "/studio#token=", 1)
+    pairing_url.replacen("/#token=", "/health#token=", 1)
 }
 
 fn load_window_tasks_and_runs(
@@ -284,50 +285,63 @@ pub(crate) fn report_json_with_diag(
         None => crate::cmd::report::empty_report(window),
     };
     let stale_limit = stale_running_limit(dctx.run_timeout_secs);
-    let (breakdown, token_diagnostics, by_repo, blocked_upstream_list, gate_taxonomy) = match db {
-        Some(db) => {
-            let (tasks, runs_by_task) = load_window_tasks_and_runs(db, repo, window.since)?;
-            let (diag, extras) =
-                collect_token_diagnostics(db, &tasks, &runs_by_task, window.since, now, dctx);
-            let ready_tasks: Vec<Task> = tasks
-                .iter()
-                .filter(|t| t.state == TaskState::Ready)
-                .cloned()
-                .collect();
-            let all_deps = db.all_deps().unwrap_or_default();
-            let blocked_pairs = blocked_upstream_tasks(&ready_tasks, &tasks, &all_deps);
-            let blocked_map: HashMap<String, String> = blocked_pairs.iter().cloned().collect();
-            let tb = collect_task_breakdown(
-                &tasks,
-                &runs_by_task,
-                now,
-                stale_limit,
-                &extras,
-                &blocked_map,
-            );
-            let repos = collect_repo_rollup(&tasks, &runs_by_task, &extras, &blocked_map);
-            let blocked_json: Vec<Value> = blocked_pairs
-                .into_iter()
-                .take(20)
-                .map(|(tid, by)| json!({ "task_id": tid, "blocked_by": by }))
-                .collect();
-            let recent_evs: Vec<_> = db
-                .recent_events(repo, LESSONS_EVENT_LIMIT)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|e| window.since.is_none_or(|c| e.created_at >= c))
-                .collect();
-            let lessons = compute_lessons(&tasks, &recent_evs);
-            (tb, diag, repos, blocked_json, lessons)
-        }
-        None => (
-            Vec::new(),
-            empty_token_diagnostics(dctx),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ),
-    };
+    let (breakdown, token_diagnostics, by_repo, blocked_upstream_list, gate_taxonomy, ops_diag) =
+        match db {
+            Some(db) => {
+                let (tasks, runs_by_task) = load_window_tasks_and_runs(db, repo, window.since)?;
+                let (diag, extras) =
+                    collect_token_diagnostics(db, &tasks, &runs_by_task, window.since, now, dctx);
+                let ready_tasks: Vec<Task> = tasks
+                    .iter()
+                    .filter(|t| t.state == TaskState::Ready)
+                    .cloned()
+                    .collect();
+                let all_deps = db.all_deps().unwrap_or_default();
+                let blocked_pairs = blocked_upstream_tasks(&ready_tasks, &tasks, &all_deps);
+                let blocked_map: HashMap<String, String> = blocked_pairs.iter().cloned().collect();
+                let tb = collect_task_breakdown(
+                    &tasks,
+                    &runs_by_task,
+                    now,
+                    stale_limit,
+                    &extras,
+                    &blocked_map,
+                );
+                let repos = collect_repo_rollup(&tasks, &runs_by_task, &extras, &blocked_map);
+                let blocked_json: Vec<Value> = blocked_pairs
+                    .into_iter()
+                    .take(20)
+                    .map(|(tid, by)| json!({ "task_id": tid, "blocked_by": by }))
+                    .collect();
+                let recent_evs: Vec<_> = db
+                    .recent_events(repo, LESSONS_EVENT_LIMIT)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|e| window.since.is_none_or(|c| e.created_at >= c))
+                    .collect();
+                let lessons = compute_lessons(&tasks, &recent_evs);
+                let ops = collect_ops_diagnostics(&OpsInput {
+                    data_dir: dctx.data_dir,
+                    tasks: &tasks,
+                    runs_by_task: &runs_by_task,
+                    events: &recent_evs,
+                    report: &report,
+                    token_diagnostics: &diag,
+                    breakdown: &tb,
+                    since: window.since,
+                    now,
+                });
+                (tb, diag, repos, blocked_json, lessons, ops)
+            }
+            None => (
+                Vec::new(),
+                empty_token_diagnostics(dctx),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                empty_ops_diagnostics(),
+            ),
+        };
     let score = compute_factory_score(&report);
     let mut value = serde_json::to_value(&report).map_err(|e| format!("report: {e}"))?;
     let score_val = serde_json::to_value(&score).map_err(|e| format!("score: {e}"))?;
@@ -345,6 +359,7 @@ pub(crate) fn report_json_with_diag(
         "gate_failure_taxonomy": gate_taxonomy,
         "task_breakdown": breakdown,
         "token_diagnostics": token_diagnostics,
+        "ops_diagnostics": ops_diag,
     });
     if let Some(rh) = runtime_health {
         root["runtime_health"] = rh;
@@ -390,7 +405,7 @@ mod tests {
     fn studio_url_keeps_the_token_fragment() {
         assert_eq!(
             studio_url("http://127.0.0.1:4317/#token=abc"),
-            "http://127.0.0.1:4317/studio#token=abc"
+            "http://127.0.0.1:4317/health#token=abc"
         );
     }
 

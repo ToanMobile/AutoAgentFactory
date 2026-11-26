@@ -506,9 +506,10 @@ pub(crate) fn run_service_url(
     let token_file = token_path(&ctx.data_dir);
     let out = CmdOutput::ok(
         "ok",
-        format!("Cockpit (read-only): {url}\nStudio (statistics): {studio}"),
+        format!("Cockpit (read-only): {url}\nHealth (monitoring): {studio}"),
     )
     .field("url", json!(url))
+    .field("health_url", json!(studio))
     .field("studio_url", json!(studio))
     .field("token_file", json!(token_file.display().to_string()))
     .field("read_only", json!(true));
@@ -549,7 +550,7 @@ pub(crate) fn run_install(
     let out = CmdOutput::ok(
         "ok",
         format!(
-            "installed {SERVICE_LABEL} ({})\nCockpit ({mode_lbl}): {url}\nStudio (statistics): {studio}\nLog: {}",
+            "installed {SERVICE_LABEL} ({})\nCockpit ({mode_lbl}): {url}\nHealth (monitoring): {studio}\nLog: {}",
             plist.display(),
             log.display()
         ),
@@ -559,6 +560,7 @@ pub(crate) fn run_install(
     .field("log", json!(log.display().to_string()))
     .field("token_file", json!(token_file.display().to_string()))
     .field("url", json!(url))
+    .field("health_url", json!(studio))
     .field("studio_url", json!(studio))
     .field("read_only", json!(!allow_actions))
     .field("allow_actions", json!(allow_actions))

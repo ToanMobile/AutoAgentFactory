@@ -41,9 +41,14 @@ impl TrustedOrigin {
         format!("{}/#token={token}", self.canonical)
     }
 
-    /// Studio URL carrying the bearer token solely in the URL fragment.
+    /// Health dashboard URL carrying the bearer token solely in the URL fragment.
+    pub fn health_url(&self, token: &str) -> String {
+        format!("{}/health#token={token}", self.canonical)
+    }
+
+    /// Legacy alias for `health_url` (kept for backward compatibility).
     pub fn studio_url(&self, token: &str) -> String {
-        format!("{}/studio#token={token}", self.canonical)
+        self.health_url(token)
     }
 }
 

@@ -1,20 +1,20 @@
 ---
 name: aaf-studio-reset
 description: >-
-  Xoá sạch dữ liệu thống kê/telemetry cũ của AAF Studio (`/studio`, `/api/report`)
+  Xoá sạch dữ liệu thống kê/telemetry cũ của AAF Health (`/health`, tên cũ `/studio`, `/api/report`)
   sau khi sửa bug AAF để đo lại số liệu mới hoàn toàn sạch mà không làm gián đoạn
   các task đang chạy (`running`), tài khoản, khoá ký receipt hay lịch sử cấu trúc
   task. Tự động backup SQLite trước khi xoá, dọn `runs` đã kết thúc, sự kiện
   telemetry cũ, `root_budgets`, file `streams/*.jsonl` cũ, `~/.cache/aaf-health/metrics.jsonl`,
   tuỳ chọn ẩn (archive) các task `done`/`cancelled` cũ và checkpoint WAL.
   Kích hoạt khi gõ `/aaf-studio-reset`, `/aaf-delete`, `/delete-studio`,
-  "xoá studio", "xóa studio", "xoá data studio", "reset studio", "clean studio",
-  hoặc "làm sạch data studio sau khi fix bug".
+  "xoá studio", "xóa studio", "xoá data studio", "reset studio", "reset health",
+  "xoá data health", "clean studio", hoặc "làm sạch data health/studio sau khi fix bug".
 ---
 
-# AAF Studio Data Reset (`/aaf-studio-reset`)
+# AAF Health Data Reset (`/aaf-studio-reset`)
 
-Skill dùng để **làm sạch toàn bộ dữ liệu thống kê cũ trên `/studio` (`/api/report`)** ngay sau mỗi đợt sửa lỗi AutoAgentFactory (AAF), giúp bảng điều khiển Studio và `/aaf_heath` bắt đầu ghi nhận số liệu hoàn toàn sạch từ mốc hiện tại (0 wasted tokens, 0 stale alerts, 0 unmeasured-long lịch sử) **mà không làm chết các worker đang chạy**.
+Skill dùng để **làm sạch toàn bộ dữ liệu thống kê cũ trên `/health` (tên cũ `/studio`, `/api/report`)** ngay sau mỗi đợt sửa lỗi AutoAgentFactory (AAF), giúp bảng điều khiển AAF Health và `/aaf_heath` bắt đầu ghi nhận số liệu hoàn toàn sạch từ mốc hiện tại (0 wasted tokens, 0 stale alerts, 0 unmeasured-long lịch sử) **mà không làm chết các worker đang chạy**.
 
 > [!CAUTION]
 > - Tuyệt đối **KHÔNG** đụng vào `/Volumes/Data/Toan/agent-workbench` (repo đã blacklisted).

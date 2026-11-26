@@ -275,7 +275,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         <button id="topAccPill" class="acc-top-pill hidden" type="button" data-i18n-title="topbar.topAccTitle" title="Active account — click to open Accounts tab"></button>
         <button id="supBtn" class="sup-btn hidden" type="button" aria-pressed="false" title="Select repo(s) in Repos bar then toggle Auto-Run (or All for all repos)"><span class="dot"></span><span id="supLabel">Auto-Run: OFF</span></button>
         <button id="newTaskBtn" class="btn-primary btn-sm hidden" type="button" data-i18n="topbar.newTask">+ New Task</button>
-        <a href="/studio" class="btn-link" data-i18n="topbar.studio" data-i18n-title="topbar.studioTitle" title="Detailed per-task metrics, duration &amp; tokens">Studio</a>
+        <a href="/health" class="btn-link" data-i18n="topbar.studio" data-i18n-title="topbar.studioTitle" title="Factory health: quality, speed, slots, tokens &amp; alerts">Health</a>
         <button id="refreshBtn" class="btn-sm icon-btn" type="button" data-i18n-title="topbar.refreshTitle" data-i18n-aria="topbar.refreshTitle" title="Refresh data" aria-label="Refresh data">↻</button>
         <button id="themeBtn" class="btn-sm icon-btn" type="button" data-i18n-title="topbar.themeTitle" data-i18n-aria="topbar.themeTitle" title="Toggle Light / Dark theme" aria-label="Toggle Light / Dark theme">◐</button>
         <button id="langBtn" class="btn-sm icon-btn mono" type="button" data-i18n-title="topbar.langTitle" data-i18n-aria="topbar.langTitle" title="Switch language (EN / VI)" aria-label="Switch language (EN / VI)">EN</button>
@@ -404,9 +404,9 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     <span class="mnav-ic">◎</span>
     <span data-i18n="tab.accounts">Accounts</span>
   </button>
-  <a href="/studio" class="mnav-btn" id="mnavStudio" data-mnav="studio">
+  <a href="/health" class="mnav-btn" id="mnavStudio" data-mnav="studio">
     <span class="mnav-ic">▤</span>
-    <span data-i18n="tab.studio">Studio</span>
+    <span data-i18n="tab.studio">Health</span>
   </a>
 </nav>
 
@@ -444,7 +444,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 <div id="authBg" class="auth-bg" role="dialog" aria-modal="true" aria-labelledby="authTitle">
   <div class="modal">
     <h3 id="authTitle" data-i18n="auth.title">Sign in to AutoAgentFactory Dashboard</h3>
-    <p class="muted" style="margin-top:0"><span data-i18n="auth.descPrefix">Paste the bearer token printed by</span> <span class="mono">aaf ui</span> / <span class="mono">aaf ui --service-url</span><span data-i18n="auth.descMid">, or reopen</span> <span class="mono">/studio</span> <span data-i18n="auth.descSuffix">from Agent Office.</span></p>
+    <p class="muted" style="margin-top:0"><span data-i18n="auth.descPrefix">Paste the bearer token printed by</span> <span class="mono">aaf ui</span> / <span class="mono">aaf ui --service-url</span><span data-i18n="auth.descMid">, or reopen</span> <span class="mono">/health</span> <span data-i18n="auth.descSuffix">from Agent Office.</span></p>
     <div style="display:flex;gap:6px;align-items:center">
       <input id="tokenInput" type="password" class="mono" data-i18n-placeholder="auth.tokenPlaceholder" placeholder="Bearer token…" style="flex:1;min-width:0">
       <button id="tokenPasteBtn" type="button" data-i18n="auth.paste" data-i18n-title="auth.pasteTitle" title="Paste token from clipboard">Paste</button>

@@ -307,7 +307,7 @@ TOKEN_FILE="$DATA_DIR/ui-service.token"
 if [[ -f "$TOKEN_FILE" ]] && curl -fsS --max-time 2 "http://127.0.0.1:4317/api/health" >/dev/null 2>&1; then
   TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
   echo ""
-  echo "=== LIVE /studio CHECK (/api/report?since=24) ==="
+  echo "=== LIVE /health CHECK (/api/report?since=24) ==="
   if STUDIO_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:4317/api/report?since=24")"; then
     STUDIO_JSON="$STUDIO_JSON" python3 - <<'PY'
 import json, os

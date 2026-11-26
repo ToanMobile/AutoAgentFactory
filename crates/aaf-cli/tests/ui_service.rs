@@ -85,11 +85,13 @@ fn service_url_creates_persistent_0600_token_and_reuses_it() {
     assert_eq!(out1["read_only"], json!(true));
     let url1 = out1["url"].as_str().unwrap();
     assert!(url1.starts_with("http://127.0.0.1:4317/#token="), "{url1}");
-    let studio1 = out1["studio_url"].as_str().unwrap();
+    let health1 = out1["health_url"].as_str().unwrap();
     assert!(
-        studio1.starts_with("http://127.0.0.1:4317/studio#token="),
-        "{studio1}"
+        health1.starts_with("http://127.0.0.1:4317/health#token="),
+        "{health1}"
     );
+    let studio1 = out1["studio_url"].as_str().unwrap();
+    assert_eq!(studio1, health1);
 
     let tok_path = sb.data.join("ui-service.token");
     assert!(tok_path.is_file());
@@ -166,13 +168,15 @@ fn service_mode_serves_cockpit_and_studio_strictly_read_only() {
     assert!(idx_body.contains("Kanban"));
     assert!(!idx_body.contains(&token));
 
-    let (st_studio, studio_body) = raw_http(
-        port,
-        &format!("GET /studio HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
-    );
-    assert_eq!(st_studio, 200);
-    assert!(studio_body.contains("<title>AAF Studio</title>"));
-    assert!(!studio_body.contains(&token));
+    for path in ["/health", "/studio"] {
+        let (st_health, health_body) = raw_http(
+            port,
+            &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        );
+        assert_eq!(st_health, 200, "{path}");
+        assert!(health_body.contains("<title>AAF Health</title>"));
+        assert!(!health_body.contains(&token));
+    }
 
     // Unauthenticated API calls are rejected.
     let (st_unauth, _) = raw_http(

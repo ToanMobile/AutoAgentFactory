@@ -333,7 +333,7 @@ if [[ "$(uname -s)" == "Darwin" && -z "${AAF_RUN_ID:-}" && "${AAF_SKIP_UI_SERVIC
         sleep 0.3
       done
       if [[ "$ui_ok" -eq 1 ]]; then
-        echo "    AAF Cockpit service: UP on http://127.0.0.1:4317 (${install_flags[*]:-read-only}) — Studio: http://127.0.0.1:4317/studio"
+        echo "    AAF Cockpit service: UP on http://127.0.0.1:4317 (${install_flags[*]:-read-only}) — Health: http://127.0.0.1:4317/health"
       else
         echo "    [WARN] AAF Cockpit service restarted, but http://127.0.0.1:4317/api/health not ready yet (check ~/Library/Logs/aaf-ui.log)" >&2
       fi

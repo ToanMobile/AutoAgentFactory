@@ -37,7 +37,7 @@ Script tự động thực hiện 5 bước, **không cần cờ nào**:
    - `which aaf aaf-hook` & `aaf --version`
    - `aaf executors list`
    - Smoke check `aaf-hook` fail-closed (payload JSON lỗi → exit `2`; `git push --force` → exit `2`).
-4. Tự khởi động lại (hoặc cài lần đầu trên macOS) dịch vụ nền `com.autoagentfactory.ui` (`aaf ui --service` trên `127.0.0.1:4317`, giữ nguyên `--allow-actions` nếu đã bật) và kiểm tra `/api/health` để `http://127.0.0.1:4317/studio` luôn dùng bản UI mới nhất (đặt `AAF_SKIP_UI_SERVICE=1` nếu muốn bỏ qua).
+4. Tự khởi động lại (hoặc cài lần đầu trên macOS) dịch vụ nền `com.autoagentfactory.ui` (`aaf ui --service` trên `127.0.0.1:4317`, giữ nguyên `--allow-actions` nếu đã bật) và kiểm tra `/api/health` để `http://127.0.0.1:4317/health` luôn dùng bản UI mới nhất (đặt `AAF_SKIP_UI_SERVICE=1` nếu muốn bỏ qua).
 5. Tự đồng bộ symlink các global skill (`aaf-update`, `aaf-audit`, `aaf-workflow`) qua `scripts/link-global-skills.sh` và báo cáo ngắn gọn version, đường dẫn binary và kết quả kiểm tra.
 
 ---

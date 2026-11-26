@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>AAF Studio</title>
+<title>AAF Health</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/svg+xml" href="/icon.svg?v=4">
 <link rel="icon" type="image/png" href="/apple-touch-icon.png?v=4">
@@ -182,7 +182,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
 <header>
   <div class="brand">
     <img src="/apple-touch-icon.png?v=4" alt="AutoAgentFactory" class="brand-logo" width="32" height="32">
-    <h1>AAF Studio</h1>
+    <h1>AAF Health</h1>
     <span class="pill hidden" id="roPill">READ-ONLY</span>
     <span class="scope" id="scope"></span>
     <span class="pill" id="factory">…</span>
@@ -209,7 +209,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   <section class="grid" id="kpis"></section>
 
   <section class="card hidden" id="repoRollupCard">
-    <div class="head"><div><h2 id="repoRollupTitle">Repository Overview</h2><div class="sub" id="repoRollupSub">Task status, upstream blockers, token waste rate, and Auto-Runner per repository. Click a row to filter Studio.</div></div></div>
+    <div class="head"><div><h2 id="repoRollupTitle">Repository Overview</h2><div class="sub" id="repoRollupSub">Task status, upstream blockers, token waste rate, and Auto-Runner per repository. Click a row to filter Health.</div></div></div>
     <div id="repoRollup" class="table-wrap"></div>
   </section>
 
@@ -225,6 +225,18 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     <div id="tokMetrics" class="tok-grid"></div>
     <div id="tokTopRunsWrap"></div>
     <div id="tokSubWrap" class="sub-grid"></div>
+  </section>
+
+  <section class="card hidden" id="opsHealthCard">
+    <div class="head">
+      <div>
+        <h2 id="opsHealthTitle">Quality, Speed &amp; Efficiency Diagnostics</h2>
+        <div class="sub" id="opsHealthSub">Synced with <code>/aaf_heath</code>: mechanical &amp; Cross-Audit scores, vacuous tests, coding/audit/gate p50/p90 latency, heavy-slot deadlocks, stalled workers, and tokens per done task.</div>
+      </div>
+      <span class="pill ok" id="opsHealthBadge">Healthy</span>
+    </div>
+    <div id="opsAlerts"></div>
+    <div id="opsMetrics" class="tok-grid"></div>
   </section>
 
   <section class="card hidden" id="runtimeHealthCard">
@@ -346,7 +358,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
   let lang = "en";
   const isVi = () => lang === "vi";
   const L = (en, vi) => (lang === "vi" ? vi : en);
-  let token = "", hours = "168", repoFilter = "", timer = null, tasks = [], breakdown = [], byRepo = [], gateTaxonomy = [], blockedUpstream = [], tokenDiag = null, runtimeHealth = null, lastStatus = null, lastReport = null, lastScoreVal = null, isReadOnly = false, metaLoaded = false, knownRepos = [], lastTbReposKey = "", drawerSeq = 0, streamSeq = 0, refreshSeq = 0, refreshAbort = null, lastFocus = null, authChan = null, bootedViaChannel = false;
+  let token = "", hours = "168", repoFilter = "", timer = null, tasks = [], breakdown = [], byRepo = [], gateTaxonomy = [], blockedUpstream = [], tokenDiag = null, opsDiag = null, runtimeHealth = null, lastStatus = null, lastReport = null, lastScoreVal = null, isReadOnly = false, metaLoaded = false, knownRepos = [], lastTbReposKey = "", drawerSeq = 0, streamSeq = 0, refreshSeq = 0, refreshAbort = null, lastFocus = null, authChan = null, bootedViaChannel = false;
 
   function store(kind, key, val) { try { kind.setItem(key, val); } catch (_) {} }
   function load(kind, key) { try { return kind.getItem(key); } catch (_) { return null; } }
@@ -367,7 +379,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     if ($("accountsLink")) $("accountsLink").textContent = L("Accounts", "Tài khoản");
     if ($("bannerBtn")) $("bannerBtn").textContent = L("Open on Dashboard →", "Mở trên Dashboard →");
     if ($("repoRollupTitle")) $("repoRollupTitle").textContent = L("Repository Overview", "Tổng quan theo Repo");
-    if ($("repoRollupSub")) $("repoRollupSub").textContent = L("Task status, upstream blockers, token waste rate, and Auto-Runner per repository. Click a row to filter Studio.", "Trạng thái task, luồng bị chặn upstream, tỷ lệ lãng phí token và Auto-Runner từng repo. Bấm vào 1 repo để lọc toàn trang Studio.");
+    if ($("repoRollupSub")) $("repoRollupSub").textContent = L("Task status, upstream blockers, token waste rate, and Auto-Runner per repository. Click a row to filter Health.", "Trạng thái task, luồng bị chặn upstream, tỷ lệ lãng phí token và Auto-Runner từng repo. Bấm vào 1 repo để lọc toàn trang Health.");
     if ($("tokDiagTitle")) $("tokDiagTitle").textContent = L("Token Burn Diagnostics & Alerts", "Chẩn đoán & Cảnh báo Token");
     if ($("tokDiagSub")) $("tokDiagSub").innerHTML = L(
       "Detects wasted tokens (failed / timed_out / killed / limit_hit), long 0/0 token leaks (&ge;30s), Cross-Audit share, duplicate <code>tree_fp</code> audits, 5m/1h/24h burn rate (Cost Guard), and anomalous runs. Click <b>View log</b> to inspect tool calls.",
@@ -436,6 +448,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       renderKpis(lastReport);
       renderRepoRollup();
       renderTokenDiagnostics(tokenDiag);
+      renderOpsDiagnostics(opsDiag);
       renderRuntimeHealth(runtimeHealth);
       if (lastScoreVal && window.AafPipelineUI && typeof window.AafPipelineUI.renderStudioScore === "function") {
         window.AafPipelineUI.renderStudioScore($("scoreBox"), lastScoreVal);
@@ -521,7 +534,7 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     clearTok();
     token = "";
     metaLoaded = false;
-    tasks = []; breakdown = []; byRepo = []; gateTaxonomy = []; blockedUpstream = []; tokenDiag = null; runtimeHealth = null; lastStatus = null;
+    tasks = []; breakdown = []; byRepo = []; gateTaxonomy = []; blockedUpstream = []; tokenDiag = null; opsDiag = null; runtimeHealth = null; lastStatus = null;
     syncAuthButtons();
     if (broadcast && hadToken && authChan) { try { authChan.postMessage({ type: "clear" }); } catch (_) {} }
     showAuth(msg || "Phiên đã được khoá.");
@@ -1077,6 +1090,78 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
     }).join("") + `</tbody></table>`;
   }
 
+  function renderOpsDiagnostics(ops) {
+    const card = $("opsHealthCard");
+    if (!card) return;
+    if (!ops || !ops.quality || !ops.speed) { card.classList.add("hidden"); return; }
+    card.classList.remove("hidden");
+    const q = ops.quality || {}, sp = ops.speed || {}, ef = ops.efficiency || {};
+    const alerts = Array.isArray(ops.alerts) ? ops.alerts : [];
+    if ($("opsHealthTitle")) $("opsHealthTitle").textContent = L("Quality, Speed & Efficiency Diagnostics", "Chất lượng, Tốc độ & Hiệu quả (4 trụ cột)");
+    if ($("opsHealthSub")) $("opsHealthSub").innerHTML = L(
+      "Single source of truth for <code>/aaf_heath</code>: mechanical &amp; Cross-Audit scores, vacuous tests, coding/audit/gate p50/p90 latency, heavy-slot deadlocks, stalled workers, and tokens per done task.",
+      "Nguồn sự thật duy nhất đồng bộ với <code>/aaf_heath</code>: điểm mechanical &amp; Cross-Audit, vacuous test, tốc độ coding/audit/gate (p50/p90), deadlock heavy slot, worker treo và token/task done."
+    );
+    const badge = $("opsHealthBadge");
+    if (badge) {
+      const activeAlerts = alerts.filter((a) => a.active_recent !== false);
+      const hasHigh = activeAlerts.some((a) => a.severity === "high" || a.severity === "critical");
+      badge.className = "pill " + (hasHigh ? "err" : (activeAlerts.length ? "warn" : "ok"));
+      badge.textContent = activeAlerts.length
+        ? L(`${activeAlerts.length} ops alert${activeAlerts.length > 1 ? "s" : ""}`, `${activeAlerts.length} cảnh báo vận hành`)
+        : (alerts.length ? L(`Healthy (${alerts.length} hist)`, `Ổn định (${alerts.length} lịch sử)`) : L("Healthy", "Ổn định"));
+    }
+    $("opsAlerts").innerHTML = alerts.length
+      ? `<div class="alert-list" style="margin-bottom:12px">` + alerts.map((a) => {
+          const chips = Array.isArray(a.task_ids) && a.task_ids.length
+            ? `<div class="alert-tasks">${a.task_ids.slice(0, 6).map((tid) => `<button type="button" class="chip-btn" data-task="${esc(tid)}">${esc(tid)}</button>`).join("")}</div>`
+            : "";
+          const histTag = a.active_recent === false ? ` <span class="pill" style="font-size:11px">${esc(L("historical", "lịch sử"))}</span>` : "";
+          return `<div class="alert-item sev-${esc(a.severity || "medium")}"${a.active_recent === false ? ' style="opacity:.78"' : ""}><div class="alert-top"><span class="pill ${a.severity === "high" || a.severity === "critical" ? "err" : "warn"}">${esc((a.category ? a.category + ":" : "") + (a.code || "ops"))}</span>${histTag}<span>${esc(a.title || "")}</span></div><div class="alert-detail">${esc(a.detail || "")}</div>${chips}</div>`;
+        }).join("") + `</div>`
+      : "";
+    const activeCodes = new Set(alerts.filter((a) => a.active_recent !== false).map((a) => a.code));
+    const qBad = activeCodes.has("clear_gate_with_mechanical_score_zero");
+    const qWarn = activeCodes.has("vacuous_test_warnings") || activeCodes.has("high_rework_churn") || activeCodes.has("low_first_pass_gate") || activeCodes.has("high_cross_audit_fail_rate");
+    const deadOrph = Array.isArray(sp.dead_orphan_slots) ? sp.dead_orphan_slots.length : 0;
+    const stalledList = Array.isArray(sp.stalled_workers) ? sp.stalled_workers : [];
+    const stalledN = stalledList.length;
+    const hasHighStall = stalledList.some((w) => w && w.severity === "high");
+    const slotErr = deadOrph > 0 || activeCodes.has("heavy_slot_drain_deadlock") || activeCodes.has("heavy_slot_queue_stalled") || hasHighStall;
+    const slotWarn = !slotErr && (activeCodes.has("heavy_slot_queue_slow") || stalledN > 0);
+    const gateAvgS = sp.gate_avg_secs != null ? Number(sp.gate_avg_secs) : 0;
+    const spErr = activeCodes.has("slow_gate_avg") && gateAvgS > 420;
+    const spWarn = !spErr && activeCodes.has("slow_gate_avg");
+    const efWarn = activeCodes.has("high_tokens_per_done") || activeCodes.has("high_burn_zero_done");
+    const mechTxt = q.mech_avg != null ? `${Number(q.mech_avg).toFixed(1)}/100` : "—";
+    const llmTxt = q.llm_avg != null ? `${Number(q.llm_avg).toFixed(1)}` : "—";
+    const effTxt = q.audit_effective_avg != null ? `${Number(q.audit_effective_avg).toFixed(1)}` : "—";
+    const tpdTxt = ef.tokens_per_done != null ? compact(ef.tokens_per_done) : "—";
+    const ioTxt = ef.in_out_ratio != null ? `${Number(ef.in_out_ratio).toFixed(1)}:1` : "—";
+    const topTask = Array.isArray(ef.top_token_tasks) && ef.top_token_tasks.length ? ef.top_token_tasks[0] : null;
+    $("opsMetrics").innerHTML = `
+      <div class="tok-tile ${qBad ? "err-tile" : (qWarn ? "warn-tile" : "")}">
+        <span class="tl">${esc(L("Quality · Mechanical & Audit", "Chất lượng · Điểm cơ học & Audit"))}</span>
+        <span class="tv">Mech ${esc(mechTxt)} · LLM ${esc(llmTxt)}</span>
+        <span class="ts">Eff ${esc(effTxt)} · CLEAR=0: ${num(q.clear_with_mech_zero_count)} · vacuous: ${num(q.vacuous_test_warns)} · churn: ${num((q.high_rework_churn_tasks || []).length)}</span>
+      </div>
+      <div class="tok-tile ${spErr ? "err-tile" : (spWarn ? "warn-tile" : "")}">
+        <span class="tl">${esc(L("Speed · Coding / Gate / Throughput", "Tốc độ · Coding / Gate / Thông lượng"))}</span>
+        <span class="tv">${num(sp.done_1h)}/1h · ${num(sp.done_window)} ${esc(L("done", "xong"))}</span>
+        <span class="ts">coding p50 ${sp.coding_dur_p50_secs != null ? dur(sp.coding_dur_p50_secs) : "—"} (p90 ${sp.coding_dur_p90_secs != null ? dur(sp.coding_dur_p90_secs) : "—"}) · gate p50 ${sp.gate_dur_p50_secs != null ? dur(sp.gate_dur_p50_secs) : "—"} (avg ${sp.gate_avg_secs != null ? dur(sp.gate_avg_secs) : "—"})</span>
+      </div>
+      <div class="tok-tile ${slotErr ? "err-tile" : (slotWarn ? "warn-tile" : "")}">
+        <span class="tl">${esc(L("Heavy Slots · Queue · Stalls", "Heavy Slot · Hàng đợi · Worker treo"))}</span>
+        <span class="tv">${num(sp.active_slots)} ${esc(L("active", "đang chạy"))} · ${num(sp.waiters)} ${esc(L("waiting", "chờ"))}${sp.draining ? " · drain" : ""}</span>
+        <span class="ts">${esc(L("oldest wait:", "chờ lâu nhất:"))} ${sp.waiters ? dur(sp.oldest_wait_secs) : "0s"} · ${esc(L("dead orphans:", "orphan chết:"))} ${num(deadOrph)} · ${esc(L("stalled:", "treo:"))} ${num(stalledN)}</span>
+      </div>
+      <div class="tok-tile ${efWarn ? "warn-tile" : ""}">
+        <span class="tl">${esc(L("Token Efficiency · Per Done Task", "Hiệu quả Token · Mỗi task xong"))}</span>
+        <span class="tv">${esc(tpdTxt)} / ${esc(L("done", "task"))} · ${esc(ioTxt)}</span>
+        <span class="ts">${topTask ? `${esc(L("Top:", "Cao nhất:"))} <button type="button" class="chip-btn" data-task="${esc(topTask.id)}">${esc(topTask.id)}</button> (${compact(topTask.tokens_total)}, ${num(topTask.runs_total)} runs)` : esc(L("No token burn in window", "Chưa có đốt token trong kỳ"))}</span>
+      </div>`;
+  }
+
   function renderRuntimeHealth(rh) {
     const card = $("runtimeHealthCard");
     if (!card) return;
@@ -1493,11 +1578,13 @@ ul.ac li{margin:3px 0;overflow-wrap:anywhere}
       gateTaxonomy = Array.isArray(rep.value.gate_failure_taxonomy) ? rep.value.gate_failure_taxonomy : [];
       blockedUpstream = Array.isArray(rep.value.blocked_upstream) ? rep.value.blocked_upstream : [];
       tokenDiag = rep.value.token_diagnostics || null;
+      opsDiag = rep.value.ops_diagnostics || null;
       runtimeHealth = rep.value.runtime_health || null;
       syncBreakdownRepoSelect();
       renderKpis(r);
       renderRepoRollup();
       renderTokenDiagnostics(tokenDiag);
+      renderOpsDiagnostics(opsDiag);
       renderRuntimeHealth(runtimeHealth);
       const scoreVal = r.score !== undefined ? r.score : rep.value.score;
       lastScoreVal = scoreVal || null;

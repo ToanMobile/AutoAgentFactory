@@ -138,7 +138,7 @@ fn render(hosts: &str, init_text: &str, summary: &Summary, cwd: &Path) -> String
     if summary.failed_required.is_empty() {
         let _ = writeln!(
             out,
-            "\nReady. Next:\n  aaf board add --title \"…\" --spec \"…\" --accept \"…\"\n  aaf run\n  aaf ui   (then open the Studio link it prints: http://127.0.0.1:4317/studio)"
+            "\nReady. Next:\n  aaf board add --title \"…\" --spec \"…\" --accept \"…\"\n  aaf run\n  aaf ui   (then open the Health link it prints: http://127.0.0.1:4317/health)"
         );
     } else {
         let _ = writeln!(
@@ -191,6 +191,6 @@ mod tests {
         assert!(text.contains("run aaf setup again"));
         let ok = render("claude", "init ok", &Summary::default(), Path::new("/r"));
         assert!(ok.contains("Ready. Next:"));
-        assert!(ok.contains("/studio"));
+        assert!(ok.contains("/health"));
     }
 }

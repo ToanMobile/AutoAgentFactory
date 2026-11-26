@@ -276,4 +276,4 @@ esac
 
 printf '\nNext, inside the git repository the factory should work on:\n'
 printf '  aaf setup    # detects your agents, registers the hook, checks everything\n'
-printf '  aaf ui       # then open http://127.0.0.1:4317/studio from the link it prints\n'
+printf '  aaf ui       # then open http://127.0.0.1:4317/health from the link it prints\n'

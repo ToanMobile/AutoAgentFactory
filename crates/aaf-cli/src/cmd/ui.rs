@@ -12,6 +12,7 @@ mod service;
 mod service_env;
 mod studio;
 mod studio_health;
+mod studio_ops;
 mod studio_repos;
 mod studio_tokens;
 mod supervisor;
@@ -207,7 +208,7 @@ pub fn run(args: &UiArgs, ctx: &Ctx) -> CmdResult {
     } else {
         let card = render_pairing_card(&url, read_only, cfg.lan_mode, args.qr);
         eprintln!(
-            "{card}\nStudio (statistics only): {}",
+            "{card}\nHealth (monitoring & diagnostics): {}",
             studio::studio_url(&url)
         );
         if let Some(orig) = &trusted_origin {
