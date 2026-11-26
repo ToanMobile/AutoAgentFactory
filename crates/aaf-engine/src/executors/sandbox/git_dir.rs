@@ -57,10 +57,10 @@ pub(super) fn submodule_git_dirs(git_dir: &Path) -> PortResult<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// `root/modules` and `root/worktrees/<name>/modules`.
+/// `root/modules` and `root/worktrees/<name>/modules`, past a linked `worktrees`.
 fn modules_dirs(root: &Path) -> PortResult<Vec<PathBuf>> {
     let mut dirs = vec![root.join("modules")];
-    for admin in sub_dirs(&root.join("worktrees"))? {
+    for admin in sub_dirs(&super::canonical(path_str(&root.join("worktrees"))?)?)? {
         dirs.push(admin.join("modules"));
     }
     Ok(dirs)
@@ -68,6 +68,11 @@ fn modules_dirs(root: &Path) -> PortResult<Vec<PathBuf>> {
 
 /// The directories (not links) directly in `dir`; none when it is missing.
 fn sub_dirs(dir: &Path) -> PortResult<Vec<PathBuf>> {
+    listed(dir, std::fs::FileType::is_dir)
+}
+
+/// The entries directly in `dir` whose own type (links not followed) is `kept`; none if missing.
+fn listed(dir: &Path, kept: fn(&std::fs::FileType) -> bool) -> PortResult<Vec<PathBuf>> {
     let unreadable =
         |err: std::io::Error| PortError::Invalid(format!("sandbox cannot list {dir:?}: {err}"));
     let entries = match std::fs::read_dir(dir) {
@@ -78,7 +83,7 @@ fn sub_dirs(dir: &Path) -> PortResult<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     for entry in entries {
         let entry = entry.map_err(unreadable)?;
-        if entry.file_type().map_err(unreadable)?.is_dir() {
+        if kept(&entry.file_type().map_err(unreadable)?) {
             dirs.push(entry.path());
         }
     }
@@ -108,13 +113,16 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>, walked: &mut usize) 
 /// Closed paths under `git_dir` whose ancestor directory entries must be
 /// pinned against rename/deletion (without blocking sibling creation inside
 /// `refs/heads`, so `refs/heads/aaf/*` stays writable).
-pub(super) fn protected_closed_paths(git_dir: &Path, worktree: Option<&Path>) -> Vec<PathBuf> {
+pub(super) fn protected_closed_paths(
+    git_dir: &Path,
+    worktree: Option<&Path>,
+) -> PortResult<Vec<PathBuf>> {
     let mut paths = vec![
         git_dir.join("refs/aaf"),
         git_dir.join("info/exclude"),
         git_dir.join("packed-refs"),
     ];
-    if worktree.is_some_and(|wt| is_linked_worktree_of(wt, git_dir)) {
+    if let Some(own) = worktree.and_then(|wt| linked_worktree_admin_dir(wt, git_dir)) {
         for rel in [
             "refs/heads/main",
             "refs/heads/master",
@@ -124,8 +132,27 @@ pub(super) fn protected_closed_paths(git_dir: &Path, worktree: Option<&Path>) ->
         ] {
             paths.push(git_dir.join(rel));
         }
+        paths.extend(closed_whole(git_dir, &own)?);
     }
-    paths
+    Ok(paths)
+}
+
+/// What linked worktree `own` of `git_dir` may not write (SEC-036), past links: `modules` and
+/// where it leads (even nowhere yet), where every link directly in `modules` or in the admin
+/// dirs (but `own`) leads, and every link on the way to those and to `worktrees`.
+fn closed_whole(git_dir: &Path, own: &Path) -> PortResult<Vec<PathBuf>> {
+    let modules = git_dir.join("modules");
+    let resolved = super::canonical(path_str(&modules)?)?;
+    let mut links = listed(own.parent().unwrap_or(own), std::fs::FileType::is_symlink)?;
+    links.extend(listed(&resolved, std::fs::FileType::is_symlink)?);
+    links.retain(|link| link != own);
+    let mut closed = super::links_to(path_str(&git_dir.join("worktrees"))?)?;
+    links.push(modules);
+    for link in &links {
+        closed.extend(super::links_to(path_str(link)?)?);
+        closed.push(super::canonical(path_str(link)?)?);
+    }
+    Ok(closed)
 }
 
 /// The deny rules for one git dir and its existing submodule git dirs
@@ -158,12 +185,25 @@ pub(super) fn rules(git_dir: &Path, subs: &[PathBuf]) -> PortResult<String> {
 /// own under `worktrees/<name>/` and writes only shared parts here.
 /// Direct children only: the entry of `git_dir` itself is closed, so none of
 /// them can be renamed away, changed and renamed back.
+/// Other worktrees' admin dirs (canonical `<admins>/<name>`: `subpath` matches whole names) and
+/// the primary `modules/` are closed whole (SEC-036, [`closed_whole`]); `own` stays writable.
 pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> PortResult<String> {
-    if !worktree.is_some_and(|worktree| is_linked_worktree_of(worktree, git_dir)) {
+    let Some(own) = worktree.and_then(|wt| linked_worktree_admin_dir(wt, git_dir)) else {
         return Ok(String::new());
-    }
+    };
     let escaped = regex_escape(path_str(git_dir)?);
     let mut out = String::new();
+    out.push_str(&format!(
+        "(deny file-write* (require-all (subpath {}) (require-not (subpath {}))))\n",
+        sbpl_string(own.parent().unwrap_or(&own))?,
+        sbpl_string(&own)?
+    ));
+    for dir in closed_whole(git_dir, &own)? {
+        out.push_str(&format!(
+            "(deny file-write* (subpath {}))\n",
+            sbpl_string(&dir)?
+        ));
+    }
     for pattern in [
         "/([^/]*HEAD|index|AUTO_MERGE|MERGE_(MSG|MODE|RR|AUTOSTASH)|SQUASH_MSG|COMMIT_EDITMSG|BISECT_[^/]*|sharedindex\\.[^/]*)(\\.lock)?$",
         "/(rebase-merge|rebase-apply|sequencer)(/|$)",
@@ -182,32 +222,24 @@ pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> 
     Ok(out)
 }
 
-/// Whether the first `.git` met walking up from `worktree` is a plain file
-/// whose `gitdir:` leads below `<git_dir>/worktrees/`. A normal checkout (or
+/// When the first `.git` met walking up from `worktree` is a plain file
+/// whose `gitdir:` leads into `<git_dir>/worktrees/<name>`: that dir. A normal checkout (or
 /// a subdirectory of one), a submodule and a `--separate-git-dir` checkout
 /// own the `HEAD` and `index` in `git_dir`, so they are not linked.
-fn is_linked_worktree_of(worktree: &Path, git_dir: &Path) -> bool {
+fn linked_worktree_admin_dir(worktree: &Path, git_dir: &Path) -> Option<PathBuf> {
     let mut dot_gits = worktree.ancestors().map(|dir| dir.join(".git"));
-    let Some(dot_git) = dot_gits.find(|dot_git| dot_git.symlink_metadata().is_ok()) else {
-        return false;
-    };
+    let dot_git = dot_gits.find(|dot_git| dot_git.symlink_metadata().is_ok())?;
     // A `.git` link to a gitfile is followed, as git follows it.
     let text = match std::fs::metadata(&dot_git) {
         Ok(meta) if meta.is_file() => std::fs::read_to_string(&dot_git).unwrap_or_default(),
-        _ => return false,
+        _ => return None,
     };
-    let Some(target) = text
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("gitdir:"))
-    else {
-        return false;
-    };
+    let target = text.lines().next()?.strip_prefix("gitdir:")?;
     let base = dot_git.parent().unwrap_or(worktree);
     let admins = git_dir.join("worktrees");
-    let admins = std::fs::canonicalize(&admins).unwrap_or(admins);
-    std::fs::canonicalize(base.join(target.trim()))
-        .is_ok_and(|target| target != admins && target.starts_with(&admins))
+    let admins = super::canonical(path_str(&admins).ok()?).ok()?;
+    let target = std::fs::canonicalize(base.join(target.trim())).ok()?;
+    Some(admins.join(target.strip_prefix(&admins).ok()?.iter().next()?))
 }
 
 /// The linked worktrees of `root` (the git dir or one existing submodule
@@ -219,14 +251,24 @@ fn is_linked_worktree_of(worktree: &Path, git_dir: &Path) -> bool {
 /// would be a worktree registration the agent made up. Git's own work goes
 /// on below `worktrees/<name>/` and is not touched.
 fn worktree_rules(root: &Path) -> PortResult<String> {
-    let escaped = regex_escape(path_str(root)?);
-    let mut out = String::new();
+    let admins = root.join("worktrees");
+    let resolved = super::canonical(path_str(&admins)?)?;
+    let (mut escaped, mut out) = (regex_escape(path_str(&admins)?), String::new());
+    if resolved != admins {
+        let linked = regex_escape(path_str(&resolved)?);
+        // A linked `worktrees` is closed where it leads too, with the submodule obeyed files
+        // and `modules` entries there, which `obeyed_rules` does not see.
+        let new = "/[^/]+/modules(/.+/(hooks|config|config\\.worktree|commondir)(/|$)|$)";
+        let regex = sbpl_regex(&format!("^{linked}{new}"))?;
+        out.push_str(&format!("(deny file-write* (regex {regex}))\n"));
+        escaped = format!("({escaped}|{linked})");
+    }
     for pattern in [
         "/[^/]+/(hooks|config|config\\.worktree)(/|$)",
         "/[^/]+/(commondir|gitdir)(/|$)",
         "(/[^/]+)?$",
     ] {
-        let regex = sbpl_regex(&format!("^{escaped}/worktrees{pattern}"))?;
+        let regex = sbpl_regex(&format!("^{escaped}{pattern}"))?;
         out.push_str(&format!("(deny file-write* (regex {regex}))\n"));
     }
     Ok(out)
