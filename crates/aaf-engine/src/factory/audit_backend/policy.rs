@@ -276,3 +276,135 @@ fn split_cmd_words(input: &str) -> Result<Vec<String>, String> {
     }
     Ok(words)
 }
+
+/// `dual_review` with no `[[cross_audit.reviewers]]`: the two reviewers are
+/// `[run].executor` and the resolved auditor. When they are one provider the
+/// task gets the single audit instead and the returned warning says why;
+/// without this every task would stop at review for want of a quorum.
+pub fn fill_default_reviewers(cfg: &mut CrossAuditConfig, run_executor: &str) -> Option<String> {
+    use aaf_domain::pipeline::{ReviewerConfig, is_known_real_provider};
+    if !cfg.dual_review || !cfg.reviewers.is_empty() {
+        return None;
+    }
+    let run = run_executor.trim().to_ascii_lowercase();
+    let auditor = super::configured_audit_provider(&run, cfg)
+        .trim()
+        .to_ascii_lowercase();
+    if !is_known_real_provider(&run)
+        || !is_known_real_provider(&auditor)
+        || same_audit_provider(&run, &auditor)
+    {
+        cfg.dual_review = false;
+        return Some(format!(
+            "cross_audit.dual_review needs two providers and only {run} is set up here: \
+             one audit runs instead (install another CLI or list [[cross_audit.reviewers]])"
+        ));
+    }
+    let reviewer = |executor: &str| ReviewerConfig {
+        id: executor.to_string(),
+        executor: executor.to_string(),
+        executor_cmd: String::new(),
+        model: String::new(),
+        effort: String::new(),
+    };
+    cfg.reviewers = vec![reviewer(&run), reviewer(&auditor)];
+    None
+}
+
+/// [`fill_default_reviewers`], then the same for `plan_debate`: with no
+/// `plan_challenger`, no separate auditor and no reviewer of another
+/// provider there is nobody to challenge the plan, and every task would be
+/// blocked at the plan stage, so the debate is turned off with a warning.
+pub fn fall_back_to_one_provider(repo: &mut aaf_domain::config::RepoConfig) -> Vec<String> {
+    use aaf_domain::pipeline::is_known_real_reviewer;
+    let mut warnings: Vec<String> =
+        fill_default_reviewers(&mut repo.cross_audit, &repo.run.executor)
+            .into_iter()
+            .collect();
+    let pipe = &repo.pipeline;
+    if pipe.plan_debate && pipe.plan_challenger.is_empty() {
+        let author = if pipe.plan_author.executor.trim().is_empty() {
+            repo.run.executor.trim()
+        } else {
+            pipe.plan_author.executor.trim()
+        }
+        .to_string();
+        let cross = &repo.cross_audit;
+        let challenger = !cross.executor.trim().is_empty()
+            || !cross.executor_cmd.trim().is_empty()
+            || cross
+                .reviewers
+                .iter()
+                .any(|r| is_known_real_reviewer(r) && !same_audit_provider(&author, &r.executor));
+        if !challenger {
+            repo.pipeline.plan_debate = false;
+            warnings.push(format!(
+                "pipeline.plan_debate needs a second provider and only {author} is set up here: \
+                 the plan is written without a debate (install another CLI or set \
+                 [pipeline.plan_challenger])"
+            ));
+        }
+    }
+    warnings
+}
+
+#[cfg(test)]
+mod default_reviewers_tests {
+    use super::*;
+
+    fn dual(executor: &str) -> CrossAuditConfig {
+        CrossAuditConfig {
+            dual_review: true,
+            executor: executor.to_string(),
+            ..CrossAuditConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_runner_and_the_auditor_review_when_none_are_listed() {
+        let mut cfg = dual("antigravity");
+        assert_eq!(fill_default_reviewers(&mut cfg, "claude"), None);
+        let ids: Vec<&str> = cfg.reviewers.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["claude", "antigravity"]);
+        assert!(cfg.dual_review);
+    }
+
+    #[test]
+    fn one_provider_falls_back_to_one_audit_with_a_warning() {
+        let mut cfg = dual("");
+        assert!(fill_default_reviewers(&mut cfg, "claude").is_some());
+        assert!(!cfg.dual_review && cfg.reviewers.is_empty());
+    }
+
+    #[test]
+    fn a_debate_without_a_second_provider_is_turned_off() {
+        let mut repo = aaf_domain::config::RepoConfig::default();
+        repo.run.executor = "claude".into();
+        repo.pipeline.plan_debate = true;
+        repo.cross_audit.dual_review = true;
+        let warnings = fall_back_to_one_provider(&mut repo);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(!repo.pipeline.plan_debate && !repo.cross_audit.dual_review);
+
+        let mut repo = aaf_domain::config::RepoConfig::default();
+        repo.run.executor = "claude".into();
+        repo.pipeline.plan_debate = true;
+        repo.cross_audit.executor = "antigravity".into();
+        assert!(fall_back_to_one_provider(&mut repo).is_empty());
+        assert!(repo.pipeline.plan_debate);
+    }
+
+    #[test]
+    fn listed_reviewers_are_kept() {
+        let mut cfg = dual("codex");
+        cfg.reviewers = vec![aaf_domain::pipeline::ReviewerConfig {
+            id: "x".into(),
+            executor: "gemini".into(),
+            executor_cmd: String::new(),
+            model: String::new(),
+            effort: String::new(),
+        }];
+        assert_eq!(fill_default_reviewers(&mut cfg, "claude"), None);
+        assert_eq!(cfg.reviewers.len(), 1);
+    }
+}

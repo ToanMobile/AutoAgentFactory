@@ -1,0 +1,4 @@
+# Test and dev runs (debug builds only) keep the conservative struct defaults;
+# see crates/aaf-domain/src/builtin_defaults.rs. Release builds ignore it.
+[env]
+AAF_NO_BUILTIN_DEFAULTS = "1"

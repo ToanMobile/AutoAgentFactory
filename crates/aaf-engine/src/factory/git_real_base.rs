@@ -110,7 +110,7 @@ pub(super) fn refuse_nested_repositories(tree: &Path) -> PortResult<()> {
 fn load_global_config() -> Option<GlobalConfig> {
     let path = crate::config::global_config_path(&|k| std::env::var(k).ok())?;
     let text = std::fs::read_to_string(path).ok()?;
-    toml::from_str(&text).ok()
+    aaf_domain::builtin_defaults::parse_global(&text).ok()
 }
 
 /// Runs [`crate::git::pr_merge::merge_pr`] for an opened PR URL.

@@ -211,6 +211,7 @@ fn run_precedence_env_over_local_and_cli_over_env() {
 #[test]
 fn env_booleans_accept_common_spellings_and_empty_means_unset() {
     let fx = Fixture::new();
+    fx.tier2("[run]\nauto_merge = false\n");
     // Parsed as "true": the environment may not switch auto-merge on, so the
     // value shows up as the warning that it was ignored.
     for raw in ["1", "TRUE", "yes", "on"] {
@@ -500,4 +501,17 @@ fn run_env_pass_is_read_from_tier_two_only() {
         "{:?}",
         cfg.warnings
     );
+}
+
+/// `executor = "auto"` (the built-in default) takes the machine's auditor.
+#[test]
+fn an_auto_auditor_takes_the_global_one() {
+    let fx = Fixture::new();
+    fx.global("[cross_audit]\nexecutor = \"codex\"\nmodel = \"o9\"\n");
+    fx.tier2("[cross_audit]\nexecutor = \"auto\"\n");
+    let cfg = fx.ok(&[]);
+    assert_eq!(cfg.repo.cross_audit.executor, "codex");
+    assert_eq!(cfg.repo.cross_audit.model, "o9");
+    fx.tier2("[cross_audit]\nexecutor = \"gemini\"\n");
+    assert_eq!(fx.ok(&[]).repo.cross_audit.executor, "gemini");
 }

@@ -38,11 +38,11 @@ fn rust_by_cargo_toml_with_certain_commands() {
     let d = detect(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
     assert_eq!(d.profile, "rust");
     assert_eq!(d.commands.build, "cargo build");
-    assert_eq!(d.commands.test_scoped, "cargo test");
+    assert_eq!(d.commands.test_scoped, "cargo test {affected_packages}");
     assert_eq!(d.commands.test_full, "cargo test --workspace");
     assert_eq!(
         d.commands.lint,
-        "cargo clippy --workspace --all-targets -- -D warnings"
+        "cargo clippy {affected_packages} --all-targets -- -D warnings"
     );
     assert_eq!(d.evidence, vec!["Cargo.toml"]);
 }

@@ -450,8 +450,8 @@ global_freeze_consecutive_fails = 3
 [run]
 executor = "claude"         # claude, codex, antigravity, opencode or custom
 executor_cmd = []           # command template for non-Claude executors; {prompt} is substituted
-auto_merge = false          # false = open a PR with the gate receipt; true = merge when the gate is Clear
-max_parallel = 1
+auto_merge = true           # default: merge when the gate is Clear; false = open a PR and wait for a person
+max_parallel = 0            # default 0 = automatic (accounts, CPUs, memory pressure); N = fixed
 run_timeout_secs = 3600
 model = ""                  # Claude only: `claude --model`; empty = the CLI's own default
 effort = ""                 # Claude only: `claude --effort`; empty = the CLI's own default

@@ -29,6 +29,7 @@ fn aaf_text(fx: &Fixture, args: &[&str]) -> String {
         .args(args)
         .current_dir(&fx.repo)
         .env_clear()
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", fx.root().join("home"))
         .env("AAF_DATA_DIR", &fx.data)

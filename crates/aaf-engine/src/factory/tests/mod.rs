@@ -18,6 +18,7 @@ mod fakes;
 mod fakes_git;
 mod flake_heal;
 mod flow;
+mod full_gate;
 mod g3_rework_edges;
 mod git_real;
 mod halt_alert;

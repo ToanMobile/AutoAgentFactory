@@ -141,6 +141,7 @@ fn o11_10_deep_braces_keep_the_exit_code_contract() {
     let started = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aaf-hook"))
         .env_clear()
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", dir.path())
         .env("AAF_DATA_DIR", dir.path().join("data"))
@@ -207,6 +208,7 @@ impl Bench {
         });
         let mut child = Command::new(env!("CARGO_BIN_EXE_aaf-hook"))
             .env_clear()
+            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("AAF_DATA_DIR", self.base.join("data"))
             .env("HOME", self.base.join("home"))

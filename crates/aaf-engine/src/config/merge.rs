@@ -103,6 +103,16 @@ pub(crate) fn merge_cross_audit(
 ) {
     let repo_exec = repo.executor.trim();
     let global_exec = global.executor.trim();
+    // `auto` (the built-in default) asks aaf to pick an auditor; the
+    // operator's machine-wide choice is that pick.
+    let repo_exec = if repo_exec.eq_ignore_ascii_case("auto")
+        && !global_exec.is_empty()
+        && !global_exec.eq_ignore_ascii_case("auto")
+    {
+        ""
+    } else {
+        repo_exec
+    };
     let inherit_provider_fields =
         repo_exec.is_empty() || repo_exec.eq_ignore_ascii_case(global_exec);
     if repo_exec.is_empty() {

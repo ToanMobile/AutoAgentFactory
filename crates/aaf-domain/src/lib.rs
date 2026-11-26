@@ -7,6 +7,7 @@ pub mod account;
 pub mod accounts_config;
 pub mod blocked;
 pub mod budget;
+pub mod builtin_defaults;
 pub mod config;
 pub mod dag;
 pub mod engine_contracts;

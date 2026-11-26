@@ -262,6 +262,7 @@ fn r6_1_conditional_cdpath_clear_keeps_inherited_value() {
         });
         let mut child = Command::new(env!("CARGO_BIN_EXE_aaf-hook"))
             .env_clear()
+            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("AAF_DATA_DIR", base.join("data"))
             .env("HOME", base.join("home"))

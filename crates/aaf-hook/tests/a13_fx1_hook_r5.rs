@@ -215,6 +215,7 @@ impl Tree {
 fn hook(payload: &serde_json::Value, base: &Path, cdpath: Option<&Path>) -> Option<i32> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_aaf-hook"));
     cmd.env_clear()
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("AAF_DATA_DIR", base.join("data"))
         .env("HOME", base.join("home"))

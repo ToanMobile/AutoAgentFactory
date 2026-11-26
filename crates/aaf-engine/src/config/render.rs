@@ -131,14 +131,17 @@ global_freeze_consecutive_fails = {freeze}
 executor = {executor}
 # Command template for non-Claude executors; {{prompt}} is substituted.
 executor_cmd = []
-# false = open a pull request with the gate receipt; true = merge when the gate is Clear.
-# Unattended preset (opt-in): auto_merge = true, and an independent auditor in
-# [cross_audit] below; head-locked changes still need a signed audit.
+# true (default) = merge when the gate is Clear; false = open a pull request
+# with the gate receipt and wait for a person. Head-locked changes still need
+# a signed audit: set an independent auditor in [cross_audit] below.
 auto_merge = {auto_merge}
+# Agent runs at the same time. 0 (default) = automatic: sized to the accounts,
+# the CPUs and memory pressure (same as `aaf run --max-parallel auto`).
 max_parallel = {max_parallel}
 run_timeout_secs = {run_timeout}
 # Claude executor only: `claude --model` and `claude --effort`. Empty = the
-# CLI's own default. The local file may override these two.
+# CLI's own default. The local file may override these two, except while
+# [pipeline] plan_debate or [cross_audit] dual_review is on.
 model = \"\"
 effort = \"\"
 # The agent gets an allow-list of aaf's environment (PATH, HOME, locale, the
@@ -247,6 +250,15 @@ require_plan_approval = {pipe_require_approval}
 max_audit_reworks = {pipe_max_audit_reworks}
 # Automatic rework rounds from PR CI failures or owner review threads (default 2, max 3, 0 = off).
 max_pr_rework_rounds = {pipe_max_pr_rework_rounds}
+
+# Full gate on the base branch while `aaf run --auto` has nothing to do; skipped
+# when the base is unchanged (or changed only docs) since the last green one. A
+# red result opens a P0 \"Sửa main\" task and holds auto-merge until it is green.
+[full_gate]
+# Hours between two full runs. 0 = off.
+cooldown_hours = {fg_cooldown}
+# Days after which it runs even while tasks are running. 0 = only when idle.
+max_days = {fg_max_days}
 ",
         gh_enabled = github.enabled,
         gh_repo = quoted(&github.repo),
@@ -264,6 +276,32 @@ max_pr_rework_rounds = {pipe_max_pr_rework_rounds}
         pipe_require_approval = pipeline.require_plan_approval,
         pipe_max_audit_reworks = pipeline.max_audit_reworks,
         pipe_max_pr_rework_rounds = pipeline.max_pr_rework_rounds,
+        fg_cooldown = defaults.full_gate.cooldown_hours,
+        fg_max_days = defaults.full_gate.max_days,
     );
+    leave_builtin_keys_out(&out)
+}
+
+/// Keys that `crates/aaf-domain/defaults.toml` decides are written commented
+/// out, with the built-in value, so the repository keeps following that file
+/// until someone uncomments a line to pin it.
+fn leave_builtin_keys_out(text: &str) -> String {
+    let entries = aaf_domain::builtin_defaults::repo_entries();
+    let mut section = String::new();
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            section = trimmed.trim_matches(['[', ']']).to_string();
+        } else if let Some((key, _)) = trimmed.split_once(" = ")
+            && let Some((_, _, value)) = entries
+                .iter()
+                .find(|(s, k, _)| *s == section && k == key.trim())
+        {
+            let _ = writeln!(out, "# {} = {value}   # built-in default", key.trim());
+            continue;
+        }
+        out.push_str(line);
+    }
     out
 }

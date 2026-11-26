@@ -83,6 +83,11 @@ pub(super) fn build_deps(
         .map_err(|e| err("accounts", e))?;
 
     let run_provider = provider_for(&cfg.repo.run.executor);
+    // `run.max_parallel = 0` (the default) means the same as `--max-parallel auto`.
+    let parallel_arg = match parallel_arg {
+        None if cfg.repo.run.max_parallel == 0 => Some(ParallelArg::Auto),
+        other => other,
+    };
     let effective_max_parallel = match parallel_arg {
         Some(ParallelArg::Auto) => {
             let cores = std::thread::available_parallelism()

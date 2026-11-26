@@ -140,7 +140,11 @@ fn project_profile_comes_from_tier_two_only() {
 
 #[test]
 fn auto_merge_cannot_be_turned_on_by_the_local_file_or_the_environment() {
-    let cfg = loaded("", Some("[run]\nauto_merge = true\n"), &[]);
+    let cfg = loaded(
+        "[run]\nauto_merge = false\n",
+        Some("[run]\nauto_merge = true\n"),
+        &[],
+    );
     assert!(!cfg.repo.run.auto_merge);
     one_warning(&cfg, "run.auto_merge");
 

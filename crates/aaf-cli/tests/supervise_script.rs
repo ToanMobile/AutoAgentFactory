@@ -94,6 +94,7 @@ fn the_real_binary_reports_frozen_the_way_the_script_reads_it() {
         .arg(&fx.repo)
         .arg("--unsandboxed")
         .env_clear()
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .envs(command.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))))
         .env("AAF_SUPERVISE_RUNS", "1")
         .output()

@@ -16,6 +16,7 @@ pub(crate) mod oracle_worktree;
 pub(crate) mod proc;
 pub(crate) mod reuse;
 pub mod runner;
+pub mod rust_scope;
 pub mod static_checks;
 #[cfg(test)]
 mod tests;
@@ -363,16 +364,18 @@ pub fn run_gate_with_options(
             cfg.gate.command_timeout_secs,
             cfg.gate.idle_timeout_secs,
         );
+        let commands_cfg =
+            rust_scope::expanded_or(&cfg.commands, mode, repo_root, &set.changes, &mut notes);
         let run = runner::run_all_throttled_with_timeouts(
             repo_root,
-            &cfg.commands,
+            &commands_cfg,
             mode,
             timeouts,
             &heavy,
             &env_refs,
             env_remove,
         )?;
-        notes = run.notes;
+        notes.extend(run.notes);
         unconfined = run.unconfined;
         Some(run.results)
     } else {
@@ -434,7 +437,7 @@ pub fn run_gate_with_options(
             let v = oracle::evaluate_with_options(
                 repo_root,
                 base_sha,
-                cfg,
+                &rust_scope::expanded_cfg(cfg, mode, repo_root, &set.changes),
                 mode,
                 &set.changes,
                 &added,

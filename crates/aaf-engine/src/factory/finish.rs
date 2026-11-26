@@ -392,7 +392,7 @@ pub(crate) fn settle(
                 &receipt.tree_fp,
             ) {
                 deps.store.append_context_note(&task.id, &why, deps.now())?;
-                return match deps.settings.effective_land() {
+                return match super::full_gate::land_for(deps, &task) {
                     LandMode::Pr | LandMode::PrMerge => {
                         open_pr(deps, job, &task, &receipt, gated_in, round.warnings)
                     }
@@ -403,7 +403,7 @@ pub(crate) fn settle(
                     }
                 };
             }
-            match deps.settings.effective_land() {
+            match super::full_gate::land_for(deps, &task) {
                 LandMode::Branch => land_branch(deps, job, &task),
                 LandMode::Pr => open_pr(deps, job, &task, &receipt, gated_in, round.warnings),
                 LandMode::PrMerge => {

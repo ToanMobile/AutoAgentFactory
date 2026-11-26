@@ -13,6 +13,7 @@ mod head_lock;
 mod heavy;
 mod hosts;
 mod seed;
+mod stale_defaults;
 
 use std::fs;
 use std::io;
@@ -33,7 +34,11 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const KEY_FILE: &str = "receipt.key";
 
 #[derive(Debug, clap::Args)]
-pub struct DoctorArgs {}
+pub struct DoctorArgs {
+    /// Drop old-init `auto_merge = false` / `max_parallel = 1` (outside a repo: every known repo).
+    #[arg(long)]
+    pub fix: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct Check {
@@ -404,7 +409,7 @@ fn keychain_sandbox_exposure_check(policy: aaf_domain::keychain::KeychainPolicy)
     advisory("keychain_sandbox_exposure", res)
 }
 
-pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
+pub fn run(args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
     let repo_state = ctx.repo_state();
     let repo_root = match &repo_state {
         RepoState::Root(root) => Ok(root.clone()),
@@ -546,6 +551,7 @@ pub fn run(_args: &DoctorArgs, ctx: &Ctx) -> CmdResult {
         ),
     ];
     checks.extend(hosts::repo_hook_checks(ctx, root_opt, &effective.repo));
+    checks.extend(stale_defaults::checks(args.fix, ctx, &repo_state));
     checks.push(seed::worktree_cow_volume_check(ctx, root_opt));
     checks.push(seed::seed_cache_dry_run_check(
         ctx,

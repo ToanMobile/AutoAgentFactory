@@ -45,7 +45,7 @@ pub(super) fn load_base_repo_config(
     }
     let spec = format!("{sha}:{REPO_CONFIG_REL}");
     let shown = aaf_fp::git(repo_root, &["show", &spec], &[], aaf_fp::GIT_TIMEOUT)?;
-    let repo_cfg: RepoConfig = toml::from_str(&shown)
+    let repo_cfg: RepoConfig = aaf_domain::builtin_defaults::parse_repo(&shown)
         .map_err(|err| ProofError::Invalid(format!("invalid TOML in {spec}: {}", err.message())))?;
     Ok(Some(repo_cfg))
 }

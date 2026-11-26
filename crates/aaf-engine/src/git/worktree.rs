@@ -339,23 +339,25 @@ pub fn existing_head(
 }
 
 fn path_eq_or_under(path: &Path, ancestor: &Path) -> bool {
-    if path == ancestor || path.starts_with(ancestor) {
-        return true;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let p_comps: Vec<_> = path.components().collect();
-        let a_comps: Vec<_> = ancestor.components().collect();
-        if a_comps.len() <= p_comps.len()
-            && a_comps.iter().zip(&p_comps).all(|(a, p)| {
-                a.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&p.as_os_str().to_string_lossy())
-            })
-        {
-            return true;
-        }
-    }
+    path == ancestor || path.starts_with(ancestor) || under_ignoring_case(path, ancestor)
+}
+
+/// APFS is case-insensitive by default: `/Users/x/Repo` and `/users/x/repo`
+/// are one directory there.
+#[cfg(target_os = "macos")]
+fn under_ignoring_case(path: &Path, ancestor: &Path) -> bool {
+    let p_comps: Vec<_> = path.components().collect();
+    let a_comps: Vec<_> = ancestor.components().collect();
+    a_comps.len() <= p_comps.len()
+        && a_comps.iter().zip(&p_comps).all(|(a, p)| {
+            a.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&p.as_os_str().to_string_lossy())
+        })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn under_ignoring_case(_path: &Path, _ancestor: &Path) -> bool {
     false
 }
 

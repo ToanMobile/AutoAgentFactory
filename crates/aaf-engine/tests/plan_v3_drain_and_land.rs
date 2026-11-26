@@ -320,6 +320,9 @@ fn mode_drain_exits_without_busy_spin_on_work_exhausted_and_review_cap() {
 
     add_ready(&db, "t2");
     let mut cfg = RepoConfig::default();
+    // The review cap is a brake for PR mode only.
+    cfg.run.auto_merge = false;
+    cfg.run.land = aaf_domain::config::LandMode::Pr;
     cfg.run.max_open_review = 1;
     let deps_cap = make_deps(&tmp, &db, Arc::new(StubPool::new(true)), false, git, cfg);
     let t1 = Instant::now();

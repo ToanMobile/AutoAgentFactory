@@ -505,7 +505,7 @@ pub(super) fn approve_inner(
     let base_cfg = base.sha.as_deref().and_then(|sha| {
         let spec = format!("{sha}:.autofactory/config.toml");
         let raw = aaf_fp::git(repo_root, &["show", &spec], &[], GIT_TIMEOUT).ok()?;
-        toml::from_str::<RepoConfig>(&raw).ok()
+        aaf_domain::builtin_defaults::parse_repo(&raw).ok()
     });
     let base_view = base_cfg.as_ref().and_then(|b| {
         let (bl, fp, ent) = locked_with(

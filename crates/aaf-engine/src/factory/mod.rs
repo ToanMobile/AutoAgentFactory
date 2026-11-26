@@ -20,6 +20,7 @@ mod commit_lock;
 pub mod dual_audit;
 mod finish;
 mod finish_land;
+pub mod full_gate;
 mod git_real;
 mod git_real_base;
 mod infra_retry;
@@ -62,8 +63,8 @@ use serde::Serialize;
 pub use crate::git::base_ref::{BaseRef, resolve_base};
 pub use audit_backend::{
     AuditBackend, audit_cmd_is_claude, build_audit_command, configured_audit_provider,
-    effective_audit_provider, resolve_audit_policy, resolve_auto_audit_executor,
-    same_audit_provider,
+    effective_audit_provider, fall_back_to_one_provider, fill_default_reviewers,
+    resolve_audit_policy, resolve_auto_audit_executor, same_audit_provider,
 };
 pub use git_real::RealGit;
 pub use ports::{

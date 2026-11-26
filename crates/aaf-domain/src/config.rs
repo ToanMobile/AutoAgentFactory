@@ -153,11 +153,26 @@ pub struct RepoConfig {
     pub proof: ProofConfig,
     pub github: GithubBoardConfig,
     pub pipeline: PipelineConfig,
+    pub full_gate: FullGateConfig,
     #[serde(
         default,
         skip_serializing_if = "crate::worktree_config::WorktreeConfig::is_empty"
     )]
     pub worktree: crate::worktree_config::WorktreeConfig,
+}
+
+/// The full gate `aaf run --auto` runs on the base branch by itself. Both
+/// `0` (the baseline here) turn it off; `defaults.toml` sets the real values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FullGateConfig {
+    /// Hours that must pass after a full run before the next one, which then
+    /// starts only while no task is Ready, Running or Gating. `0` = off.
+    pub cooldown_hours: u64,
+    /// After this many days without a full run it starts even while tasks
+    /// are running (its commands still wait for a machine slot). `0` = only
+    /// when idle.
+    pub max_days: u64,
 }
 
 /// Hard upper bound on automatic audit-rework rounds before escalating.
@@ -429,16 +444,19 @@ impl Default for UnblockerConfig {
     }
 }
 
+/// Read through [`crate::builtin_defaults::RunConfigRaw`], so a file that
+/// sets only `auto_merge` or only `land` gets the other to match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(from = "crate::builtin_defaults::RunConfigRaw")]
 pub struct RunConfig {
     /// `claude`, `codex`, `gemini`, `antigravity`, `opencode` or `custom`.
     pub executor: String,
     /// Command template for non-Claude executors; `{prompt}` is substituted.
     pub executor_cmd: Vec<String>,
     pub auto_merge: bool,
-    #[serde(default, skip_serializing_if = "LandMode::is_default")]
+    #[serde(skip_serializing_if = "LandMode::is_default")]
     pub land: LandMode,
+    /// Agent runs at the same time; `0` = automatic (accounts, CPUs, memory).
     pub max_parallel: u32,
     pub run_timeout_secs: u64,
     /// `--model` of the Claude executor; empty leaves the CLI's own default.

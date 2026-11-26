@@ -123,6 +123,7 @@ fn exit_code(base: &Path, command: &str) -> Option<i32> {
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_aaf-hook"))
         .env_clear()
+        .env("AAF_NO_BUILTIN_DEFAULTS", "1")
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("AAF_DATA_DIR", base.join("data"))
         .env("HOME", base.join("home"))

@@ -237,10 +237,11 @@ pub fn detect_stack(repo_root: &Path) -> Detected {
             "rust",
             commands(
                 "cargo build",
-                "cargo test",
+                // `{affected_packages}`: the members the diff touches and their
+                // reverse dependencies in `--scoped`, `--workspace` otherwise.
+                "cargo test {affected_packages}",
                 "cargo test --workspace",
-                // Every member and its test targets, like the test command.
-                "cargo clippy --workspace --all-targets -- -D warnings",
+                "cargo clippy {affected_packages} --all-targets -- -D warnings",
             ),
             vec!["Cargo.toml".to_string()],
         );

@@ -82,6 +82,7 @@ impl Fixture {
             .args(args)
             .current_dir(cwd)
             .env_clear()
+            .env("AAF_NO_BUILTIN_DEFAULTS", "1")
             // The real PATH (git, sh), but nothing else of the developer's
             // environment: no HOME, no AAF_* variables, no agent run id.
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())

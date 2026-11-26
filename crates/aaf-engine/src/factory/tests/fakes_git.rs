@@ -147,6 +147,9 @@ impl GitOps for FakeGit {
         state.log.push(format!("rebase:{id}"));
         Ok(state.rebase_conflicts.get(&id).cloned().unwrap_or_default())
     }
+    fn reset_to(&self, _worktree: &TaskWorktree, _sha: &str) -> PortResult<()> {
+        Ok(())
+    }
     fn base_sha(&self) -> PortResult<String> {
         Ok(format!("base{}", self.0.lock().unwrap().base))
     }

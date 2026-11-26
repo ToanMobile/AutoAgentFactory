@@ -246,7 +246,7 @@ pub(crate) fn report_json_with_diag(
 }
 
 pub(crate) fn doctor_json(ctx: &Ctx) -> Result<Value, String> {
-    let out = run_doctor(&DoctorArgs {}, ctx).map_err(|e| e.message)?;
+    let out = run_doctor(&DoctorArgs { fix: false }, ctx).map_err(|e| e.message)?;
     let mut object = out.fields;
     object.insert("ok".into(), json!(true));
     object.insert("healthy".into(), json!(out.status == "ok"));

@@ -21,6 +21,43 @@ fn is_local_gradle_publish(task: &str) -> bool {
         || lower.contains("localpublication")
 }
 
+/// A `git push` argument that sends a tag: `--tags`, `--follow-tags`,
+/// `--mirror`, a `refs/tags/...` refspec, or a version-like ref such as
+/// `v1`, `v1.2.3` or `1.2.3` (a branch named like a version is refused too:
+/// the hook cannot tell them apart without the repository).
+fn is_tag_push_arg(word: &str) -> bool {
+    if matches!(word, "--tags" | "--follow-tags" | "--mirror") {
+        return true;
+    }
+    let src = word.trim_start_matches('+');
+    let src = src.split(':').next_back().unwrap_or(src);
+    if src.starts_with("refs/tags/") {
+        return true;
+    }
+    let (version, prefixed) = match src.strip_prefix('v') {
+        Some(rest) => (rest, true),
+        None => (src, false),
+    };
+    version.starts_with(|c: char| c.is_ascii_digit())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        && (version.contains('.') || (prefixed && version.chars().all(|c| c.is_ascii_digit())))
+}
+
+/// `git [options] push ...` that sends a tag, including `push tag <name>`
+/// and `-c push.followTags=true` given before the subcommand.
+fn is_git_tag_push(rest: &[&str]) -> bool {
+    let Some(at) = rest.iter().position(|w| *w == "push") else {
+        return false;
+    };
+    let follow_tags = rest[..at]
+        .iter()
+        .any(|w| w.to_ascii_lowercase().starts_with("push.followtags=true"));
+    let args = &rest[at + 1..];
+    follow_tags || args.iter().any(|w| is_tag_push_arg(w)) || args.windows(2).any(|w| w[0] == "tag")
+}
+
 /// Programs that run the tool named in their arguments.
 const LAUNCHERS: &[&str] = &[
     "bundle", "npx", "bunx", "yarn", "pnpm", "xcrun", "mise", "rbenv",
@@ -57,6 +94,30 @@ pub fn matches<S: AsRef<str>>(words: &[S], anywhere: bool) -> Option<&'static st
                         && !is_local_gradle_publish(task)
                 })
                 .then_some("gradle publish"),
+            // Publishing a release of the repository itself: pushing a tag
+            // (which starts the release workflow) or `gh release create`.
+            "git" => {
+                let rest: Vec<&str> = after().collect();
+                is_git_tag_push(&rest).then_some("git tag push")
+            }
+            "gh" => {
+                let rest: Vec<&str> = after().collect();
+                if rest
+                    .windows(2)
+                    .any(|w| w[0] == "release" && w[1] == "create")
+                {
+                    Some("gh release create")
+                } else {
+                    // Starting the release workflow by hand.
+                    rest.windows(3)
+                        .any(|w| {
+                            w[0] == "workflow"
+                                && w[1] == "run"
+                                && w[2].to_ascii_lowercase().contains("release")
+                        })
+                        .then_some("gh workflow run release")
+                }
+            }
             _ => None,
         };
         if hit.is_some() {

@@ -212,6 +212,32 @@ Add `--json` to any command for machine-readable output
 
 </details>
 
+## ⚙️ Built-in defaults
+
+What a repository gets when its `.autofactory/config.toml` leaves a key out. The source is [`crates/aaf-domain/defaults.toml`](crates/aaf-domain/defaults.toml), which is embedded in the binary: edit it, rebuild or run `/aaf-update`, and every repository follows. A key set in a repository still wins. `aaf doctor --fix` removes the `auto_merge = false` / `max_parallel = 1` lines that an older `aaf init` wrote, so those repositories pick up the new defaults too.
+
+| # | Key | What it does | Default |
+|---|---|---|---|
+| 1 | `cross_audit.executor` | Who audits changes to head-locked files. `auto` = the first other provider installed (gemini, codex, claude, opencode); `""` = the agent's own executor, which needs `aaf approve` | `"auto"` |
+| 2 | `run.auto_merge`, `run.max_parallel` | Gate-clear tasks land on their own; parallel agents sized to accounts, CPUs and memory (`0` = automatic) | `true`, `0` |
+| 3 | `aaf run --auto-split` (flag) | Split root tasks into 2–4 parallel subtasks | off |
+| 4 | `pipeline.plan_stage`, `pipeline.plan_debate` | Write a plan before coding; two models debate it | `true`, `true` |
+| 5 | `pipeline.require_plan_approval` | A person approves the plan first | `false` |
+| 6 | `cross_audit.score_gate` | Block the merge when the audit score is below the thresholds | `true` |
+| 7 | `cross_audit.audit_scope` | When the post-gate audit runs: `head_lock`, `large` (≥ 3 files or > 200 LOC), `always` | `"large"` |
+| 8 | `cross_audit.dual_review` | Two independent reviewers. Without `[[cross_audit.reviewers]]` they are `[run].executor` and the resolved auditor; with only one provider installed, one audit runs and `aaf run` warns | `true` |
+| 9 | `cross_audit.require_different_provider` | Stop instead of auditing with the agent's own account | `false` |
+| 10 | `gate.red_green_oracle` | New tests must fail before and pass after the fix: `off`, `warn`, `block` | `"warn"` |
+| 11 | `proof.required` | Screenshot proof for mobile UI changes | `false` |
+| 12 | `github.enabled` | Sync tasks with a GitHub Project board | `false` |
+| 13 | `telegram.enabled`, `allow_approve`, `allow_mutating` | Telegram bot; approving and state-changing commands from it | `true`, `false`, `false` |
+| 14 | `notifications.webhook_url` | JSON webhook for events (`""` = off) | `""` |
+| 15 | `safety.owner_github_allowlist` | GitHub logins whose issues may become tasks | `[]` |
+| 16 | `cost_guard.daily_token_cap`, `spike_factor` | 24 h token cap and 1 h spike freeze (`0` = off) | `0`, `0` |
+| 17 | `full_gate.cooldown_hours`, `max_days` | Full gate on the base branch while `aaf run --auto` is idle, at most once per cooldown; after `max_days` it runs even while busy. Red opens a P0 "Sửa main" task and holds auto-merge until green (`0` = off) | `24`, `7` |
+
+The gate scopes Rust tests to what changed: `{affected_packages}` in `commands.lint` / `commands.test_scoped` becomes `-p <crate>` for the touched workspace members and everything that depends on them, or `--workspace` when the diff touches a manifest, `Cargo.lock`, a `build.rs` or a path outside the members. The whole suite runs on the base branch while `aaf run --auto` has nothing to do (row 17): skipped when the base is unchanged or changed only docs since the last green run, retried once to tell a flaky test (a P2 task) from a real failure (a P0 task, auto-merge held, the fix task still lands). Its commands share the heavy-command slots and run at `nice`. Release still runs `aaf gate --release`, which store uploads, tag pushes and `gh release create` require.
+
 ## 📚 Learn more
 
 | Document | What is inside |

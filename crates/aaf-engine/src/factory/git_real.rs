@@ -335,6 +335,13 @@ impl GitOps for RealGit {
         git(&self.repo_root, &["rev-parse", "--verify", &self.start()]).map_err(err)
     }
 
+    fn reset_to(&self, worktree: &TaskWorktree, sha: &str) -> PortResult<()> {
+        let tree = worktree.path.as_path();
+        git(tree, &["reset", "--hard", "--quiet", sha]).map_err(err)?;
+        git(tree, &["clean", "-ffdq"]).map_err(err)?;
+        Ok(())
+    }
+
     fn merge(
         &self,
         worktree: &TaskWorktree,
