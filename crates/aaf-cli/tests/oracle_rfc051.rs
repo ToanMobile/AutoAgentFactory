@@ -218,8 +218,15 @@ fn default_server_blocks_post_approve_with_403_and_does_not_sign() {
     let idx = send_raw(addr, &format!("GET / HTTP/1.1\r\nHost: {addr}\r\n\r\n"));
     assert_eq!(idx.status, 200);
     assert!(idx.body.contains("meta.allow_approve"));
-    assert!(idx.body.contains("--allow-approve"));
+    assert!(idx.body.contains("review.approveDisabled"));
     assert!(idx.body.contains("esc(approveHint)"));
+    // The hint text itself lives in the i18n bundle the page loads.
+    let i18n = send_raw(
+        addr,
+        &format!("GET /assets/i18n.js HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    );
+    assert_eq!(i18n.status, 200);
+    assert!(i18n.body.contains("--allow-approve"));
 
     handle.join();
 }

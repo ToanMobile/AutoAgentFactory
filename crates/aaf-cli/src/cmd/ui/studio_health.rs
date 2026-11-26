@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
