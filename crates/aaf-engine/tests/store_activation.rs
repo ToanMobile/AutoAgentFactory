@@ -137,7 +137,19 @@ fn symlinks_are_not_followed() {
     )
     .unwrap();
     let report = scan(tmp.path(), &RepoConfig::default(), true);
-    assert_eq!(report.status, StoreStatus::NotApplicable, "{report:#?}");
+    // The linked manifest names the platform, but neither link is read: no
+    // Critical from the debuggable target, and both links are reported.
+    assert_eq!(report.status, StoreStatus::Clear, "{report:#?}");
+    assert_eq!(report.critical, 0, "{report:#?}");
+    assert_eq!(report.warnings, 2, "{report:#?}");
+    assert_eq!(
+        report.unresolved,
+        vec![
+            unreadable("AndroidManifest.xml", "symbolic link is not followed"),
+            unreadable("app", "symbolic link to a directory is not followed"),
+        ],
+        "{report:#?}"
+    );
 
     // The same tree reached without a link is found.
     let report = scan(outside.path(), &RepoConfig::default(), true);

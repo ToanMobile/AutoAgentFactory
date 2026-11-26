@@ -163,6 +163,7 @@ pub(super) fn interp_spec(interp: Interp) -> InterpSpec {
 pub(super) fn inline_payloads(interp: Interp, args: &[String]) -> Vec<String> {
     let spec = interp_spec(interp);
     let mut out = Vec::new();
+    let mut perl = PerlSwitches::default();
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -228,6 +229,9 @@ pub(super) fn inline_payloads(interp: Interp, args: &[String]) -> Vec<String> {
                     }
                     break;
                 }
+                if interp == Interp::Perl && perl_switch_value(c, rest, &mut perl) {
+                    break;
+                }
                 if spec.code_short.contains(c) {
                     if !rest.is_empty() {
                         out.push(rest.to_string());
@@ -265,7 +269,112 @@ pub(super) fn inline_payloads(interp: Interp, args: &[String]) -> Vec<String> {
         }
         i += 1;
     }
+    if interp == Interp::Perl {
+        return perl.finish(out);
+    }
     out
+}
+
+fn is_perl_word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Skips a module name as Perl's switch parser reads it: `[A-Za-z0-9_:]*`.
+fn skip_name(s: &str) -> &str {
+    s.trim_start_matches(|c: char| is_perl_word(c) || c == ':')
+}
+
+/// Text Perl compiles ahead of `-e`: `-d` (via `PERL5DB`), then `-M`/`-m` in order.
+/// `Some(escapes)`: a `=` value in `q\0...\0`, escaping it with an odd run of `\`.
+#[derive(Default)]
+pub(super) struct PerlSwitches {
+    debugger: Vec<String>,
+    modules: Vec<(String, Option<bool>)>,
+}
+
+impl PerlSwitches {
+    /// Code in compile order, then joined (one piece may open a string the next
+    /// closes); a quoted value is code once an earlier piece is code or escapes.
+    fn finish(self, programs: Vec<String>) -> Vec<String> {
+        let mut open = !self.debugger.is_empty();
+        let mut out = self.debugger;
+        for (text, quoted) in self.modules {
+            if open || quoted.is_none() {
+                out.push(text);
+            }
+            open |= quoted.unwrap_or(true);
+        }
+        out.extend(programs);
+        if out.len() > 1 {
+            out.push(out.join("\n"));
+        }
+        out
+    }
+}
+
+/// The text after a `-M`/`-d` module name (`'` joins packages only before an
+/// identifier, `File'Spec`) or a version (`5.010`, `v5.10`; `v1'Foo` is a name).
+fn module_tail(value: &str) -> Option<&str> {
+    let v = value.strip_prefix('v').unwrap_or("");
+    let digits = v.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
+    let version = if digits.starts_with('.') { v } else { value };
+    let tail = if version.starts_with(|c: char| c.is_ascii_digit()) {
+        version.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | '_'))
+    } else {
+        let mut tail = skip_name(value);
+        while let Some(next) = tail.strip_prefix('\'')
+            && next.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        {
+            tail = skip_name(next);
+        }
+        tail
+    };
+    (!tail.is_empty()).then_some(tail)
+}
+
+/// Handles Perl switches whose attached value must not be rescanned as more
+/// flag letters. Returns `true` when the value consumes the rest of the
+/// argument, recording any text Perl evaluates as code in `sw`:
+/// - `-0x<hex>` and `-V:<var>` swallow the whole argument (a non-hex tail
+///   after `-0x` becomes `-x<tail>`), so `-0x1e` / `-V:package` hide no `-e`.
+/// - `-[Mm][-]<Mod><text>` is `use <Mod><text>;`, `=<val>` right after the name `q\0<val>\0`.
+/// - `-d[t][:=][-]<Mod><text>` is `use Devel::<Mod><text>;`, `=<val>` `q{<val>}` (`{}\` escape).
+pub(super) fn perl_switch_value(c: char, rest: &str, sw: &mut PerlSwitches) -> bool {
+    fn split(value: &str) -> (&str, Option<&str>) {
+        let value = value.strip_prefix('-').unwrap_or(value);
+        (value, skip_name(value).strip_prefix('='))
+    }
+    match c {
+        '0' => rest.starts_with('x'),
+        'V' => rest.starts_with(':'),
+        'M' | 'm' if !rest.is_empty() => {
+            let (value, quoted) = split(rest);
+            if let Some(val) = quoted {
+                let escapes = (val.len() - val.trim_end_matches('\\').len()) % 2 == 1;
+                sw.modules.push((val.to_string(), Some(escapes)));
+            } else if let Some(tail) = module_tail(value) {
+                sw.modules.push((tail.to_string(), None));
+            }
+            true
+        }
+        'd' => {
+            let rest = match rest.strip_prefix('t') {
+                Some(after) if !after.starts_with(is_perl_word) => after,
+                _ => rest,
+            };
+            let Some(value) = rest.strip_prefix([':', '=']) else {
+                return false;
+            };
+            let (value, quoted) = split(value);
+            if !quoted.is_some_and(|val| !val.contains(['{', '}', '\\']))
+                && let Some(tail) = module_tail(value)
+            {
+                sw.debugger.push(tail.to_string());
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Extracts single-, double-, and backtick-quoted string literals from a script.
@@ -473,3 +582,7 @@ pub(super) fn extract_space_call_commands(code: &str) -> Vec<String> {
     }
     cmds
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

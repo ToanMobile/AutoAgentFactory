@@ -13,9 +13,9 @@ mod scope;
 mod writes;
 
 use parse::{
-    Interp, classify_interpreter, extract_delimited_commands, extract_literals,
+    Interp, PerlSwitches, classify_interpreter, extract_delimited_commands, extract_literals,
     extract_space_call_commands, has_space_call, inline_payloads, interp_spec,
-    next_space_delimited_cluster, normalize_api_haystack,
+    next_space_delimited_cluster, normalize_api_haystack, perl_switch_value,
 };
 use scope::{
     extract_api_arg_slices, has_any, has_shell_exec_api, is_safe_py_mktemp_arg, safe_py_mktemp_vars,
@@ -89,6 +89,11 @@ pub(crate) fn reads_program_from_stdin(cmd: &Cmd) -> bool {
                     return false;
                 }
                 let rest = chars.as_str();
+                if interp == Interp::Perl
+                    && perl_switch_value(c, rest, &mut PerlSwitches::default())
+                {
+                    break;
+                }
                 if spec.other_valued_short.contains(c) {
                     if rest.is_empty() {
                         step = 2;
