@@ -22,27 +22,63 @@ const PSEUDO_REFS: [&str; 7] = [
     "REBASE_HEAD",
 ];
 
-/// Fails closed when a pseudo-ref in `tree`'s git dir is a symlink, a
-/// non-regular file, a hard link, or a `ref:` symref. A missing one is fine.
+const MAX_WALK: usize = 10_000;
+
+/// Fails closed when a pseudo-ref in `tree`'s git dir, or (linked worktree)
+/// any entry under its own `refs/`, is a symlink, a non-regular file, a hard
+/// link, or a `ref:` symref. `--rebase-merges` writes `refs/rewritten/*`
+/// there; a planted `ref: refs/heads/main` makes it delete `main`.
 pub(crate) fn ensure_plain_pseudo_refs(tree: &Path) -> Result<(), GitError> {
-    let raw = PathBuf::from(git(tree, &["rev-parse", "--git-dir"])?);
-    let git_dir = if raw.is_absolute() {
-        raw
-    } else {
-        tree.join(raw)
-    };
+    let git_dir = PathBuf::from(git(tree, &["rev-parse", "--absolute-git-dir"])?);
     for name in PSEUDO_REFS {
         check_one(&git_dir.join(name))?;
+    }
+    let refs = git_dir.join("refs");
+    // Both paths come back resolved, so equal means the main checkout.
+    if git_dir != common_dir(tree)? && fs::symlink_metadata(&refs).is_ok() {
+        ensure_plain_ref_tree(&refs)?;
     }
     Ok(())
 }
 
-/// Same check on the loose file of `full_ref` (`refs/heads/aaf/<task>`) in
-/// the common dir. `git symbolic-ref HEAD` already reports the final target of
-/// a `ref:` chain, but names a filesystem-symlinked ref by its first name.
-pub(crate) fn ensure_plain_branch_ref(tree: &Path, full_ref: &str) -> Result<(), GitError> {
+/// Walks `root` without following links (at most [`MAX_WALK`] entries);
+/// every non-directory must pass [`check_one`].
+fn ensure_plain_ref_tree(root: &Path) -> Result<(), GitError> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(path) = stack.pop() {
+        seen += 1;
+        if seen > MAX_WALK {
+            return Err(refused(root, "holds more entries than the guard walks"));
+        }
+        if fs::symlink_metadata(&path)?.file_type().is_dir() {
+            for entry in fs::read_dir(&path)? {
+                stack.push(entry?.path());
+            }
+        } else {
+            check_one(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn common_dir(tree: &Path) -> Result<PathBuf, GitError> {
     let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
-    let common = PathBuf::from(git(tree, &args)?);
+    Ok(PathBuf::from(git(tree, &args)?))
+}
+
+/// Same check on the loose file of `full_ref` (`refs/heads/aaf/<task>`) in
+/// the common dir, plus no symlinked directory on the way to it. `git
+/// symbolic-ref HEAD` already reports the final target of a `ref:` chain,
+/// but names a filesystem-symlinked ref by its first name.
+pub(crate) fn ensure_plain_branch_ref(tree: &Path, full_ref: &str) -> Result<(), GitError> {
+    let common = common_dir(tree)?;
+    for dir in Path::new(full_ref).ancestors().skip(1) {
+        let dir = common.join(dir);
+        if fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(refused(&dir, "is a symlinked directory"));
+        }
+    }
     check_one(&common.join(full_ref))
 }
 

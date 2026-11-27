@@ -189,6 +189,8 @@ impl GitOps for RealGit {
             other => other,
         })?;
         worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
+        let branch_ref = format!("refs/heads/{}", worktree.branch);
+        crate::git::pseudo_ref_guard::ensure_plain_branch_ref(tree, &branch_ref).map_err(err)?;
         let args = [
             "-c",
             NO_HOOKS,
