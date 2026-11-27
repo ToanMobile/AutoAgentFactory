@@ -147,6 +147,8 @@ impl<'a> RoOverlay<'a> {
             for rel in ["refs/heads/develop", "refs/heads/release", "refs/remotes"] {
                 self.protect_existing(&git_dir.join(rel))?;
             }
+            // RFC-126: lock common reflog tree for linked worktrees.
+            self.protect_existing(&git_dir.join("logs"))?;
         }
         let worktrees = git_dir.join("worktrees");
         if worktrees.is_dir() {
@@ -162,6 +164,10 @@ impl<'a> RoOverlay<'a> {
                     push_flag_path(self.argv, self.bound_rw, "--bind", &child)?;
                     for rel in ["hooks", "config", "config.worktree", "commondir", "gitdir"] {
                         self.protect_existing(&child.join(rel))?;
+                    }
+                    if !is_primary_checkout {
+                        // RFC-126: lock every worktree's reflog dir too.
+                        self.protect_existing(&child.join("logs"))?;
                     }
                 }
             }

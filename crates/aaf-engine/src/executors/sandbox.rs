@@ -15,6 +15,7 @@ pub use crate::confine_core::path::canonical;
 pub(crate) use crate::confine_core::path::{canonical_entry, entries_to, links_to, regex_escape};
 
 mod git_dir;
+pub(crate) use git_dir::own_reflog_files;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -352,6 +353,16 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
         let target = canonical(raw)?;
         let target = sbpl_string(&target)?;
         profile.push_str(&format!("(allow file-write-data (literal {target}))\n"));
+    }
+    if let Some(run_wt) = run_worktree {
+        // RFC-126: reopen only pre-existing own reflog files (data-only; paths
+        // are already canonicalized and verified by `own_reflog_files`).
+        for git_dir in &git_dirs {
+            for file in git_dir::own_reflog_files(run_wt, git_dir) {
+                let target = sbpl_string(&file)?;
+                profile.push_str(&format!("(allow file-write-data (literal {target}))\n"));
+            }
+        }
     }
     if let Some(mark) = &extra.run_mark {
         let mark = canonical(mark)?;

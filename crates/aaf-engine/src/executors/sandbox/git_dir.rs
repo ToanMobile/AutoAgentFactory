@@ -2,7 +2,7 @@
 //! runs or obeys later, outside the sandbox, for the superproject and for
 //! every submodule git dir below it.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use aaf_domain::ports::{PortError, PortResult};
 
@@ -219,7 +219,85 @@ pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> 
         refs.push_str(&format!(" (subpath {})", sbpl_string(&git_dir.join(rel))?));
     }
     out.push_str(&format!("(deny file-write*{refs})\n"));
+    // RFC-126: lock reflog trees in linked worktrees; only existing own reflog
+    // files are reopened at the end of the profile with `file-write-data`.
+    out.push_str(&format!(
+        "(deny file-write* (subpath {}))\n(deny file-write* (subpath {}))\n",
+        sbpl_string(&git_dir.join("logs"))?,
+        sbpl_string(&own.join("logs"))?
+    ));
     Ok(out)
+}
+
+/// Returns up to two pre-existing reflog files owned by linked worktree
+/// `worktree` under `git_dir` (RFC-126): `<own>/logs/HEAD` and
+/// `<git_dir>/logs/<ref>` where `<ref>` comes from `<own>/HEAD`
+/// (`ref: refs/heads/<branch>`).
+///
+/// `<own>/HEAD` is write-denied in both macOS Seatbelt (`[^/]*HEAD`) and Linux
+/// Bubblewrap (`protect_git_dir`), so reading it host-side while building the
+/// sandbox profile is trustworthy. Only regular files with `nlink == 1` and no
+/// symlink directory between `git_dir` and the file are kept (fail-closed).
+pub(crate) fn own_reflog_files(worktree: &Path, git_dir: &Path) -> Vec<PathBuf> {
+    let Some(own) = linked_worktree_admin_dir(worktree, git_dir) else {
+        return Vec::new();
+    };
+    let Ok(git_dir_canon) = std::fs::canonicalize(git_dir) else {
+        return Vec::new();
+    };
+    let Ok(own_rel) = own.strip_prefix(&git_dir_canon) else {
+        return Vec::new();
+    };
+    let mut comps = own_rel.components();
+    if !(matches!(comps.next(), Some(Component::Normal(w)) if w == "worktrees")
+        && matches!(comps.next(), Some(Component::Normal(_)))
+        && comps.next().is_none())
+    {
+        return Vec::new();
+    }
+    let mut rels = vec![own_rel.join("logs/HEAD")];
+    if let Some(ref_name) = read_own_branch_ref(&own) {
+        rels.push(Path::new("logs").join(ref_name));
+    }
+    rels.into_iter()
+        .filter_map(|rel| verified_reflog_file(&git_dir_canon, &rel))
+        .collect()
+}
+
+fn read_own_branch_ref(own: &Path) -> Option<String> {
+    let head = own.join("HEAD");
+    if !std::fs::symlink_metadata(&head).is_ok_and(|m| m.file_type().is_file()) {
+        return None;
+    }
+    let text = std::fs::read_to_string(&head).ok()?;
+    let ref_name = text.lines().next()?.strip_prefix("ref:")?.trim();
+    let branch = ref_name.strip_prefix("refs/heads/")?;
+    if branch.is_empty()
+        || ref_name.contains("..")
+        || ref_name.contains('\\')
+        || ref_name.chars().any(char::is_control)
+        || branch.split('/').any(|seg| seg.is_empty() || seg == ".")
+    {
+        return None;
+    }
+    Some(ref_name.to_string())
+}
+
+fn verified_reflog_file(git_dir_canon: &Path, rel: &Path) -> Option<PathBuf> {
+    let candidate = git_dir_canon.join(rel);
+    let meta = std::fs::symlink_metadata(&candidate).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return None;
+        }
+    }
+    let resolved = std::fs::canonicalize(&candidate).ok()?;
+    (resolved == candidate).then_some(candidate)
 }
 
 /// When the first `.git` met walking up from `worktree` is a plain file

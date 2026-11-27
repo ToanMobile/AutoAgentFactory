@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::super::sandbox::SandboxPaths;
+use super::super::sandbox::{SandboxPaths, own_reflog_files};
 use super::ro_overlay::RoOverlay;
 
 const BASE_BWRAP_ARGS: &str = concat!(
@@ -132,6 +132,16 @@ pub fn build_bwrap_args(
             .as_ref()
             .is_some_and(|wt| canonical_or_self(&wt.join(".git")) == canonical_or_self(gd));
         ro.protect_git_dir(gd, is_primary)?;
+    }
+    if let Some(worktree) = &paths.worktree {
+        let wt = Path::new(worktree);
+        // RFC-126: reopen only this linked worktree's pre-existing reflog files
+        // above the `--ro-bind` overlays on `<git_dir>/logs` and `<own>/logs`.
+        for git_dir in &paths.git_dirs {
+            for file in own_reflog_files(wt, Path::new(git_dir)) {
+                ro.bind_rw(abs_path_str(&file, "own reflog file")?);
+            }
+        }
     }
     if let Some(worktree) = &paths.worktree {
         let wt = Path::new(worktree);
