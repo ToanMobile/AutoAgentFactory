@@ -513,6 +513,34 @@ pub fn may_name_protected(pattern: &str) -> bool {
             || ENV_VARIANTS.iter().any(|name| glob_match(pattern, name)))
 }
 
+/// A file-name glob can match a secret file (returns the matched pattern).
+pub fn may_name_secret(pattern: &str) -> Option<&'static str> {
+    if pattern.len() > MAX_PATTERN {
+        return Some("secret file");
+    }
+    if SECRET_ENV_ALLOWLIST.contains(&fold(pattern).as_str()) {
+        return None;
+    }
+    let parts = glob_parts(pattern);
+    let hits = |glob: &str| globs_intersect(&parts, &glob_parts(glob));
+    if let Some(&pat) = [".env", "id_rsa", "id_ed25519"]
+        .iter()
+        .chain(SECRET_EXACT)
+        .find(|g| hits(g))
+    {
+        return Some(pat);
+    }
+    if let Some(&suf) = SECRET_SUFFIXES.iter().find(|s| hits(&format!("*{s}"))) {
+        return Some(suf);
+    }
+    let prefix_pat = [".env.*", "id_rsa.*", "id_ed25519.*"]
+        .into_iter()
+        .find(|g| hits(g))?;
+    (parts.first() != Some(&Part::Star)
+        || (prefix_pat == ".env.*" && ENV_VARIANTS.iter().any(|name| glob_match(pattern, name))))
+    .then_some(prefix_pat)
+}
+
 /// Shell-style match of one path component, case-insensitive. A bracket
 /// class is treated as "any one character": wider than the shell, never
 /// narrower.

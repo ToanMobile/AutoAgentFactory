@@ -283,6 +283,11 @@ fn glob_secret(raw: &str, ctx: &Ctx) -> Option<String> {
         })?;
         return Some(format!("{last} (pattern {pat})"));
     }
+    if walk.cut
+        && let Some(pat) = paths::may_name_secret(last)
+    {
+        return Some(format!("{last} (pattern {pat})"));
+    }
     SECRET_SAMPLES.iter().find_map(|sample| {
         let pat = paths::is_secret_file(Path::new(sample))?;
         paths::glob_match(last, sample).then(|| format!("{sample} (pattern {pat})"))
