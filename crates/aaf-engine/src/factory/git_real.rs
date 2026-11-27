@@ -260,7 +260,6 @@ impl GitOps for RealGit {
         );
         let tree = {
             let _admin = self.admin();
-            worktree::ensure_plain_reflogs(&self.repo_root).map_err(err)?;
             worktree::create(&self.repo_root, &self.worktrees_dir, &name, &self.start())
                 .map_err(err)?
         };

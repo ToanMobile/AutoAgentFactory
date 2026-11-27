@@ -7,9 +7,9 @@ use std::{fs, io};
 
 use super::{GitError, cmd::git, worktree::resolved};
 
-const MAX_REFLOG_WALKED: usize = 10_000;
+const MAX_REFLOG_WALKED: usize = 200_000;
 const LINK_HINT: &str = "a task agent may have planted it to redirect git's reflog writes; \
-     check it, remove it, then `aaf board unblock` the task";
+     check it and remove it, then retry (for a factory task: `aaf board unblock` it)";
 
 fn resolve_git_dirs(tree: &Path) -> Result<(PathBuf, PathBuf), GitError> {
     let raw = git(tree, &["rev-parse", "--git-common-dir", "--git-dir"])?;
@@ -32,9 +32,8 @@ pub fn ensure_plain_reflogs(tree: &Path) -> Result<(), GitError> {
 }
 
 /// Checks multiple trees while walking each shared `<common>/logs` at most once.
-pub fn ensure_plain_reflogs_all(trees: &[&Path]) -> Result<(), GitError> {
+pub(crate) fn ensure_plain_reflogs_all(trees: &[&Path]) -> Result<(), GitError> {
     let mut checked: Vec<PathBuf> = Vec::new();
-    let mut walked = 0;
     for tree in trees {
         let (common, git_dir) = resolve_git_dirs(tree)?;
         for dir in [common, git_dir] {
@@ -42,14 +41,14 @@ pub fn ensure_plain_reflogs_all(trees: &[&Path]) -> Result<(), GitError> {
             if checked.iter().any(|s| key == *s || key.starts_with(s)) {
                 continue;
             }
-            check_reflog_tree(&dir.join("logs"), &mut walked)?;
+            check_reflog_tree(&dir.join("logs"))?;
             checked.push(key);
         }
     }
     Ok(())
 }
 
-fn check_reflog_tree(root: &Path, walked: &mut usize) -> Result<(), GitError> {
+fn check_reflog_tree(root: &Path) -> Result<(), GitError> {
     let io_err = |p: &Path, e: io::Error| GitError::Invalid(format!("reflog {}: {e}", p.display()));
     let bad = |p: &Path, why: &str| {
         GitError::Invalid(format!("reflog {} {why}: {LINK_HINT}", p.display()))
@@ -62,11 +61,12 @@ fn check_reflog_tree(root: &Path, walked: &mut usize) -> Result<(), GitError> {
     if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
         return Err(bad(root, "root is not a plain directory"));
     }
+    let mut walked = 0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir).map_err(|e| io_err(&dir, e))? {
-            *walked += 1;
-            if *walked > MAX_REFLOG_WALKED {
+            walked += 1;
+            if walked > MAX_REFLOG_WALKED {
                 let d = root.display();
                 return Err(GitError::Invalid(format!(
                     "reflog walk exceeded {MAX_REFLOG_WALKED} entries under {d}"

@@ -32,7 +32,8 @@ pub use hydration::{
 };
 pub use merge_queue::{MergeOutcome, MergeRequest, merge};
 pub use pr::{PrOutcome, PrRequest, open_pr, open_pr_with_proof, pr_body, pr_body_with_proof};
-pub use reflog_guard::{ensure_plain_reflogs, ensure_plain_reflogs_all};
+pub use reflog_guard::ensure_plain_reflogs;
+pub(crate) use reflog_guard::ensure_plain_reflogs_all;
 pub use warm_slot::{
     SlotKind, WarmSlot, base_snapshots_dir, promote_clean_base_snapshot,
     promote_from_pure_base_slot, restore_clean_base_snapshot, warm_slots_root,
