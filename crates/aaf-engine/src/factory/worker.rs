@@ -207,8 +207,20 @@ pub(super) fn hook_problem_if(
             Err(err) => return Some(format!("the base branch could not be read ({err})")),
         }
     };
-    hook_settings::check_worktree_for_executor(cwd, &settings.agent_path, base.as_deref(), executor)
-        .err()
+    // SEC-099: `writer_requires_hook` only sets `required` for custom/unknown
+    // executors when `executor_cmd` invokes Claude, so check them under Claude rules.
+    let normalized = aaf_domain::pipeline::normalize_executor_id(executor);
+    let effective = match normalized.as_str() {
+        "claude" | "codex" | "gemini" | "antigravity" | "opencode" => normalized.as_str(),
+        _ => "claude",
+    };
+    hook_settings::check_worktree_for_executor(
+        cwd,
+        &settings.agent_path,
+        base.as_deref(),
+        effective,
+    )
+    .err()
 }
 
 pub(super) struct OpenRun {
