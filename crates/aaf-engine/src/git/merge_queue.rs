@@ -170,6 +170,7 @@ fn merge_locked(
     };
 
     let onto_sha = git(&req.repo_root, &["rev-parse", "--verify", &onto])?;
+    super::pseudo_ref_guard::ensure_plain_pseudo_refs(tree)?;
     // Onto the resolved commit, not the ref: a ref that moved in between
     // would land the task on a base the gate is not told about.
     if let Some(files) = rebase(tree, &onto_sha)? {

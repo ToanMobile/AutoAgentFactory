@@ -201,6 +201,7 @@ pub fn undo_latest_turn(
     let snap = preview_latest_undo(db, repo_root, task_id)?;
     let task = db.get_task(task_id).map_err(|e| e.to_string())?;
     let wt_path = verify_registered_worktree(repo_root, worktrees_root, task_id)?;
+    crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(&wt_path).map_err(|e| e.to_string())?;
 
     git(
         &wt_path,

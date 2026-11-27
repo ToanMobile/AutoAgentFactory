@@ -327,6 +327,7 @@ impl GitOps for RealGit {
         let _admin = self.admin();
         let tree = worktree.path.as_path();
         worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
+        crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(tree).map_err(err)?;
         let start = self.start();
         let args = [
             "-c",
@@ -360,6 +361,7 @@ impl GitOps for RealGit {
 
     fn reset_to(&self, worktree: &TaskWorktree, sha: &str) -> PortResult<()> {
         let tree = worktree.path.as_path();
+        crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(tree).map_err(err)?;
         git(tree, &["reset", "--hard", "--quiet", sha]).map_err(err)?;
         git(tree, &["clean", "-ffdq"]).map_err(err)?;
         Ok(())

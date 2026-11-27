@@ -248,6 +248,7 @@ pub fn run_autofix(
         });
     }
 
+    plain_pseudo_refs(&repo_root)?;
     // Undo any commits or index staging performed by the formatter while keeping worktree edits.
     if let Err(err) =
         git_ok(&repo_root, &["reset", "--mixed", "--quiet", &pre_head]).and_then(|_| {
@@ -351,7 +352,14 @@ fn git_ok(repo_root: &Path, args: &[&str]) -> Result<String, GateError> {
     aaf_fp::git(repo_root, args, &[], GIT_TIMEOUT).map_err(GateError::from)
 }
 
+/// SEC-125: a planted `ORIG_HEAD` symref would let the reset move another ref.
+fn plain_pseudo_refs(repo_root: &Path) -> Result<(), GateError> {
+    crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(repo_root)
+        .map_err(|e| GateError::Git(e.to_string()))
+}
+
 fn reset_clean(repo_root: &Path, pre_head: &str) -> Result<(), GateError> {
+    plain_pseudo_refs(repo_root)?;
     let _ = git_ok(repo_root, &["reset", "--hard", "--quiet", pre_head])?;
     let _ = git_ok(repo_root, &["clean", "-ffdq"])?;
     Ok(())
