@@ -354,6 +354,10 @@ pub(super) fn sync_checked_out_local_base(
     // Full refname: a short `origin/main` resolves `refs/tags/origin/main`
     // first, so a planted tag could fast-forward the base (SEC-035).
     let target_ref = format!("refs/remotes/{remote}/{base_branch}");
+    // SEC-125: `merge --ff-only` writes `ORIG_HEAD`; a symref there moves another ref.
+    if let Err(e) = crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(repo_root) {
+        return format!("warning: skipped local fast-forward of `{base_branch}`: {e}");
+    }
     match git_raw(
         repo_root,
         &["merge", "--ff-only", "--no-overwrite-ignore", &target_ref],

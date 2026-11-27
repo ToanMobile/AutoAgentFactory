@@ -16,6 +16,7 @@ pub mod merge_queue;
 pub mod pr;
 pub mod pr_feedback_gh;
 pub mod pr_merged_gh;
+pub(crate) mod pseudo_ref_guard;
 mod reflog_guard;
 pub mod warm_slot;
 mod warm_slot_ops;

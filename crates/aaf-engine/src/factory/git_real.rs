@@ -281,6 +281,7 @@ impl GitOps for RealGit {
             // stand in for the task branch.
             let branch_ref = format!("refs/heads/{branch}");
             let tree_path = guard.integration().tree.path.clone();
+            crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(&tree_path).map_err(err)?;
             let merge = git_no_hooks(
                 &tree_path,
                 &[
@@ -330,6 +331,9 @@ impl GitOps for RealGit {
         let tree = worktree.path.as_path();
         worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
         worktree::ensure_plain_reflogs(tree).map_err(err)?;
+        let branch_ref = format!("refs/heads/{}", worktree.branch);
+        crate::git::pseudo_ref_guard::ensure_plain_branch_ref(tree, &branch_ref).map_err(err)?;
+        crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(tree).map_err(err)?;
         let start = self.start();
         let args = [
             "-c",
@@ -364,6 +368,10 @@ impl GitOps for RealGit {
     fn reset_to(&self, worktree: &TaskWorktree, sha: &str) -> PortResult<()> {
         let tree = worktree.path.as_path();
         worktree::ensure_plain_reflogs(tree).map_err(err)?;
+        worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
+        let branch_ref = format!("refs/heads/{}", worktree.branch);
+        crate::git::pseudo_ref_guard::ensure_plain_branch_ref(tree, &branch_ref).map_err(err)?;
+        crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(tree).map_err(err)?;
         git(tree, &["reset", "--hard", "--quiet", sha]).map_err(err)?;
         git(tree, &["clean", "-ffdq"]).map_err(err)?;
         Ok(())
