@@ -224,8 +224,12 @@ pub fn undo_latest_turn(
     .map_err(|e| format!("git reset --hard {}: {e}", snap.commit_oid))?;
     git(&wt_path, &["clean", "-fd"]).map_err(|e| format!("git clean -fd: {e}"))?;
 
-    git(repo_root, &["update-ref", "-d", &snap.ref_name])
-        .map_err(|e| format!("delete snapshot ref {}: {e}", snap.ref_name))?;
+    crate::git::ensure_plain_reflogs(repo_root).map_err(|e| e.to_string())?;
+    git(
+        repo_root,
+        &["update-ref", "-d", "--no-deref", &snap.ref_name],
+    )
+    .map_err(|e| format!("delete snapshot ref {}: {e}", snap.ref_name))?;
     db.delete_snapshot(snap.id)
         .map_err(|e| format!("delete snapshot row: {e}"))?;
 

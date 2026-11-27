@@ -336,6 +336,7 @@ impl GitOps for RealGit {
         let branch_ref = format!("refs/heads/{}", worktree.branch);
         crate::git::pseudo_ref_guard::ensure_plain_branch_ref(tree, &branch_ref).map_err(err)?;
         crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(tree).map_err(err)?;
+        crate::git::pseudo_ref_guard::ensure_no_operation_state(tree).map_err(err)?;
         let start = self.start();
         let args = [
             "-c",

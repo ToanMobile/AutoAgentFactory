@@ -2,8 +2,7 @@
 //! deadline utilities for [`super::pr_merge`].
 
 use std::fs::{self, File, TryLockError};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,8 +24,6 @@ use crate::throttle::Progress;
 pub(super) const MAX_WAIT_SECS: u64 = 86_400;
 /// How often a waiter on the per-repo merge lock reports progress.
 const MERGE_LOCK_PROGRESS_SECS: u64 = 15;
-
-static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Returns a bounded deadline that never overflows `Instant`.
 pub(super) fn bounded_deadline(timeout: Duration) -> Instant {
@@ -464,34 +461,6 @@ impl Drop for MergeLockGuard {
     }
 }
 
-/// Unique temporary ref (`refs/aaf-merge/pr-{num}-{pid}-{seq}`); always
-/// deleted on `Drop` so error paths never leak refs.
-pub(super) struct TempRefGuard {
-    repo_root: PathBuf,
-    ref_name: String,
-}
-
-impl TempRefGuard {
-    pub(super) fn new(repo_root: &Path, pr_number: u64) -> Self {
-        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let ref_name = format!("refs/aaf-merge/pr-{pr_number}-{}-{seq}", std::process::id());
-        Self {
-            repo_root: repo_root.to_path_buf(),
-            ref_name,
-        }
-    }
-
-    pub(super) fn as_str(&self) -> &str {
-        &self.ref_name
-    }
-}
-
-impl Drop for TempRefGuard {
-    fn drop(&mut self) {
-        let _ = git_raw(&self.repo_root, &["update-ref", "-d", &self.ref_name]);
-    }
-}
-
 pub(super) fn fetch_base(
     repo_root: &Path,
     remote: &str,
@@ -506,6 +475,13 @@ pub(super) fn fetch_base(
     )?;
     let base_ref = format!("refs/remotes/{remote}/{base_ref_name}");
     git(repo_root, &["rev-parse", &base_ref])
+}
+
+/// Runs `git fetch --quiet -- <remote> <specs...>` and reports exit status.
+fn fetch_specs(repo: &Path, remote: &str, specs: &[&str]) -> Result<bool, GitError> {
+    let mut args = vec!["fetch", "--quiet", "--", remote];
+    args.extend_from_slice(specs);
+    Ok(git_raw(repo, &args)?.success())
 }
 
 pub(super) fn has_local_commit(repo_root: &Path, sha: &str) -> Result<bool, GitError> {
@@ -541,51 +517,41 @@ pub(super) fn fetch_base_and_pr(
         pr.base_ref_name, pr.base_ref_name
     );
     let base_ref = format!("refs/remotes/{remote}/{}", pr.base_ref_name);
-    let tmp_ref = TempRefGuard::new(repo_root, pr.number);
-    let pr_refspec = format!("+refs/pull/{}/head:{}", pr.number, tmp_ref.as_str());
+    let pr_ref = format!("refs/pull/{}/head", pr.number);
+    let branch_ref = check_branch_name(repo_root, &pr.head_ref_name)
+        .ok()
+        .map(|()| format!("refs/heads/{}", pr.head_ref_name));
+    // SEC-135: read advertised OIDs from remote; fetch PR with no `:dst` ref.
+    let mut ls_args = vec!["ls-remote", "--", remote, &pr_ref];
+    ls_args.extend(branch_ref.as_deref());
+    let (mut pull_oid, mut branch_oid) = (None::<String>, None::<String>);
+    for line in git(repo_root, &ls_args)?.lines() {
+        match line.split_once('\t').filter(|(s, _)| valid_sha40(s)) {
+            Some((oid, r)) if r == pr_ref => pull_oid = Some(oid.into()),
+            Some((oid, r)) if branch_ref.as_deref() == Some(r) => branch_oid = Some(oid.into()),
+            _ => {}
+        }
+    }
+    let eq = |s: &str| s.eq_ignore_ascii_case(expect_head);
+    let pull_ok = pull_oid.as_deref().is_some_and(eq);
+    let branch_ok = branch_oid.as_deref().is_some_and(eq);
 
     // Combine base + PR refspecs into a single network fetch; fall back to
     // separate fetches when `refs/pull/<n>/head` is missing or lagging.
-    let (base_sha, mut fetched_head) = if git_raw(
-        repo_root,
-        &["fetch", "--quiet", "--", remote, &base_refspec, &pr_refspec],
-    )?
-    .success()
-    {
-        let base_sha = git(repo_root, &["rev-parse", &base_ref])?;
-        let head = git(repo_root, &["rev-parse", tmp_ref.as_str()]).ok();
-        (base_sha, head)
+    let base_sha = if fetch_specs(repo_root, remote, &[&base_refspec, &pr_ref])? {
+        git(repo_root, &["rev-parse", &base_ref])?
     } else {
         let base_sha = fetch_base(repo_root, remote, &pr.base_ref_name)?;
-        let head =
-            if git_raw(repo_root, &["fetch", "--quiet", "--", remote, &pr_refspec])?.success() {
-                git(repo_root, &["rev-parse", tmp_ref.as_str()]).ok()
-            } else {
-                None
-            };
-        (base_sha, head)
+        let _ = fetch_specs(repo_root, remote, &[&pr_ref])?;
+        base_sha
     };
 
     // GitHub can update `refs/pull/<n>/head` asynchronously right after a push;
-    // try the branch ref (updated atomically by `git push`) as a best-effort
-    // fallback if the PR ref failed or still points at an older commit (for fork
-    // PRs the branch does not exist on `remote`, so a miss is non-fatal).
-    if !fetched_head
-        .as_deref()
-        .is_some_and(|sha| sha.eq_ignore_ascii_case(expect_head))
-        && check_branch_name(repo_root, &pr.head_ref_name).is_ok()
-    {
-        let branch_refspec = format!("+refs/heads/{}:{}", pr.head_ref_name, tmp_ref.as_str());
-        if git_raw(
-            repo_root,
-            &["fetch", "--quiet", "--", remote, &branch_refspec],
-        )?
-        .success()
-            && let Ok(sha) = git(repo_root, &["rev-parse", tmp_ref.as_str()])
-        {
-            fetched_head = Some(sha);
-        }
+    // fall back to fetching the head branch ref without `:dst`.
+    if let Some(br) = branch_ref.as_deref().filter(|_| !pull_ok && branch_ok) {
+        let _ = fetch_specs(repo_root, remote, &[br])?;
     }
+    let fetched_head = pull_oid.filter(|_| pull_ok || !branch_ok).or(branch_oid);
     let fetched_head = fetched_head
         .ok_or_else(|| GitError::Invalid(format!("failed to fetch PR #{} head", pr.number)))?;
     if !fetched_head.eq_ignore_ascii_case(expect_head) {
@@ -593,5 +559,11 @@ pub(super) fn fetch_base_and_pr(
             "fetched PR head {fetched_head} does not match --expect-head {expect_head}"
         )));
     }
-    Ok((base_sha, fetched_head))
+    if !has_local_commit_and_tree(repo_root, expect_head)? {
+        let msg = format!("failed to fetch PR #{} head", pr.number);
+        return Err(GitError::Invalid(msg));
+    }
+    let spec = format!("{expect_head}^{{commit}}");
+    let head_sha = git(repo_root, &["rev-parse", "--verify", &spec])?;
+    Ok((base_sha, head_sha))
 }

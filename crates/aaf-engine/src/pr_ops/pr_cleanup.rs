@@ -493,10 +493,16 @@ fn delete_local_branch(
         ));
         return false;
     }
-    let expected_lower = expect_head.to_ascii_lowercase();
+    if let Err(err) = worktree::ensure_plain_reflogs(main_repo) {
+        report
+            .warnings
+            .push(format!("could not delete local branch `{branch}`: {err}"));
+        return false;
+    }
+    let oid = expect_head.to_ascii_lowercase();
     match git_raw(
         main_repo,
-        &["update-ref", "-d", &branch_ref, &expected_lower],
+        &["update-ref", "-d", "--no-deref", &branch_ref, &oid],
     ) {
         Ok(out) if out.success() => {
             report.branch_deleted = true;

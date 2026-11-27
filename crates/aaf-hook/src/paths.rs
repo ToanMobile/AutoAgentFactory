@@ -415,6 +415,12 @@ pub fn has_glob(text: &str) -> bool {
     text.contains(['*', '?', '['])
 }
 
+/// True when `last` is a glob with a bounded tail (does not end with `*`),
+/// e.g. `release.keystor?` or `*.pe?`, unlike open-ended `README*`/`mod.*`.
+pub fn bounded_glob(last: &str) -> bool {
+    has_glob(last) && !last.ends_with('*')
+}
+
 #[derive(PartialEq)]
 enum Part {
     Star,
@@ -489,8 +495,7 @@ const ENV_VARIANTS: &[&str] = &[
     ".env.test",
 ];
 
-/// A file-name glob (as given to `find -name`) can match a protected file.
-pub fn may_name_protected(pattern: &str) -> bool {
+fn may_name_protected_with(pattern: &str, include_nested: bool) -> bool {
     if pattern.len() > MAX_PATTERN {
         return true;
     }
@@ -500,6 +505,7 @@ pub fn may_name_protected(pattern: &str) -> bool {
     let parts = glob_parts(pattern);
     if PROTECTED_GLOBS
         .iter()
+        .filter(|g| include_nested || !NESTED.iter().any(|(_, f)| f == *g))
         .any(|glob| globs_intersect(&parts, &glob_parts(glob)))
     {
         return true;
@@ -511,6 +517,44 @@ pub fn may_name_protected(pattern: &str) -> bool {
     globs_intersect(&parts, &glob_parts(".env.*"))
         && (parts.first() != Some(&Part::Star)
             || ENV_VARIANTS.iter().any(|name| glob_match(pattern, name)))
+}
+
+/// A file-name glob (as given to `find -name`) can match a protected file.
+pub fn may_name_protected(pattern: &str) -> bool {
+    may_name_protected_with(pattern, true)
+}
+
+/// Like [`may_name_protected`], excluding names only protected inside `.claude`/`.autofactory`.
+pub fn may_name_protected_anywhere(pattern: &str) -> bool {
+    may_name_protected_with(pattern, false)
+}
+
+/// A file-name glob can match a secret file (returns the matched pattern).
+pub fn may_name_secret(pattern: &str) -> Option<&'static str> {
+    if pattern.len() > MAX_PATTERN {
+        return Some("secret file");
+    }
+    if SECRET_ENV_ALLOWLIST.contains(&fold(pattern).as_str()) {
+        return None;
+    }
+    let parts = glob_parts(pattern);
+    let hits = |glob: &str| globs_intersect(&parts, &glob_parts(glob));
+    if let Some(&pat) = [".env", "id_rsa", "id_ed25519"]
+        .iter()
+        .chain(SECRET_EXACT)
+        .find(|g| hits(g))
+    {
+        return Some(pat);
+    }
+    if let Some(&suf) = SECRET_SUFFIXES.iter().find(|s| hits(&format!("*{s}"))) {
+        return Some(suf);
+    }
+    let prefix_pat = [".env.*", "id_rsa.*", "id_ed25519.*"]
+        .into_iter()
+        .find(|g| hits(g))?;
+    (parts.first() != Some(&Part::Star)
+        || (prefix_pat == ".env.*" && ENV_VARIANTS.iter().any(|name| glob_match(pattern, name))))
+    .then_some(prefix_pat)
 }
 
 /// Shell-style match of one path component, case-insensitive. A bracket

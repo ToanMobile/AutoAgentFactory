@@ -36,7 +36,8 @@ pub fn check_read(path: &Path) -> Option<Denial> {
 const READERS: &[&str] = &[
     "cat", "head", "tail", "less", "more", "bat", "sed", "awk", "gawk", "mawk", "nawk", "grep",
     "egrep", "fgrep", "rg", "strings", "base64", "xxd", "hexdump", "od", "nl", "tac", "rev",
-    "pbcopy", "tee", "cp", "dd", "cut", "sort", "uniq", "wc", "diff", "cmp", "source", ".",
+    "pbcopy", "tee", "cp", "dd", "cut", "sort", "uniq", "wc", "diff", "cmp", "paste", "fmt", "pr",
+    "fold", "expand", "unexpand", "column", "join", "comm", "source", ".",
 ];
 
 /// Commands whose first positional operand is a pattern/script rather than a file
@@ -281,6 +282,12 @@ fn glob_secret(raw: &str, ctx: &Ctx) -> Option<String> {
                 .then(|| secret_pattern(&ctx.expand_real_dotdot(raw)))
                 .flatten()
         })?;
+        return Some(format!("{last} (pattern {pat})"));
+    }
+    if walk.cut
+        && paths::bounded_glob(last)
+        && let Some(pat) = paths::may_name_secret(last)
+    {
         return Some(format!("{last} (pattern {pat})"));
     }
     SECRET_SAMPLES.iter().find_map(|sample| {
