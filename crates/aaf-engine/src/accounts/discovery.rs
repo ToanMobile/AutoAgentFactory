@@ -18,7 +18,7 @@ pub struct DiscoveryEnv<'a> {
 
 /// Single-directory providers: home-relative config dir and the binary
 /// names that prove the tool is installed (any one is enough).
-const SINGLE_DIR_PROVIDERS: [(ProviderKind, &str, &[&str]); 3] = [
+const SINGLE_DIR_PROVIDERS: [(ProviderKind, &str, &[&str]); 4] = [
     (ProviderKind::Codex, ".codex", &["codex"]),
     (
         ProviderKind::Antigravity,
@@ -26,6 +26,7 @@ const SINGLE_DIR_PROVIDERS: [(ProviderKind, &str, &[&str]); 3] = [
         &["gemini", "agy", "antigravity"],
     ),
     (ProviderKind::OpenCode, ".config/opencode", &["opencode"]),
+    (ProviderKind::Grok, ".grok", &["grok"]),
 ];
 
 /// Discovers accounts, sorted by provider then config dir, without duplicates.
@@ -45,7 +46,9 @@ pub fn discover(cfg: &AccountsConfig, env: &DiscoveryEnv) -> Vec<AccountProfile>
     }
     for (provider, rel, binaries) in SINGLE_DIR_PROVIDERS {
         let dir = env.home.join(rel);
-        if is_real_dir(&dir) && binaries.iter().any(|name| (env.binary_on_path)(name)) {
+        let has_bin = binaries.iter().any(|name| (env.binary_on_path)(name))
+            || (provider == ProviderKind::Grok && is_executable(&dir.join("bin/grok")));
+        if is_real_dir(&dir) && has_bin {
             found.extend(profile(provider, &dir, &aliases));
         }
     }
@@ -246,4 +249,38 @@ pub fn account_id(provider: ProviderKind, canonical_dir: &Path) -> String {
     let mut hash = aaf_fp::sha256_hex(canonical_dir.as_os_str().as_encoded_bytes());
     hash.truncate(12);
     format!("{}-{hash}", provider.as_str())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod grok_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn discovers_grok_dir_only_when_grok_binary_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".grok")).unwrap();
+        let cfg = AccountsConfig::default();
+
+        let with_bin = discover(
+            &cfg,
+            &DiscoveryEnv {
+                home: dir.path().to_path_buf(),
+                binary_on_path: &|bin| bin == "grok",
+            },
+        );
+        assert_eq!(with_bin.len(), 1);
+        assert_eq!(with_bin[0].provider, ProviderKind::Grok);
+        assert_eq!(with_bin[0].name, "grok");
+        assert!(with_bin[0].id.starts_with("grok-"));
+
+        let without_bin = discover(
+            &cfg,
+            &DiscoveryEnv {
+                home: dir.path().to_path_buf(),
+                binary_on_path: &|_| false,
+            },
+        );
+        assert!(without_bin.is_empty());
+    }
 }

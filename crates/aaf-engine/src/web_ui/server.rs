@@ -341,6 +341,11 @@ fn dispatch_request(
     req: &HttpRequest,
 ) {
     let route = match_route(&req.method, &req.raw_path);
+    let accounts_refresh = matches!(route, Route::Accounts)
+        && req
+            .query
+            .get("refresh")
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
     let sec_ctx = RequestSecurityContext {
         method: &req.method,
         path: &req.raw_path,
@@ -356,7 +361,7 @@ fn dispatch_request(
         is_mutating: matches!(
             route,
             Route::ApproveCommit | Route::Action | Route::CreateTask
-        ),
+        ) || accounts_refresh,
     };
     if let Err(rej) = verify_request_security(cfg, bound_port, &sec_ctx) {
         let (code, msg) = match rej {

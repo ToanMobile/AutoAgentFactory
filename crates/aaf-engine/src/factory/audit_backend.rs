@@ -13,7 +13,6 @@ use aaf_domain::ports::{AgentOutcome, AgentRunner, LimitHit, PortResult};
 use aaf_domain::task::Task;
 use serde_json::json;
 
-#[allow(dead_code)]
 mod policy;
 
 pub use super::rework_filter::{findings_from_review_issues, is_valid_rework_finding};
@@ -88,11 +87,12 @@ pub fn resolve_auto_audit_executor(
                 })
             })
     };
-    const CANDIDATES: [(&str, &[&str]); 5] = [
+    const CANDIDATES: [(&str, &[&str]); 6] = [
         ("gemini", &[".gemini"]),
         ("antigravity", &[".gemini"]),
         ("codex", &[".codex"]),
         ("claude", &[".claude"]),
+        ("grok", &[".grok"]),
         ("opencode", &[".local/share/opencode", ".config/opencode"]),
     ];
     for (candidate, dirs) in CANDIDATES {
@@ -100,7 +100,9 @@ pub fn resolve_auto_audit_executor(
             continue;
         }
         let installed = crate::executors::registry::find_descriptor(candidate)
-            .and_then(|d| crate::executors::registry::resolve_binary(d, path_var))
+            .and_then(|d| {
+                crate::executors::registry::resolve_binary_with_home(d, path_var, Some(home))
+            })
             .is_some();
         let configured_dir = if candidate == "claude" {
             has_claude_dir(home)
@@ -121,7 +123,8 @@ pub fn resolve_auto_audit_executor(
 /// Keeps `"antigravity"` separate from `"gemini"`, invoking `agy` via
 /// [`crate::executors::registry::build_headless_argv`] (R3-PROTO-2).
 pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String> {
-    if cfg.executor_cmd.trim().is_empty() && cfg.executor.trim().eq_ignore_ascii_case("antigravity")
+    if cfg.executor_cmd.trim().is_empty()
+        && aaf_domain::pipeline::normalize_executor_id(&cfg.executor) == "antigravity"
     {
         let model = cfg.model.trim();
         let effort = cfg.effort.trim();

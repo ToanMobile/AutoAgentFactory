@@ -169,6 +169,7 @@ fn executor_for_provider(provider: Option<ProviderKind>, fallback: &str) -> &str
         Some(ProviderKind::Codex) => "codex",
         Some(ProviderKind::Antigravity) => "antigravity",
         Some(ProviderKind::OpenCode) => "opencode",
+        Some(ProviderKind::Grok) => "grok",
         None => fallback,
     }
 }

@@ -25,12 +25,31 @@ pub const DEFAULT_SPIKE_FACTOR: u32 = 4;
 /// Maximum length of a [`ReviewerConfig::id`] in bytes.
 const MAX_REVIEWER_ID_LEN: usize = 64;
 
+/// Normalizes built-in executor aliases to their canonical executor id.
+pub fn normalize_executor_id(raw: &str) -> String {
+    let norm = raw.trim().to_ascii_lowercase();
+    match norm.as_str() {
+        "claude" | "claude-code" | "claude_code" | "claudecode" => "claude".to_string(),
+        "codex" | "codex-cli" | "openai-codex" => "codex".to_string(),
+        "gemini" | "gemini-cli" => "gemini".to_string(),
+        "opencode" | "open-code" | "open_code" => "opencode".to_string(),
+        "cursor" | "cursor-cli" | "cursor-agent" | "agent" => "cursor".to_string(),
+        "antigravity" | "agy" | "antigravity-cli" => "antigravity".to_string(),
+        "grok" | "grok-cli" | "xai-grok" => "grok".to_string(),
+        "codebuddy" | "code-buddy" | "codebuddy-cli" => "codebuddy".to_string(),
+        "kimi" | "kimi-code" | "kimi-cli" => "kimi".to_string(),
+        "pi" | "pi-cli" | "pi-agent" => "pi".to_string(),
+        "deepseek" | "deepseek-cli" | "deepseek-harness" | "dsh" => "deepseek".to_string(),
+        _ => norm,
+    }
+}
+
 /// Maps provider/executor names to their canonical model-family identity.
 ///
 /// `"antigravity"` and `"gemini"` share the Gemini model family and collapse to
 /// `"gemini"` so they never count as two independent providers.
 pub fn canonical_provider(provider: &str) -> String {
-    let norm = provider.trim().to_ascii_lowercase();
+    let norm = normalize_executor_id(provider);
     match norm.as_str() {
         "antigravity" | "gemini" => "gemini".to_string(),
         _ => norm,
@@ -43,12 +62,13 @@ pub fn canonical_provider(provider: &str) -> String {
 /// wrapper commands cannot satisfy cross-provider diversity requirements.
 pub fn is_known_real_provider(executor: &str) -> bool {
     matches!(
-        executor.trim().to_ascii_lowercase().as_str(),
+        normalize_executor_id(executor).as_str(),
         "claude"
             | "codex"
             | "gemini"
             | "antigravity"
             | "opencode"
+            | "grok"
             | "cursor"
             | "kimi"
             | "pi"

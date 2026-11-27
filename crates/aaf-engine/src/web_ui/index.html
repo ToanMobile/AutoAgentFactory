@@ -77,7 +77,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 @media(prefers-reduced-motion:reduce){.sup-btn.on .dot{animation:none}}
 .pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid transparent;white-space:nowrap;font-variant-numeric:tabular-nums}
 .pill-ready{color:var(--info);background:var(--info-bg)}
-.pill-running,.pill-gating{color:var(--warn);background:var(--warn-bg)}
+.pill-running,.pill-gating,.pill-warn{color:var(--warn);background:var(--warn-bg)}
 .pill-review{color:var(--rev);background:var(--rev-bg);border-color:color-mix(in srgb,var(--rev) 28%,transparent)}
 .pill-blocked,.pill-err{color:var(--err);background:var(--err-bg)}
 .pill-done,.pill-ok{color:var(--ok);background:var(--ok-bg)}
@@ -186,6 +186,12 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .decision-opt:hover{background:var(--surface2)}
 .decision-opt input[type="radio"]{margin-top:3px;flex:none;accent-color:var(--accent)}
 .decision-rec{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;font-size:10.5px;font-weight:700;color:var(--ok);background:var(--ok-bg);margin-left:5px;vertical-align:middle}
+.decision-opt-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.decision-opt-title{font-weight:600;color:var(--ink)}
+.decision-opt-desc{font-size:12px;color:var(--muted);line-height:1.45}
+.decision-hint{font-size:12px;line-height:1.45;color:var(--ink2);background:color-mix(in srgb,var(--info) 9%,var(--surface2));border-left:3px solid var(--info);border-radius:6px;padding:6px 9px}
+.decision-hint b{color:var(--ink)}
+.decision-code{font-family:var(--mono);font-size:11.5px;padding:1px 4px;border-radius:4px;background:var(--surface2);color:var(--ink)}
 .decision-input{width:100%;font-size:12.5px;padding:5px 8px}
 .decision-foot{display:flex;flex-direction:column;gap:7px;padding-top:4px;border-top:1px dashed var(--border)}
 .spec-box{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.55}
@@ -235,7 +241,15 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .acc-stat-val{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ink)}
 .acc-stat-sub{font-size:11.5px;color:var(--muted)}
 .acc-warn{margin-bottom:12px;padding:9px 12px;border-radius:10px;border:1px solid color-mix(in srgb,var(--warn) 45%,var(--border));background:color-mix(in srgb,var(--warn) 10%,var(--surface));color:var(--ink);font-size:12.5px}
-.acc-issue{font-size:11.5px;color:var(--warn);line-height:1.4;padding:5px 8px;border-radius:7px;background:color-mix(in srgb,var(--warn) 10%,var(--surface2))}
+.acc-issue{font-size:11.5px;color:var(--warn);line-height:1.4;padding:5px 8px;border-radius:7px;background:color-mix(in srgb,var(--warn) 10%,var(--surface2));white-space:normal;max-width:280px}
+.acc-provider-group{margin-bottom:14px}
+.acc-provider-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.acc-provider-title{display:inline-flex;align-items:center;gap:8px;font-weight:700;font-size:13.5px;color:var(--ink)}
+.acc-provider-dot{width:9px;height:9px;border-radius:50%;flex:none}
+.acc-dir{font-size:11px;color:var(--muted);margin-top:2px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.acc-nolive{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:1px 7px;border-radius:999px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);margin-right:6px}
+.acc-repo-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+#repoModePill{max-width:100%;white-space:normal;line-height:1.3}
 .table-wrap{overflow-x:auto;max-width:100%}
 table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
@@ -372,21 +386,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   <section id="view-accounts" class="hidden">
     <div class="acc-toolbar">
       <button id="accRefreshBtn" class="btn-primary btn-sm" type="button" data-i18n="acc.refreshLive">↻ Refresh Quota (Live)</button>
-      <button id="ccRotateBtn" class="btn-sm hidden" type="button" data-i18n="acc.rotate">Rotate Account</button>
-      <button id="ccUnfreezeBtn" class="btn-sm hidden" type="button" data-i18n="acc.unfreeze">Unfreeze Accounts</button>
-      <button id="ccBalanceBtn" class="btn-sm hidden" type="button" data-i18n="acc.balance">Balance Repos</button>
+      <button id="accClearAllCdBtn" class="btn-ok btn-sm hidden" type="button" data-i18n="acc.clearAllCd">Clear All Cooldowns</button>
       <span id="accMetaNote" class="muted" style="font-size:12px;margin-left:auto"></span>
     </div>
     <div id="accWarnBox"></div>
     <div id="accUsageBar" class="acc-summary hidden"></div>
-    <div id="ccProfilesBox" class="acc-grid"></div>
+    <div id="accountsBox"></div>
     <div class="card" style="margin-bottom:14px">
-      <div class="kv-title"><span data-i18n="acc.repoAssignTitle">Repo ↔ Account</span> (<span class="mono">.claude/settings.local.json</span>)</div>
+      <div class="acc-repo-head">
+        <div class="kv-title" style="margin-bottom:0"><span data-i18n="acc.repoAssignTitle">Repo ↔ Account</span> (<span class="mono">.claude/settings.local.json</span>)</div>
+        <span id="repoModePill" class="pill pill-slate hidden"></span>
+      </div>
       <div id="repoAssignBox" class="table-wrap"><div class="muted" data-i18n="acc.loadingRepos">Loading repository list…</div></div>
-    </div>
-    <div class="card">
-      <div class="kv-title" data-i18n="acc.poolTitle">AAF Router Account Pool &amp; Cooldowns</div>
-      <div id="accountsBox" class="table-wrap"></div>
     </div>
   </section>
 
@@ -545,8 +556,13 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   let lastFocusBeforeDrawer = null;
   let lastFocusBeforeModal = null;
   let lastMachineSig = null;
+  let lastAccountsPoolSig = null;
   let accountsPanelData = null;
+  let accountsPanelFetchedAt = 0;
+  let statusFetchedAt = 0;
+  let lastStatusAccountIds = new Set();
   let accountsLoadInFlight = false;
+  let accountsLiveInFlight = false;
   let accountsLoadQueued = false;
   let accountsQueuedLive = false;
   const pendingAccounts = new Set();
@@ -651,6 +667,11 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         el.textContent = durLive(Math.max(0, nowSec - start));
       }
     });
+    const effAccts = getEffectiveAccounts();
+    if (effAccts.some((a) => a.cooldown_until)) {
+      renderTopAccPill();
+      if (activeTab === "accounts") renderAccountsPool(false);
+    }
   }
   function formatLiveStage(t) {
     const ev = (t.latest_event && t.latest_event.kind) || "";
@@ -865,7 +886,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     }
     renderLocalizedStreamStatus();
     if (accountsPanelData) renderAccountsPanel();
-    else renderMachine(true);
+    renderMachine(true);
+    renderTopAccPill();
     if ($("drawerBg").classList.contains("open") && drawerDetail) renderDrawerTab();
   }
 
@@ -1129,6 +1151,17 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     sse.addEventListener("status", (ev) => {
       try {
         statusData = JSON.parse(ev.data);
+        statusFetchedAt = Date.now();
+        const sAccts = (statusData && statusData.watch_accounts && statusData.watch_accounts.entries)
+          || (statusData && statusData.accounts)
+          || [];
+        const nextIds = new Set(sAccts.map((a) => a && a.id).filter(Boolean));
+        if (accountsPanelData && Array.isArray(accountsPanelData.aaf_accounts)) {
+          const panelIds = new Set(accountsPanelData.aaf_accounts.map((a) => a && a.id).filter(Boolean));
+          const hasBrandNew = [...nextIds].some((id) => !lastStatusAccountIds.has(id) && !panelIds.has(id));
+          if (hasBrandNew) loadAccountsPanel(false);
+        }
+        lastStatusAccountIds = nextIds;
         renderStatusChrome();
         if (activeTab === "machine" || activeTab === "accounts") renderMachine();
         const sig = boardSigFromStatus(statusData);
@@ -1454,6 +1487,16 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     }
     const activeRunObj = runs.find((r) => r.id === activeRunId && r.status === "running");
     $("stopStreamRunBtn").classList.toggle("hidden", ro || !activeRunObj);
+    if ($("accRefreshBtn")) {
+      if (accountsLiveInFlight || accountsQueuedLive) {
+        $("accRefreshBtn").disabled = true;
+        $("accRefreshBtn").textContent = tr("acc.syncing");
+      } else {
+        $("accRefreshBtn").disabled = ro;
+        $("accRefreshBtn").title = ro ? roHint() : "";
+      }
+    }
+    renderTopAccPill();
   }
 
   function matchesRepo(t) { return selectedRepos.size === 0 || selectedRepos.has(t.repo_name); }
@@ -1886,31 +1929,66 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     });
   }
 
+  function formatDecisionText(raw) {
+    const escaped = esc(raw);
+    return escaped.replace(/`([^`]{1,80})`/g, '<code class="decision-code">$1</code>');
+  }
+
+  function splitOptionTitleDesc(cleanBody) {
+    const dashMatch = cleanBody.match(/^([^—–]{3,76}?)\s+[—–]\s+(.+)$/);
+    if (dashMatch) return { title: dashMatch[1].trim(), desc: dashMatch[2].trim() };
+    const colonIdx = cleanBody.indexOf(":");
+    if (colonIdx >= 3 && colonIdx <= 76 && colonIdx < cleanBody.length - 3) {
+      return { title: cleanBody.slice(0, colonIdx).trim(), desc: cleanBody.slice(colonIdx + 1).trim() };
+    }
+    return { title: cleanBody, desc: "" };
+  }
+
   function parseDecisionQuestion(raw, idx) {
-    const text = String(raw || "").trim();
-    const re = /(?:^|[\s:;.\-])\((\d+)\)\s+/g;
-    const matches = [];
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      const markerPos = m.index + m[0].indexOf("(");
-      matches.push({ num: m[1], start: markerPos, contentStart: m.index + m[0].length });
+    let text = String(raw || "").trim();
+    let hint = "";
+    const hintRe = /(?:\s*\|\s*|\s+)(?:gợi ý|hint|khuyến nghị|recommendation|suggestion)\s*:\s*([\s\S]+)$/i;
+    const hm = text.match(hintRe);
+    if (hm) {
+      hint = hm[1].trim();
+      text = text.slice(0, hm.index).replace(/[\s|\-:]+$/, "").trim();
+    }
+    const patterns = [
+      /(?:^|[\s:;.\-|])\((\d+)\)\s+/g,
+      /(?:^|[\s|])(?:option|phương án|pa)\s*(\d+)\s*[:)\-]\s+/gi,
+      /(?:^|\s*\|\s*)([A-D])\)\s+/g,
+    ];
+    let matches = [];
+    for (const re of patterns) {
+      const found = [];
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const marker = m[0].replace(/^[\s:;.\-|]+/, "");
+        const markerPos = m.index + (m[0].length - marker.length);
+        found.push({ num: m[1], start: markerPos, contentStart: m.index + m[0].length });
+      }
+      if (found.length >= 2) {
+        matches = found;
+        break;
+      }
     }
     if (matches.length >= 2) {
-      const rawPrefix = text.slice(0, matches[0].start).replace(/[:\-\s]+$/, "").trim();
+      const rawPrefix = text.slice(0, matches[0].start).replace(/[\s|:\-]+$/, "").trim();
       const options = matches.map((cur, i) => {
         const end = i + 1 < matches.length ? matches[i + 1].start : text.length;
-        const body = text.slice(cur.contentStart, end).trim().replace(/[.\s]+$/, "");
+        const body = text.slice(cur.contentStart, end).trim().replace(/[\s|.]+$/, "");
         const recommended = /\((?:khuyến nghị|recommended)\)/i.test(body);
-        const colonIdx = body.indexOf(":");
-        const head = (colonIdx > 0 && colonIdx <= 80 ? body.slice(0, colonIdx) : body.slice(0, 72))
+        const cleanBody = body
           .replace(/\s*\((?:khuyến nghị|recommended)\)\s*/gi, " ")
           .replace(/\s+/g, " ")
           .trim();
-        return { num: cur.num, text: body, shortLabel: head || body.slice(0, 60), recommended };
+        const { title, desc } = splitOptionTitleDesc(cleanBody);
+        const shortLabel = title.slice(0, 72) || cleanBody.slice(0, 60);
+        return { num: cur.num, text: cleanBody, title, desc, shortLabel, recommended };
       });
-      return { idx, prefix: rawPrefix || `#${idx + 1}`, question: text, options };
+      return { idx, prefix: rawPrefix || `#${idx + 1}`, question: text, options, hint };
     }
-    return { idx, prefix: `#${idx + 1}`, question: text, options: [] };
+    return { idx, prefix: `#${idx + 1}`, question: text, options: [], hint };
   }
 
   function renderDecisionSection(taskId, openQs, taskState, ro, scopeId) {
@@ -1921,14 +1999,22 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const titleKey = isBlocked ? "decision.titleBlocked" : "decision.titleOpen";
     const itemsHtml = parsed.map((item) => {
       const name = `${scopeId}_q_${item.idx}`;
+      const recOpt = item.options.find((o) => o.recommended);
+      const effectiveHint = item.hint
+        || (recOpt ? tr("decision.recHint", { num: recOpt.num, label: recOpt.shortLabel }) : tr("decision.defaultHint"));
+      const hintHtml = `<div class="decision-hint">💡 <b>${esc(tr("decision.hintLabel"))}:</b> ${formatDecisionText(effectiveHint)}</div>`;
       if (item.options.length >= 2) {
         const optsHtml = item.options.map((opt, oi) => `
           <label class="decision-opt">
             <input type="radio" name="${esc(name)}" value="${esc(opt.num)}" data-dec-idx="${item.idx}" data-dec-opt="${oi}" data-dec-rec="${opt.recommended ? "1" : "0"}" ${ro ? "disabled" : ""}>
-            <span><strong>(${esc(opt.num)})</strong> ${esc(opt.text)}${opt.recommended ? `<span class="decision-rec">${esc(tr("decision.recommendedBadge"))}</span>` : ""}</span>
+            <span class="decision-opt-body">
+              <span class="decision-opt-title"><strong>(${esc(opt.num)})</strong> ${formatDecisionText(opt.title)}${opt.recommended ? `<span class="decision-rec">${esc(tr("decision.recommendedBadge"))}</span>` : ""}</span>
+              ${opt.desc ? `<span class="decision-opt-desc">${formatDecisionText(opt.desc)}</span>` : ""}
+            </span>
           </label>`).join("");
         return `<div class="decision-item">
-          <div class="decision-q-head">${item.idx + 1}. ${esc(item.prefix)}</div>
+          <div class="decision-q-head">${item.idx + 1}. ${formatDecisionText(item.prefix)}</div>
+          ${hintHtml}
           <div class="decision-opts">
             ${optsHtml}
             <label class="decision-opt">
@@ -1941,7 +2027,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         </div>`;
       }
       return `<div class="decision-item">
-        <div class="decision-q-head">${item.idx + 1}. ${esc(item.question)}</div>
+        <div class="decision-q-head">${item.idx + 1}. ${formatDecisionText(item.question)}</div>
+        ${hintHtml}
         <input type="text" class="decision-input" data-dec-free="${item.idx}" placeholder="${esc(tr("decision.answerPlaceholder"))}" ${ro ? "disabled" : ""}>
       </div>`;
     }).join("");
@@ -2828,113 +2915,316 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     return String(val);
   }
 
+  const PROVIDER_ORDER = ["claude_code", "antigravity", "grok", "codex", "open_code"];
+
+  function providerMeta(prov) {
+    switch (String(prov || "").toLowerCase()) {
+      case "claude_code": return { title: tr("acc.groupClaude"), shortName: "Claude", color: "#D97706" };
+      case "antigravity": return { title: tr("acc.groupGoogle"), shortName: "Google", color: "#2563EB" };
+      case "grok": return { title: tr("acc.groupGrok"), shortName: "Grok", color: "#7C3AED" };
+      case "codex": return { title: tr("acc.groupCodex"), shortName: "Codex", color: "#059669" };
+      case "open_code": return { title: tr("acc.groupOpenCode"), shortName: "OpenCode", color: "#0EA5E9" };
+      default: return { title: String(prov || "Unknown"), shortName: String(prov || "Other"), color: "#64748B" };
+    }
+  }
+
+  function selectionModeLabel(mode) {
+    const m = String(mode || "").trim().toLowerCase();
+    if (m === "pinned") return tr("acc.modePinned");
+    if (m === "least_used") return tr("acc.modeLeastUsed");
+    return tr("acc.modeSticky");
+  }
+
+  function getEffectiveAccounts() {
+    const statusAccts = (statusData && statusData.watch_accounts && statusData.watch_accounts.entries)
+      || (statusData && statusData.accounts)
+      || [];
+    if (accountsPanelData && Array.isArray(accountsPanelData.aaf_accounts) && accountsPanelData.aaf_accounts.length) {
+      if (statusFetchedAt > accountsPanelFetchedAt && statusAccts.length) {
+        const liveById = new Map();
+        for (const sa of statusAccts) {
+          if (sa && sa.id) liveById.set(sa.id, sa);
+        }
+        return accountsPanelData.aaf_accounts.map((a) => {
+          const live = a && a.id ? liveById.get(a.id) : null;
+          if (!live) return a;
+          const nextState = live.state || live.status || a.state;
+          return {
+            ...a,
+            state: nextState,
+            cooldown_until: nextState === "cooldown"
+              ? (live.cooldown_until !== undefined ? live.cooldown_until : a.cooldown_until)
+              : null,
+            tokens_5h: live.tokens_5h !== undefined ? live.tokens_5h : a.tokens_5h,
+            tokens_7d: live.tokens_7d !== undefined ? live.tokens_7d : a.tokens_7d,
+          };
+        });
+      }
+      return accountsPanelData.aaf_accounts;
+    }
+    return statusAccts;
+  }
+
+  function isAccountInCooldown(a) {
+    if (a && a.cooldown_until !== null && a.cooldown_until !== undefined && Number.isFinite(Number(a.cooldown_until))) {
+      return Number(a.cooldown_until) > Date.now() / 1000;
+    }
+    const st = (a && (a.state || a.status)) || "unknown";
+    return st === "cooldown";
+  }
+
+  function buildAnthropicQuotaMap() {
+    const swProfiles = (accountsPanelData && accountsPanelData.switcher && Array.isArray(accountsPanelData.switcher.profiles))
+      ? accountsPanelData.switcher.profiles
+      : [];
+    const byKey = new Map();
+    for (const p of swProfiles) {
+      // Only Anthropic/Claude profiles have a real live 5h/7d OAuth quota API.
+      // Never attach synthetic/placeholder 100% quotas to Google/Grok/Codex accounts.
+      if (!p || p.vendor !== "anthropic") continue;
+      if (p.id) byKey.set(String(p.id).toLowerCase(), p);
+      if (p.name) byKey.set(String(p.name).toLowerCase(), p);
+    }
+    return byKey;
+  }
+
   function renderMachine(force = false) {
     if (!statusData) return;
     const c = statusData.counts || {};
     const r = statusData.runs || {};
     const ro = Boolean(meta.read_only);
-    const panelAccts = (accountsPanelData && Array.isArray(accountsPanelData.aaf_accounts) && accountsPanelData.aaf_accounts.length)
-      ? accountsPanelData.aaf_accounts
-      : null;
-    const accts = panelAccts || (statusData.watch_accounts && statusData.watch_accounts.entries) || statusData.accounts || [];
-    const swProfiles = (accountsPanelData && accountsPanelData.switcher && Array.isArray(accountsPanelData.switcher.profiles))
-      ? accountsPanelData.switcher.profiles
-      : [];
-    const swByKey = new Map();
-    for (const p of swProfiles) {
-      if (p && p.id) swByKey.set(String(p.id).toLowerCase(), p);
-      if (p && p.name) swByKey.set(String(p.name).toLowerCase(), p);
-    }
     const hs = statusData.heavy_slots || {};
     const th = statusData.throttle || {};
-    const swSig = swProfiles.map((p) => [p.id, p.remainingPct, p.weeklyRemainingPct, p.resetRemainHuman, p.weeklyResetFormatted, p.isFrozen]);
     const langNow = window.AafI18n ? window.AafI18n.getLang() : "en";
-    const mSig = JSON.stringify([langNow, ro, c, r, statusData.tokens_in, statusData.tokens_out, statusData.estimated_cost_usd, statusData.frozen, hs, th, accts, swSig, [...pendingAccounts]]);
-    if (!force && mSig === lastMachineSig) return;
-    lastMachineSig = mSig;
-    const hasCost = statusData.estimated_cost_usd !== null && statusData.estimated_cost_usd !== undefined;
-    const costHtml = hasCost
-      ? `<div class="stat-val">$${esc(Number(statusData.estimated_cost_usd).toFixed(4))}</div>`
-      : `<div class="stat-val" title="${esc(tr("machine.subTokensOnly"))}">—</div>`;
-    const taskParts = [
-      `${stateLabel("backlog")} ${c.backlog ?? 0}`,
-      `${stateLabel("ready")} ${c.ready ?? 0}`,
-      `${stateLabel("running")} ${(c.running ?? 0) + (c.gating ?? 0)}`,
-      `${stateLabel("review")} ${c.review ?? 0}`,
-      `${stateLabel("blocked")} ${c.blocked ?? 0}`,
-      `${stateLabel("done")} ${c.done ?? 0}`,
-    ];
-    if (c.cancelled) taskParts.push(`${stateLabel("cancelled")} ${c.cancelled}`);
-    $("metricCards").innerHTML = `
-      <div class="card"><div class="stat-label">${esc(tr("machine.tasks"))}</div><div class="stat-val">${esc(c.total ?? 0)}</div><div class="stat-sub">${esc(taskParts.join(" · "))}</div></div>
-      <div class="card"><div class="stat-label">${esc(tr("machine.runs"))}</div><div class="stat-val">${esc(r.total ?? 0)}</div><div class="stat-sub">${esc(tr("machine.runsSub", { active: r.running ?? 0, ok: r.succeeded ?? 0, fail: r.failed ?? 0 }))}</div></div>
-      <div class="card"><div class="stat-label">${esc(tr("machine.tokens"))}</div><div class="stat-val">${esc((statusData.tokens_in||0).toLocaleString())}</div><div class="stat-sub">${esc(tr("machine.tokensSub", { out: (statusData.tokens_out||0).toLocaleString() }))}</div></div>
-      <div class="card"><div class="stat-label">${esc(tr("machine.estCost"))}</div>${costHtml}<div class="stat-sub">${esc(tr("machine.frozenSub", { val: statusData.frozen ? tr("common.yes") : tr("common.no") }))}</div></div>`;
+    const mSig = JSON.stringify([langNow, ro, c, r, statusData.tokens_in, statusData.tokens_out, statusData.estimated_cost_usd, statusData.frozen, hs, th]);
+    if (force || mSig !== lastMachineSig) {
+      lastMachineSig = mSig;
+      const hasCost = statusData.estimated_cost_usd !== null && statusData.estimated_cost_usd !== undefined;
+      const costHtml = hasCost
+        ? `<div class="stat-val">$${esc(Number(statusData.estimated_cost_usd).toFixed(4))}</div>`
+        : `<div class="stat-val" title="${esc(tr("machine.subTokensOnly"))}">—</div>`;
+      const taskParts = [
+        `${stateLabel("backlog")} ${c.backlog ?? 0}`,
+        `${stateLabel("ready")} ${c.ready ?? 0}`,
+        `${stateLabel("running")} ${(c.running ?? 0) + (c.gating ?? 0)}`,
+        `${stateLabel("review")} ${c.review ?? 0}`,
+        `${stateLabel("blocked")} ${c.blocked ?? 0}`,
+        `${stateLabel("done")} ${c.done ?? 0}`,
+      ];
+      if (c.cancelled) taskParts.push(`${stateLabel("cancelled")} ${c.cancelled}`);
+      $("metricCards").innerHTML = `
+        <div class="card"><div class="stat-label">${esc(tr("machine.tasks"))}</div><div class="stat-val">${esc(c.total ?? 0)}</div><div class="stat-sub">${esc(taskParts.join(" · "))}</div></div>
+        <div class="card"><div class="stat-label">${esc(tr("machine.runs"))}</div><div class="stat-val">${esc(r.total ?? 0)}</div><div class="stat-sub">${esc(tr("machine.runsSub", { active: r.running ?? 0, ok: r.succeeded ?? 0, fail: r.failed ?? 0 }))}</div></div>
+        <div class="card"><div class="stat-label">${esc(tr("machine.tokens"))}</div><div class="stat-val">${esc((statusData.tokens_in||0).toLocaleString())}</div><div class="stat-sub">${esc(tr("machine.tokensSub", { out: (statusData.tokens_out||0).toLocaleString() }))}</div></div>
+        <div class="card"><div class="stat-label">${esc(tr("machine.estCost"))}</div>${costHtml}<div class="stat-sub">${esc(tr("machine.frozenSub", { val: statusData.frozen ? tr("common.yes") : tr("common.no") }))}</div></div>`;
 
-    const slots = hs.slots || [];
-    $("throttleBox").innerHTML = `
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-        <span class="pill pill-slate">${esc(tr("machine.activeSlots", { a: th.throttle_slots ?? 0, b: th.slot_lock_files ?? 0 }))}</span>
-        <span class="pill ${hs.drain_active ? "pill-blocked" : "pill-ok"}">${esc(tr("machine.drain", { state: hs.drain_active ? tr("machine.drainActive") : tr("machine.drainIdle") }))}</span>
-        <span class="pill pill-info">${esc(tr("machine.memPressure", { val: memPressureLabel(hs.memory_pressure) }))}</span>
-      </div>
-      ${slots.length ? `<div class="table-wrap"><table><thead><tr><th>${esc(tr("machine.thSlot"))}</th><th>${esc(tr("machine.thState"))}</th><th>${esc(tr("machine.thPgid"))}</th><th>${esc(tr("machine.thLabel"))}</th><th>${esc(tr("machine.thRam"))}</th></tr></thead><tbody>${slots.map((s) =>
-        `<tr><td class="mono">#${esc(s.slot)}</td><td>${esc(slotStateLabel(s.state))}</td><td class="mono">${esc(s.pgid ?? "—")}</td><td>${esc(s.label ?? "—")}</td><td class="mono">${esc(s.reserved_ram_mb ?? "—")}</td></tr>`
-      ).join("")}</tbody></table></div>` : `<div class="muted">${esc(tr("machine.noSlots"))}</div>`}`;
+      const slots = hs.slots || [];
+      $("throttleBox").innerHTML = `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <span class="pill pill-slate">${esc(tr("machine.activeSlots", { a: th.throttle_slots ?? 0, b: th.slot_lock_files ?? 0 }))}</span>
+          <span class="pill ${hs.drain_active ? "pill-blocked" : "pill-ok"}">${esc(tr("machine.drain", { state: hs.drain_active ? tr("machine.drainActive") : tr("machine.drainIdle") }))}</span>
+          <span class="pill pill-info">${esc(tr("machine.memPressure", { val: memPressureLabel(hs.memory_pressure) }))}</span>
+        </div>
+        ${slots.length ? `<div class="table-wrap"><table><thead><tr><th>${esc(tr("machine.thSlot"))}</th><th>${esc(tr("machine.thState"))}</th><th>${esc(tr("machine.thPgid"))}</th><th>${esc(tr("machine.thLabel"))}</th><th>${esc(tr("machine.thRam"))}</th></tr></thead><tbody>${slots.map((s) =>
+          `<tr><td class="mono">#${esc(s.slot)}</td><td>${esc(slotStateLabel(s.state))}</td><td class="mono">${esc(s.pgid ?? "—")}</td><td>${esc(s.label ?? "—")}</td><td class="mono">${esc(s.reserved_ram_mb ?? "—")}</td></tr>`
+        ).join("")}</tbody></table></div>` : `<div class="muted">${esc(tr("machine.noSlots"))}</div>`}`;
+    }
+    renderTopAccPill();
+    renderAccountsPool(force);
+  }
+
+  function renderAccountsSummary() {
+    const accts = getEffectiveAccounts();
+    $("cntAccounts").textContent = String(accts.length);
+    const usageBar = $("accUsageBar");
+    if (!usageBar) return;
+    if (!accts.length) {
+      usageBar.innerHTML = "";
+      usageBar.classList.add("hidden");
+      return;
+    }
+    const data = accountsPanelData || {};
+    const sw = data.switcher || null;
+    const profiles = (sw && Array.isArray(sw.profiles)) ? sw.profiles : [];
+    const claudes = accts.filter((a) => a.provider === "claude_code");
+    const claudeReady = claudes.filter((a) => !isAccountInCooldown(a)).length;
+    const anthProfiles = profiles.filter((p) => p && p.vendor === "anthropic");
+    const liveCnt = anthProfiles.filter((p) => p.quota && p.quota.live).length;
+    const tsSync = sw && sw.health && sw.health.quotaFetchedAtMs
+      ? ago(Math.round(sw.health.quotaFetchedAtMs / 1000))
+      : tr("acc.notSynced");
+    const claudeSub = anthProfiles.length
+      ? tr("acc.liveQuotaSub", { live: liveCnt, total: anthProfiles.length, ago: tsSync })
+      : tr("acc.pureMode");
+
+    const provCounts = [];
+    const byProv = new Map();
+    for (const a of accts) {
+      const p = String(a.provider || "unknown").toLowerCase();
+      byProv.set(p, (byProv.get(p) || 0) + 1);
+    }
+    const orderedKeys = [...new Set([...PROVIDER_ORDER, ...byProv.keys()])].filter((k) => byProv.has(k));
+    for (const k of orderedKeys) {
+      provCounts.push(`${providerMeta(k).shortName} (${byProv.get(k)})`);
+    }
+    const selMode = data.selection_mode || "sticky";
+    const crossExec = (data.cross_audit_executor || "auto").trim() || "auto";
+    usageBar.innerHTML = `
+      <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.summaryClaudeReady"))}</div><div class="acc-stat-val">${claudeReady} / ${claudes.length}</div><div class="acc-stat-sub">${esc(claudeSub)}</div></div>
+      <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.summaryProviders"))}</div><div class="acc-stat-val">${esc(tr("acc.providersCount", { n: orderedKeys.length }))}</div><div class="acc-stat-sub">${esc(provCounts.join(" · "))}</div></div>
+      <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.summaryPolicy"))}</div><div class="acc-stat-val mono">${esc(selMode)}</div><div class="acc-stat-sub">${esc(tr("acc.crossAuditSub", { exec: crossExec }))}</div></div>`;
+    usageBar.classList.remove("hidden");
+  }
+
+  function renderAccountsPool(force = false) {
+    const box = $("accountsBox");
+    if (!box) return;
+    const ro = Boolean(meta.read_only);
+    const accts = getEffectiveAccounts();
+    const swByKey = buildAnthropicQuotaMap();
+    const provQuotas = (accountsPanelData && accountsPanelData.provider_quotas) || {};
+    const swSig = [...swByKey.entries()].map(([k, p]) => [k, p.remainingPct, p.weeklyRemainingPct, p.resetRemainHuman, p.weeklyResetFormatted, p.quota && p.quota.live, p.quotaStale, p.quotaIssue]);
+    const langNow = window.AafI18n ? window.AafI18n.getLang() : "en";
+    const cdSig = accts.map((a) => {
+      const activeCd = isAccountInCooldown(a);
+      return [a.id || a.name, activeCd ? untilStr(a.cooldown_until) : "—", activeCd];
+    });
+    const pSig = JSON.stringify([langNow, ro, accts, cdSig, swSig, provQuotas, [...pendingAccounts]]);
+    const anyInCd = accts.some((a) => isAccountInCooldown(a));
+    if ($("accClearAllCdBtn")) {
+      $("accClearAllCdBtn").classList.toggle("hidden", ro || !anyInCd);
+    }
+    if (!force && pSig === lastAccountsPoolSig) return;
+    lastAccountsPoolSig = pSig;
+    renderAccountsSummary();
+
+    if (!accts.length) {
+      box.innerHTML = `<div class="card"><div class="muted">${esc(tr("acc.noAccounts"))}</div></div>`;
+      return;
+    }
 
     const fmtTok = (v) => (typeof v === "number" && Number.isFinite(v) ? `${v.toLocaleString()} tok` : "—");
-    const quotaCell = (pct, resetTxt, tokVal) => {
+    const quotaCellLive = (pct, resetTxt, tokVal, issueHtml) => {
       const tokHtml = `<span class="mono muted">${esc(fmtTok(tokVal))}</span>`;
-      if (typeof pct !== "number") return tokHtml;
-      const clamped = Math.max(0, Math.min(100, pct));
-      const cls = clamped <= 15 ? "pill-blocked" : (clamped <= 40 ? "pill-warn" : "pill-ok");
-      const rst = resetTxt ? ` · ${esc(resetTxt)}` : "";
-      const fillW = clamped === 0 ? 100 : clamped;
-      return `<div><span class="pill ${cls}" style="margin-right:6px">${esc(tr("acc.remainingShort", { pct: clamped }))}${rst}</span>${tokHtml}</div><div class="mini-meter ${clamped === 0 ? "limit" : ""}"><div class="meter-fill ${meterCls(clamped)}" style="width:${clamped === 0 ? 0 : fillW}%"></div></div>`;
+      const issueBlock = issueHtml ? `<div class="acc-issue" style="margin-top:4px">${issueHtml}</div>` : "";
+      if (typeof pct === "number") {
+        const clamped = Math.max(0, Math.min(100, pct));
+        const cls = clamped <= 15 ? "pill-blocked" : (clamped <= 40 ? "pill-warn" : "pill-ok");
+        const rst = resetTxt ? ` · ${esc(resetTxt)}` : "";
+        return `<div><span class="pill ${cls}" style="margin-right:6px">${esc(tr("acc.remainingShort", { pct: clamped }))}${rst}</span>${tokHtml}</div><div class="mini-meter ${clamped === 0 ? "limit" : ""}"><div class="meter-fill ${meterCls(clamped)}" style="width:${clamped}%"></div></div>${issueBlock}`;
+      }
+      return `${tokHtml}${issueBlock}`;
     };
-    $("accountsBox").innerHTML = accts.length ? `<table><thead><tr><th>${esc(tr("acc.thName"))}</th><th>${esc(tr("acc.thProvider"))}</th><th>${esc(tr("acc.thState"))}</th><th>${esc(tr("acc.thCooldown"))}</th><th>${esc(tr("acc.th5hUsage"))}</th><th>${esc(tr("acc.thWeekly"))}</th>${!ro ? `<th>${esc(tr("acc.thControls"))}</th>` : ""}</tr></thead><tbody>${accts.map((a) => {
-      const st = a.state || a.status || "unknown";
-      const inCd = st === "cooldown" || Boolean(a.cooldown_until && Number(a.cooldown_until) > Date.now() / 1000);
-      const acctKey = a.id || a.name;
-      const busy = pendingAccounts.has(acctKey);
-      const dis = busy ? "disabled" : "";
-      const swp = swByKey.get(String(a.name || "").toLowerCase()) || swByKey.get(String(a.id || "").toLowerCase()) || null;
-      const cell5h = quotaCell(swp ? swp.remainingPct : null, swp ? swp.resetRemainHuman : "", a.tokens_5h);
-      const cell7d = quotaCell(swp ? swp.weeklyRemainingPct : null, swp ? swp.weeklyResetFormatted : "", a.tokens_7d);
-      const controls = !ro ? `<td><div style="display:flex;gap:4px">${
-        inCd
-          ? `<button type="button" class="btn-ok btn-sm" ${dis} data-acc-clear="${esc(acctKey)}">${esc(tr("acc.clearCd"))}</button>`
-          : `<button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="5">${esc(tr("acc.cd5m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="15">${esc(tr("acc.cd15m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="300">${esc(tr("acc.cd5h"))}</button>`
-      }</div></td>` : "";
-      return `<tr><td><strong>${esc(a.name)}</strong></td><td>${esc(a.provider)}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":(inCd?"pill-blocked":"pill-running")}">${esc(accountStateLabel(st))}</span></td><td class="mono">${esc(untilStr(a.cooldown_until))}</td><td>${cell5h}</td><td>${cell7d}</td>${controls}</tr>`;
-    }).join("")}</tbody></table>` : `<div class="muted">${esc(tr("acc.noAccounts"))}</div>`;
+    const quotaCellNoLive = (tokVal, labelKey, titleKey) =>
+      `<span class="acc-nolive" title="${esc(tr(titleKey || "acc.noLiveApiTitle"))}">${esc(tr(labelKey || "acc.noLiveApi"))}</span><span class="mono muted">${esc(fmtTok(tokVal))}</span>`;
 
-    $("accountsBox").querySelectorAll("[data-acc-clear]").forEach((btn) => {
+    // Group accounts strictly by provider in canonical display order.
+    const groups = new Map();
+    for (const p of PROVIDER_ORDER) groups.set(p, []);
+    for (const a of accts) {
+      const key = String(a.provider || "unknown").toLowerCase();
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(a);
+    }
+
+    const sectionsHtml = [];
+    for (const [prov, list] of groups.entries()) {
+      if (!list.length) continue;
+      const pm = providerMeta(prov);
+      const isClaude = prov === "claude_code";
+      const pq = !isClaude ? (provQuotas[prov] || null) : null;
+      const pqLive = Boolean(pq && pq.live);
+      const readyCnt = list.filter((a) => !isAccountInCooldown(a)).length;
+      const rowsHtml = list.map((a) => {
+        const rawSt = a.state || a.status || "unknown";
+        const inCd = isAccountInCooldown(a);
+        const st = (rawSt === "cooldown" && !inCd) ? "available" : rawSt;
+        const cdText = inCd ? untilStr(a.cooldown_until) : "—";
+        const acctKey = a.id || a.name;
+        const busy = pendingAccounts.has(acctKey);
+        const dis = busy ? "disabled" : "";
+        const swp = isClaude
+          ? (swByKey.get(String(a.name || "").toLowerCase()) || swByKey.get(String(a.id || "").toLowerCase()) || null)
+          : null;
+        const liveTag = (swp && swp.quota && swp.quota.live) || pqLive
+          ? ` <span class="pill pill-ok" style="font-size:10px;padding:1px 5px">LIVE</span>`
+          : (swp && swp.quotaStale ? ` <span class="pill pill-warn" style="font-size:10px;padding:1px 5px">STALE</span>` : "");
+        const issueHtml = swp && swp.quotaIssue
+          ? esc(quotaIssueText(swp.quotaIssue, swp.accountMismatch, st !== "leased"))
+          : "";
+        let cell5h;
+        let cell7d;
+        if (isClaude) {
+          cell5h = quotaCellLive(swp ? swp.remainingPct : null, swp ? swp.resetRemainHuman : "", a.tokens_5h, issueHtml);
+          cell7d = quotaCellLive(swp ? swp.weeklyRemainingPct : null, swp ? swp.weeklyResetFormatted : "", a.tokens_7d, "");
+        } else if (pqLive) {
+          cell5h = typeof pq.remainingPct === "number"
+            ? quotaCellLive(pq.remainingPct, pq.resetRemainHuman || "", a.tokens_5h, "")
+            : quotaCellNoLive(a.tokens_5h);
+          cell7d = typeof pq.weeklyRemainingPct === "number"
+            ? quotaCellLive(pq.weeklyRemainingPct, pq.weeklyResetFormatted || "", a.tokens_7d, "")
+            : quotaCellNoLive(a.tokens_7d);
+        } else if (prov === "grok" && pq && pq.reason === "tui_only") {
+          cell5h = quotaCellNoLive(a.tokens_5h, "acc.grokTuiOnly", "acc.grokTuiOnlyTitle");
+          cell7d = quotaCellNoLive(a.tokens_7d, "acc.grokTuiOnly", "acc.grokTuiOnlyTitle");
+        } else {
+          cell5h = quotaCellNoLive(a.tokens_5h);
+          cell7d = quotaCellNoLive(a.tokens_7d);
+        }
+        const dirSub = a.config_dir ? `<div class="acc-dir mono" title="${esc(a.config_dir)}">${esc(a.config_dir)}</div>` : "";
+        const controls = !ro ? `<td><div style="display:flex;gap:4px">${
+          inCd
+            ? `<button type="button" class="btn-ok btn-sm" ${dis} data-acc-clear="${esc(acctKey)}">${esc(tr("acc.clearCd"))}</button>`
+            : `<button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="5">${esc(tr("acc.cd5m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="15">${esc(tr("acc.cd15m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="300">${esc(tr("acc.cd5h"))}</button>`
+        }</div></td>` : "";
+        return `<tr><td><strong>${esc(a.name)}</strong>${dirSub}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":(inCd?"pill-blocked":"pill-running")}">${esc(accountStateLabel(st))}</span>${liveTag}</td><td class="mono">${esc(cdText)}</td><td>${cell5h}</td><td>${cell7d}</td>${controls}</tr>`;
+      }).join("");
+
+      sectionsHtml.push(`
+        <div class="card acc-provider-group" data-provider-group="${esc(prov)}">
+          <div class="acc-provider-head">
+            <div class="acc-provider-title">
+              <span class="acc-provider-dot" style="background:${pm.color}"></span>
+              <span>${esc(pm.title)}</span>
+            </div>
+            <span class="pill ${readyCnt > 0 ? "pill-ok" : "pill-blocked"}">${esc(tr("acc.groupCount", { ready: readyCnt, total: list.length }))}</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>${esc(tr("acc.thName"))}</th><th>${esc(tr("acc.thState"))}</th><th>${esc(tr("acc.thCooldown"))}</th><th>${esc(tr("acc.th5hUsage"))}</th><th>${esc(tr("acc.thWeekly"))}</th>${!ro ? `<th>${esc(tr("acc.thControls"))}</th>` : ""}</tr></thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+        </div>`);
+    }
+    box.innerHTML = sectionsHtml.join("");
+
+    box.querySelectorAll("[data-acc-clear]").forEach((btn) => {
       btn.onclick = async () => {
         const key = btn.dataset.accClear;
         if (pendingAccounts.has(key)) return;
         pendingAccounts.add(key);
-        renderMachine(true);
+        renderAccountsPool(true);
         try {
           await api("/api/action", { method: "POST", body: JSON.stringify({ action: "account_clear", task_id: key, note: "" }) });
           toast(tr("toast.clearedCooldown"));
-          await refreshAll();
+          await Promise.all([loadAccountsPanel(false), refreshAll({ skipAccounts: true })]);
         } catch (e) { toast(tr("toast.error", { msg: e.message })); }
-        finally { pendingAccounts.delete(key); renderMachine(true); }
+        finally { pendingAccounts.delete(key); renderAccountsPool(true); }
       };
     });
-    $("accountsBox").querySelectorAll("[data-acc-cd]").forEach((btn) => {
+    box.querySelectorAll("[data-acc-cd]").forEach((btn) => {
       btn.onclick = async () => {
         const key = btn.dataset.accCd;
         if (pendingAccounts.has(key)) return;
         pendingAccounts.add(key);
-        renderMachine(true);
+        renderAccountsPool(true);
         try {
           await api("/api/action", { method: "POST", body: JSON.stringify({ action: "account_cooldown", task_id: key, note: btn.dataset.mins }) });
           toast(tr("toast.setCooldown", { mins: btn.dataset.mins }));
-          await refreshAll();
+          await Promise.all([loadAccountsPanel(false), refreshAll({ skipAccounts: true })]);
         } catch (e) { toast(tr("toast.error", { msg: e.message })); }
-        finally { pendingAccounts.delete(key); renderMachine(true); }
+        finally { pendingAccounts.delete(key); renderAccountsPool(true); }
       };
     });
   }
@@ -2957,16 +3247,30 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
   function renderTopAccPill() {
     const pill = $("topAccPill");
-    const sw = accountsPanelData && accountsPanelData.switcher;
-    if (!sw || !Array.isArray(sw.profiles) || !sw.profiles.length) {
+    if (!pill) return;
+    const accts = getEffectiveAccounts();
+    if (!accts.length) {
       pill.classList.add("hidden");
       return;
     }
-    const active = sw.profiles.find((p) => p.isActive || p.id === sw.activeProfileId) || sw.profiles[0];
-    const rem5 = typeof active.remainingPct === "number" ? ` · ${active.remainingPct}% 5h` : "";
-    const rem7 = typeof active.weeklyRemainingPct === "number" ? ` · ${active.weeklyRemainingPct}% 7d` : "";
-    const label = active.shortLabel || active.id;
-    pill.innerHTML = `<span class="dot ${active.isFrozen ? "err" : "live"}"></span><span>${esc(label)}${esc(rem5)}${esc(rem7)}</span>`;
+    const claudes = accts.filter((a) => a.provider === "claude_code");
+    const swByKey = buildAnthropicQuotaMap();
+    if (claudes.length) {
+      const ready = claudes.filter((a) => !isAccountInCooldown(a));
+      let best5 = null;
+      for (const a of ready) {
+        const swp = swByKey.get(String(a.name || "").toLowerCase()) || swByKey.get(String(a.id || "").toLowerCase());
+        if (swp && typeof swp.remainingPct === "number") {
+          best5 = best5 === null ? swp.remainingPct : Math.max(best5, swp.remainingPct);
+        }
+      }
+      const pctTxt = best5 !== null ? ` · max ${best5}% 5h` : "";
+      pill.innerHTML = `<span class="dot ${ready.length ? "live" : "err"}"></span><span>${esc(tr("acc.pillClaude", { ready: ready.length, total: claudes.length }))}${esc(pctTxt)}</span>`;
+      pill.classList.remove("hidden");
+      return;
+    }
+    const readyAll = accts.filter((a) => !isAccountInCooldown(a)).length;
+    pill.innerHTML = `<span class="dot ${readyAll ? "live" : "err"}"></span><span>${esc(tr("acc.pillAccounts", { ready: readyAll, total: accts.length }))}</span>`;
     pill.classList.remove("hidden");
   }
 
@@ -2975,9 +3279,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     if (accountsLoadInFlight) {
       accountsLoadQueued = true;
       accountsQueuedLive = accountsQueuedLive || forceLive;
+      if (forceLive) {
+        $("accRefreshBtn").disabled = true;
+        $("accRefreshBtn").textContent = tr("acc.syncing");
+      }
       return;
     }
     accountsLoadInFlight = true;
+    accountsLiveInFlight = Boolean(forceLive);
     if (forceLive) {
       $("accRefreshBtn").disabled = true;
       $("accRefreshBtn").textContent = tr("acc.syncing");
@@ -2988,43 +3297,67 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         nextData.switcher = accountsPanelData.switcher;
       }
       accountsPanelData = nextData;
+      accountsPanelFetchedAt = Date.now();
       renderTopAccPill();
       renderAccountsPanel();
       if (forceLive) {
-        toast(nextData.switcher_error ? ("Warning: " + nextData.switcher_error) : tr("toast.quotaUpdated"));
+        if (nextData.switcher_error) {
+          toast(tr("toast.quotaWarning", { msg: nextData.switcher_error }));
+        } else if (nextData.synced_cooldowns > 0) {
+          toast(tr("toast.quotaUpdatedSynced", { n: nextData.synced_cooldowns }));
+        } else {
+          toast(tr("toast.quotaUpdated"));
+        }
+        if (nextData.synced_cooldowns > 0) {
+          refreshAll({ skipAccounts: true }).catch(() => {});
+        }
       }
     } catch (e) {
       if (activeTab === "accounts") {
         if ($("accWarnBox")) {
           $("accWarnBox").innerHTML = `<div class="acc-warn">${esc(tr("acc.loadFailed", { msg: e.message }))}</div>`;
-        } else {
-          $("ccProfilesBox").innerHTML = `<div class="empty">${esc(tr("acc.loadFailed", { msg: e.message }))}</div>`;
+        } else if ($("accountsBox")) {
+          $("accountsBox").innerHTML = `<div class="empty">${esc(tr("acc.loadFailed", { msg: e.message }))}</div>`;
         }
       }
     } finally {
       accountsLoadInFlight = false;
-      $("accRefreshBtn").disabled = false;
-      $("accRefreshBtn").textContent = tr("acc.refreshLive");
+      accountsLiveInFlight = false;
       if (accountsLoadQueued) {
         const nextLive = accountsQueuedLive;
         accountsLoadQueued = false;
         accountsQueuedLive = false;
         loadAccountsPanel(nextLive);
+      } else {
+        $("accRefreshBtn").disabled = Boolean(meta.read_only);
+        $("accRefreshBtn").title = meta.read_only ? roHint() : "";
+        $("accRefreshBtn").textContent = tr("acc.refreshLive");
       }
     }
   }
 
   function renderAccountsPanel() {
     const ro = Boolean(meta.read_only);
-    const data = accountsPanelData || {};
+    if ($("accRefreshBtn")) {
+      if (accountsLiveInFlight || accountsQueuedLive) {
+        $("accRefreshBtn").disabled = true;
+        $("accRefreshBtn").textContent = tr("acc.syncing");
+      } else {
+        $("accRefreshBtn").disabled = ro;
+        $("accRefreshBtn").title = ro ? roHint() : "";
+        $("accRefreshBtn").textContent = tr("acc.refreshLive");
+      }
+    }
+    if (!accountsPanelData) {
+      renderAccountsSummary();
+      renderAccountsPool(true);
+      return;
+    }
+    const data = accountsPanelData;
     const sw = data.switcher || null;
     const profiles = (sw && Array.isArray(sw.profiles)) ? sw.profiles : [];
-    const aafCount = (data.aaf_accounts || (statusData && statusData.accounts) || []).length;
-    $("cntAccounts").textContent = String(profiles.length || aafCount);
+    const accts = getEffectiveAccounts();
     const hasSw = Boolean(sw && profiles.length);
-    $("ccRotateBtn").classList.toggle("hidden", ro || !hasSw);
-    $("ccUnfreezeBtn").classList.toggle("hidden", ro || !hasSw);
-    $("ccBalanceBtn").classList.toggle("hidden", ro || !hasSw);
 
     const warnMsgs = [];
     if (data.switcher_error) warnMsgs.push("CC Switcher: " + data.switcher_error);
@@ -3045,89 +3378,25 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       $("accMetaNote").textContent = hasSw ? "" : tr("acc.pureMode");
     }
 
-    const usageBar = $("accUsageBar");
-    if (usageBar) {
-      if (hasSw) {
-        const u = sw.usage || {};
-        const costVal = typeof u.totalCostUsd === "number" ? `$${u.totalCostUsd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—";
-        const reqVal = typeof u.totalRequests === "number" ? tr("acc.requestsCount", { n: u.totalRequests.toLocaleString() }) : tr("acc.noDbData");
-        const ab = sw.antiBan || {};
-        const abReady = !(ab.claudeCooldownRemainSec > 0);
-        const abVal = abReady ? tr("acc.readyNow") : tr("acc.waitSec", { s: ab.claudeCooldownRemainSec });
-        const abSub = tr("acc.cooldownWindow", { m: ab.cooldownMinutes ?? 15 });
-        const liveCnt = profiles.filter((p) => p.quota && p.quota.live).length;
-        const anthCnt = profiles.filter((p) => p.vendor === "anthropic").length;
-        const tsSync = sw.health && sw.health.quotaFetchedAtMs ? ago(Math.round(sw.health.quotaFetchedAtMs / 1000)) : tr("acc.notSynced");
-        const daemonLabel = sw.health && sw.health.daemon && sw.health.daemon.running ? "Daemon ON" : "Daemon OFF";
-        usageBar.innerHTML = `
-          <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.totalUsage"))}</div><div class="acc-stat-val">${esc(costVal)}</div><div class="acc-stat-sub">${esc(reqVal)}</div></div>
-          <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.antiBan"))}</div><div class="acc-stat-val">${esc(abVal)}</div><div class="acc-stat-sub">${esc(abSub)}</div></div>
-          <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.liveQuota"))}</div><div class="acc-stat-val">${liveCnt} / ${anthCnt} Claude</div><div class="acc-stat-sub">${esc(tr("acc.updatedSync", { ago: tsSync, daemon: daemonLabel }))}</div></div>`;
-        usageBar.classList.remove("hidden");
+    renderAccountsSummary();
+
+    const modePill = $("repoModePill");
+    if (modePill) {
+      const selMode = data.selection_mode || "";
+      if (selMode) {
+        modePill.textContent = selectionModeLabel(selMode);
+        modePill.classList.remove("hidden");
       } else {
-        usageBar.innerHTML = "";
-        usageBar.classList.add("hidden");
+        modePill.classList.add("hidden");
       }
     }
 
-    if (hasSw) {
-      $("ccProfilesBox").innerHTML = profiles.map((p) => {
-        const isAct = Boolean(p.isActive || p.id === sw.activeProfileId);
-        const rem5 = typeof p.remainingPct === "number" ? Math.max(0, Math.min(100, p.remainingPct)) : null;
-        const used5 = typeof p.usedPct === "number" ? Math.max(0, Math.min(100, p.usedPct)) : (rem5 !== null ? 100 - rem5 : null);
-        const rem7 = typeof p.weeklyRemainingPct === "number" ? Math.max(0, Math.min(100, p.weeklyRemainingPct)) : null;
-        const used7 = rem7 !== null ? 100 - rem7 : null;
-        const stPill = isAct
-          ? `<span class="pill pill-ok">${esc(tr("acc.inUse"))}</span>`
-          : (p.isFrozen ? `<span class="pill pill-blocked">${esc(p.status || tr("acc.limit"))}</span>` : `<span class="pill pill-slate">${esc(p.status || tr("acc.ready"))}</span>`);
-        const liveTag = p.quota && p.quota.live
-          ? ` · <span style="color:var(--ok);font-weight:600">LIVE</span>`
-          : (p.quotaStale ? ` · <span style="color:var(--warn);font-weight:600">STALE</span>` : "");
-        const rst5 = p.resetRemainHuman
-          ? `${esc(tr("acc.resetsIn", { t: p.resetRemainHuman }))}${p.resetTimeFormatted ? ` · ${esc(p.resetTimeFormatted)}` : ""}`
-          : (p.resetTimeFormatted ? esc(p.resetTimeFormatted) : "—");
-        const m5 = rem5 !== null
-          ? `<div class="meter" title="${esc(tr("acc.used5hTitle", { pct: used5 }))}"><div class="meter-row"><span><b>5h</b> · ${esc(tr("acc.remaining", { pct: rem5 }))}</span><span class="muted">${rst5}</span></div><div class="meter-track ${rem5 === 0 ? "limit" : ""}"><div class="meter-fill ${meterCls(rem5)}" style="width:${rem5}%"></div></div></div>`
-          : `<div class="acc-issue">${esc(p.quotaIssue ? quotaIssueText(p.quotaIssue, p.accountMismatch, !(p.isParallelActive || isAct)) : tr("acc.quota5hNoLive", { status: p.status || tr("acc.noLiveData") }))}</div>`;
-        const m7 = rem7 !== null
-          ? `<div class="meter" title="${esc(tr("acc.used7dTitle", { pct: used7 }))}"><div class="meter-row"><span><b>${esc(tr("acc.weekly"))}</b> · ${esc(tr("acc.remaining", { pct: rem7 }))}</span><span class="muted">${p.weeklyResetFormatted ? esc(p.weeklyResetFormatted) : "—"}</span></div><div class="meter-track ${rem7 === 0 ? "limit" : ""}"><div class="meter-fill ${meterCls(rem7)}" style="width:${rem7}%"></div></div></div>`
-          : `<div class="meter"><div class="meter-row"><span><b>${esc(tr("acc.weekly"))}</b> · ${esc(p.vendor === "anthropic" ? tr("acc.noData") : tr("acc.unlimited"))}</span><span class="muted">—</span></div><div class="meter-track"><div class="meter-fill" style="width:${p.vendor === "anthropic" ? 0 : 100}%;opacity:${p.vendor === "anthropic" ? 0 : 0.28}"></div></div></div>`;
-        const swBtn = !ro
-          ? `<button type="button" class="${isAct ? "btn-sm" : "btn-primary btn-sm"}" data-cc-switch="${esc(p.id)}" ${isAct ? "disabled" : ""}>${esc(isAct ? tr("acc.activeDefaultBtn") : tr("acc.useAccountBtn"))}</button>`
-          : "";
-        return `<div class="acc-card ${isAct ? "active" : ""} ${p.isFrozen ? "frozen" : ""}">
-          <div class="acc-head">
-            <div><div class="acc-name">${esc(p.shortLabel || p.id)}</div><div class="acc-sub">${esc(p.vendor || "")} · ${esc(tr("acc.assignedRepos", { n: p.assignedRepoCount ?? 0 }))}${liveTag}</div></div>
-            ${stPill}
-          </div>
-          ${m5}${m7}
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:auto;padding-top:4px">
-            <span class="mono acc-sub">${esc(p.id)}</span>
-            ${swBtn}
-          </div>
-        </div>`;
-      }).join("");
-      $("ccProfilesBox").querySelectorAll("[data-cc-switch]").forEach((btn) => {
-        btn.onclick = async () => {
-          btn.disabled = true;
-          try {
-            await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_switch", task_id: btn.dataset.ccSwitch, note: "" }) });
-            toast(tr("toast.switchedTo", { id: btn.dataset.ccSwitch }));
-            await loadAccountsPanel(false);
-          } catch (e) { toast(tr("toast.error", { msg: e.message })); }
-          finally { btn.disabled = false; }
-        };
-      });
-    } else {
-      $("ccProfilesBox").innerHTML = "";
-    }
-
-    const claudeOpts = (sw && Array.isArray(sw.claudeAccounts) && sw.claudeAccounts.length)
-      ? sw.claudeAccounts
-      : (data.aaf_accounts || []).filter((a) => a.provider === "claude").map((a) => a.name);
-    const repos = (sw && Array.isArray(sw.repoAssignments) && sw.repoAssignments.length)
-      ? sw.repoAssignments
-      : (data.repo_assignments || []);
+    const aafClaudeNames = accts.filter((a) => a.provider === "claude_code").map((a) => a.name);
+    const swClaudeNames = (sw && Array.isArray(sw.claudeAccounts)) ? sw.claudeAccounts : [];
+    const claudeOpts = [...new Set([...aafClaudeNames, ...swClaudeNames])];
+    const repos = Array.isArray(data.repo_assignments) && data.repo_assignments.length
+      ? data.repo_assignments
+      : ((sw && Array.isArray(sw.repoAssignments)) ? sw.repoAssignments : []);
     if (!repos.length) {
       $("repoAssignBox").innerHTML = `<div class="muted">${esc(tr("acc.noRepos"))}</div>`;
     } else {
@@ -3173,7 +3442,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         };
       });
     }
-    renderMachine(true);
+    renderAccountsPool(true);
   }
 
   let sopLoadInFlight = false;
@@ -3215,12 +3484,13 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     if (tab === "machine") { renderMachine(); loadSopRuns(); }
   }
 
-  async function refreshAll() {
+  async function refreshAll(opts = {}) {
     if (!token) return;
     const [m, s, b] = await Promise.all([api("/api/meta"), api("/api/status"), api("/api/board")]);
     meta = m;
     metaLoaded = true;
     statusData = s;
+    statusFetchedAt = Date.now();
     lastBoardSig = boardSigFromStatus(s);
     boardTasks = b.tasks || [];
     boardLoaded = true;
@@ -3232,7 +3502,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     if (!accountsPanelData) $("cntAccounts").textContent = String(aafCnt);
     if (activeTab === "machine" || activeTab === "accounts") renderMachine();
     if (activeTab === "machine") loadSopRuns();
-    if (activeTab === "accounts") loadAccountsPanel(false);
+    if (activeTab === "accounts" && !opts.skipAccounts) loadAccountsPanel(false);
   }
 
   async function boot() {
@@ -3269,20 +3539,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     else { switchTab("board"); }
     $("topAccPill").onclick = () => switchTab("accounts");
     $("accRefreshBtn").onclick = () => loadAccountsPanel(true);
-    $("ccRotateBtn").onclick = async () => {
-      $("ccRotateBtn").disabled = true;
-      try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_rotate", task_id: "", note: "" }) }); toast(tr("toast.rotated")); await loadAccountsPanel(false); }
-      catch (e) { toast(tr("toast.error", { msg: e.message })); } finally { $("ccRotateBtn").disabled = false; }
-    };
-    $("ccUnfreezeBtn").onclick = async () => {
-      $("ccUnfreezeBtn").disabled = true;
-      try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_unfreeze", task_id: "", note: "" }) }); toast(tr("toast.unfrozen")); await loadAccountsPanel(false); }
-      catch (e) { toast(tr("toast.error", { msg: e.message })); } finally { $("ccUnfreezeBtn").disabled = false; }
-    };
-    $("ccBalanceBtn").onclick = async () => {
-      $("ccBalanceBtn").disabled = true;
-      try { await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_balance", task_id: "", note: "even" }) }); toast(tr("toast.balanced")); await loadAccountsPanel(false); }
-      catch (e) { toast(tr("toast.error", { msg: e.message })); } finally { $("ccBalanceBtn").disabled = false; }
+    $("accClearAllCdBtn").onclick = () => {
+      openModal({
+        title: tr("acc.clearAllCdTitle"),
+        desc: tr("acc.clearAllCdDesc"),
+        confirmLabel: tr("acc.clearAllCdBtn"),
+        danger: false,
+        onConfirm: async () => {
+          const res = await api("/api/action", { method: "POST", body: JSON.stringify({ action: "account_clear_all", task_id: "", note: "" }) });
+          toast(tr("toast.clearedAllCd", { n: res.cleared ?? 0 }));
+          await Promise.all([loadAccountsPanel(false), refreshAll({ skipAccounts: true })]);
+        },
+      });
     };
 
     $("sortBy").value = sortBy;

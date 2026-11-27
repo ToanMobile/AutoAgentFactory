@@ -1,7 +1,7 @@
 //! `aaf executors list|resolve|roles|mcp`: inspect multi-CLI inventory, fallback
 //! routing, role profiles, and read-only `.mcp.json` secret hygiene.
 
-use aaf_engine::executors::registry::{discover_inventory, resolve_with_fallback};
+use aaf_engine::executors::registry::{discover_inventory_with_home, resolve_with_fallback};
 use aaf_engine::roles::{inspect_mcp_servers, load_roles};
 use serde_json::{Value, json};
 
@@ -16,7 +16,7 @@ pub struct ExecutorsArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum ExecutorsCommand {
-    /// List all 10 built-in coding-agent CLIs, installed status, binary path, and hook support.
+    /// List all 11 built-in coding-agent CLIs, installed status, binary path, and hook support.
     List,
     /// Preview which executor would be selected given a primary and ordered fallbacks.
     Resolve {
@@ -42,7 +42,7 @@ pub fn run(args: &ExecutorsArgs, ctx: &Ctx) -> CmdResult {
 }
 
 fn run_list(ctx: &Ctx) -> CmdResult {
-    let inventory = discover_inventory(&ctx.path_var);
+    let inventory = discover_inventory_with_home(&ctx.path_var, Some(&ctx.home));
     let installed_count = inventory.iter().filter(|item| item.installed).count();
 
     let mut lines = Vec::with_capacity(inventory.len() + 2);

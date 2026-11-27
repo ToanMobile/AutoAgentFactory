@@ -85,6 +85,7 @@ fn provider_kind() {
         (ProviderKind::Codex, "codex"),
         (ProviderKind::Antigravity, "antigravity"),
         (ProviderKind::OpenCode, "open_code"),
+        (ProviderKind::Grok, "grok"),
     ];
     assert_eq!(cases.len(), ProviderKind::ALL.len());
     for (provider, name) in cases {

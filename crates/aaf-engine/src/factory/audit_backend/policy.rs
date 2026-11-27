@@ -1,19 +1,12 @@
 //! Cross-audit provider resolution, independence policy, and command-template
 //! construction helpers for [`crate::factory::audit_backend`].
 
-use std::ffi::OsStr;
 use std::path::Path;
 
 use aaf_domain::config::CrossAuditConfig;
+use aaf_domain::pipeline::{canonical_provider, normalize_executor_id};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
-
-fn canonical_provider(provider: &str) -> String {
-    match provider.trim().to_ascii_lowercase().as_str() {
-        "antigravity" | "gemini" => "gemini".to_string(),
-        other => other.to_string(),
-    }
-}
 
 /// True when two provider names refer to the same underlying provider
 /// (e.g. `gemini` and `antigravity`).
@@ -33,79 +26,6 @@ pub fn audit_cmd_is_claude(executor_cmd: &str) -> bool {
         .file_name()
         .and_then(|s| s.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case("claude"))
-}
-
-/// Effective audit provider name from config (`[cross_audit].executor` when
-/// non-empty, `"custom"` when only `executor_cmd` is set, `"claude"` when
-/// `executor_cmd` invokes `claude`, otherwise `[run].executor`).
-pub fn configured_audit_provider<'a>(
-    run_executor: &'a str,
-    cross_audit: &'a CrossAuditConfig,
-) -> &'a str {
-    let custom_cmd = cross_audit.executor_cmd.trim();
-    if !custom_cmd.is_empty() && audit_cmd_is_claude(custom_cmd) {
-        return "claude";
-    }
-    let trimmed = cross_audit.executor.trim();
-    if !trimmed.is_empty() {
-        trimmed
-    } else if !custom_cmd.is_empty() {
-        "custom"
-    } else {
-        run_executor.trim()
-    }
-}
-
-/// Resolves `[cross_audit].executor = "auto"` once to another installed CLI
-/// with a config directory under `home` (e.g. `gemini`/`codex` when
-/// `run_executor == "claude"`), falling back to `run_executor` if none is ready.
-pub fn resolve_auto_audit_executor(
-    run_executor: &str,
-    configured: &str,
-    path_var: &OsStr,
-    home: &Path,
-) -> String {
-    let trimmed = configured.trim();
-    if trimmed.is_empty() {
-        return run_executor.trim().to_string();
-    }
-    if !trimmed.eq_ignore_ascii_case("auto") {
-        return trimmed.to_string();
-    }
-    let has_claude_dir = |h: &Path| {
-        h.join(".claude").is_dir()
-            || std::fs::read_dir(h).ok().is_some_and(|entries| {
-                entries.flatten().any(|e| {
-                    e.file_name()
-                        .to_str()
-                        .is_some_and(|n| n.starts_with(".claude-"))
-                        && e.path().is_dir()
-                })
-            })
-    };
-    const CANDIDATES: [(&str, &[&str]); 4] = [
-        ("gemini", &[".gemini"]),
-        ("codex", &[".codex"]),
-        ("claude", &[".claude"]),
-        ("opencode", &[".local/share/opencode", ".config/opencode"]),
-    ];
-    for (candidate, dirs) in CANDIDATES {
-        if same_audit_provider(run_executor, candidate) {
-            continue;
-        }
-        let installed = crate::executors::registry::find_descriptor(candidate)
-            .and_then(|d| crate::executors::registry::resolve_binary(d, path_var))
-            .is_some();
-        let configured_dir = if candidate == "claude" {
-            has_claude_dir(home)
-        } else {
-            dirs.iter().any(|rel| home.join(rel).is_dir())
-        };
-        if installed && configured_dir {
-            return candidate.to_string();
-        }
-    }
-    run_executor.trim().to_string()
 }
 
 /// Computes `(reviewer, same_account)` for an audit approval and enforces
@@ -186,7 +106,7 @@ pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String
         return Ok(words);
     }
 
-    let exec = cfg.executor.trim().to_ascii_lowercase();
+    let exec = normalize_executor_id(&cfg.executor);
     let model = cfg.model.trim();
     let effort = cfg.effort.trim();
     if !model.is_empty() {
@@ -212,7 +132,7 @@ pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String
             cmd.push(PROMPT_PLACEHOLDER.into());
             Ok(cmd)
         }
-        "gemini" | "antigravity" => {
+        "gemini" => {
             let mut cmd = vec!["gemini".into(), "--approval-mode".into(), "plan".into()];
             if !model.is_empty() {
                 cmd.extend(["-m".into(), model.into()]);
@@ -228,11 +148,28 @@ pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String
             cmd.push(PROMPT_PLACEHOLDER.into());
             Ok(cmd)
         }
+        "grok" => {
+            let mut cmd = vec![
+                "grok".into(),
+                "--permission-mode".into(),
+                "plan".into(),
+                "--no-memory".into(),
+                "--no-subagents".into(),
+            ];
+            if !model.is_empty() {
+                cmd.extend(["--model".into(), model.into()]);
+            }
+            if !effort.is_empty() {
+                cmd.extend(["--reasoning-effort".into(), effort.into()]);
+            }
+            cmd.push(format!("--single={PROMPT_PLACEHOLDER}"));
+            Ok(cmd)
+        }
         "custom" => {
             Err("cross_audit.executor = \"custom\" requires cross_audit.executor_cmd".into())
         }
         other => Err(format!(
-            "unknown cross_audit.executor {other:?}: expected claude, codex, gemini, antigravity, opencode or custom"
+            "unknown cross_audit.executor {other:?}: expected claude, codex, gemini, antigravity, opencode, grok or custom"
         )),
     }
 }
@@ -286,11 +223,10 @@ pub fn fill_default_reviewers(cfg: &mut CrossAuditConfig, run_executor: &str) ->
     if !cfg.dual_review || !cfg.reviewers.is_empty() {
         return None;
     }
-    let run = run_executor.trim().to_ascii_lowercase();
-    let auditor = super::configured_audit_provider(&run, cfg)
-        .trim()
-        .to_ascii_lowercase();
-    if !is_known_real_provider(&run)
+    let run = normalize_executor_id(run_executor);
+    let auditor = normalize_executor_id(super::configured_audit_provider(&run, cfg));
+    if !cfg.executor_cmd.trim().is_empty()
+        || !is_known_real_provider(&run)
         || !is_known_real_provider(&auditor)
         || same_audit_provider(&run, &auditor)
     {
@@ -300,14 +236,17 @@ pub fn fill_default_reviewers(cfg: &mut CrossAuditConfig, run_executor: &str) ->
              one audit runs instead (install another CLI or list [[cross_audit.reviewers]])"
         ));
     }
-    let reviewer = |executor: &str| ReviewerConfig {
+    let reviewer = |executor: &str, model: &str, effort: &str| ReviewerConfig {
         id: executor.to_string(),
         executor: executor.to_string(),
         executor_cmd: String::new(),
-        model: String::new(),
-        effort: String::new(),
+        model: model.trim().to_string(),
+        effort: effort.trim().to_string(),
     };
-    cfg.reviewers = vec![reviewer(&run), reviewer(&auditor)];
+    cfg.reviewers = vec![
+        reviewer(&run, "", ""),
+        reviewer(&auditor, &cfg.model, &cfg.effort),
+    ];
     None
 }
 
@@ -317,10 +256,19 @@ pub fn fill_default_reviewers(cfg: &mut CrossAuditConfig, run_executor: &str) ->
 /// blocked at the plan stage, so the debate is turned off with a warning.
 pub fn fall_back_to_one_provider(repo: &mut aaf_domain::config::RepoConfig) -> Vec<String> {
     use aaf_domain::pipeline::is_known_real_reviewer;
-    let mut warnings: Vec<String> =
-        fill_default_reviewers(&mut repo.cross_audit, &repo.run.executor)
-            .into_iter()
-            .collect();
+    let mut warnings: Vec<String> = Vec::new();
+    if repo.cross_audit.dual_review
+        && repo.cross_audit.reviewers.is_empty()
+        && !repo.run.executor_cmd.is_empty()
+    {
+        repo.cross_audit.dual_review = false;
+        warnings.push(
+            "cross_audit.dual_review disabled because [run].executor_cmd is set without explicit [[cross_audit.reviewers]]"
+                .to_string(),
+        );
+    } else if let Some(w) = fill_default_reviewers(&mut repo.cross_audit, &repo.run.executor) {
+        warnings.push(w);
+    }
     let pipe = &repo.pipeline;
     if pipe.plan_debate && pipe.plan_challenger.is_empty() {
         let author = if pipe.plan_author.executor.trim().is_empty() {
@@ -330,8 +278,21 @@ pub fn fall_back_to_one_provider(repo: &mut aaf_domain::config::RepoConfig) -> V
         }
         .to_string();
         let cross = &repo.cross_audit;
-        let challenger = !cross.executor.trim().is_empty()
-            || !cross.executor_cmd.trim().is_empty()
+        let has_cross_cfg =
+            !cross.executor.trim().is_empty() || !cross.executor_cmd.trim().is_empty();
+        let eff = if cross.executor.trim().is_empty() {
+            "custom"
+        } else {
+            cross.executor.trim()
+        };
+        let invalid_empty_custom =
+            eff.eq_ignore_ascii_case("custom") && cross.executor_cmd.trim().is_empty();
+        let has_distinct_cross = has_cross_cfg
+            && !invalid_empty_custom
+            && !same_audit_provider(&author, eff)
+            && !(audit_cmd_is_claude(&cross.executor_cmd)
+                && same_audit_provider(&author, "claude"));
+        let challenger = has_distinct_cross
             || cross
                 .reviewers
                 .iter()
@@ -392,6 +353,29 @@ mod default_reviewers_tests {
         repo.cross_audit.executor = "antigravity".into();
         assert!(fall_back_to_one_provider(&mut repo).is_empty());
         assert!(repo.pipeline.plan_debate);
+
+        // Switching primary to antigravity while cross_audit is pinned to
+        // antigravity (or gemini) shares canonical provider "gemini": debate
+        // must cleanly fall back to off instead of self-debating or failing.
+        for same in ["antigravity", "gemini"] {
+            let mut same_repo = aaf_domain::config::RepoConfig::default();
+            same_repo.run.executor = "antigravity".into();
+            same_repo.pipeline.plan_debate = true;
+            same_repo.cross_audit.dual_review = true;
+            same_repo.cross_audit.executor = same.into();
+            let warns = fall_back_to_one_provider(&mut same_repo);
+            assert_eq!(warns.len(), 2, "same={same} warns={warns:?}");
+            assert!(!same_repo.pipeline.plan_debate && !same_repo.cross_audit.dual_review);
+        }
+
+        // Switching primary to antigravity with grok auditor keeps both active.
+        let mut grok_repo = aaf_domain::config::RepoConfig::default();
+        grok_repo.run.executor = "antigravity".into();
+        grok_repo.pipeline.plan_debate = true;
+        grok_repo.cross_audit.dual_review = true;
+        grok_repo.cross_audit.executor = "grok".into();
+        assert!(fall_back_to_one_provider(&mut grok_repo).is_empty());
+        assert!(grok_repo.pipeline.plan_debate && grok_repo.cross_audit.dual_review);
     }
 
     #[test]

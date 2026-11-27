@@ -473,16 +473,24 @@ impl UiBackend for CliUiBackend {
     }
 
     fn accounts_json(&self, refresh: bool) -> Result<Value, String> {
-        let db = self.ro_db.get().map_err(|e| e.message)?;
+        let db = if refresh && !self.read_only {
+            None
+        } else {
+            self.ro_db.get().map_err(|e| e.message)?
+        };
         let scoped = self.repo_root.as_deref();
-        accounts_panel::read_accounts_panel(
+        let res = accounts_panel::read_accounts_panel(
             db.as_ref(),
             &self.ctx,
             &self.config_base,
             scoped,
             self.read_only,
             refresh,
-        )
+        )?;
+        if refresh {
+            self.invalidate_status_cache();
+        }
+        Ok(res)
     }
 
     fn handover_json(&self, task_id: &str) -> Result<Value, String> {

@@ -72,6 +72,40 @@ impl Lease {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Pure read-only probe: returns `true` when every concurrency slot for
+    /// `account_id` is currently held under an exclusive advisory lock. Never
+    /// creates directories, lock files, or exclusive locks.
+    pub fn all_slots_leased_ro(leases_dir: &Path, account_id: &str, max_concurrent: u32) -> bool {
+        if !is_safe_file_stem(account_id) {
+            return false;
+        }
+        let slots = max_concurrent.max(1);
+        for slot in 0..slots {
+            let name = match slot {
+                0 => account_id.to_string(),
+                n => format!("{account_id}.slot{n}"),
+            };
+            let path = leases_dir.join(format!("{name}.lock"));
+            let is_reg = fs::symlink_metadata(&path)
+                .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file());
+            if !is_reg {
+                return false;
+            }
+            let locked = File::open(&path).is_ok_and(|file| match file.try_lock_shared() {
+                Ok(()) => {
+                    let _ = file.unlock();
+                    false
+                }
+                Err(TryLockError::WouldBlock) => true,
+                Err(TryLockError::Error(_)) => false,
+            });
+            if !locked {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl Drop for Lease {

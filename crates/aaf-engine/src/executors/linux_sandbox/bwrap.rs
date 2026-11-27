@@ -25,6 +25,13 @@ fn ro_cache_safe_subdirs(path: &Path, canon: &Path) -> Option<&'static [&'static
         ".m2" => Some(&["repository"]),
         ".pub-cache" => Some(&["hosted", "git"]),
         ".android" => Some(&["cache", "build-cache"]),
+        ".grok" => Some(&[
+            "sessions",
+            "logs",
+            "memtrace",
+            "process-records",
+            "long-running-background-tasks",
+        ]),
         _ => None,
     }
 }
@@ -140,6 +147,15 @@ pub fn build_bwrap_args(
             ".claude/settings.local.json",
             ".gemini/settings.json",
             ".gemini/trusted_hooks.json",
+            ".grok/config.toml",
+            ".grok/hooks",
+            ".grok/hooks-paths",
+            ".grok/rules",
+            ".grok/skills",
+            ".grok/agents",
+            ".grok/sandbox.toml",
+            ".cursor/hooks",
+            ".cursor/mcp.json",
         ] {
             ro.protect_existing(&wt.join(rel))?;
         }

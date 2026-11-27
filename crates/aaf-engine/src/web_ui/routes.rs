@@ -125,10 +125,7 @@ pub(super) fn normalize_action(raw: &str) -> Option<&'static str> {
         "supervisor_repos" | "supervisor-repos" => Some("supervisor_repos"),
         "account_cooldown" | "account-cooldown" => Some("account_cooldown"),
         "account_clear" | "account-clear" => Some("account_clear"),
-        "cc_switch" | "cc-switch" => Some("cc_switch"),
-        "cc_rotate" | "cc-rotate" => Some("cc_rotate"),
-        "cc_unfreeze" | "cc-unfreeze" => Some("cc_unfreeze"),
-        "cc_balance" | "cc-balance" => Some("cc_balance"),
+        "account_clear_all" | "account-clear-all" => Some("account_clear_all"),
         "cc_repo_assign" | "cc-repo-assign" => Some("cc_repo_assign"),
         "cc_repo_remove" | "cc-repo-remove" => Some("cc_repo_remove"),
         _ => None,
@@ -146,10 +143,7 @@ pub(super) fn action_needs_task_id(normalized: &str) -> bool {
             | "supervisor_repos"
             | "account_cooldown"
             | "account_clear"
-            | "cc_switch"
-            | "cc_rotate"
-            | "cc_unfreeze"
-            | "cc_balance"
+            | "account_clear_all"
             | "cc_repo_assign"
             | "cc_repo_remove"
     )

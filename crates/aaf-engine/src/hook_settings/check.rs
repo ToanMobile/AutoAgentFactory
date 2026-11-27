@@ -344,7 +344,7 @@ fn checked_executor_hook(
     repo_root: &Path,
     executor: &str,
 ) -> Result<Option<super::Registered>, String> {
-    match executor.trim().to_ascii_lowercase().as_str() {
+    match aaf_domain::pipeline::normalize_executor_id(executor).as_str() {
         "claude" => {
             let path = repo_root.join(SETTINGS_REL);
             let text = std::fs::read_to_string(&path).map_err(|err| {
@@ -402,7 +402,7 @@ pub fn check_worktree_for_executor(
     base: Option<&str>,
     executor: &str,
 ) -> Result<(), String> {
-    let normalized = executor.trim().to_ascii_lowercase();
+    let normalized = aaf_domain::pipeline::normalize_executor_id(executor);
     if normalized.is_empty() || normalized == "claude" {
         return check_worktree(worktree, path_var, base);
     }
@@ -466,7 +466,7 @@ pub fn check_base_for_executor(
     path_var: &OsStr,
     executor: &str,
 ) -> Result<(), String> {
-    let normalized = executor.trim().to_ascii_lowercase();
+    let normalized = aaf_domain::pipeline::normalize_executor_id(executor);
     if normalized.is_empty() || normalized == "claude" {
         return check_base(repo_root, base, path_var);
     }

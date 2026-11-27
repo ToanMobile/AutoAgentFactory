@@ -4,12 +4,14 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use aaf_domain::account::ProviderKind;
 use aaf_domain::ports::{
     AgentOutcome, AgentRequest, AgentRunner, InfraFailure, InfraKind, LimitHit, PortError,
     PortResult,
 };
 use serde_json::Value;
+
+mod paths;
+pub use paths::{account_paths, account_paths_for};
 
 use super::pty::{CommandSpec, GENERIC_TAIL_BYTES};
 use super::stream_log::StreamLog;
@@ -17,55 +19,6 @@ use super::{AccountPaths, ExecEnv, open_stream_log, run_confined_with_tail};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
 const RAW_ERROR_CHARS: usize = 500;
-
-/// Entries of a Claude config dir closed for writing (matches `ClaudeCodeRunner::CONFIG_CLOSED`).
-const CLAUDE_CONFIG_CLOSED: [&str; 3] = ["settings.json", "settings.local.json", "hooks"];
-
-/// Entries of a Codex config directory that later runs execute or obey.
-const CODEX_CONFIG_CLOSED: [&str; 7] = [
-    "config.toml",
-    "hooks.json",
-    "AGENTS.md",
-    "instructions.md",
-    "rules",
-    "skills",
-    "plugins",
-];
-
-/// Extra Gemini / Antigravity config entries closed on top of [`super::agy::GEMINI_CONFIG_CLOSED`].
-const GEMINI_EXTRA_CLOSED: [&str; 14] = [
-    "settings.local.json",
-    "hooks",
-    "extensions",
-    "policies",
-    "commands",
-    "antigravity",
-    "antigravity-cli/bin",
-    "antigravity-cli/mcp",
-    "antigravity-cli/settings.json",
-    "antigravity-ide/bin",
-    "config/hooks.json",
-    "config/mcp_config.json",
-    "config/plugins",
-    "config/node_modules",
-];
-
-/// Entries of an OpenCode config/state directory that later runs execute or obey.
-const OPENCODE_CONFIG_CLOSED: [&str; 13] = [
-    "opencode.json",
-    "opencode.jsonc",
-    "config.json",
-    "plugin",
-    "plugins",
-    "tool",
-    "tools",
-    "agent",
-    "agents",
-    "command",
-    "commands",
-    "skill",
-    "skills",
-];
 
 #[derive(Debug)]
 pub struct GenericRunner {
@@ -181,89 +134,70 @@ fn apply_sandbox_cli_flags(
                 }
             }
         }
+        "grok" => {
+            if request.sandbox.read_only {
+                let has_no_sub = template_args.iter().any(|a| a == "--no-subagents");
+                let mut stripped = Vec::with_capacity(args.len() + 3);
+                stripped.push("--permission-mode".to_string());
+                stripped.push("plan".to_string());
+                if !has_no_sub {
+                    stripped.push("--no-subagents".to_string());
+                }
+                let drained: Vec<String> = std::mem::take(args);
+                let mut i = 0usize;
+                let mut after_sep = false;
+                while i < drained.len() {
+                    let tpl = template_args.get(i).map(String::as_str).unwrap_or("");
+                    if after_sep || tpl.contains(PROMPT_PLACEHOLDER) {
+                        stripped.push(drained[i].clone());
+                        i += 1;
+                        continue;
+                    }
+                    if tpl == "--" {
+                        after_sep = true;
+                        stripped.push(drained[i].clone());
+                        i += 1;
+                        continue;
+                    }
+                    if tpl == "--permission-mode" {
+                        i += 1;
+                        if let Some(next_tpl) = template_args.get(i)
+                            && !next_tpl.contains(PROMPT_PLACEHOLDER)
+                            && !next_tpl.starts_with('-')
+                        {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if tpl.starts_with("--permission-mode=")
+                        || tpl == "--always-approve"
+                        || tpl == "--no-plan"
+                    {
+                        i += 1;
+                        continue;
+                    }
+                    stripped.push(drained[i].clone());
+                    i += 1;
+                }
+                *args = stripped;
+            } else {
+                let has_perm = template_args.iter().any(|a| {
+                    a == "--permission-mode"
+                        || a.starts_with("--permission-mode=")
+                        || a == "--always-approve"
+                });
+                if !has_perm {
+                    let mode = if request.sandbox.enabled {
+                        "bypassPermissions"
+                    } else {
+                        "acceptEdits"
+                    };
+                    args.splice(0..0, ["--permission-mode".to_string(), mode.to_string()]);
+                }
+            }
+        }
         _ => {}
     }
-}
-
-fn denied_under(root: &str, entries: &[&str]) -> Vec<String> {
-    let base = root.trim_end_matches('/');
-    entries
-        .iter()
-        .map(|name| format!("{base}/{name}"))
-        .collect()
-}
-
-fn closed_dir_paths(config_dir: &str, entries: &[&str]) -> AccountPaths {
-    AccountPaths {
-        writable: vec![config_dir.to_string()],
-        write_denied: denied_under(config_dir, entries),
-        writable_regex: Vec::new(),
-    }
-}
-
-fn gemini_account_paths(config_dir: &str, sandbox_enabled: bool) -> AccountPaths {
-    let mut writable = Vec::with_capacity(2);
-    for sub in ["tmp", "history"] {
-        let dir = Path::new(config_dir).join(sub);
-        if sandbox_enabled {
-            let _ = std::fs::create_dir_all(&dir);
-        }
-        writable.push(dir.to_string_lossy().into_owned());
-    }
-    let mut write_denied = super::agy::closed_entries(config_dir);
-    for extra in denied_under(config_dir, &GEMINI_EXTRA_CLOSED) {
-        if !write_denied.contains(&extra) {
-            write_denied.push(extra);
-        }
-    }
-    AccountPaths {
-        writable,
-        write_denied,
-        writable_regex: Vec::new(),
-    }
-}
-
-/// Builds confined account paths for a generic CLI run from `request.account`,
-/// or falls back to default home state dirs based on `program_name` when `None`.
-pub fn account_paths_for(
-    request: &AgentRequest,
-    program_name: &str,
-    home: Option<&str>,
-) -> AccountPaths {
-    if let Some(account) = &request.account {
-        let dir = &account.config_dir;
-        return match account.provider {
-            ProviderKind::ClaudeCode => closed_dir_paths(dir, &CLAUDE_CONFIG_CLOSED),
-            ProviderKind::Codex => closed_dir_paths(dir, &CODEX_CONFIG_CLOSED),
-            ProviderKind::Antigravity => gemini_account_paths(dir, request.sandbox.enabled),
-            ProviderKind::OpenCode => closed_dir_paths(dir, &OPENCODE_CONFIG_CLOSED),
-        };
-    }
-    let Some(home) = home
-        .filter(|h| !h.is_empty())
-        .map(|h| h.trim_end_matches('/'))
-    else {
-        return AccountPaths::default();
-    };
-    let at = |sub: &str| format!("{home}/{sub}");
-    match program_name {
-        "claude" => AccountPaths {
-            writable: vec![at(".claude"), at(".claude.json")],
-            write_denied: denied_under(&at(".claude"), &CLAUDE_CONFIG_CLOSED),
-            writable_regex: Vec::new(),
-        },
-        "codex" => closed_dir_paths(&at(".codex"), &CODEX_CONFIG_CLOSED),
-        "gemini" | "agy" | "antigravity" => {
-            gemini_account_paths(&at(".gemini"), request.sandbox.enabled)
-        }
-        "opencode" => closed_dir_paths(&at(".local/share/opencode"), &OPENCODE_CONFIG_CLOSED),
-        _ => AccountPaths::default(),
-    }
-}
-
-/// Builds the confined account paths for a generic CLI run with an explicit account.
-pub fn account_paths(request: &AgentRequest) -> AccountPaths {
-    account_paths_for(request, "", None)
 }
 
 fn extract_target_hint(val: &Value) -> Option<String> {

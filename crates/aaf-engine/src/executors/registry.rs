@@ -75,7 +75,7 @@ pub struct ResolvedExecutor {
 
 const GEMINI_HEADLESS_ENV: &[(&str, &str)] = &[("GEMINI_CLI_TRUST_WORKSPACE", "true")];
 
-const BUILTIN_EXECUTORS: [CliDescriptor; 10] = [
+const BUILTIN_EXECUTORS: [CliDescriptor; 11] = [
     CliDescriptor {
         id: "claude",
         display_name: "Claude Code",
@@ -137,6 +137,16 @@ const BUILTIN_EXECUTORS: [CliDescriptor; 10] = [
         headless_env: &[],
     },
     CliDescriptor {
+        id: "grok",
+        display_name: "Grok CLI",
+        binaries: &["grok"],
+        hook_support: HookSupport::SandboxOnly,
+        supports_model_flag: true,
+        supports_effort_flag: true,
+        supports_read_only_flag: true,
+        headless_env: &[],
+    },
+    CliDescriptor {
         id: "codebuddy",
         display_name: "CodeBuddy CLI",
         binaries: &["codebuddy"],
@@ -178,27 +188,14 @@ const BUILTIN_EXECUTORS: [CliDescriptor; 10] = [
     },
 ];
 
-/// Returns all 10 built-in coding-agent CLI descriptors in canonical order.
+/// Returns all 11 built-in coding-agent CLI descriptors in canonical order.
 pub fn builtin_executors() -> &'static [CliDescriptor] {
     &BUILTIN_EXECUTORS
 }
 
 /// Looks up a built-in CLI descriptor by canonical id or common case-insensitive alias.
 pub fn find_descriptor(id: &str) -> Option<&'static CliDescriptor> {
-    let normalized = id.trim().to_ascii_lowercase();
-    let canonical = match normalized.as_str() {
-        "claude" | "claude-code" | "claudecode" => "claude",
-        "codex" | "codex-cli" | "openai-codex" => "codex",
-        "gemini" | "gemini-cli" => "gemini",
-        "opencode" | "open-code" => "opencode",
-        "cursor" | "cursor-cli" | "cursor-agent" | "agent" => "cursor",
-        "antigravity" | "antigravity-cli" | "agy" => "antigravity",
-        "codebuddy" | "code-buddy" | "codebuddy-cli" => "codebuddy",
-        "kimi" | "kimi-code" | "kimi-cli" => "kimi",
-        "pi" | "pi-agent" | "pi-cli" => "pi",
-        "deepseek" | "deepseek-harness" | "deepseek-cli" | "dsh" => "deepseek",
-        _ => return None,
-    };
+    let canonical = aaf_domain::pipeline::normalize_executor_id(id);
     BUILTIN_EXECUTORS.iter().find(|desc| desc.id == canonical)
 }
 
@@ -371,6 +368,28 @@ pub fn build_headless_argv_confined(
             }
             argv.push(format!("-p={prompt}"));
         }
+        "grok" => {
+            if read_only {
+                argv.extend([
+                    "--permission-mode".to_string(),
+                    "plan".to_string(),
+                    "--no-subagents".to_string(),
+                ]);
+            } else if sandboxed {
+                argv.extend([
+                    "--permission-mode".to_string(),
+                    "bypassPermissions".to_string(),
+                ]);
+            }
+            argv.push("--no-memory".to_string());
+            if let Some(m) = clean_model {
+                argv.extend(["--model".to_string(), m.to_string()]);
+            }
+            if let Some(e) = clean_effort {
+                argv.extend(["--reasoning-effort".to_string(), e.to_string()]);
+            }
+            argv.push(format!("--single={prompt}"));
+        }
         "cursor" | "codebuddy" | "deepseek" => {
             if let Some(m) = clean_model {
                 argv.extend(["--model".to_string(), m.to_string()]);
@@ -396,27 +415,61 @@ pub fn build_headless_argv_confined(
     Ok(argv)
 }
 
-/// Resolves the first matching binary for `desc` on `path_var`.
-pub fn resolve_binary(desc: &CliDescriptor, path_var: &OsStr) -> Option<PathBuf> {
-    desc.binaries
-        .iter()
-        .find_map(|candidate| find_on_path(path_var, candidate))
+#[cfg(unix)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// Resolves a built-in CLI's `{prompt}` command template from `path_var`.
+#[cfg(not(unix))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file())
+}
+
+/// Resolves the first matching binary for `desc` on `path_var`, falling back to
+/// known per-user install paths under `home` (such as `~/.grok/bin/grok`).
+pub fn resolve_binary_with_home(
+    desc: &CliDescriptor,
+    path_var: &OsStr,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    if let Some(found) = desc
+        .binaries
+        .iter()
+        .find_map(|candidate| find_on_path(path_var, candidate))
+    {
+        return Some(found);
+    }
+    if desc.id == "grok"
+        && let Some(h) = home
+    {
+        let fallback = h.join(".grok/bin/grok");
+        if is_executable_file(&fallback) {
+            return Some(fallback);
+        }
+    }
+    None
+}
+
+/// Resolves the first matching binary for `desc` on `path_var`.
+pub fn resolve_binary(desc: &CliDescriptor, path_var: &OsStr) -> Option<PathBuf> {
+    resolve_binary_with_home(desc, path_var, None)
+}
+
+/// Resolves a built-in CLI's `{prompt}` command template from `path_var` (and optional `home`).
 pub(super) fn resolve_generic_template(
     exec: &str,
     model: &str,
     effort: &str,
     path_var: Option<&OsStr>,
+    home: Option<&std::path::Path>,
 ) -> aaf_domain::ports::PortResult<Vec<String>> {
     use aaf_domain::ports::PortError;
-    let desc = BUILTIN_EXECUTORS
-        .iter()
-        .find(|d| d.id == exec)
+    let desc = find_descriptor(exec)
         .ok_or_else(|| PortError::Invalid(format!("unknown executor {exec:?}")))?;
     let bin = path_var
-        .and_then(|p| resolve_binary(desc, p))
+        .and_then(|p| resolve_binary_with_home(desc, p, home))
+        .or_else(|| resolve_binary_with_home(desc, OsStr::new(""), home))
         .ok_or_else(|| {
             PortError::NotFound(format!(
                 "none of [{}] for executor {:?} found on PATH",
@@ -438,13 +491,16 @@ pub(super) fn resolve_generic_template(
     .map_err(PortError::Invalid)
 }
 
-/// Discovers which of the 10 built-in coding-agent CLIs are installed on `path_var`
-/// using purely filesystem lookups (no subprocesses spawned).
-pub fn discover_inventory(path_var: &OsStr) -> Vec<InstalledExecutor> {
+/// Discovers which of the 11 built-in coding-agent CLIs are installed on `path_var`
+/// (plus well-known per-user install paths under `home`), using purely filesystem lookups.
+pub fn discover_inventory_with_home(
+    path_var: &OsStr,
+    home: Option<&std::path::Path>,
+) -> Vec<InstalledExecutor> {
     BUILTIN_EXECUTORS
         .iter()
         .map(|desc| {
-            let resolved_binary = resolve_binary(desc, path_var);
+            let resolved_binary = resolve_binary_with_home(desc, path_var, home);
             InstalledExecutor {
                 id: desc.id.to_string(),
                 display_name: desc.display_name.to_string(),
@@ -455,6 +511,12 @@ pub fn discover_inventory(path_var: &OsStr) -> Vec<InstalledExecutor> {
             }
         })
         .collect()
+}
+
+/// Discovers which of the 11 built-in coding-agent CLIs are installed on `path_var`
+/// using purely filesystem lookups (no subprocesses spawned).
+pub fn discover_inventory(path_var: &OsStr) -> Vec<InstalledExecutor> {
+    discover_inventory_with_home(path_var, None)
 }
 
 /// Resolves `primary` or the first available entry in `fallbacks` against `path_var`,

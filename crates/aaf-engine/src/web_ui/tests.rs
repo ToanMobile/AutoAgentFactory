@@ -230,11 +230,31 @@ fn index_returns_html_with_strict_csp_and_security_headers() {
     assert!(resp.body.contains("<!DOCTYPE html>"));
     assert!(resp.body.contains("AutoAgentFactory Dashboard"));
     assert!(resp.body.contains("machine.subTokensOnly"));
+    assert!(resp.body.contains("accClearAllCdBtn"));
+    assert!(resp.body.contains("data-provider-group"));
+    assert!(resp.body.contains("\"claude_code\""));
+    assert!(resp.body.contains("acc.noLiveApi"));
+    for removed in [
+        "ccRotateBtn",
+        "ccUnfreezeBtn",
+        "ccBalanceBtn",
+        "ccProfilesBox",
+        "acc.unlimited",
+        "cc_switch",
+    ] {
+        assert!(
+            !resp.body.contains(removed),
+            "legacy UI token {removed} still present"
+        );
+    }
     assert!(
         super::pwa::I18N_UI_JS
             .to_ascii_lowercase()
             .contains("subscription accounts: tokens only")
     );
+    assert!(super::pwa::I18N_UI_JS.contains("acc.groupGrok"));
+    assert!(super::pwa::I18N_UI_JS.contains("acc.noLiveApi"));
+    assert!(!super::pwa::I18N_UI_JS.contains("\"acc.unlimited\""));
     assert_eq!(
         resp.headers
             .get("content-security-policy")

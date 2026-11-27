@@ -313,11 +313,12 @@ impl GateRunner for RealGate {
 /// `[cross_audit].executor`) can use; `None` for `custom` commands, which run
 /// without a discovered account profile.
 pub fn provider_for(executor: &str) -> Option<ProviderKind> {
-    match executor.trim().to_ascii_lowercase().as_str() {
+    match aaf_domain::pipeline::normalize_executor_id(executor).as_str() {
         "claude" => Some(ProviderKind::ClaudeCode),
         "codex" => Some(ProviderKind::Codex),
         "antigravity" | "gemini" => Some(ProviderKind::Antigravity),
         "opencode" => Some(ProviderKind::OpenCode),
+        "grok" => Some(ProviderKind::Grok),
         _ => None,
     }
 }

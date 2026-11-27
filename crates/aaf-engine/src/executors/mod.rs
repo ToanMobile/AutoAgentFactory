@@ -228,7 +228,9 @@ pub fn build_runner_with(cfg: &RunConfig, mut env: ExecEnv) -> PortResult<Box<dy
         .rev()
         .find(|(k, v)| k == "PATH" && !v.is_empty())
         .map(|(_, v)| v.clone());
-    match cfg.executor.as_str() {
+    let norm_exec = aaf_domain::pipeline::normalize_executor_id(&cfg.executor);
+    let home_path = env.home.as_deref().map(Path::new);
+    match norm_exec.as_str() {
         "claude" => {
             let bin = env.claude_bin.clone().ok_or_else(|| {
                 PortError::NotFound("the `claude` binary is not on PATH".to_string())
@@ -256,7 +258,7 @@ pub fn build_runner_with(cfg: &RunConfig, mut env: ExecEnv) -> PortResult<Box<dy
         }
         "custom" => Ok(Box::new(GenericRunner::new(cfg.executor_cmd.clone(), env)?)),
         exec if !cfg.executor_cmd.is_empty() => {
-            if !registry::builtin_executors().iter().any(|d| d.id == exec) {
+            if registry::find_descriptor(exec).is_none() {
                 return Err(PortError::Invalid(format!("unknown executor {exec:?}")));
             }
             Ok(Box::new(GenericRunner::new(cfg.executor_cmd.clone(), env)?))
@@ -267,6 +269,7 @@ pub fn build_runner_with(cfg: &RunConfig, mut env: ExecEnv) -> PortResult<Box<dy
                 &cfg.model,
                 &cfg.effort,
                 path_var.as_deref().map(OsStr::new),
+                home_path,
             )?;
             Ok(Box::new(GenericRunner::new(tpl, env)?))
         }

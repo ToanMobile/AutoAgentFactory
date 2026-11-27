@@ -106,7 +106,7 @@ pub const CI_AND_MANIFEST_GLOBS: &[&str] = &[
 /// its own guard (`.claude/settings.json` registers `aaf-hook`) and, once
 /// merged, what runs in the owner's own sessions outside any sandbox.
 /// Part of the default `head_lock_globs`.
-pub const AGENT_CONFIG_GLOBS: [&str; 23] = [
+pub const AGENT_CONFIG_GLOBS: [&str; 27] = [
     "**/.claude/**",
     "**/CLAUDE.md",
     "**/.mcp.json",
@@ -118,6 +118,10 @@ pub const AGENT_CONFIG_GLOBS: [&str; 23] = [
     "**/.codex/**",
     "**/.opencode/**",
     "**/opencode.json",
+    "**/.grok/**",
+    "**/GROK.md",
+    "**/.cursor/**",
+    "**/.cursorrules",
     "**/.autofactory/sops/**",
     "**/.autofactory/roles/**",
     "**/.husky/**",

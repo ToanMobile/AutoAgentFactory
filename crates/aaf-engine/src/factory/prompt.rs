@@ -313,6 +313,7 @@ pub fn sandbox_policy_for(
     let exists_or_link = |path: &Path| std::fs::symlink_metadata(path).is_ok() || path.exists();
     let shared_claude = resolve(&home.join(".claude"));
     let shared_gemini = resolve(&home.join(".gemini"));
+    let shared_grok = resolve(&home.join(".grok"));
     let own_dir = own.map(|own| resolve(Path::new(&own.config_dir)));
     let mut read_denied = vec![data_dir.to_string_lossy().into_owned()];
     let mut push_unique = |path: String| {
@@ -326,9 +327,12 @@ pub fn sandbox_policy_for(
             provider == Some(ProviderKind::ClaudeCode) && dir == shared_claude;
         let exempt_shared_gemini =
             provider == Some(ProviderKind::Antigravity) && own.is_none() && dir == shared_gemini;
+        let exempt_shared_grok =
+            provider == Some(ProviderKind::Grok) && own.is_none() && dir == shared_grok;
         if Some(&dir) != own_dir.as_ref()
             && !exempt_shared_claude
             && !exempt_shared_gemini
+            && !exempt_shared_grok
             && dir.is_dir()
         {
             push_unique(account.config_dir.clone());
@@ -346,6 +350,12 @@ pub fn sandbox_policy_for(
         let gemini = home.join(".gemini");
         if exists_or_link(&gemini) {
             push_unique(gemini.to_string_lossy().into_owned());
+        }
+    }
+    if provider != Some(ProviderKind::Grok) {
+        let grok = home.join(".grok");
+        if exists_or_link(&grok) {
+            push_unique(grok.to_string_lossy().into_owned());
         }
     }
     SandboxPolicy {

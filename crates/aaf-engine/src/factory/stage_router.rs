@@ -41,7 +41,7 @@ pub struct ProviderKey(pub String);
 
 impl ProviderKey {
     pub fn from_executor(executor: &str) -> Self {
-        let norm = executor.trim().to_ascii_lowercase();
+        let norm = aaf_domain::pipeline::normalize_executor_id(executor);
         Self(if norm.is_empty() {
             "default".to_string()
         } else {
@@ -390,13 +390,13 @@ fn validate_plan_pair(
 }
 
 fn stage_uses_claude(executor: &str, executor_cmd: &str) -> bool {
-    executor.trim().eq_ignore_ascii_case("claude")
+    aaf_domain::pipeline::normalize_executor_id(executor) == "claude"
         || (!executor_cmd.trim().is_empty() && audit_cmd_is_claude(executor_cmd))
 }
 
 fn is_hooked_non_claude_executor(executor: &str) -> bool {
     matches!(
-        executor.trim().to_ascii_lowercase().as_str(),
+        aaf_domain::pipeline::normalize_executor_id(executor).as_str(),
         "codex" | "gemini" | "antigravity" | "opencode"
     )
 }
@@ -419,7 +419,7 @@ pub fn writer_hook_executors(cfg: &RepoConfig) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut record = |eff: &str, cmd: &str| {
         if cmd.trim().is_empty() && is_hooked_non_claude_executor(eff) {
-            out.insert(eff.trim().to_ascii_lowercase());
+            out.insert(aaf_domain::pipeline::normalize_executor_id(eff));
         }
     };
     let run_cmd = cfg.run.executor_cmd.join(" ");
@@ -458,7 +458,7 @@ pub fn any_stage_uses_claude(cfg: &RepoConfig) -> bool {
         &p.implementer,
         &p.implementer_escalated,
     ];
-    cfg.run.executor.trim().eq_ignore_ascii_case("claude")
+    aaf_domain::pipeline::normalize_executor_id(&cfg.run.executor) == "claude"
         || run_cmd_claude
         || stages
             .iter()

@@ -241,7 +241,17 @@ pub(crate) fn plist_xml(
     let exe = xml_escape(&exe.display().to_string());
     let work_dir = xml_escape(&service_working_dir(home, extra_env).display().to_string());
     let log = xml_escape(&log_path(home).display().to_string());
-    let path_var = xml_escape(&normalize_path_var(path_var));
+    let mut raw_path = path_var.to_string();
+    for rel in [".grok/bin", ".local/bin", ".cargo/bin"] {
+        let candidate = home.join(rel);
+        if candidate.is_dir() {
+            if !raw_path.is_empty() {
+                raw_path.push(':');
+            }
+            raw_path.push_str(&candidate.to_string_lossy());
+        }
+    }
+    let path_var = xml_escape(&normalize_path_var(&raw_path));
     let mut env_xml = format!("\t\t<key>PATH</key>\n\t\t<string>{path_var}</string>");
     for (k, v) in extra_env {
         let ek = xml_escape(k);

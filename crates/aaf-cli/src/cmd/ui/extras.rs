@@ -498,6 +498,14 @@ pub(super) fn do_account_cooldown(
     let profile = discovered
         .iter()
         .find(|p| p.id == wanted || p.name == wanted)
+        .cloned()
+        .or_else(|| {
+            db.list_accounts().ok().and_then(|states| {
+                states.into_iter().map(|s| s.profile).find(|p| {
+                    Path::new(&p.config_dir).is_dir() && (p.id == wanted || p.name == wanted)
+                })
+            })
+        })
         .ok_or_else(|| format!("not found: account '{wanted}'"))?;
     let until = if clear {
         None

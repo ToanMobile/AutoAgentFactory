@@ -9,14 +9,16 @@ pub enum ProviderKind {
     Codex,
     Antigravity,
     OpenCode,
+    Grok,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 4] = [
+    pub const ALL: [ProviderKind; 5] = [
         ProviderKind::ClaudeCode,
         ProviderKind::Codex,
         ProviderKind::Antigravity,
         ProviderKind::OpenCode,
+        ProviderKind::Grok,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -25,6 +27,7 @@ impl ProviderKind {
             ProviderKind::Codex => "codex",
             ProviderKind::Antigravity => "antigravity",
             ProviderKind::OpenCode => "open_code",
+            ProviderKind::Grok => "grok",
         }
     }
 

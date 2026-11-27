@@ -374,7 +374,7 @@ const SENSITIVE_HOME_DIRS: [&str; 6] = [
     ".config/autofactory",
     ".local/share/opencode",
 ];
-const SENSITIVE_HOME_PREFIXES: [&str; 3] = [".claude", ".codex", ".gemini"];
+const SENSITIVE_HOME_PREFIXES: [&str; 4] = [".claude", ".codex", ".gemini", ".grok"];
 
 fn lexical_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();

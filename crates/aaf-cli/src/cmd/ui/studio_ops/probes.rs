@@ -306,11 +306,17 @@ pub(super) fn detect_worker_issues(
             if streams_dir.is_none() || validate_run_id(&r.id).is_err() {
                 continue;
             }
-            let non_streaming = r.executor.eq_ignore_ascii_case("antigravity")
+            let is_non_stream = |s: &str| {
+                matches!(
+                    aaf_domain::pipeline::normalize_executor_id(s).as_str(),
+                    "antigravity" | "grok"
+                )
+            };
+            let non_streaming = is_non_stream(&r.executor)
                 || tail
                     .as_ref()
                     .and_then(|t| t.last_tool.as_deref())
-                    .is_some_and(|t| t.eq_ignore_ascii_case("antigravity"));
+                    .is_some_and(is_non_stream);
             let (warn_s, high_s) = if non_streaming {
                 (STALL_NON_STREAM_WARN_SECS, STALL_NON_STREAM_HIGH_SECS)
             } else {

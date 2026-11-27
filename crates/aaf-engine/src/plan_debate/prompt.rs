@@ -126,7 +126,12 @@ pub fn build_author_prompt(
          3. For every open issue from the previous round, add a `dispositions` entry with \
             `action` = `\"ACCEPTED\"` (and update the plan accordingly) or `\"DISPUTED\"` with \
             concrete codebase evidence.\n\
-         4. Keep `summary` concise and `tier_assessment` strictly one of `\"S\"`, `\"M\"`, `\"L\"`."
+         4. Keep `summary` concise and `tier_assessment` strictly one of `\"S\"`, `\"M\"`, `\"L\"`.\n\
+         5. Only populate `open_questions` when a genuine product, UX, or scope choice requires a \
+            human decision. Write EVERY `open_questions` item in plain, natural language for a \
+            non-coding reader in the task's language (NEVER raw code/symbol/function dumps or \
+            unexplained technical jargon). Format each item as:\n\
+            `<Short plain question> | (1) <Plain option A> (Recommended/Khuyến nghị) — <1-sentence benefit/tradeoff> | (2) <Plain option B> — <1-sentence benefit/tradeoff> | Hint/Gợi ý: <1 plain sentence explaining why the recommended choice is safest/best>`."
     );
 
     append_task_spec(&mut out, task);

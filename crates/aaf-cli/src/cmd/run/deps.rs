@@ -32,7 +32,7 @@ const MOBILE_PROFILES: [&str; 5] = ["android", "ios", "flutter", "react-native",
 
 /// True when `[run]` invokes Claude Code natively or via `run.executor_cmd`.
 pub(crate) fn run_executor_is_claude(run: &RunConfig) -> bool {
-    run.executor.trim().eq_ignore_ascii_case("claude")
+    aaf_domain::pipeline::normalize_executor_id(&run.executor) == "claude"
         || run
             .executor_cmd
             .first()
@@ -161,7 +161,15 @@ pub(super) fn build_deps(
         repo,
         Arc::new(db.clone()),
     );
-    if same_audit_provider(&cfg.repo.run.executor, &resolved_audit_exec) {
+    let needs_audit_reserve = same_audit_provider(&cfg.repo.run.executor, &resolved_audit_exec)
+        || (cfg.repo.cross_audit.dual_review
+            && cfg
+                .repo
+                .cross_audit
+                .reviewers
+                .iter()
+                .any(|r| same_audit_provider(&cfg.repo.run.executor, &r.executor)));
+    if needs_audit_reserve {
         let reserve_db = db.clone();
         selecting = selecting.with_audit_reserve(Arc::new(move || {
             reserve_db

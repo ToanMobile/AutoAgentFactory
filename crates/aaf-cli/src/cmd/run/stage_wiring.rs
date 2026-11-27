@@ -56,9 +56,10 @@ pub(super) fn build_stage_runner(
     exec_env: ExecEnv,
     read_only_audit: bool,
 ) -> Result<Arc<dyn AgentRunner>, CmdError> {
-    let exec = executor.trim().to_ascii_lowercase();
+    let exec = aaf_domain::pipeline::normalize_executor_id(executor);
     let (cmd, model, effort) = (executor_cmd.trim(), model.trim(), effort.trim());
-    let ro_gen = read_only_audit && matches!(exec.as_str(), "codex" | "gemini" | "opencode");
+    let ro_gen =
+        read_only_audit && matches!(exec.as_str(), "codex" | "gemini" | "opencode" | "grok");
     let mut run_cfg = RunConfig {
         executor: exec.clone(),
         model: model.into(),
@@ -83,12 +84,15 @@ pub(super) fn build_stage_runner(
 
 /// Builds a provider-scoped [`AccountPool`]. R3-CONC-5: [`ProviderKind::Antigravity`]
 /// ALWAYS clamps `max_concurrent_per_account = 1` AND wraps in [`AntigravityLockedPool`].
+/// Uses strict audit reserve only for auxiliary pools (never for the primary writer
+/// pool, which would stall coding whenever any unrelated repo is in `Gating`).
 pub(super) fn build_pool_for_provider(
     ctx: &Ctx,
     repo: &Path,
     cfg: &EffectiveConfig,
     db: &Db,
     key: &ProviderKey,
+    strict_audit_reserve: bool,
 ) -> Arc<dyn AccountPool> {
     let acc = &cfg.global.accounts;
     let provider = key.provider_kind();
@@ -114,7 +118,7 @@ pub(super) fn build_pool_for_provider(
             .list_tasks(None, Some(TaskState::Gating))
             .is_ok_and(|tasks| !tasks.is_empty())
     });
-    selecting = if is_agy {
+    selecting = if is_agy && strict_audit_reserve {
         selecting.with_strict_audit_reserve(has_gating)
     } else {
         selecting.with_audit_reserve(has_gating)
@@ -170,7 +174,9 @@ pub(super) fn build_stage_router(
     let exec_env = exec_env_for(ctx, cfg);
     let dkey = ProviderKey::from_executor(&run.executor);
     let dpool = match dkey.provider_kind() {
-        Some(ProviderKind::Antigravity) => build_pool_for_provider(ctx, repo, cfg, db, &dkey),
+        Some(ProviderKind::Antigravity) => {
+            build_pool_for_provider(ctx, repo, cfg, db, &dkey, false)
+        }
         _ => default_accounts,
     };
     let mut pools = HashMap::from([(dkey, Arc::clone(&dpool))]);
@@ -190,7 +196,7 @@ pub(super) fn build_stage_router(
         let key = ProviderKey::from_executor(eff);
         let p = pools
             .entry(key.clone())
-            .or_insert_with(|| build_pool_for_provider(ctx, repo, cfg, db, &key));
+            .or_insert_with(|| build_pool_for_provider(ctx, repo, cfg, db, &key, ro));
         let target = if ro {
             StageTarget::new(eff, c, m, e, r, Arc::clone(p))
         } else {
@@ -213,8 +219,16 @@ pub(super) fn build_stage_router(
                 "" => "custom".into(),
                 ex => resolve_auto_audit_executor(a_exec, ex, &ctx.path_var, &ctx.home),
             };
-            let x = cross;
-            Some(mk((&eff, &x.executor_cmd, &x.model, &x.effort), true)?)
+            let same_prov = same_audit_provider(a_exec, &eff)
+                || (aaf_engine::factory::audit_cmd_is_claude(&cross.executor_cmd)
+                    && same_audit_provider(a_exec, "claude"));
+            if same_prov {
+                let found = first_distinct(&cross.reviewers, a_exec);
+                found.map(|r| mk(rv(r), true)).transpose()?
+            } else {
+                let x = cross;
+                Some(mk((&eff, &x.executor_cmd, &x.model, &x.effort), true)?)
+            }
         } else {
             let found = first_distinct(&cross.reviewers, a_exec);
             found.map(|r| mk(rv(r), true)).transpose()?
@@ -274,7 +288,7 @@ pub(super) fn build_native_audit_backend(
     let key = ProviderKey::from_executor(&prov);
     let accounts = router
         .and_then(|rt| rt.pool_for(&key))
-        .unwrap_or_else(|| build_pool_for_provider(ctx, repo, cfg, db, &key));
+        .unwrap_or_else(|| build_pool_for_provider(ctx, repo, cfg, db, &key, true));
     let target = StageTarget::new(prov, cmd, model, effort, runner, accounts);
     Ok(Some(to_audit(&target)))
 }
@@ -341,6 +355,7 @@ mod tests {
             &cfg,
             &db,
             &ProviderKey::from_executor("claude"),
+            true,
         );
 
         // First coding work leases 1 of 2 accounts; second coding work must NOT steal
@@ -380,13 +395,14 @@ mod tests {
             &cfg,
             &db,
             &ProviderKey::from_executor("antigravity"),
+            true,
         );
         assert!(
             agy_pool
                 .acquire_for("t-plan-ready", Purpose::Work)
                 .unwrap()
                 .is_none(),
-            "sole Antigravity slot must be reserved for Gating Audit over Ready plan Work"
+            "sole auxiliary Antigravity slot must be reserved for Gating Audit over Ready plan Work"
         );
         assert!(
             agy_pool
@@ -394,6 +410,23 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "Gating Audit must immediately acquire the sole Antigravity slot"
+        );
+        // Primary writer Antigravity pool (strict_audit_reserve = false) must NOT deadlock
+        // coding work when another repo has a Gating task.
+        let agy_primary = build_pool_for_provider(
+            &ctx,
+            Path::new("/tmp/repo-b"),
+            &cfg,
+            &db,
+            &ProviderKey::from_executor("antigravity"),
+            false,
+        );
+        assert!(
+            agy_primary
+                .acquire_for("t-coding-primary", Purpose::Work)
+                .unwrap()
+                .is_some(),
+            "primary Antigravity writer pool must not stall on unrelated Gating tasks"
         );
     }
 }

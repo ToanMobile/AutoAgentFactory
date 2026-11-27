@@ -20,7 +20,7 @@ fn path_for(dirs: &[&Path]) -> OsString {
 #[test]
 fn all_ten_builtin_executors_exist_with_unique_ids_and_hook_support() {
     let all = builtin_executors();
-    assert_eq!(all.len(), 10);
+    assert_eq!(all.len(), 11);
 
     let ids: Vec<&str> = all.iter().map(|d| d.id).collect();
     assert_eq!(
@@ -32,6 +32,7 @@ fn all_ten_builtin_executors_exist_with_unique_ids_and_hook_support() {
             "opencode",
             "cursor",
             "antigravity",
+            "grok",
             "codebuddy",
             "kimi",
             "pi",
@@ -74,7 +75,7 @@ fn all_ten_builtin_executors_exist_with_unique_ids_and_hook_support() {
         find_descriptor("gemini").unwrap().headless_env,
         &[("GEMINI_CLI_TRUST_WORKSPACE", "true")]
     );
-    for id in ["cursor", "codebuddy", "kimi", "pi", "deepseek"] {
+    for id in ["grok", "cursor", "codebuddy", "kimi", "pi", "deepseek"] {
         assert_eq!(
             find_descriptor(id).unwrap().hook_support,
             HookSupport::SandboxOnly,
@@ -99,6 +100,9 @@ fn find_descriptor_resolves_canonical_ids_and_case_insensitive_aliases() {
         ("agy", "antigravity"),
         ("AGY", "antigravity"),
         ("antigravity-cli", "antigravity"),
+        ("grok", "grok"),
+        ("grok-cli", "grok"),
+        ("xai-grok", "grok"),
         ("code-buddy", "codebuddy"),
         ("kimi-code", "kimi"),
         ("pi-agent", "pi"),
@@ -132,7 +136,9 @@ fn build_headless_argv_builds_valid_args_for_all_ten_clis() {
         assert!(
             matches!(
                 argv.last().map(String::as_str),
-                Some("implement feature") | Some("-p=implement feature")
+                Some("implement feature")
+                    | Some("-p=implement feature")
+                    | Some("--single=implement feature")
             ),
             "{}: unexpected prompt arg {:?}",
             desc.id,
@@ -210,6 +216,32 @@ fn build_headless_argv_builds_valid_args_for_all_ten_clis() {
             "fix"
         ]
     );
+
+    let grok = find_descriptor("grok").unwrap();
+    let grok_ro = build_headless_argv(
+        grok,
+        "/bin/grok",
+        "-leading-dash review",
+        Some("grok-code-fast-1"),
+        Some("high"),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        grok_ro,
+        vec![
+            "/bin/grok",
+            "--permission-mode",
+            "plan",
+            "--no-subagents",
+            "--no-memory",
+            "--model",
+            "grok-code-fast-1",
+            "--reasoning-effort",
+            "high",
+            "--single=-leading-dash review",
+        ]
+    );
 }
 
 #[test]
@@ -255,7 +287,7 @@ fn discover_inventory_finds_fake_binaries_on_synthetic_path() {
 
     let synthetic_path = path_for(&[tmp.path()]);
     let inventory = discover_inventory(&synthetic_path);
-    assert_eq!(inventory.len(), 10);
+    assert_eq!(inventory.len(), 11);
 
     let by_id = |id: &str| inventory.iter().find(|item| item.id == id).unwrap();
 
@@ -286,7 +318,7 @@ fn discover_inventory_finds_fake_binaries_on_synthetic_path() {
     assert_eq!(by_id("claude").headless_env_count, 0);
 
     let empty = discover_inventory(&OsString::new());
-    assert_eq!(empty.len(), 10);
+    assert_eq!(empty.len(), 11);
     assert!(empty.iter().all(|item| !item.installed));
 }
 

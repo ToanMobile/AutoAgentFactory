@@ -38,10 +38,12 @@ fn check_executor_binary(
         return Ok(());
     }
     if let Some(desc) = find_descriptor(exec) {
-        if desc
-            .binaries
-            .iter()
-            .any(|bin| find_on_path(&ctx.path_var, bin).is_some())
+        if aaf_engine::executors::registry::resolve_binary_with_home(
+            desc,
+            &ctx.path_var,
+            Some(&ctx.home),
+        )
+        .is_some()
         {
             return Ok(());
         }
@@ -73,15 +75,37 @@ fn resolve_plan_author(repo: &RepoConfig) -> (&str, &str) {
     }
 }
 
-fn resolve_plan_challenger<'a>(repo: &'a RepoConfig, author_exec: &str) -> (&'a str, &'a str) {
+fn resolve_plan_challenger(ctx: &Ctx, repo: &RepoConfig, author_exec: &str) -> (String, String) {
     let exec = repo.pipeline.plan_challenger.executor.trim();
     if !exec.is_empty() {
-        return (exec, repo.pipeline.plan_challenger.executor_cmd.trim());
+        return (
+            exec.to_string(),
+            repo.pipeline
+                .plan_challenger
+                .executor_cmd
+                .trim()
+                .to_string(),
+        );
     }
     let audit_exec = repo.cross_audit.executor.trim();
     let audit_cmd = repo.cross_audit.executor_cmd.trim();
     if !audit_exec.is_empty() || !audit_cmd.is_empty() {
-        return (audit_exec, audit_cmd);
+        let eff = if audit_exec.is_empty() {
+            "custom".to_string()
+        } else {
+            aaf_engine::factory::resolve_auto_audit_executor(
+                author_exec,
+                audit_exec,
+                &ctx.path_var,
+                &ctx.home,
+            )
+        };
+        let same_prov = aaf_engine::factory::same_audit_provider(author_exec, &eff)
+            || (aaf_engine::factory::audit_cmd_is_claude(audit_cmd)
+                && aaf_engine::factory::same_audit_provider(author_exec, "claude"));
+        if !same_prov {
+            return (eff, audit_cmd.to_string());
+        }
     }
     let author_canon = canonical_provider(author_exec);
     if let Some(reviewer) = repo
@@ -90,9 +114,12 @@ fn resolve_plan_challenger<'a>(repo: &'a RepoConfig, author_exec: &str) -> (&'a 
         .iter()
         .find(|r| is_known_real_reviewer(r) && canonical_provider(&r.executor) != author_canon)
     {
-        return (reviewer.executor.trim(), reviewer.executor_cmd.trim());
+        return (
+            reviewer.executor.trim().to_string(),
+            reviewer.executor_cmd.trim().to_string(),
+        );
     }
-    ("", "")
+    (String::new(), String::new())
 }
 
 fn is_real_stage(executor: &str, executor_cmd: &str) -> bool {
@@ -112,7 +139,8 @@ pub(super) fn dual_frontier_check(ctx: &Ctx, repo: &RepoConfig) -> Result<String
 
     if plan_debate {
         let (author_exec, author_cmd) = resolve_plan_author(repo);
-        let (challenger_exec, challenger_cmd) = resolve_plan_challenger(repo, author_exec);
+        let (challenger_exec, challenger_cmd) = resolve_plan_challenger(ctx, repo, author_exec);
+        let (challenger_exec, challenger_cmd) = (challenger_exec.as_str(), challenger_cmd.as_str());
         for (label, exec, cmd) in [
             ("plan_author", author_exec, author_cmd),
             ("plan_challenger", challenger_exec, challenger_cmd),

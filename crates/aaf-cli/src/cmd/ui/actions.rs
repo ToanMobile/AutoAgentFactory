@@ -343,6 +343,9 @@ pub(super) fn dispatch_db_action(
         "account_clear" => {
             super::extras::do_account_cooldown(db, ctx, config_base, task_id, "", true)
         }
+        "account_clear_all" | "account-clear-all" => {
+            super::accounts_panel::do_account_clear_all(db, ctx, config_base)
+        }
         other => Err(format!("invalid action: {other}")),
     }
 }

@@ -1,198 +1,27 @@
-//! Accounts panel backend: native AAF account pool + optional CC Switcher
-//! live 5h/7d quota, profile switching, and Repo <-> Account (`.claude/settings.local.json`)
-//! assignment with safe native fallback.
+//! Accounts panel backend: native AAF account pool (Claude, Google/Antigravity,
+//! Grok, Codex, OpenCode), live Claude 5h/7d OAuth quota sync into AAF cooldowns,
+//! native clear-all cooldowns, and merged Repo <-> Account assignment.
 
+mod live_quota;
+mod switcher;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::path::Path;
 
-use aaf_domain::account::AccountStatus;
-use aaf_domain::ports::Clock;
-use aaf_engine::accounts::{DiscoveryEnv, Router, binary_on_path_in, discover};
+use aaf_domain::account::{AccountProfile, ProviderKind, default_account_name};
+use aaf_domain::ports::{AccountStore, Clock};
+use aaf_engine::accounts::{DiscoveryEnv, Lease, Router, binary_on_path_in, discover};
 use aaf_engine::db::Db;
 use serde_json::{Value, json};
 
-use super::extras::{
-    canonical_under_allowed_roots, known_repos, read_repo_local_account,
-    write_repo_local_account_native,
-};
+use super::extras::{known_repos, read_repo_local_account};
+use crate::cmd::board::store::open_db;
 use crate::ctx::{Ctx, SystemClock};
 
-const CC_READ_TIMEOUT: Duration = Duration::from_secs(45);
-const CC_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
-const CC_CACHE_TTL: Duration = Duration::from_secs(30);
-const MAX_CC_STDOUT_BYTES: usize = 512 * 1024;
-const MAX_CC_STDERR_BYTES: usize = 4 * 1024;
-static CC_WRITE_LOCK: Mutex<()> = Mutex::new(());
-static CC_READ_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
-
-fn is_valid_ident(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 48
-        && bytes[0].is_ascii_alphanumeric()
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-}
-
-fn find_cc_switcher_script(ctx: &Ctx) -> Option<PathBuf> {
-    for env_key in ["AAF_CC_SWITCHER_BIN", "AGENT_OFFICE_CC_SWITCHER"] {
-        if let Some((_, v)) = ctx.aaf_env.iter().find(|(k, _)| k == env_key) {
-            let p = PathBuf::from(v.trim());
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-        if let Ok(v) = std::env::var(env_key) {
-            let p = PathBuf::from(v.trim());
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    let cfg_candidate = ctx.config_dir.join("cc-switcher-mcp.js");
-    if cfg_candidate.is_file() {
-        return Some(cfg_candidate);
-    }
-    None
-}
-
-fn find_node_bin(ctx: &Ctx) -> Option<PathBuf> {
-    for dir in std::env::split_paths(&ctx.path_var) {
-        let p = dir.join("node");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    for cand in [
-        "/opt/homebrew/bin/node",
-        "/usr/local/bin/node",
-        "/usr/bin/node",
-    ] {
-        let p = PathBuf::from(cand);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn invalidate_read_cache() {
-    let mut guard = CC_READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = None;
-}
-
-fn run_cc_switcher(ctx: &Ctx, args: &[&str]) -> Result<Value, String> {
-    let timeout = if args.contains(&"--refresh") {
-        CC_REFRESH_TIMEOUT
-    } else {
-        CC_READ_TIMEOUT
-    };
-    run_cc_switcher_with_timeout(ctx, args, timeout)
-}
-
-fn run_cc_switcher_with_timeout(
-    ctx: &Ctx,
-    args: &[&str],
-    timeout: Duration,
-) -> Result<Value, String> {
-    let script = find_cc_switcher_script(ctx)
-        .ok_or_else(|| "not found: cc-switcher-mcp is not installed on this machine".to_string())?;
-    let node = find_node_bin(ctx)
-        .ok_or_else(|| "not found: node runtime not found on PATH".to_string())?;
-    let mut cmd = Command::new(node);
-    cmd.arg(&script)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("PATH", &ctx.path_var)
-        .env("HOME", &ctx.home)
-        .env("CC_SWITCHER_QUIET", "1");
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("cc-switcher spawn failed: {e}"))?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("cc-switcher stdout unavailable".into());
-    };
-    let stderr_handle = child.stderr.take().map(|err_pipe| {
-        thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = err_pipe
-                .take((MAX_CC_STDERR_BYTES + 1) as u64)
-                .read_to_end(&mut buf);
-            buf
-        })
-    });
-    let reader = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout
-            .take((MAX_CC_STDOUT_BYTES + 1) as u64)
-            .read_to_end(&mut buf);
-        buf
-    });
-    let deadline = Instant::now() + timeout;
-    let mut exit_status: Option<ExitStatus> = None;
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(st)) => {
-                exit_status = Some(st);
-                break;
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(30)),
-            Err(_) => break,
-        }
-    }
-    let Some(status) = exit_status else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!(
-            "cc-switcher timed out after {}s",
-            timeout.as_secs()
-        ));
-    };
-    let bytes = reader.join().unwrap_or_default();
-    let err_bytes = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let text = String::from_utf8_lossy(&bytes);
-    let last_line = text
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
-    let val: Value = serde_json::from_str(last_line).map_err(|_| {
-        let err_tail = String::from_utf8_lossy(&err_bytes);
-        let detail = err_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("");
-        if detail.is_empty() {
-            format!("cc-switcher returned invalid JSON (status {status})")
-        } else {
-            format!("cc-switcher failed ({status}): {}", detail.trim())
-        }
-    })?;
-    if status.code() == Some(2) {
-        let msg = val["error"].as_str().unwrap_or("invalid cc-switcher input");
-        return Err(format!("invalid cc-switcher: {msg}"));
-    }
-    if !status.success() {
-        let msg = val["error"]
-            .as_str()
-            .unwrap_or("cc-switcher command failed");
-        return Err(msg.to_string());
-    }
-    Ok(val)
-}
+const FIVE_HOURS_SECS: i64 = 5 * 3600;
+const SEVEN_DAYS_SECS: i64 = 7 * 24 * 3600;
+const FALLBACK_EXHAUSTED_COOLDOWN_SECS: i64 = 3600;
 
 fn native_repo_assignments(db: Option<&Db>, scoped_repo: Option<&Path>) -> Vec<Value> {
     let canon_scope = scoped_repo.map(|s| fs::canonicalize(s).unwrap_or_else(|_| s.to_path_buf()));
@@ -219,136 +48,275 @@ fn native_repo_assignments(db: Option<&Db>, scoped_repo: Option<&Path>) -> Vec<V
         .collect()
 }
 
-fn is_open_design_app_config(ctx: &Ctx, raw_repo: &str) -> Option<PathBuf> {
-    let trimmed = raw_repo.trim();
-    if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.chars().any(char::is_control) {
-        return None;
-    }
-    let expected = ctx.home.join(
-        "Library/Application Support/Open Design/namespaces/release-stable/data/app-config.json",
-    );
-    let given = Path::new(trimmed);
-    if !given.is_absolute() || given != expected {
-        return None;
-    }
-    let meta = fs::symlink_metadata(given).ok()?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        return None;
-    }
-    Some(expected)
-}
-
-fn validate_repo_target(
-    ctx: &Ctx,
+fn merge_repo_assignments(
+    db: Option<&Db>,
     scoped_repo: Option<&Path>,
-    raw_repo: &str,
-) -> Result<PathBuf, String> {
-    let trimmed = raw_repo.trim();
-    let p = PathBuf::from(trimmed);
-    if trimmed.is_empty()
-        || trimmed.len() > 1024
-        || trimmed.chars().any(char::is_control)
-        || !p.is_absolute()
-        || !p.is_dir()
+    sw: Option<&Value>,
+) -> Vec<Value> {
+    let canon_scope = scoped_repo.map(|s| fs::canonicalize(s).unwrap_or_else(|_| s.to_path_buf()));
+    let mut by_key: BTreeMap<String, Value> = BTreeMap::new();
+    let canon_key = |raw: &str| {
+        let p = Path::new(raw);
+        fs::canonicalize(p)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| raw.trim_end_matches('/').to_string())
+    };
+    if let Some(arr) = sw
+        .and_then(|v| v.get("repoAssignments"))
+        .and_then(Value::as_array)
     {
-        return Err("invalid repo: must be an absolute existing git repository path".into());
-    }
-    let git_root = aaf_fp::repo_root(&p).map_err(|_| {
-        "invalid repo: must be an absolute existing git repository path".to_string()
-    })?;
-    let canon = fs::canonicalize(&git_root).map_err(|e| e.to_string())?;
-    if let Some(scoped) = scoped_repo {
-        let canon_scoped = fs::canonicalize(scoped).unwrap_or_else(|_| scoped.to_path_buf());
-        if canon != canon_scoped {
-            return Err("refused: repo outside scoped repository".into());
-        }
-    }
-    let forbidden = [ctx.worktrees_dir.clone(), ctx.data_dir.clone()];
-    if canonical_under_allowed_roots(&canon, &forbidden).is_some() {
-        return Err("refused: repo cannot be inside AAF worktrees or data directory".into());
-    }
-    Ok(canon)
-}
-
-fn normalize_switcher_value(v: Value) -> Value {
-    v.get("state")
-        .filter(|s| s.get("profiles").is_some())
-        .cloned()
-        .unwrap_or(v)
-}
-
-fn fallback_switcher_snapshot(ctx: &Ctx) -> Option<Value> {
-    let cached = CC_READ_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(|(_, v)| v.clone());
-    if cached.is_some() {
-        return cached;
-    }
-    run_cc_switcher(ctx, &["--panel-json", "--no-sync"])
-        .ok()
-        .map(normalize_switcher_value)
-}
-
-fn fetch_switcher_state(
-    ctx: &Ctx,
-    read_only: bool,
-    refresh: bool,
-) -> (bool, Option<Value>, String) {
-    if find_cc_switcher_script(ctx).is_none() {
-        return (false, None, String::new());
-    }
-    if !refresh {
-        let guard = CC_READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, ref cached)) = *guard
-            && at.elapsed() < CC_CACHE_TTL
-        {
-            return (true, Some(cached.clone()), String::new());
-        }
-    }
-    let args: &[&str] = if read_only {
-        &["--panel-json", "--no-sync"]
-    } else if refresh {
-        &["--panel-json", "--refresh"]
-    } else {
-        // Match CC Switcher's smart TTL sync (instant when fresh, auto-syncs when stale).
-        &["--panel-json"]
-    };
-    let _write_guard = if refresh {
-        match CC_WRITE_LOCK.try_lock() {
-            Ok(g) => Some(g),
-            Err(_) => {
-                return (
-                    true,
-                    fallback_switcher_snapshot(ctx),
-                    "another account operation is already in progress".into(),
-                );
-            }
-        }
-    } else {
-        None
-    };
-    match run_cc_switcher(ctx, args) {
-        Ok(v) => {
-            let normalized = normalize_switcher_value(v);
-            let mut cache = CC_READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            *cache = Some((Instant::now(), normalized.clone()));
-            (true, Some(normalized), String::new())
-        }
-        Err(e) => {
-            let fallback = if refresh {
-                fallback_switcher_snapshot(ctx)
-            } else {
-                CC_READ_CACHE
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .map(|(_, v)| v.clone())
+        for row in arr {
+            let Some(path_str) = row["path"].as_str() else {
+                continue;
             };
-            (true, fallback, e)
+            if row["pathExists"].as_bool() == Some(false) || !Path::new(path_str).exists() {
+                continue;
+            }
+            let key = canon_key(path_str);
+            if let Some(ref sc) = canon_scope
+                && Path::new(&key) != sc.as_path()
+            {
+                continue;
+            }
+            by_key.insert(key, row.clone());
         }
     }
+    for row in native_repo_assignments(db, scoped_repo) {
+        let Some(path_str) = row["path"].as_str() else {
+            continue;
+        };
+        let key = canon_key(path_str);
+        by_key.entry(key).or_insert(row);
+    }
+    let mut rows: Vec<Value> = by_key.into_values().collect();
+    rows.sort_by(|a, b| {
+        let ka = (
+            a["source"].as_str() == Some("app"),
+            a["name"].as_str().unwrap_or("").to_ascii_lowercase(),
+        );
+        let kb = (
+            b["source"].as_str() == Some("app"),
+            b["name"].as_str().unwrap_or("").to_ascii_lowercase(),
+        );
+        ka.cmp(&kb)
+    });
+    rows
+}
+
+fn find_unique_claude_account<'a>(
+    discovered: &'a [AccountProfile],
+    sw_id: &str,
+) -> Option<&'a AccountProfile> {
+    let key = sw_id.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let mut matches = discovered.iter().filter(|a| {
+        a.provider == ProviderKind::ClaudeCode
+            && (a.id.eq_ignore_ascii_case(key)
+                || a.name.eq_ignore_ascii_case(key)
+                || default_account_name(&a.config_dir).eq_ignore_ascii_case(key))
+    });
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+/// Synchronizes live-exhausted Anthropic OAuth profiles (and live Antigravity
+/// `/usage` when 0%) into `aaf.db` cooldowns so workers skip 0% accounts.
+pub(crate) fn sync_live_exhausted_cooldowns(
+    db: &Db,
+    discovered: &[AccountProfile],
+    sw: Option<&Value>,
+    now_secs: i64,
+) -> usize {
+    let Some(profiles) = sw.and_then(|v| v.get("profiles")).and_then(Value::as_array) else {
+        return 0;
+    };
+    let Ok(accounts) = db.list_accounts() else {
+        return 0;
+    };
+    let mut existing: HashMap<String, Option<i64>> = accounts
+        .into_iter()
+        .map(|s| (s.profile.id, s.cooldown_until))
+        .collect();
+    let now_ms = now_secs.saturating_mul(1000);
+    let mut synced = 0usize;
+    for p in profiles {
+        if p["vendor"].as_str() != Some("anthropic")
+            || p["quota"]["live"].as_bool() != Some(true)
+            || p["quotaStale"].as_bool() == Some(true)
+            || !p["accountMismatch"].is_null()
+        {
+            continue;
+        }
+        let rem5_zero = p["remainingPct"].as_i64().is_some_and(|v| v <= 0);
+        let rem7_zero = p["weeklyRemainingPct"].as_i64().is_some_and(|v| v <= 0);
+        let zero_quota = rem5_zero || rem7_zero;
+        let frozen = p["isFrozen"].as_bool() == Some(true);
+        if !zero_quota && !frozen {
+            continue;
+        }
+        let r5 = if rem5_zero {
+            p["resetAtMs"].as_i64().unwrap_or(0)
+        } else {
+            0
+        };
+        let r7 = if rem7_zero {
+            p["weeklyResetAtMs"].as_i64().unwrap_or(0)
+        } else {
+            0
+        };
+        let rf = if frozen {
+            p["frozenUntilMs"].as_i64().unwrap_or(0)
+        } else {
+            0
+        };
+        let until_ms = rf.max(r5).max(r7);
+        let missing_reset = (rem5_zero && r5 <= 0) || (rem7_zero && r7 <= 0);
+        let until_secs = if until_ms > now_ms {
+            until_ms.saturating_add(999) / 1000
+        } else if missing_reset {
+            now_secs.saturating_add(FALLBACK_EXHAUSTED_COOLDOWN_SECS)
+        } else {
+            continue;
+        };
+        let sw_id = p["id"].as_str().unwrap_or("");
+        let Some(acct) = find_unique_claude_account(discovered, sw_id) else {
+            continue;
+        };
+        let cur_until = existing.get(&acct.id).copied().flatten().unwrap_or(0);
+        if until_secs > cur_until && db.set_cooldown(&acct.id, Some(until_secs)).is_ok() {
+            existing.insert(acct.id.clone(), Some(until_secs));
+            synced += 1;
+        }
+    }
+    synced
+}
+
+/// Pure read-only account pool snapshot: never creates `leases/` or acquires
+/// exclusive locks, never silently zeros DB errors, and preserves DB-only
+/// leased/cooldown accounts whose config directories still exist.
+fn build_aaf_account_rows(
+    db: Option<&Db>,
+    ctx: &Ctx,
+    discovered: &[AccountProfile],
+    max_concurrent: u32,
+    now: i64,
+) -> Result<Vec<Value>, String> {
+    let leases_dir = ctx.data_dir.join("leases");
+    let (db_states, tok_5h, tok_7d) = if let Some(db) = db {
+        let states = db.list_accounts().map_err(|e| e.to_string())?;
+        let t5 = db
+            .tokens_since_all(now.saturating_sub(FIVE_HOURS_SECS))
+            .map_err(|e| e.to_string())?;
+        let t7 = db
+            .tokens_since_all(now.saturating_sub(SEVEN_DAYS_SECS))
+            .map_err(|e| e.to_string())?;
+        (states, t5, t7)
+    } else {
+        (Vec::new(), HashMap::new(), HashMap::new())
+    };
+    let state_by_id: HashMap<String, _> = db_states
+        .iter()
+        .map(|s| (s.profile.id.clone(), s))
+        .collect();
+    let mut seen_ids = HashSet::new();
+    let eff_conc_for = |provider: ProviderKind| -> u32 {
+        if provider == ProviderKind::Antigravity {
+            1
+        } else {
+            max_concurrent
+        }
+    };
+    let row_for = |p: &AccountProfile, cooldown_until: Option<i64>, leased: Option<bool>| -> Value {
+        let in_cd = cooldown_until.is_some_and(|u| u > now);
+        let (st, until) = if in_cd {
+            ("cooldown", cooldown_until)
+        } else if leased.unwrap_or_else(|| {
+            Lease::all_slots_leased_ro(&leases_dir, &p.id, eff_conc_for(p.provider))
+        }) {
+            ("leased", None)
+        } else {
+            ("available", None)
+        };
+        json!({
+            "id": p.id,
+            "name": p.name,
+            "provider": p.provider,
+            "config_dir": p.config_dir,
+            "state": st,
+            "cooldown_until": until,
+            "tokens_5h": tok_5h.get(&p.id).copied().unwrap_or(0),
+            "tokens_7d": tok_7d.get(&p.id).copied().unwrap_or(0),
+        })
+    };
+    let mut rows = Vec::with_capacity(discovered.len());
+    for p in discovered {
+        seen_ids.insert(p.id.clone());
+        let cd = state_by_id.get(&p.id).and_then(|s| s.cooldown_until);
+        rows.push(row_for(p, cd, None));
+    }
+    for s in &db_states {
+        if seen_ids.contains(&s.profile.id) || !Path::new(&s.profile.config_dir).is_dir() {
+            continue;
+        }
+        let in_cd = s.in_cooldown(now);
+        let leased = if in_cd {
+            false
+        } else {
+            Lease::all_slots_leased_ro(&leases_dir, &s.profile.id, eff_conc_for(s.profile.provider))
+        };
+        if in_cd || leased {
+            rows.push(row_for(&s.profile, s.cooldown_until, Some(leased)));
+        }
+    }
+    Ok(rows)
+}
+
+/// Clear cooldowns for every discovered/existing account currently in cooldown in `aaf.db`.
+pub(super) fn do_account_clear_all(
+    db: &Db,
+    ctx: &Ctx,
+    config_base: &Path,
+) -> Result<Value, String> {
+    let cfg = ctx.load_config(config_base).map_err(|e| e.message)?;
+    let lookup = |name: &str| binary_on_path_in(&ctx.path_var, name);
+    let discovered = discover(
+        &cfg.global.accounts,
+        &DiscoveryEnv {
+            home: ctx.home.clone(),
+            binary_on_path: &lookup,
+        },
+    );
+    let visible_ids: HashSet<&str> = discovered.iter().map(|p| p.id.as_str()).collect();
+    let clock = SystemClock;
+    let router = Router::new(
+        db,
+        db,
+        &clock,
+        ctx.data_dir.join("leases"),
+        cfg.global.accounts.max_concurrent_per_account,
+    );
+    router.sync(&discovered).map_err(|e| e.to_string())?;
+    let now = clock.now();
+    let mut cleared_ids = Vec::new();
+    for state in db.list_accounts().map_err(|e| e.to_string())? {
+        let visible = visible_ids.contains(state.profile.id.as_str())
+            || Path::new(&state.profile.config_dir).is_dir();
+        if visible && state.in_cooldown(now) {
+            db.set_cooldown(&state.profile.id, None)
+                .map_err(|e| e.to_string())?;
+            cleared_ids.push(state.profile.id);
+        }
+    }
+    Ok(json!({
+        "action": "account_clear_all",
+        "cleared": cleared_ids.len(),
+        "account_ids": cleared_ids,
+    }))
 }
 
 /// Build combined accounts panel response for `GET /api/accounts`.
@@ -372,67 +340,55 @@ pub(super) fn read_accounts_panel(
             binary_on_path: &lookup,
         },
     );
+    let (sw_installed, sw_val, sw_err) = switcher::fetch_switcher_state(ctx, read_only, refresh);
+    let provider_quotas = live_quota::fetch_provider_quotas(ctx, read_only, refresh);
     let clock = SystemClock;
-    let aaf_accounts: Vec<Value> = if let Some(db) = db {
-        let router = Router::new(
-            db,
-            db,
-            &clock,
-            ctx.data_dir.join("leases"),
-            cfg.global.accounts.max_concurrent_per_account,
-        );
-        router
-            .status(clock.now())
-            .map(|list| {
-                list.into_iter()
-                    .filter(|a| discovered.iter().any(|p| p.id == a.id))
-                    .map(|a| {
-                        let (st, until) = match a.status {
-                            AccountStatus::Available => ("available", None),
-                            AccountStatus::Cooldown { until } => ("cooldown", Some(until)),
-                            AccountStatus::Leased => ("leased", None),
-                        };
-                        json!({
-                            "id": a.id,
-                            "name": a.name,
-                            "provider": a.provider,
-                            "state": st,
-                            "cooldown_until": until,
-                            "tokens_5h": a.tokens_5h,
-                            "tokens_7d": a.tokens_7d,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+    let now = clock.now();
+    let max_conc = cfg.global.accounts.max_concurrent_per_account;
+    let mut synced_cooldowns = 0usize;
+    let rw_db = if refresh && !read_only {
+        Some(open_db(ctx).map_err(|e| e.message)?)
     } else {
-        discovered
-            .iter()
-            .map(|p| {
-                json!({
-                    "id": p.id,
-                    "name": p.name,
-                    "provider": p.provider,
-                    "state": "available",
-                    "cooldown_until": Value::Null,
-                    "tokens_5h": 0,
-                    "tokens_7d": 0,
-                })
-            })
-            .collect()
+        None
     };
-
-    let (sw_installed, sw_val, sw_err) = fetch_switcher_state(ctx, read_only, refresh);
+    if let Some(ref rw) = rw_db {
+        let router = Router::new(rw, rw, &clock, ctx.data_dir.join("leases"), max_conc);
+        router.sync(&discovered).map_err(|e| e.to_string())?;
+        if sw_err.is_empty() {
+            synced_cooldowns += sync_live_exhausted_cooldowns(rw, &discovered, sw_val.as_ref(), now);
+        }
+        synced_cooldowns += live_quota::sync_live_provider_cooldown(
+            rw,
+            &discovered,
+            ProviderKind::Antigravity,
+            provider_quotas.get("antigravity"),
+            now,
+        );
+        synced_cooldowns += live_quota::sync_live_provider_cooldown(
+            rw,
+            &discovered,
+            ProviderKind::Grok,
+            provider_quotas.get("grok"),
+            now,
+        );
+    }
+    let effective_db = rw_db.as_ref().or(db);
+    let aaf_accounts = build_aaf_account_rows(effective_db, ctx, &discovered, max_conc, now)?;
+    let repo_assignments = merge_repo_assignments(effective_db, scoped_repo, sw_val.as_ref());
     Ok(json!({
         "aaf_accounts": aaf_accounts,
-        "repo_assignments": native_repo_assignments(db, scoped_repo),
+        "provider_quotas": provider_quotas,
+        "repo_assignments": repo_assignments,
+        "selection_mode": cfg.global.accounts.selection.as_str(),
+        "cross_audit_executor": cfg.repo.cross_audit.executor,
+        "synced_cooldowns": synced_cooldowns,
         "switcher_installed": sw_installed,
         "switcher": sw_val,
         "switcher_error": sw_err,
     }))
 }
 
-/// Dispatch account-switcher & repo-assignment actions from `POST /api/action`.
+/// Dispatch repository account-assignment actions from `POST /api/action`.
 pub(super) fn dispatch_cc_action(
     ctx: &Ctx,
     scoped_repo: Option<&Path>,
@@ -440,117 +396,8 @@ pub(super) fn dispatch_cc_action(
     task_id: &str,
     note: &str,
 ) -> Result<Value, String> {
-    let _guard = CC_WRITE_LOCK
-        .try_lock()
-        .map_err(|_| "refused: another account operation is already running".to_string())?;
-    let res = match action {
-        "cc_switch" => {
-            let target = task_id.trim();
-            if !is_valid_ident(target) {
-                return Err("invalid target: expected valid account id".into());
-            }
-            let mut args = vec!["--panel-action", "switch", "--target", target];
-            if note.trim().eq_ignore_ascii_case("force") {
-                args.push("--force");
-            }
-            run_cc_switcher(ctx, &args)
-        }
-        "cc_rotate" => run_cc_switcher(ctx, &["--panel-action", "rotate"]),
-        "cc_unfreeze" => run_cc_switcher(ctx, &["--panel-action", "unfreeze"]),
-        "cc_balance" => {
-            if scoped_repo.is_some() {
-                return Err("refused: cc_balance is disabled in single-repo scope".into());
-            }
-            let mode = match note.trim() {
-                "" | "even" => "even",
-                "swap" => "swap",
-                _ => return Err("invalid balance mode: expected 'even' or 'swap'".into()),
-            };
-            run_cc_switcher(ctx, &["--panel-action", "balance", "--mode", mode])
-        }
-        "cc_repo_assign" => {
-            let account = note.trim();
-            if !is_valid_ident(account) {
-                return Err("invalid account: expected valid account id".into());
-            }
-            if scoped_repo.is_none()
-                && let Some(app_cfg) = is_open_design_app_config(ctx, task_id)
-            {
-                let cfg_str = app_cfg.to_string_lossy().into_owned();
-                run_cc_switcher(
-                    ctx,
-                    &[
-                        "--panel-action",
-                        "repo_assign",
-                        "--repo",
-                        &cfg_str,
-                        "--account",
-                        account,
-                    ],
-                )
-            } else {
-                let canon = validate_repo_target(ctx, scoped_repo, task_id)?;
-                let repo_str = canon.to_string_lossy().into_owned();
-                if find_cc_switcher_script(ctx).is_some() {
-                    match run_cc_switcher(
-                        ctx,
-                        &[
-                            "--panel-action",
-                            "repo_assign",
-                            "--repo",
-                            &repo_str,
-                            "--account",
-                            account,
-                        ],
-                    ) {
-                        Ok(v) => Ok(v),
-                        Err(e)
-                            if e.to_ascii_lowercase().contains("chưa")
-                                || e.to_ascii_lowercase().contains("not found") =>
-                        {
-                            run_cc_switcher(
-                                ctx,
-                                &[
-                                    "--panel-action",
-                                    "repo_add",
-                                    "--repo",
-                                    &repo_str,
-                                    "--account",
-                                    account,
-                                ],
-                            )
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    write_repo_local_account_native(&canon, Some(account))?;
-                    Ok(json!({
-                        "action": "cc_repo_assign",
-                        "repo": repo_str,
-                        "account": account,
-                        "native": true,
-                    }))
-                }
-            }
-        }
-        "cc_repo_remove" => {
-            let canon = validate_repo_target(ctx, scoped_repo, task_id)?;
-            let repo_str = canon.to_string_lossy().into_owned();
-            if find_cc_switcher_script(ctx).is_some() {
-                run_cc_switcher(ctx, &["--panel-action", "repo_remove", "--repo", &repo_str])
-            } else {
-                write_repo_local_account_native(&canon, None)?;
-                Ok(json!({
-                    "action": "cc_repo_remove",
-                    "repo": repo_str,
-                    "native": true,
-                }))
-            }
-        }
-        other => Err(format!("invalid action: {other}")),
-    };
-    if res.is_ok() {
-        invalidate_read_cache();
-    }
-    res
+    switcher::dispatch_repo_action(ctx, scoped_repo, action, task_id, note)
 }
+
+#[cfg(test)]
+mod tests;
