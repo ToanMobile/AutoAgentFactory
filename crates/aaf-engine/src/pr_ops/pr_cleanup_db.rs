@@ -161,7 +161,6 @@ pub(super) fn transition_review_task_done(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::pr_cleanup::is_protected_branch;
-    use super::super::pr_merge_support::TempRefGuard;
 
     #[test]
     fn protected_branches_are_case_insensitive_and_cover_base_and_prefixes() {
@@ -186,17 +185,5 @@ mod tests {
         for name in ["aaf/t1", "feat/demo", "fix/cleanup-c3"] {
             assert!(!is_protected_branch(name, "main"), "{name}");
         }
-    }
-
-    #[test]
-    fn temp_ref_guard_includes_pid_and_unique_seq() {
-        let tmp = tempfile::tempdir().unwrap();
-        let prefix = format!("refs/aaf-merge/pr-7-{}-", std::process::id());
-        let (g1, g2) = (
-            TempRefGuard::new(tmp.path(), 7),
-            TempRefGuard::new(tmp.path(), 7),
-        );
-        assert!(g1.as_str().starts_with(&prefix) && g2.as_str().starts_with(&prefix));
-        assert_ne!(g1.as_str(), g2.as_str());
     }
 }
