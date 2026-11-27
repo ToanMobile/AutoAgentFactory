@@ -514,30 +514,30 @@ fn non_streaming_antigravity_uses_higher_stall_threshold_and_needs_human_dag_is_
         "t-agy".into(),
         vec![make_running_run("run-agy", "t-agy", "plan", None, now)],
     );
-    let blocked_upstream = vec![
-        ("t-r1".to_string(), "t-human-blk".to_string()),
-        ("t-r2".to_string(), "t-human-blk".to_string()),
-        ("t-r3".to_string(), "t-human-blk".to_string()),
-        ("t-r4".to_string(), "t-human-blk".to_string()),
-    ];
+    let blocked_upstream: Vec<(String, String)> = (1..=4)
+        .map(|i| (format!("t-r{i}"), "t-human-blk".to_string()))
+        .collect();
     let report = empty_report(ReportWindow {
         since: Some(now - 86_400),
         now,
     });
+    let eval_at = |ts: i64| {
+        collect_ops_diagnostics(&OpsInput {
+            data_dir: Some(dir.path()),
+            tasks: &tasks,
+            runs_by_task: &runs_by_task,
+            events: &[],
+            accounts: &[],
+            blocked_upstream: &blocked_upstream,
+            report: &report,
+            token_diagnostics: &json!({ "summary": {} }),
+            breakdown: &[],
+            since: Some(now - 86_400),
+            now: ts,
+        })
+    };
     // At +480s (8m): antigravity is NOT stalled yet (< 15m); needs_human DAG blocker is medium.
-    let out_8m = collect_ops_diagnostics(&OpsInput {
-        data_dir: Some(dir.path()),
-        tasks: &tasks,
-        runs_by_task: &runs_by_task,
-        events: &[],
-        accounts: &[],
-        blocked_upstream: &blocked_upstream,
-        report: &report,
-        token_diagnostics: &json!({ "summary": {} }),
-        breakdown: &[],
-        since: Some(now - 86_400),
-        now: now + 480,
-    });
+    let out_8m = eval_at(now + 480);
     assert!(
         out_8m["speed"]["stalled_workers"]
             .as_array()
@@ -558,19 +558,7 @@ fn non_streaming_antigravity_uses_higher_stall_threshold_and_needs_human_dag_is_
     );
 
     // At +960s (16m): antigravity exceeds 15m threshold and IS flagged as medium stalled.
-    let out_16m = collect_ops_diagnostics(&OpsInput {
-        data_dir: Some(dir.path()),
-        tasks: &tasks,
-        runs_by_task: &runs_by_task,
-        events: &[],
-        accounts: &[],
-        blocked_upstream: &blocked_upstream,
-        report: &report,
-        token_diagnostics: &json!({ "summary": {} }),
-        breakdown: &[],
-        since: Some(now - 86_400),
-        now: now + 960,
-    });
+    let out_16m = eval_at(now + 960);
     let stalled_16m = out_16m["speed"]["stalled_workers"].as_array().unwrap();
     assert_eq!(stalled_16m.len(), 1);
     assert_eq!(stalled_16m[0]["severity"], "medium");
@@ -588,11 +576,23 @@ fn non_streaming_antigravity_uses_higher_stall_threshold_and_needs_human_dag_is_
         })
         .collect();
     let out_loop = collect_ops_diagnostics(&OpsInput {
-        data_dir: None, tasks: &[loop_task], runs_by_task: &HashMap::new(),
-        events: &fail_evs, accounts: &[], blocked_upstream: &[],
-        report: &report, token_diagnostics: &json!({ "summary": {} }),
-        breakdown: &[], since: Some(now - 86_400), now,
+        data_dir: None,
+        tasks: &[loop_task],
+        runs_by_task: &HashMap::new(),
+        events: &fail_evs,
+        accounts: &[],
+        blocked_upstream: &[],
+        report: &report,
+        token_diagnostics: &json!({ "summary": {} }),
+        breakdown: &[],
+        since: Some(now - 86_400),
+        now,
     });
-    let churn_a = out_loop["alerts"].as_array().unwrap().iter().find(|a| a["code"] == "high_rework_churn").expect("high_rework_churn alert");
+    let churn_a = out_loop["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["code"] == "high_rework_churn")
+        .expect("high_rework_churn alert");
     assert_eq!(churn_a["severity"], "high");
 }

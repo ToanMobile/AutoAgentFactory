@@ -317,6 +317,15 @@ fn service_allow_actions_enables_ready_and_cancel_but_keeps_approve_locked() {
 #[test]
 fn service_new_endpoints_create_task_diff_proof_and_supervisor() {
     let sb = Sandbox::new();
+    let claude_dir = sb.home.join(".claude-finos");
+    fs::create_dir_all(&claude_dir).unwrap();
+    support::write(
+        &sb.home.join(".config/autofactory/config.toml"),
+        "[accounts.aliases]\n\"~/.claude-finos\" = \"finos_toan\"\n",
+    );
+    let fake_claude = sb.bin.join("claude");
+    support::write(&fake_claude, "#!/bin/sh\nexit 0\n");
+    support::make_executable(&fake_claude);
     let port = free_loopback_port();
     let child = sb
         .command(&[
