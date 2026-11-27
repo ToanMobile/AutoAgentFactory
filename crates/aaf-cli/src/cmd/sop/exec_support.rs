@@ -37,6 +37,14 @@ pub(crate) fn build_exec_env(ctx: &Ctx, cfg: &EffectiveConfig) -> ExecEnv {
     }
 }
 
+pub(crate) fn stage_uses_custom_cmd(effective_exec: &str, base_run: &RunConfig) -> bool {
+    let lower = aaf_domain::pipeline::normalize_executor_id(effective_exec);
+    lower != "claude"
+        && (lower == "custom"
+            || (lower == aaf_domain::pipeline::normalize_executor_id(&base_run.executor)
+                && !base_run.executor_cmd.is_empty()))
+}
+
 pub(crate) fn build_stage_run_config(
     effective_exec: &str,
     effective_model: &str,
@@ -63,10 +71,7 @@ pub(crate) fn build_stage_run_config(
             ..RunConfig::default()
         });
     }
-    if lower == "custom"
-        || (lower == base_run.executor.trim().to_ascii_lowercase()
-            && !base_run.executor_cmd.is_empty())
-    {
+    if stage_uses_custom_cmd(effective_exec, base_run) {
         return Ok(RunConfig {
             executor: "custom".to_string(),
             executor_cmd: base_run.executor_cmd.clone(),
