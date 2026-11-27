@@ -103,10 +103,31 @@ pub(super) fn do_cancel(db: &Db, task_id: &str, note: &str) -> Result<Value, Str
     }
 }
 
-pub(super) fn do_unblock(db: &Db, task_id: &str) -> Result<Value, String> {
-    unblock_task(db, task_id, "aaf ui unblock", "web-ui", SystemClock.now())
+pub(super) fn do_unblock(db: &Db, task_id: &str, note: &str) -> Result<Value, String> {
+    let trimmed = note.trim();
+    if trimmed.len() > super::diff_parse::MAX_STEER_NOTE_BYTES {
+        return Err(format!(
+            "invalid unblock note: exceeds {}-byte limit ({} bytes)",
+            super::diff_parse::MAX_STEER_NOTE_BYTES,
+            trimmed.len()
+        ));
+    }
+    let now = SystemClock.now();
+    unblock_task(db, task_id, "aaf ui unblock", "web-ui", now)
         .map_err(|e| e.to_refused_string())?;
-    Ok(json!({ "action": "unblock", "task_id": task_id, "state": "ready" }))
+    let recorded_note = if !trimmed.is_empty() {
+        Some(aaf_engine::factory::snapshots::steer_task(
+            db, task_id, trimmed, now,
+        )?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "action": "unblock",
+        "task_id": task_id,
+        "state": "ready",
+        "note": recorded_note,
+    }))
 }
 
 pub(super) fn do_unblock_all(db: &Db, repo: Option<&str>) -> Result<Value, String> {
@@ -294,7 +315,7 @@ pub(super) fn dispatch_db_action(
         "ready" => do_ready(db, task_id),
         "ready_all" | "ready-all" => do_ready_all(db, repo),
         "cancel" => do_cancel(db, task_id, note),
-        "unblock" => do_unblock(db, task_id),
+        "unblock" => do_unblock(db, task_id, note),
         "unblock_all" | "unblock-all" => do_unblock_all(db, repo),
         "delete_done" | "delete-done" => do_delete_done(db, repo, task_id, note),
         "approve_plan" | "approve-plan" => do_approve_plan(db, task_id),

@@ -408,6 +408,56 @@ fn already_emitted_clear_gate(deps: &Deps, task_id: &str, receipt: &Receipt) -> 
         && val.get("config_hash").and_then(|v| v.as_str()) == Some(receipt.config_hash.as_str())
 }
 
+fn already_emitted_proof_recorded(deps: &Deps, task_id: &str, tree_fp: &str) -> bool {
+    if tree_fp.is_empty() {
+        return false;
+    }
+    let Ok(events) = deps
+        .store
+        .events_for_task_by_kinds(task_id, &[EventKind::ProofRecorded], 1)
+    else {
+        return false;
+    };
+    let Some(last) = events.first() else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&last.payload_json) else {
+        return false;
+    };
+    val.get("tree_fp").and_then(|v| v.as_str()) == Some(tree_fp)
+}
+
+fn emit_verified_proof_event_if_present(
+    deps: &Deps,
+    task_id: &str,
+    worktree_path: &Path,
+    receipt: &Receipt,
+) -> PortResult<()> {
+    if receipt.tree_fp.is_empty() || already_emitted_proof_recorded(deps, task_id, &receipt.tree_fp)
+    {
+        return Ok(());
+    }
+    let Ok(rec) = crate::proof::show_proof(
+        worktree_path,
+        &deps.settings.data_dir,
+        Some(&receipt.tree_fp),
+    ) else {
+        return Ok(());
+    };
+    let flow_names: Vec<&str> = rec.flows.iter().map(|f| f.name.as_str()).collect();
+    let payload = json!({
+        "ok": true,
+        "tree_fp": rec.tree_fp,
+        "source_tool": rec.source_tool,
+        "device_serial": rec.device_serial,
+        "width": rec.width,
+        "height": rec.height,
+        "flows": flow_names,
+        "summary": format!("verified proof ({}x{})", rec.width, rec.height),
+    });
+    deps.emit(EventKind::ProofRecorded, task_id, payload)
+}
+
 pub(crate) fn settle(
     deps: &Deps,
     job: &GateJob,
@@ -433,6 +483,7 @@ pub(crate) fn settle(
             if !(needs_audit && already_emitted_clear_gate(deps, &task.id, &receipt)) {
                 emit_gate(&receipt)?;
             }
+            emit_verified_proof_event_if_present(deps, &task.id, &job.worktree.path, &receipt)?;
             if needs_audit {
                 return Ok(Resolution::NeedsPostAudit {
                     receipt: Box::new(receipt),

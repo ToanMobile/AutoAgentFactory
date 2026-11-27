@@ -404,3 +404,233 @@ fn plan_detail_falls_back_to_approved_context_note_after_human_unblock() {
             .contains("- Update Login.kt")
     );
 }
+
+#[test]
+fn done_task_proof_resolves_from_gate_event_after_worktree_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let data = dir.path().join("data");
+    let wt_dir = dir.path().join("worktrees");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&wt_dir).unwrap();
+    let canon_repo = std::fs::canonicalize(&repo).unwrap();
+
+    let ctx = Ctx {
+        cwd: dir.path().to_path_buf(),
+        home: dir.path().join("home"),
+        data_dir: data.clone(),
+        config_dir: dir.path().join("config"),
+        worktrees_dir: wt_dir.clone(),
+        path_var: std::ffi::OsString::new(),
+        run_id: None,
+        stdin_is_tty: false,
+        aaf_env: Vec::new(),
+    };
+    let db = Db::open(&data.join("aaf.db")).unwrap();
+
+    // Create a minimal valid PNG under data/proofs/<repo_id>/.
+    let tree_fp = "git-tree:1111222233334444555566667777888899990000";
+    let png_path = aaf_engine::proof::captured_proof_image_path(&data, &canon_repo, tree_fp);
+    std::fs::create_dir_all(png_path.parent().unwrap()).unwrap();
+    let png_bytes: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
+        b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde,
+    ];
+    std::fs::write(&png_path, &png_bytes).unwrap();
+    let canon_png = std::fs::canonicalize(&png_path).unwrap();
+    let rec = aaf_domain::proof::ProofRecord {
+        schema_version: aaf_domain::proof::PROOF_SCHEMA_VERSION_V2,
+        repo_root: canon_repo.to_string_lossy().into_owned(),
+        tree_fp: tree_fp.to_string(),
+        image_path: canon_png.to_string_lossy().into_owned(),
+        image_sha256: aaf_fp::sha256_hex(&png_bytes),
+        width: 1440,
+        height: 2560,
+        byte_len: png_bytes.len() as u64,
+        source_tool: "host:proof_flows".into(),
+        device_serial: "host-proof-flows".into(),
+        task_id: None, // Matches real host-captured proofs where task_id is None
+        recorded_at: 1_700_000_000,
+        base_sha: Some("abc123".into()),
+        flows: vec![aaf_domain::proof::FlowResult {
+            name: "emulator-smoke".into(),
+            passed: true,
+            needs_human: false,
+            assertions: vec![aaf_domain::proof::AssertionResult {
+                name: "screenshot_captured".into(),
+                passed: true,
+                detail: "ok".into(),
+            }],
+            duration_ms: 1200,
+        }],
+    };
+    aaf_fp::write_proof(&data, &rec).unwrap();
+
+    // Done task whose worktree has already been cleaned up.
+    let mut done_task = aaf_domain::task::Task::new_root(
+        "t-done-proof",
+        canon_repo.to_string_lossy().into_owned(),
+        "Done with proof",
+        aaf_domain::task::ImmutableSpec {
+            description: "desc".into(),
+            acceptance: vec!["ac".into()],
+        },
+        aaf_domain::task::Priority::P2,
+        100,
+    );
+    done_task.state = aaf_domain::task::TaskState::Done;
+    db.insert_task(&done_task).unwrap();
+    db.emit(
+        &aaf_domain::event::FactoryEvent::new(
+            aaf_domain::event::EventKind::GateResult,
+            serde_json::json!({
+                "status": "CLEAR",
+                "tree_fp": tree_fp,
+                "gated_tree": wt_dir.join("deleted-wt").to_string_lossy(),
+            })
+            .to_string(),
+            101,
+        )
+        .for_task("t-done-proof"),
+    )
+    .unwrap();
+
+    let proof_json = proof_stop::read_task_proof(&db, &ctx, "t-done-proof").unwrap();
+    assert_eq!(proof_json["available"], true);
+    assert_eq!(proof_json["record"]["tree_fp"], tree_fp);
+    assert_eq!(proof_json["images"].as_array().unwrap().len(), 1);
+    let served = proof_stop::read_task_proof_image(&db, &ctx, "t-done-proof", 0).unwrap();
+    assert_eq!(served, png_bytes);
+
+    // Done task with no runs reports no_runs diagnostic reason.
+    let mut parent_done = aaf_domain::task::Task::new_root(
+        "t-done-noruns",
+        canon_repo.to_string_lossy().into_owned(),
+        "Parent task",
+        aaf_domain::task::ImmutableSpec {
+            description: "desc".into(),
+            acceptance: vec!["ac".into()],
+        },
+        aaf_domain::task::Priority::P2,
+        100,
+    );
+    parent_done.state = aaf_domain::task::TaskState::Done;
+    db.insert_task(&parent_done).unwrap();
+    let missing_no_runs = proof_stop::read_task_proof(&db, &ctx, "t-done-noruns").unwrap();
+    assert_eq!(missing_no_runs["available"], false);
+    assert_eq!(missing_no_runs["reason"], "no_runs");
+
+    // Task with ProofRecorded event whose files were cleaned reports expired_or_cleaned.
+    let mut expired_task = aaf_domain::task::Task::new_root(
+        "t-done-exp",
+        canon_repo.to_string_lossy().into_owned(),
+        "Expired proof",
+        aaf_domain::task::ImmutableSpec {
+            description: "desc".into(),
+            acceptance: vec!["ac".into()],
+        },
+        aaf_domain::task::Priority::P2,
+        100,
+    );
+    expired_task.state = aaf_domain::task::TaskState::Done;
+    db.insert_task(&expired_task).unwrap();
+    db.emit(
+        &aaf_domain::event::FactoryEvent::new(
+            aaf_domain::event::EventKind::ProofRecorded,
+            serde_json::json!({ "ok": true, "tree_fp": "git-tree:missing00000000000000000000000000000000" })
+                .to_string(),
+            102,
+        )
+        .for_task("t-done-exp"),
+    )
+    .unwrap();
+    let missing_exp = proof_stop::read_task_proof(&db, &ctx, "t-done-exp").unwrap();
+    assert_eq!(missing_exp["available"], false);
+    assert_eq!(missing_exp["reason"], "expired_or_cleaned");
+}
+
+#[test]
+fn unblock_with_decision_note_steers_task_and_hydrates_plan_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("state.db")).unwrap();
+    let hash = "178c54de9f369332dd5fef3e666ce1dafb414f416a765302c2657fbbf8459aa3";
+    let mut task = aaf_domain::task::Task::new_root(
+        "t-dec1",
+        "/repo/a",
+        "Zone 0.3 decisions",
+        aaf_domain::task::ImmutableSpec {
+            description: "Decide 8 items".into(),
+            acceptance: vec!["User decides".into()],
+        },
+        aaf_domain::task::Priority::P2,
+        100,
+    );
+    task.state = aaf_domain::task::TaskState::Blocked;
+    task.blocked_reason = Some(aaf_domain::blocked::BlockedReason::NeedsHuman {
+        why: "Need owner product decisions".into(),
+    });
+    task.context_notes.push(format!(
+        "plan_approved: Summary [plan_contract_hash={hash}]"
+    ));
+    db.insert_task(&task).unwrap();
+    db.emit(
+        &aaf_domain::event::FactoryEvent::new(
+            aaf_domain::event::EventKind::PlanConverged,
+            serde_json::json!({
+                "summary": "Summary",
+                "plan_contract_hash": hash,
+                "plan_contract": {
+                    "summary": "Summary",
+                    "files_to_change": [],
+                    "invariants_and_edge_cases": [],
+                    "red_green_tests": [],
+                    "open_questions": [
+                        "FB-A06: (1) Fix (Recommended): follow 0.4. (2) Close: keep old."
+                    ],
+                    "tier_assessment": "L",
+                    "tier_reasons": []
+                }
+            })
+            .to_string(),
+            101,
+        )
+        .for_task("t-dec1"),
+    )
+    .unwrap();
+
+    // Oversize unblock note must be refused BEFORE mutating state.
+    let too_big = "x".repeat(2001);
+    let err = actions::do_unblock(&db, "t-dec1", &too_big).unwrap_err();
+    assert!(err.contains("exceeds"), "{err}");
+    assert_eq!(
+        db.get_task("t-dec1").unwrap().state,
+        aaf_domain::task::TaskState::Blocked
+    );
+
+    // Valid unblock with decision note moves to Ready and records steer note.
+    let res = actions::do_unblock(&db, "t-dec1", "FB-A06: (1) Fix").unwrap();
+    assert_eq!(res["state"], "ready");
+    assert_eq!(res["note"], "steer: FB-A06: (1) Fix");
+    let updated = db.get_task("t-dec1").unwrap();
+    assert_eq!(updated.state, aaf_domain::task::TaskState::Ready);
+    assert!(
+        updated
+            .context_notes
+            .iter()
+            .any(|n| n == "steer: FB-A06: (1) Fix")
+    );
+
+    // Even after human unblock started a new epoch, plan_detail_json hydrates open_questions by hash.
+    let detail = extras::plan_detail_json(&db, &updated);
+    assert_eq!(detail["available"], true);
+    assert_eq!(detail["hash"], hash);
+    assert_eq!(
+        detail["contract"]["open_questions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -270,6 +270,27 @@ pub fn show_proof(
     Ok(record)
 }
 
+/// Loads and verifies HMAC signature of a recorded proof bound to an archived
+/// root (such as a cleaned-up worktree path that no longer exists on disk).
+pub fn show_proof_for_archived_root(
+    proof_repo_root: &Path,
+    data_dir: &Path,
+    tree_fp: &str,
+) -> Result<ProofRecord, ProofError> {
+    let fp = tree_fp.trim();
+    if fp.is_empty() {
+        return Err(ProofError::Invalid("tree_fp must not be empty".to_string()));
+    }
+    let canon_root = canonicalize_archived_root(proof_repo_root);
+    let record = aaf_fp::read_proof(data_dir, &canon_root, fp)?;
+    if record.repo_root != canon_root.to_string_lossy() || record.tree_fp != fp {
+        return Err(ProofError::Invalid(
+            "proof binding mismatch for repo_root/tree_fp".to_string(),
+        ));
+    }
+    Ok(record)
+}
+
 fn resolve_tree_fp(canon_root: &Path, tree_fp: Option<&str>) -> Result<String, ProofError> {
     match tree_fp {
         Some(fp) if !fp.trim().is_empty() => Ok(fp.trim().to_string()),

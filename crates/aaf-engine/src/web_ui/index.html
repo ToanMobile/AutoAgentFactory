@@ -176,6 +176,21 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .kv-title{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700;margin-bottom:6px}
 .blocked-callout{padding:9px 11px;border-radius:9px;border:1px solid color-mix(in srgb,var(--err) 35%,var(--border));background:var(--err-bg);color:var(--err);font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
 .plan-callout{padding:10px 12px;border-radius:9px;border:1px solid color-mix(in srgb,var(--rev) 35%,var(--border));background:var(--rev-bg);color:var(--ink);font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
+.decision-box{padding:12px 13px;border-radius:10px;border:1px solid color-mix(in srgb,var(--warn) 45%,var(--border));background:color-mix(in srgb,var(--warn-bg) 70%,var(--surface));display:flex;flex-direction:column;gap:10px}
+.decision-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.decision-title{font-weight:700;font-size:13.5px;color:var(--ink)}
+.decision-item{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;display:flex;flex-direction:column;gap:6px}
+.decision-q-head{font-weight:700;font-size:13px;color:var(--ink);overflow-wrap:anywhere}
+.decision-opts{display:flex;flex-direction:column;gap:5px}
+.decision-opt{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;line-height:1.45;cursor:pointer;padding:4px 6px;border-radius:6px;transition:background .1s}
+.decision-opt:hover{background:var(--surface2)}
+.decision-opt input[type="radio"]{margin-top:3px;flex:none;accent-color:var(--accent)}
+.decision-rec{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;font-size:10.5px;font-weight:700;color:var(--ok);background:var(--ok-bg);margin-left:5px;vertical-align:middle}
+.decision-input{width:100%;font-size:12.5px;padding:5px 8px}
+.decision-foot{display:flex;flex-direction:column;gap:7px;padding-top:4px;border-top:1px dashed var(--border)}
+.spec-box{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.55}
+.spec-box.clamped{max-height:360px;overflow-y:auto;padding-right:4px}
+.proof-assert{font-size:12px;line-height:1.45;padding:3px 0 3px 10px;border-left:2px solid var(--border);color:var(--ink2);overflow-wrap:anywhere}
 .action-bar{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
 .stream-box{background:#090C10;color:#E2E8F0;border:1px solid var(--border);border-radius:10px;padding:10px;height:460px;overflow:auto;font-family:var(--mono);font-size:12px}
 .stream-line{padding:3px 4px;border-bottom:1px solid rgba(255,255,255,.06);white-space:pre-wrap;word-break:break-word}
@@ -1824,14 +1839,13 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function renderCompactSpec(specText) {
     const clean = String(specText || "").trim();
     if (!clean) return "";
-    const lines = clean.split("\n").filter((l) => l.trim());
-    const isLong = clean.length > 220 || lines.length > 3;
-    if (!isLong) {
-      return `<div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(clean)}</div>`;
+    const lineCount = clean.split("\n").length;
+    const isHuge = clean.length > 2500 || lineCount > 35;
+    if (!isHuge) {
+      return `<div class="spec-box">${esc(clean)}</div>`;
     }
-    const preview = clean.length > 200 ? clean.slice(0, 200).trimEnd() + "…" : lines.slice(0, 3).join("\n") + "…";
-    return `<div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5">${esc(preview)}</div>
-      <details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:12px;font-weight:600">${esc(tr("drawer.showMore"))}</summary><div style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${esc(clean)}</div></details>`;
+    return `<div class="spec-box clamped" data-expandable-box="1">${esc(clean)}</div>
+      <div style="margin-top:6px"><button type="button" class="btn-sm btn-ghost" data-toggle-expand="1">${esc(tr("drawer.expandBox"))}</button></div>`;
   }
 
   function cleanLegacyPlanText(raw) {
@@ -1851,15 +1865,177 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function renderCompactPlanBody(raw) {
     const clean = cleanLegacyPlanText(raw);
     if (!clean) return "";
-    const lines = clean.split("\n");
-    const nonEmpty = lines.filter((l) => l.trim()).length;
-    if (lines.length <= 18 && clean.length <= 1100) {
-      return `<div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55">${esc(clean)}</div>`;
+    const lineCount = clean.split("\n").length;
+    const isHuge = clean.length > 2500 || lineCount > 35;
+    if (!isHuge) {
+      return `<div class="spec-box">${esc(clean)}</div>`;
     }
-    let preview = lines.slice(0, 16).join("\n").trimEnd();
-    if (preview.length > 1000) preview = preview.slice(0, 1000).trimEnd();
-    return `<div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55">${esc(preview)}…</div>
-      <details style="margin-top:8px"><summary class="muted" style="cursor:pointer;font-size:12px;font-weight:600">${esc(tr("drawer.showFullPlan", { n: nonEmpty }))}</summary><div style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12.5px;line-height:1.5;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${esc(clean)}</div></details>`;
+    return `<div class="spec-box clamped" data-expandable-box="1">${esc(clean)}</div>
+      <div style="margin-top:6px"><button type="button" class="btn-sm btn-ghost" data-toggle-expand="1">${esc(tr("drawer.expandBox"))}</button></div>`;
+  }
+
+  function bindExpandableBoxes(root) {
+    if (!root) return;
+    root.querySelectorAll("[data-toggle-expand]").forEach((btn) => {
+      btn.onclick = () => {
+        const box = btn.parentElement && btn.parentElement.previousElementSibling;
+        if (!box || !box.hasAttribute("data-expandable-box")) return;
+        const clamped = box.classList.toggle("clamped");
+        btn.textContent = clamped ? tr("drawer.expandBox") : tr("drawer.collapseBox");
+      };
+    });
+  }
+
+  function parseDecisionQuestion(raw, idx) {
+    const text = String(raw || "").trim();
+    const re = /(?:^|[\s:;.\-])\((\d+)\)\s+/g;
+    const matches = [];
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const markerPos = m.index + m[0].indexOf("(");
+      matches.push({ num: m[1], start: markerPos, contentStart: m.index + m[0].length });
+    }
+    if (matches.length >= 2) {
+      const rawPrefix = text.slice(0, matches[0].start).replace(/[:\-\s]+$/, "").trim();
+      const options = matches.map((cur, i) => {
+        const end = i + 1 < matches.length ? matches[i + 1].start : text.length;
+        const body = text.slice(cur.contentStart, end).trim().replace(/[.\s]+$/, "");
+        const recommended = /\((?:khuyến nghị|recommended)\)/i.test(body);
+        const colonIdx = body.indexOf(":");
+        const head = (colonIdx > 0 && colonIdx <= 80 ? body.slice(0, colonIdx) : body.slice(0, 72))
+          .replace(/\s*\((?:khuyến nghị|recommended)\)\s*/gi, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        return { num: cur.num, text: body, shortLabel: head || body.slice(0, 60), recommended };
+      });
+      return { idx, prefix: rawPrefix || `#${idx + 1}`, question: text, options };
+    }
+    return { idx, prefix: `#${idx + 1}`, question: text, options: [] };
+  }
+
+  function renderDecisionSection(taskId, openQs, taskState, ro, scopeId) {
+    if (!Array.isArray(openQs) || !openQs.length) return "";
+    const parsed = openQs.map((q, idx) => parseDecisionQuestion(q, idx));
+    const hasAnyRec = parsed.some((item) => item.options.some((o) => o.recommended));
+    const isBlocked = taskState === "blocked";
+    const titleKey = isBlocked ? "decision.titleBlocked" : "decision.titleOpen";
+    const itemsHtml = parsed.map((item) => {
+      const name = `${scopeId}_q_${item.idx}`;
+      if (item.options.length >= 2) {
+        const optsHtml = item.options.map((opt, oi) => `
+          <label class="decision-opt">
+            <input type="radio" name="${esc(name)}" value="${esc(opt.num)}" data-dec-idx="${item.idx}" data-dec-opt="${oi}" data-dec-rec="${opt.recommended ? "1" : "0"}" ${ro ? "disabled" : ""}>
+            <span><strong>(${esc(opt.num)})</strong> ${esc(opt.text)}${opt.recommended ? `<span class="decision-rec">${esc(tr("decision.recommendedBadge"))}</span>` : ""}</span>
+          </label>`).join("");
+        return `<div class="decision-item">
+          <div class="decision-q-head">${item.idx + 1}. ${esc(item.prefix)}</div>
+          <div class="decision-opts">
+            ${optsHtml}
+            <label class="decision-opt">
+              <input type="radio" name="${esc(name)}" value="custom" data-dec-idx="${item.idx}" data-dec-custom-radio="1" ${ro ? "disabled" : ""}>
+              <span style="flex:1;min-width:0"><span>${esc(tr("decision.customOption"))}</span>
+                <input type="text" class="decision-input" style="margin-top:4px" data-dec-custom-text="${item.idx}" placeholder="${esc(tr("decision.customPlaceholder"))}" ${ro ? "disabled" : ""}>
+              </span>
+            </label>
+          </div>
+        </div>`;
+      }
+      return `<div class="decision-item">
+        <div class="decision-q-head">${item.idx + 1}. ${esc(item.question)}</div>
+        <input type="text" class="decision-input" data-dec-free="${item.idx}" placeholder="${esc(tr("decision.answerPlaceholder"))}" ${ro ? "disabled" : ""}>
+      </div>`;
+    }).join("");
+    return `<div class="decision-box" data-decision-box="${esc(scopeId)}">
+      <div class="decision-head">
+        <div>
+          <div class="decision-title">🧭 ${esc(tr(titleKey, { n: parsed.length }))}</div>
+          <div class="muted" style="font-size:12px;margin-top:2px">${esc(tr("decision.subtitle"))}</div>
+        </div>
+        ${hasAnyRec && !ro ? `<button type="button" class="btn-sm" data-dec-select-rec="1">${esc(tr("decision.selectRecommended"))}</button>` : ""}
+      </div>
+      ${itemsHtml}
+      ${!ro ? `<div class="decision-foot">
+        <textarea rows="2" class="decision-input" data-dec-extra="1" placeholder="${esc(tr("decision.extraNotePlaceholder"))}"></textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+          <button type="button" class="${isBlocked ? "btn-primary" : "btn-sm"}" data-dec-submit="1">${esc(tr(isBlocked ? "decision.submitUnblock" : "decision.submitSteer"))}</button>
+        </div>
+      </div>` : ""}
+    </div>`;
+  }
+
+  function bindDecisionSection(root, taskId, openQs, taskState, ro, scopeId) {
+    if (!root || ro || !Array.isArray(openQs) || !openQs.length) return;
+    const box = root.querySelector(`[data-decision-box="${scopeId}"]`);
+    if (!box) return;
+    const parsed = openQs.map((q, idx) => parseDecisionQuestion(q, idx));
+    const recBtn = box.querySelector("[data-dec-select-rec]");
+    if (recBtn) {
+      recBtn.onclick = () => {
+        box.querySelectorAll('input[type="radio"][data-dec-rec="1"]').forEach((r) => { r.checked = true; });
+      };
+    }
+    box.querySelectorAll("[data-dec-custom-text]").forEach((inp) => {
+      const idx = inp.dataset.decCustomText;
+      const activate = () => {
+        const radio = box.querySelector(`input[type="radio"][data-dec-idx="${idx}"][data-dec-custom-radio="1"]`);
+        if (radio) radio.checked = true;
+      };
+      inp.onfocus = activate;
+      inp.oninput = activate;
+    });
+    const submitBtn = box.querySelector("[data-dec-submit]");
+    if (submitBtn) {
+      submitBtn.onclick = async () => {
+        if (submitBtn.disabled) return;
+        const parts = [];
+        for (const item of parsed) {
+          if (item.options.length >= 2) {
+            const checked = box.querySelector(`input[type="radio"][name="${scopeId}_q_${item.idx}"]:checked`);
+            if (!checked) continue;
+            if (checked.value === "custom") {
+              const txt = ((box.querySelector(`[data-dec-custom-text="${item.idx}"]`) || {}).value || "").trim();
+              if (txt) parts.push(`${item.prefix}: ${txt}`);
+            } else {
+              const oi = Number(checked.dataset.decOpt);
+              const opt = item.options[oi];
+              if (opt) parts.push(`${item.prefix}: (${opt.num}) ${opt.shortLabel}`);
+            }
+          } else {
+            const txt = ((box.querySelector(`[data-dec-free="${item.idx}"]`) || {}).value || "").trim();
+            if (txt) parts.push(`#${item.idx + 1}: ${txt}`);
+          }
+        }
+        const extra = ((box.querySelector("[data-dec-extra]") || {}).value || "").trim();
+        if (extra) parts.push(extra);
+        if (!parts.length) {
+          toast(tr("decision.emptySelection"));
+          return;
+        }
+        const note = parts.join(" | ");
+        const byteLen = new TextEncoder().encode(note).length;
+        if (byteLen > 2000) {
+          toast(tr("decision.tooLong", { n: byteLen }));
+          return;
+        }
+        const action = taskState === "blocked" ? "unblock" : "steer";
+        const origLabel = submitBtn.textContent;
+        submitBtn.disabled = true;
+        submitBtn.textContent = "…";
+        try {
+          await api("/api/action", {
+            method: "POST",
+            body: JSON.stringify({ action, task_id: taskId, note }),
+          });
+          toast(tr(action === "unblock" ? "decision.sentUnblock" : "decision.sentSteer", { id: taskId }));
+          await refreshAll();
+          await refreshOpenContext();
+        } catch (e) {
+          toast(tr("toast.error", { msg: e.message }));
+          submitBtn.disabled = false;
+          submitBtn.textContent = origLabel;
+        }
+      };
+    }
   }
 
   function renderRunRow(r, runnerLive) {
@@ -1902,6 +2078,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const canCancel = ["backlog", "ready", "blocked", "review"].includes(t.state);
       const { steer, sys } = splitDrawerNotes(notes);
       const planShort = plan.summary || (plan.contract && plan.contract.summary) || "";
+      const openQs = (plan.contract && Array.isArray(plan.contract.open_questions)) ? plan.contract.open_questions : [];
       const revRuns = runs.slice().reverse();
       const recentRuns = revRuns.slice(0, 2);
       const olderRuns = revRuns.slice(2);
@@ -1917,11 +2094,12 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         </div>
         <div style="font-weight:700;font-size:16px;word-break:break-word">${esc(t.title)}</div>
         ${blkText ? `<div class="blocked-callout"><strong>${esc(tr("drawer.blockedPrefix"))}</strong> ${esc(blkText)}</div>` : ""}
+        ${openQs.length && (t.state === "blocked" || plan.needs_approval) ? renderDecisionSection(taskId, openQs, t.state, ro, "ovdec") : ""}
         ${plan.needs_approval ? `<div class="plan-callout"><strong>${esc(tr("drawer.planWaiting"))}</strong> ${esc(planShort || tr("drawer.planWaitingFallback"))}</div>` : ""}
         ${plan.available && !plan.needs_approval ? `<div class="kv-section" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="min-width:0;font-size:13px"><strong style="margin-right:6px">${esc(tr("drawer.planSummary"))}:</strong><span class="muted">${esc(planShort)}</span></div><button type="button" class="btn-sm" id="drawerOpenPlanBtn" style="flex:none">${esc(tr("drawer.openPlan"))}</button></div>` : ""}
         <div class="kv-section"><div class="kv-title">${esc(tr("drawer.pipeline"))}</div><div id="drawerPipeBox" class="muted">${esc(tr("drawer.loadingPipeline"))}</div></div>
         ${specText ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.spec"))}</div>${renderCompactSpec(specText)}</div>` : ""}
-        ${steer.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.notes"))}</div>${steer.map((n)=>`<div style="margin-bottom:4px;font-size:13px;line-height:1.45">• ${esc(n)}</div>`).join("")}</div>` : ""}
+        ${steer.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.notes"))}</div>${steer.map((n)=>`<div style="margin-bottom:4px;font-size:13px;line-height:1.45;overflow-wrap:anywhere">• ${esc(n)}</div>`).join("")}</div>` : ""}
         <div class="kv-section">
           <div class="kv-title">${esc(tr("drawer.runs", { n: runs.length }))}</div>
           ${recentRuns.length ? recentRuns.map((r) => renderRunRow(r, runnerLive)).join("") : `<div class="muted">${esc(tr("drawer.noRuns"))}</div>`}
@@ -1929,7 +2107,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         </div>
         ${acceptance.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.acceptance"))} (${acceptance.length})</summary><div style="margin-top:8px">${acceptance.map((a)=>`<div style="margin-bottom:4px;font-size:12.5px;line-height:1.45">• ${esc(a)}</div>`).join("")}</div></details>` : ""}
         ${deps.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.deps"))} (${deps.length})</summary><div class="mono" style="margin-top:6px;font-size:12px">${esc(deps.join(", "))}</div></details>` : ""}
-        ${sys.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.systemNotes", { n: sys.length }))}</summary><div style="margin-top:8px">${sys.map((item)=>`<div style="margin-bottom:6px;font-size:12.5px;line-height:1.45;overflow-wrap:anywhere">${item.label ? `<strong>${esc(item.label)}:</strong> ` : ""}<span class="muted">${esc(item.body.length > 220 ? item.body.slice(0, 220) + "…" : item.body)}</span></div>`).join("")}</div></details>` : ""}
+        ${sys.length ? `<details class="kv-section"><summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.systemNotes", { n: sys.length }))}</summary><div style="margin-top:8px">${sys.map((item)=> item.body.length > 320
+          ? `<details style="margin-bottom:6px;font-size:12.5px;line-height:1.45;overflow-wrap:anywhere"><summary style="cursor:pointer">${item.label ? `<strong>${esc(item.label)}:</strong> ` : ""}<span class="muted">${esc(item.body.slice(0, 180))}…</span></summary><div class="muted" style="margin-top:4px;white-space:pre-wrap">${esc(item.body)}</div></details>`
+          : `<div style="margin-bottom:6px;font-size:12.5px;line-height:1.45;overflow-wrap:anywhere">${item.label ? `<strong>${esc(item.label)}:</strong> ` : ""}<span class="muted">${esc(item.body)}</span></div>`
+        ).join("")}</div></details>` : ""}
         <details class="kv-section">
           <summary class="kv-title" style="cursor:pointer;margin:0">${esc(tr("drawer.recentEvents", { n: events.length }))}</summary>
           <div style="margin-top:6px">${events.map((e) => `<div class="mono" style="font-size:11.5px;padding:3px 0;border-bottom:1px solid var(--border)">${esc(String(e.kind || "").replace(/_/g, " "))} · <span class="muted">${esc(ago(e.created_at))}</span></div>`).join("") || `<div class="muted">${esc(tr("drawer.none"))}</div>`}</div>
@@ -1943,6 +2124,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           ${canCancel ? `<button class="btn-danger btn-sm" id="drawerCancelBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.cancelTask"))}</button>` : ""}
         </div>
         ${ro ? `<div class="muted" style="font-size:12px">${esc(roHint())}</div>` : ""}`;
+      bindExpandableBoxes($("drawerBody"));
+      if (openQs.length && (t.state === "blocked" || plan.needs_approval)) {
+        bindDecisionSection($("drawerBody"), taskId, openQs, t.state, ro, "ovdec");
+      }
       if ($("drawerOpenPlanBtn")) $("drawerOpenPlanBtn").onclick = () => switchDrawerTab("plan");
       $("drawerBody").querySelectorAll("[data-run]").forEach((b) => {
         b.onclick = () => { closeDrawer(); switchTab("stream"); followRun(b.dataset.run); };
@@ -2072,7 +2257,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const cleanedBody = !c && plan.note_body ? cleanLegacyPlanText(plan.note_body) : "";
       const showNoteBody = Boolean(cleanedBody && cleanedBody !== summaryText.trim());
       const hasTechDetails = Boolean(
-        invariants.length || openQs.length || tierReasons.length || plan.hash ||
+        invariants.length || tierReasons.length || plan.hash ||
         files.some((f) => f.risk) || tests.some((rt) => rt.red_condition || rt.green_condition)
       );
       $("drawerBody").innerHTML = `
@@ -2083,6 +2268,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           </div>
           <div style="font-size:13.5px;line-height:1.5">${esc(summaryText || cleanedBody || "")}</div>
         </div>
+        ${openQs.length ? renderDecisionSection(taskId, openQs, t.state, ro, "pldec") : ""}
         ${files.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.filesToChange", { n: files.length }))}</div>${files.map((f) => `<div style="margin-bottom:5px;font-size:13px;line-height:1.45"><span class="mono" style="font-weight:600">${esc(f.path || "")}</span>${f.responsibility ? ` — ${esc(f.responsibility)}` : ""}</div>`).join("")}</div>` : ""}
         ${tests.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.tests", { n: tests.length }))}</div>${tests.map((rt) => `<div style="margin-bottom:4px;font-size:13px">• <span class="mono">${esc(rt.test_path || rt.ac_ref || "test")}</span></div>`).join("")}</div>` : ""}
         ${showNoteBody ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.planDetails"))}</div>${renderCompactPlanBody(cleanedBody)}</div>` : ""}
@@ -2090,11 +2276,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           ${files.some((f) => f.risk) ? files.filter((f) => f.risk).map((f) => `<div style="margin-bottom:4px"><span class="mono">${esc(f.path)}</span> — <span class="muted">${esc(tr("drawer.risk"))} ${esc(f.risk)}</span></div>`).join("") : ""}
           ${invariants.length ? `<div style="margin-top:6px"><strong>${esc(tr("drawer.invariants", { n: invariants.length }))}</strong>${invariants.map((inv) => `<div class="muted">• ${esc(inv)}</div>`).join("")}</div>` : ""}
           ${tests.some((rt) => rt.red_condition || rt.green_condition) ? `<div style="margin-top:6px"><strong>${esc(tr("drawer.tests", { n: tests.length }))}</strong>${tests.map((rt) => `<div class="muted" style="margin-bottom:4px"><span class="mono">${esc(rt.test_path || rt.ac_ref || "test")}</span>${rt.red_condition ? ` · RED: ${esc(rt.red_condition)}` : ""}${rt.green_condition ? ` · GREEN: ${esc(rt.green_condition)}` : ""}</div>`).join("")}</div>` : ""}
-          ${openQs.length ? `<div style="margin-top:6px"><strong>${esc(tr("drawer.openQuestions", { n: openQs.length }))}</strong>${openQs.map((q) => `<div class="muted">• ${esc(q)}</div>`).join("")}</div>` : ""}
           ${tierReasons.length ? `<div class="muted" style="margin-top:6px">${tierReasons.map((r) => `• ${esc(r)}`).join(" ")}</div>` : ""}
           ${plan.hash ? `<div class="mono muted" style="margin-top:6px">hash: ${esc(plan.hash)}</div>` : ""}
         </div></details>` : ""}
         ${plan.needs_approval ? `<div class="action-bar"><button class="btn-ok" id="planTabApproveBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.approvePlanReady"))}</button></div>` : ""}`;
+      bindExpandableBoxes($("drawerBody"));
+      if (openQs.length) {
+        bindDecisionSection($("drawerBody"), taskId, openQs, t.state, ro, "pldec");
+      }
       if ($("planTabApproveBtn")) {
         $("planTabApproveBtn").onclick = () => runQuickAction("approve_plan", taskId, $("planTabApproveBtn"), true);
       }
@@ -2107,20 +2296,39 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         const pf = await api("/api/proof/" + encodeURIComponent(taskId));
         if (renderSeq !== drawerRenderSeq || drawerTab !== "proof") return;
         if (!pf.available) {
-          $("drawerBody").innerHTML = `<div class="empty">${esc(tr("drawer.noProof"))}</div>`;
+          const reasonKey = pf.reason === "not_captured_when_done"
+            ? "drawer.noProofDone"
+            : pf.reason === "no_runs"
+              ? "drawer.noProofNoRuns"
+              : pf.reason === "expired_or_cleaned"
+                ? "drawer.noProofExpired"
+                : "drawer.noProof";
+          $("drawerBody").innerHTML = `<div class="empty">${esc(tr(reasonKey))}</div>`;
           return;
         }
         const rec = pf.record || {};
         const flows = Array.isArray(rec.flows) ? rec.flows : [];
         const imgs = Array.isArray(pf.images) ? pf.images : [];
+        const shortFp = rec.tree_fp ? String(rec.tree_fp).slice(0, 24) : "";
         $("drawerBody").innerHTML = `
           <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
             <span class="pill pill-ok">${esc(tr("drawer.signedProof"))}</span>
+            ${rec.source_tool ? `<span class="pill pill-slate mono">${esc(rec.source_tool)}</span>` : ""}
             ${rec.device_serial ? `<span class="pill pill-slate mono">${esc(rec.device_serial)}</span>` : ""}
             ${rec.width && rec.height ? `<span class="pill pill-slate">${esc(rec.width)}×${esc(rec.height)}</span>` : ""}
+            ${shortFp ? `<span class="pill pill-slate mono" title="${esc(rec.tree_fp)}">${esc(shortFp)}</span>` : ""}
             ${rec.recorded_at ? `<span class="muted" style="font-size:12px">${esc(ago(rec.recorded_at))}</span>` : ""}
           </div>
-          ${flows.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.proofFlows", { n: flows.length }))}</div>${flows.map((f) => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>${esc(f.name)}</span><span class="pill ${f.passed ? "pill-ok" : "pill-err"}">${esc(f.passed ? tr("proof.pass") : tr("proof.fail"))}</span></div>`).join("")}</div>` : ""}
+          ${flows.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.proofFlows", { n: flows.length }))}</div>${flows.map((f) => {
+            const asserts = Array.isArray(f.assertions) ? f.assertions : [];
+            return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                <span style="font-weight:600">${esc(f.name)}${f.duration_ms ? ` <span class="muted mono" style="font-weight:400">(${esc((Number(f.duration_ms) / 1000).toFixed(1))}s)</span>` : ""}</span>
+                <span class="pill ${f.passed ? "pill-ok" : "pill-err"}">${esc(f.passed ? tr("proof.pass") : tr("proof.fail"))}</span>
+              </div>
+              ${asserts.length ? `<div style="margin-top:5px;display:flex;flex-direction:column;gap:2px">${asserts.map((a) => `<div class="proof-assert">${a.passed ? "✅" : "❌"} <strong>${esc(a.name)}</strong>${a.detail ? ` — <span class="muted">${esc(a.detail)}</span>` : ""}</div>`).join("")}</div>` : ""}
+            </div>`;
+          }).join("")}</div>` : ""}
           <div id="proofImgsBox" class="proof-grid">${imgs.length ? `<div class="muted">${esc(tr("drawer.loadingImgs", { n: imgs.length }))}</div>` : `<div class="muted">${esc(tr("drawer.noImgOnDisk"))}</div>`}</div>`;
         if (imgs.length) {
           const urls = await Promise.all(imgs.map((im) => fetchImageDataUrl(im.url).then((src) => ({ name: im.name, src })).catch((e) => ({ name: im.name, err: e.message }))));
@@ -2196,15 +2404,26 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     renderReviewQueue();
     const box = $("reviewDetail");
     box.innerHTML = `<div class="muted">${esc(tr("review.loading", { id: taskId }))}</div>`;
-    const [hoRes, pvRes] = await Promise.allSettled([
+    const [hoRes, pvRes, tdRes] = await Promise.allSettled([
       api("/api/handover/" + encodeURIComponent(taskId)),
       api("/api/approve/preview/" + encodeURIComponent(taskId)),
+      api("/api/task/" + encodeURIComponent(taskId)),
     ]);
     if (seq !== reviewSeq) return;
     const ho = hoRes.status === "fulfilled" ? hoRes.value : null;
     const pv = pvRes.status === "fulfilled" ? pvRes.value : null;
+    const td = tdRes.status === "fulfilled" ? tdRes.value : null;
     const task = boardTasks.find((t) => t.id === taskId);
-    const st = (ho && ho.state) || (task && task.state) || "";
+    const fullTask = (td && td.task) || task || {};
+    const plan = (td && td.plan) || {};
+    const openQs = (plan.contract && Array.isArray(plan.contract.open_questions)) ? plan.contract.open_questions : [];
+    const specText = cleanSpec(
+      typeof fullTask.spec === "string"
+        ? fullTask.spec
+        : ((fullTask.spec && fullTask.spec.description) || (task && task.spec_description) || "")
+    );
+    const blkText = formatBlockedText(fullTask.blocked_reason) || (task && task.blocked_detail) || "";
+    const st = (ho && ho.state) || fullTask.state || (task && task.state) || "";
     const scores = (ho && ho.scores) || [];
     const locked = (pv && pv.locked_changes) || [];
     const lockFp = (pv && pv.lock_fp) || "";
@@ -2219,14 +2438,18 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
         <div style="min-width:0">
           <div class="mono" style="font-weight:700;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${esc(taskId)} <span class="pill pill-${esc(st)}">${esc(stateLabel(st))}</span>${task && task.repo_name ? `<span class="pill pill-slate">${esc(task.repo_name)}</span>` : ""}</div>
-          <div style="font-size:16px;font-weight:700;margin-top:3px;overflow-wrap:anywhere">${esc((ho && ho.title) || (task && task.title) || "")}</div>
+          <div style="font-size:16px;font-weight:700;margin-top:3px;overflow-wrap:anywhere">${esc((ho && ho.title) || fullTask.title || "")}</div>
         </div>
-        <div style="display:flex;gap:6px;align-items:center">
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <button class="btn-sm" id="revOpenPlan" type="button">${esc(tr("drawer.tabPlan"))}</button>
           <button class="btn-sm" id="revOpenDiff" type="button">${esc(tr("drawer.tabDiff"))}</button>
           <button class="btn-sm" id="revOpenProof" type="button">${esc(tr("drawer.tabProof"))}</button>
           ${ho && ho.status ? `<span class="pill ${ho.status === "XONG" ? "pill-ok" : "pill-running"}">${esc(ho.status)}</span>` : ""}
         </div>
       </div>
+      ${st === "blocked" && blkText ? `<div class="blocked-callout" style="margin-top:10px"><strong>${esc(tr("drawer.blockedPrefix"))}</strong> ${esc(blkText)}</div>` : ""}
+      ${openQs.length ? `<div style="margin-top:10px">${renderDecisionSection(taskId, openQs, st, ro, "revdec")}</div>` : ""}
+      ${st === "blocked" && specText ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.spec"))}</div>${renderCompactSpec(specText)}</div>` : ""}
       ${ho ? `
         <div class="score-grid">
           <div class="score-box"><div class="stat-label">${esc(tr("review.effectiveScore"))}</div><div class="stat-val">${esc(ho.effective_score ?? "—")}</div></div>
@@ -2259,6 +2482,11 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       </div>
       ${locked.length > 0 && approveHint ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(approveHint)}</div>` : ""}`;
 
+    bindExpandableBoxes(box);
+    if (openQs.length) {
+      bindDecisionSection(box, taskId, openQs, st, ro, "revdec");
+    }
+    $("revOpenPlan").onclick = () => openTaskDrawer(taskId, "plan");
     $("revOpenDiff").onclick = () => openTaskDrawer(taskId, "diff");
     $("revOpenProof").onclick = () => openTaskDrawer(taskId, "proof");
     if ($("btnApprovePlan")) $("btnApprovePlan").onclick = () => runQuickAction("approve_plan", taskId, $("btnApprovePlan"));
@@ -2480,7 +2708,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
   function promptMutate(action, taskId) {
     const needsNote = action === "rework" || action === "steer";
-    const optionalNote = action === "cancel";
+    const optionalNote = action === "cancel" || action === "unblock";
     const actionLabelMap = {
       unfreeze: tr("modal.actUnfreeze"),
       unblock: tr("modal.actUnblock"),
@@ -2496,10 +2724,15 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       rework: tr("modal.mutateReworkDesc"),
       steer: tr("modal.mutateSteerDesc"),
     };
+    const notePlaceholder = action === "cancel"
+      ? tr("modal.cancelReasonPlaceholder")
+      : action === "unblock"
+        ? tr("modal.unblockNotePlaceholder")
+        : tr("modal.mutateNotePlaceholder");
     openModal({
       title: taskId ? tr("modal.mutateTitleTask", { action: actLabel, id: taskId }) : tr("modal.mutateTitle", { action: actLabel }),
       desc: descMap[action] || tr("modal.mutateNoteDesc", { action: actLabel }),
-      fields: (needsNote || optionalNote) ? `<textarea id="mNote" rows="3" style="width:100%" placeholder="${esc(optionalNote ? tr("modal.cancelReasonPlaceholder") : tr("modal.mutateNotePlaceholder"))}"></textarea>` : "",
+      fields: (needsNote || optionalNote) ? `<textarea id="mNote" rows="3" style="width:100%" placeholder="${esc(notePlaceholder)}"></textarea>` : "",
       confirmLabel: tr("modal.mutateConfirmBtn", { action: actLabel }),
       onConfirm: async () => {
         const note = (needsNote || optionalNote) ? ($("mNote").value || "").trim() : "";

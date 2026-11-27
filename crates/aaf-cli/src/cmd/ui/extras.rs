@@ -79,11 +79,59 @@ pub(super) fn task_needs_plan_approval(task: &Task) -> bool {
         )
 }
 
+fn extract_plan_contract_hash(note_body: &str) -> Option<&str> {
+    const MARKER: &str = "[plan_contract_hash=";
+    let start = note_body.rfind(MARKER)? + MARKER.len();
+    let rest = &note_body[start..];
+    let end = rest.find(']')?;
+    let hash = rest[..end].trim();
+    (!hash.is_empty()).then_some(hash)
+}
+
+fn hydrate_plan_contract_by_hash(
+    db: &Db,
+    task_id: &str,
+    expected_hash: &str,
+) -> Option<aaf_domain::pipeline::PlanContract> {
+    let events = db
+        .events_for_task_by_kinds(
+            task_id,
+            &[EventKind::PlanConverged, EventKind::PlanDebateTurn],
+            32,
+        )
+        .ok()?;
+    for ev in events {
+        let Ok(payload) = serde_json::from_str::<Value>(&ev.payload_json) else {
+            continue;
+        };
+        let hash = payload["plan_contract_hash"].as_str().map(str::trim);
+        if hash != Some(expected_hash) {
+            continue;
+        }
+        if let Some(val) = payload.get("plan_contract").filter(|v| !v.is_null())
+            && let Ok(contract) = serde_json::from_value(val.clone())
+        {
+            return Some(contract);
+        }
+    }
+    None
+}
+
 pub(super) fn plan_detail_json(db: &Db, task: &Task) -> Value {
     let needs_approval = task_needs_plan_approval(task);
     let plan = match latest_plan_info(db, &task.id) {
         Ok(Some(plan)) => Some(plan),
-        _ => plan_from_task_notes(task),
+        _ => plan_from_task_notes(task).map(|mut p| {
+            if p.plan_contract.is_none()
+                && let Some(hash) = extract_plan_contract_hash(&p.note_body).map(str::to_string)
+            {
+                if let Some(contract) = hydrate_plan_contract_by_hash(db, &task.id, &hash) {
+                    p.plan_contract = Some(contract);
+                }
+                p.plan_contract_hash = Some(hash);
+            }
+            p
+        }),
     };
     match plan {
         Some(plan) => json!({
