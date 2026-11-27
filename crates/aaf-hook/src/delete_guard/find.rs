@@ -28,34 +28,13 @@ pub(super) const DELETERS: &[&str] = &[
     "trash-put",
     "del",
     "del-cli",
-    "ln",
-    "gzip",
-    "gunzip",
-    "pigz",
-    "unpigz",
-    "bzip2",
-    "bunzip2",
-    "pbzip2",
-    "pbunzip2",
-    "lbzip2",
-    "lbunzip2",
-    "xz",
-    "unxz",
-    "lzma",
-    "unlzma",
-    "lzip",
-    "compress",
-    "uncompress",
-    "zstd",
-    "unzstd",
-    "zstdmt",
-    "lz4",
-    "unlz4",
-    "brotli",
-    "lzop",
 ];
 
 const EXEC_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+
+pub(super) fn is_deleter(name: &str) -> bool {
+    DELETERS.contains(&name) || name == "ln" || super::rewriters::is_compressor(name)
+}
 
 /// The argv after `find -exec` runs a deleting tool, seen through the same
 /// wrapper stripping as a typed command (`env rm`, `nice /bin/rm`,
@@ -67,7 +46,7 @@ fn runs_deleter(argv: &[String]) -> bool {
         || script
             .cmds
             .iter()
-            .any(|cmd| cmd.dynamic_name || DELETERS.contains(&cmd.name()))
+            .any(|cmd| cmd.dynamic_name || is_deleter(cmd.name()))
 }
 
 /// A global option `find` reads before its search roots: `-H`, `-L`, `-P`

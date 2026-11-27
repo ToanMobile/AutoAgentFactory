@@ -11,7 +11,7 @@ mod find;
 mod rewriters;
 mod writers;
 
-use find::{DELETERS, feeds_protected, find};
+use find::{feeds_protected, find, is_deleter};
 
 const RULE: &str = "delete_guard";
 const FIX: &str = "leave this protected file in place and work on non-protected source/config \
@@ -105,7 +105,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let name = cmd.name();
     let args = cmd.args();
     if cmd.xargs
-        && (cmd.dynamic_name || DELETERS.contains(&name))
+        && (cmd.dynamic_name || is_deleter(name))
         && feeds_protected(cmd.feeder.as_deref(), ctx)
     {
         let tool = if cmd.dynamic_name {
