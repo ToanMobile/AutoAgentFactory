@@ -176,3 +176,99 @@ fn a_repair_that_cites_the_named_blocker_is_accepted() {
     let notes = world.task("t1").context_notes.join("\n");
     assert!(notes.contains("src/lib.rs:2"), "{notes}\n{summary:?}");
 }
+
+#[test]
+fn inconclusive_audit_after_budget_spent_blocks_root_without_freezing_factory() {
+    let mut world = locked_world();
+    world.repo.unblocker.global_freeze_consecutive_fails = 1;
+    // Agent run (15) + inconclusive audit (15) + repair (15) exceeds 30.
+    world.repo.unblocker.max_token_budget = 30;
+    let auditor = Arc::new(Auditor(Mutex::new(VecDeque::new()), Mutex::new(0)));
+
+    let summary = run_once(&world, &auditor);
+
+    assert_eq!(world.state("t1"), TaskState::Blocked, "{summary:?}");
+    assert_eq!(summary.blocked, vec!["t1"], "{summary:?}");
+    assert!(
+        matches!(
+            world.task("t1").blocked_reason,
+            Some(aaf_domain::blocked::BlockedReason::BudgetExceeded { .. })
+        ),
+        "{:?}",
+        world.task("t1").blocked_reason
+    );
+    assert!(
+        !summary.frozen && !crate::factory::is_frozen(&world.db).unwrap(),
+        "an inconclusive auditor must not freeze the global factory: {summary:?}"
+    );
+    assert!(
+        world.task("t1").context_notes.is_empty(),
+        "no implementer rework note on auditor failure: {:?}",
+        world.task("t1").context_notes
+    );
+}
+
+#[test]
+fn scored_audit_sets_json_schema_and_retries_empty_auditor_response() {
+    struct SchemaWatcher {
+        replies: Mutex<VecDeque<String>>,
+        schemas: Mutex<Vec<Option<String>>>,
+    }
+    impl AgentRunner for SchemaWatcher {
+        fn run(&self, req: &AgentRequest) -> PortResult<AgentOutcome> {
+            if !req.prompt.contains(SPEC_BEGIN) {
+                return Ok(ok_outcome());
+            }
+            self.schemas.lock().unwrap().push(req.json_schema.clone());
+            let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(AgentOutcome {
+                final_text: text,
+                ..ok_outcome()
+            })
+        }
+    }
+
+    let world = locked_world();
+    let watcher = Arc::new(SchemaWatcher {
+        replies: Mutex::new(VecDeque::from([String::new(), audit_answer(&[])])),
+        schemas: Mutex::new(Vec::new()),
+    });
+    let mut deps = world.deps();
+    deps.runner = watcher.clone();
+    let hooks = crate::factory::Hooks {
+        idle: &|| false,
+        reap: &|_| Ok(()),
+    };
+
+    let summary = crate::factory::run(&deps, crate::factory::Mode::Once, &hooks).unwrap();
+
+    assert_eq!(world.state("t1"), TaskState::Review, "{summary:?}");
+    let schemas = watcher.schemas.lock().unwrap();
+    assert_eq!(schemas.len(), 2, "initial empty response + format repair");
+    for schema_opt in schemas.iter() {
+        let schema = schema_opt.as_deref().expect("json_schema must be set");
+        let parsed: serde_json::Value = serde_json::from_str(schema).expect("valid JSON schema");
+        assert_eq!(parsed["type"], "object");
+        assert!(parsed["properties"]["answers"].is_object());
+    }
+    let sample_input = crate::cross_audit::AuditInput {
+        spec: super::fakes::spec(),
+        diff: "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n".into(),
+        mobile: false,
+    };
+    let initial = crate::cross_audit::build_scored_prompt(&sample_input, true);
+    assert!(
+        initial.contains("NEVER call Bash/shell commands"),
+        "initial audit prompt must forbid Bash/shell commands in headless read-only mode"
+    );
+    let repair = crate::cross_audit::prompt::build_format_repair_prompt(
+        &sample_input,
+        true,
+        "empty response",
+        "",
+    );
+    assert!(
+        repair.contains("do NOT call Bash/shell commands"),
+        "format-repair audit prompt must forbid Bash/shell commands"
+    );
+}

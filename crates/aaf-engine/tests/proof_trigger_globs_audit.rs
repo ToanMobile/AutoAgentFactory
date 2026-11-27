@@ -6,13 +6,17 @@ use std::process::Command;
 use std::sync::Arc;
 
 use aaf_domain::config::{MachineConfig, ProofConfig, RepoConfig};
+use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::gate::{GateMode, GateStatus};
-use aaf_domain::ports::Clock;
+use aaf_domain::ports::{Clock, EventSink, TaskStore};
+use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 use aaf_engine::cross_audit::compute_mechanical_score;
+use aaf_engine::db::Db;
 use aaf_engine::factory::adapters::RealGate;
 use aaf_engine::factory::ports::GateRunner;
 use aaf_engine::gate::proof_need::proof_needed_for_worktree;
 use aaf_engine::gate::run_gate_observed;
+use aaf_engine::handover::load_handover;
 use tempfile::TempDir;
 
 struct FixedClock(i64);
@@ -195,4 +199,112 @@ fn real_gate_verify_receipt_and_mechanical_score_pass_for_non_ui_diff_under_trig
         Some(&base_sha)
     ));
     assert!(!adapter.verify_cached_receipt(repo.path(), &receipt));
+}
+
+#[test]
+fn load_handover_honors_proof_trigger_globs_and_fails_closed() {
+    let repo = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let _base_sha = init_repo(repo.path());
+
+    git(repo.path(), &["checkout", "-b", "aaf/non-ui-handover"]);
+    fs::create_dir_all(repo.path().join("scripts")).unwrap();
+    fs::write(repo.path().join("scripts/check.py"), "assert 1 == 1\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-m", "non-ui script"]);
+
+    let mut cfg = RepoConfig::default();
+    cfg.gate.base_ref = "main".to_string();
+    cfg.commands.test_scoped = "true".to_string();
+    cfg.commands.lint = "true".to_string();
+    cfg.proof = android_proof_cfg();
+    cfg.cross_audit.score_gate = false;
+    cfg.cross_audit.dual_review = false;
+
+    let clock = FixedClock(1_795_680_100);
+    let receipt = run_gate_observed(
+        data.path(),
+        repo.path(),
+        &cfg,
+        GateMode::Scoped,
+        &clock,
+        &MachineConfig::default(),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(receipt.status, GateStatus::Clear, "{:?}", receipt.reasons);
+
+    let db = Db::open(&data.path().join("aaf.db")).unwrap();
+    let mut task = Task::new_root(
+        "t-non-ui",
+        repo.path().to_string_lossy(),
+        "Non-UI test task",
+        ImmutableSpec {
+            description: "only scripts".into(),
+            acceptance: vec!["pass".into()],
+        },
+        Priority::P2,
+        1_795_680_000,
+    );
+    task.state = TaskState::Done;
+    db.insert_task(&task).unwrap();
+    db.emit(&FactoryEvent {
+        id: None,
+        task_id: Some(task.id.clone()),
+        run_id: None,
+        kind: EventKind::GateResult,
+        payload_json: serde_json::json!({
+            "status": "CLEAR",
+            "tree_fp": receipt.tree_fp,
+            "config_hash": receipt.config_hash,
+            "gated_tree": repo.path().to_string_lossy(),
+        })
+        .to_string(),
+        created_at: 1_795_680_100,
+    })
+    .unwrap();
+
+    // Non-UI Clear receipt under trigger_globs must report XONG without missing device proof,
+    // even when runtime cross-audit config_hash differs from static load_config (e.g. dynamic reviewers).
+    let ok = load_handover(&db, data.path(), &task.id, &cfg).unwrap();
+    assert!(!ok.proof_required);
+    assert_eq!(ok.status, "XONG", "missing={:?}", ok.missing);
+
+    let mut drifted_audit_cfg = cfg.clone();
+    drifted_audit_cfg.cross_audit.require_different_provider = true;
+    let ok_drifted = load_handover(&db, data.path(), &task.id, &drifted_audit_cfg).unwrap();
+    assert!(!ok_drifted.proof_required);
+    assert_eq!(
+        ok_drifted.status, "XONG",
+        "missing={:?}",
+        ok_drifted.missing
+    );
+
+    // Tightening trigger_globs to match the committed non-UI script must fail closed.
+    let mut tightened_cfg = cfg.clone();
+    tightened_cfg.proof.trigger_globs = vec!["scripts/**".to_string()];
+    let tightened = load_handover(&db, data.path(), &task.id, &tightened_cfg).unwrap();
+    assert!(tightened.proof_required);
+    assert_eq!(tightened.status, "CHƯA XONG");
+
+    // Empty trigger_globs must still fail closed and require proof.
+    let mut all_proof_cfg = cfg.clone();
+    all_proof_cfg.proof.trigger_globs.clear();
+    let strict = load_handover(&db, data.path(), &task.id, &all_proof_cfg).unwrap();
+    assert!(strict.proof_required);
+    assert_eq!(strict.status, "CHƯA XONG");
+
+    // If a ProofRecorded event exists but the proof artifact is missing, fail closed.
+    db.emit(&FactoryEvent {
+        id: None,
+        task_id: Some(task.id.clone()),
+        run_id: None,
+        kind: EventKind::ProofRecorded,
+        payload_json: serde_json::json!({ "tree_fp": receipt.tree_fp }).to_string(),
+        created_at: 1_795_680_101,
+    })
+    .unwrap();
+    let missing_after_record = load_handover(&db, data.path(), &task.id, &cfg).unwrap();
+    assert!(missing_after_record.proof_required);
+    assert_eq!(missing_after_record.status, "CHƯA XONG");
 }

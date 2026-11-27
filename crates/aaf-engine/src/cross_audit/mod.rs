@@ -105,6 +105,24 @@ pub fn run_scored_audit(
     )
 }
 
+/// Strict inline JSON Schema matching [`parse_scored_verdict`] so CLIs that
+/// support `--json-schema` (`claude`, `agy`) enforce structured output.
+pub fn scored_audit_json_schema(require_scores: bool) -> String {
+    let req = if require_scores {
+        r#"["answers","scores"]"#
+    } else {
+        r#"["answers"]"#
+    };
+    let sc = if require_scores {
+        r#","scores":{"type":"array","minItems":7,"maxItems":7,"items":{"type":"object","additionalProperties":false,"required":["id","score","deduction_reason"],"properties":{"id":{"type":"string","enum":["G1","G2","G3","G4","G5","G6","G7"]},"score":{"type":"integer","minimum":0,"maximum":100},"deduction_reason":{"type":"string"}}}}"#
+    } else {
+        ""
+    };
+    format!(
+        r#"{{"type":"object","additionalProperties":false,"required":{req},"properties":{{"answers":{{"type":"array","minItems":1,"items":{{"type":"object","additionalProperties":false,"required":["id","answer","evidence"],"properties":{{"id":{{"type":"string","minLength":1}},"answer":{{"type":"string","enum":["yes","no"]}},"evidence":{{"type":"string"}}}}}}}}{sc}}}}}"#
+    )
+}
+
 /// Like [`run_scored_audit`] with an explicit diff byte ceiling.
 pub fn run_scored_audit_with_limit(
     input: &AuditInput,
@@ -131,6 +149,9 @@ pub fn run_scored_audit_with_limit(
 
     let mut request = request_template.clone();
     request.prompt = prompt::build_scored_prompt_with_limit(input, require_scores, max_diff_bytes);
+    if request.json_schema.is_none() {
+        request.json_schema = Some(scored_audit_json_schema(require_scores));
+    }
     let outcome = runner.run(&request)?;
     report.tokens_in = outcome.tokens_in;
     report.tokens_out = outcome.tokens_out;

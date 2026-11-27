@@ -463,3 +463,79 @@ fn an_interrupted_run_is_reaped_and_its_tasks_are_picked_up_again() {
     review.sort();
     assert_eq!(review, vec!["t1", "t2"]);
 }
+
+#[test]
+fn proof_only_gate_block_without_host_capture_stops_for_human_without_rework_or_freeze() {
+    struct ProofOnlyGate;
+    impl crate::factory::ports::GateRunner for ProofOnlyGate {
+        fn head_lock(
+            &self,
+            _tree: &std::path::Path,
+        ) -> aaf_domain::ports::PortResult<aaf_domain::gate::HeadLockReport> {
+            Ok(aaf_domain::gate::HeadLockReport {
+                status: aaf_domain::gate::LockStatus::Clear,
+                lock_fp: String::new(),
+                locked_changes: Vec::new(),
+                approval: None,
+            })
+        }
+        fn run(
+            &self,
+            tree: &std::path::Path,
+        ) -> aaf_domain::ports::PortResult<aaf_domain::gate::Receipt> {
+            Ok(aaf_domain::gate::Receipt {
+                schema_version: aaf_domain::gate::RECEIPT_SCHEMA_VERSION,
+                repo_root: tree.to_string_lossy().into_owned(),
+                tree_fp: "git-tree:t1".to_string(),
+                head_sha: None,
+                base_sha: None,
+                mode: aaf_domain::gate::GateMode::Scoped,
+                status: aaf_domain::gate::GateStatus::Blocked,
+                reasons: vec![
+                    "proof required: fingerprint: io: No such file or directory (os error 2)"
+                        .to_string(),
+                    "commands skipped: an earlier stage already blocks".to_string(),
+                ],
+                config_hash: String::new(),
+                commands: Vec::new(),
+                static_findings: Vec::new(),
+                suppressions: 0,
+                head_lock: aaf_domain::gate::HeadLockReport {
+                    status: aaf_domain::gate::LockStatus::Clear,
+                    lock_fp: String::new(),
+                    locked_changes: Vec::new(),
+                    approval: None,
+                },
+                store_compliance: aaf_domain::gate::StoreComplianceReport::not_applicable(),
+                created_at: 0,
+            })
+        }
+    }
+
+    let mut world = World::new();
+    world.repo.unblocker.global_freeze_consecutive_fails = 1;
+    world.repo.proof.required = true;
+    world.add("t1");
+    let mut deps = world.deps();
+    deps.gate = std::sync::Arc::new(ProofOnlyGate);
+    let hooks = crate::factory::Hooks {
+        idle: &|| false,
+        reap: &|_| Ok(()),
+    };
+    let summary = crate::factory::run(&deps, Mode::Once, &hooks).unwrap();
+
+    assert_eq!(world.state("t1"), TaskState::Blocked, "{summary:?}");
+    assert!(summary.requeued.is_empty(), "must not trigger T3/T4 rework");
+    assert!(
+        !summary.frozen && !is_frozen(&world.db).unwrap(),
+        "missing operator proof must not freeze the global factory"
+    );
+    assert!(
+        matches!(
+            world.task("t1").blocked_reason,
+            Some(BlockedReason::NeedsHuman { ref why }) if why.contains("missing signed device proof")
+        ),
+        "{:?}",
+        world.task("t1").blocked_reason
+    );
+}

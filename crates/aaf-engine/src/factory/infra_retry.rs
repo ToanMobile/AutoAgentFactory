@@ -54,9 +54,11 @@ pub(crate) fn block_infra(
 }
 
 /// RFC-032: a cross-audit that still has no verdict after its one retry,
-/// on a complete diff and with budget left, is the auditor's failure, not
-/// the implementer's. It becomes an infra block that comes back on its own
+/// on a complete diff, is the auditor's failure, not the implementer's.
+/// With budget left, it becomes an infra block that comes back on its own
 /// instead of a rework round (which would climb to T3/T4) or a freeze count.
+/// When the root budget is already spent, it freezes only that root and blocks
+/// for a human without incrementing the global factory freeze counter.
 /// Returns `false` (caller keeps its old path) for anything else.
 pub(crate) fn block_inconclusive_audit(
     deps: &Deps,
@@ -68,8 +70,38 @@ pub(crate) fn block_inconclusive_audit(
     if !inconclusive || diff_truncated {
         return Ok(false);
     }
-    if super::worker::ensure_budget(deps, &task.root_id)?.check() != BudgetCheck::Ok {
-        return Ok(false);
+    let mut budget = super::worker::ensure_budget(deps, &task.root_id)?;
+    let exceeded_kind = match budget.check() {
+        BudgetCheck::Ok => None,
+        BudgetCheck::Frozen => Some("root budget already frozen"),
+        BudgetCheck::TokensExceeded => Some("root token budget exceeded"),
+        BudgetCheck::WallClockExceeded => Some("root wall-clock budget exceeded"),
+        BudgetCheck::CyclesExceeded => Some("root unblock cycle budget exceeded"),
+    };
+    if let Some(kind) = exceeded_kind {
+        let why = format!(
+            "{kind} (tokens {}/{}, wall {}s/{}s, cycles {}/{}) after inconclusive cross-audit: {detail}",
+            budget.tokens_used,
+            budget.token_limit,
+            budget.wall_secs_used,
+            budget.wall_secs_limit,
+            budget.cycles_used,
+            budget.cycles_limit,
+        );
+        let reason = BlockedReason::BudgetExceeded {
+            detail: super::unblock::one_line(&why, 300),
+        };
+        if !budget.frozen {
+            budget.frozen = true;
+            deps.store.put_budget(&budget)?;
+            deps.emit(
+                EventKind::BudgetFrozen,
+                &task.root_id,
+                json!({ "root_id": task.root_id, "why": &why }),
+            )?;
+        }
+        block(deps, task, &reason, "budget_frozen", &why, false)?;
+        return Ok(true);
     }
     let detail = format!("cross-audit gave no verdict after its retry: {detail}");
     let reason = BlockedReason::Infra {

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use aaf_domain::config::RepoConfig;
 use aaf_domain::event::EventKind;
+use aaf_domain::gate::{GateStatus, Receipt};
 use aaf_domain::ports::{EventSink, TaskStore};
 use serde_json::Value;
 
@@ -58,6 +59,7 @@ pub fn load_handover(
     let proof_ev_fp = latest_event(&events, EventKind::ProofRecorded)
         .and_then(|e| serde_json::from_str::<Value>(&e.payload_json).ok())
         .and_then(|v| v.get("tree_fp").and_then(Value::as_str).map(str::to_string));
+    let had_proof_event = proof_ev_fp.is_some();
     let tree_fp = receipt
         .as_ref()
         .map(|r| r.tree_fp.clone())
@@ -106,13 +108,15 @@ pub fn load_handover(
             .ok()
         })
     });
+    let proof_required =
+        effective_proof_required(cfg, &roots, &repo_path, receipt.as_ref(), had_proof_event);
     let mut data = build_handover_from_parts_with_dual(
         &task,
         &events,
         receipt.as_ref(),
         audit.as_ref(),
         proof.as_ref(),
-        cfg.proof.required,
+        proof_required,
         cfg.cross_audit.score_gate,
         cfg.cross_audit.min_average_score,
         cfg.cross_audit.min_criterion_score,
@@ -121,4 +125,44 @@ pub fn load_handover(
     );
     data.proof_config = cfg.proof.clone();
     Ok(data)
+}
+
+fn effective_proof_required(
+    cfg: &RepoConfig,
+    roots: &[PathBuf],
+    repo_path: &Path,
+    receipt: Option<&Receipt>,
+    had_proof_event: bool,
+) -> bool {
+    if !cfg.proof.required {
+        return false;
+    }
+    if cfg.proof.trigger_globs.is_empty() {
+        return true;
+    }
+    if let Some(worktree) = roots
+        .iter()
+        .find(|r| r.as_path() != repo_path && r.is_dir())
+    {
+        return crate::gate::proof_need::proof_needed_for_worktree(
+            worktree,
+            &cfg.proof,
+            &cfg.gate.base_ref,
+            receipt.and_then(|r| r.base_sha.as_deref()),
+        );
+    }
+    if !had_proof_event && let Some(rec) = receipt {
+        if let (Some(base_sha), Some(head_sha)) = (rec.base_sha.as_deref(), rec.head_sha.as_deref())
+            && repo_path.is_dir()
+            && !crate::gate::proof_need::proof_needed_for_commit_range(
+                repo_path, &cfg.proof, base_sha, head_sha,
+            )
+        {
+            return false;
+        }
+        if rec.status == GateStatus::Clear && rec.config_hash == crate::gate::config_hash(cfg) {
+            return false;
+        }
+    }
+    true
 }

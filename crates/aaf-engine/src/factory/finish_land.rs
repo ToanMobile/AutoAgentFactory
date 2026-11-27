@@ -70,13 +70,19 @@ fn compose_task_pr_body(deps: &Deps, job: &GateJob, task: &Task, receipt: &Recei
     )
     .ok();
     let ca = &deps.settings.repo.cross_audit;
+    let proof_required = crate::gate::proof_need::proof_needed_for_worktree(
+        &job.worktree.path,
+        &deps.settings.repo.proof,
+        &deps.settings.repo.gate.base_ref,
+        receipt.base_sha.as_deref(),
+    );
     let handover = crate::handover::build_handover_from_parts_with_dual(
         task,
         &events,
         Some(receipt),
         audit.as_ref(),
         proof.as_ref(),
-        deps.settings.repo.proof.required,
+        proof_required,
         ca.score_gate,
         ca.min_average_score,
         ca.min_criterion_score,

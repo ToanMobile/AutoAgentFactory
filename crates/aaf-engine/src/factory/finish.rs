@@ -357,6 +357,36 @@ pub(super) fn is_head_lock_only_block(receipt: &Receipt) -> bool {
     })
 }
 
+fn is_proof_only_block(receipt: &Receipt) -> bool {
+    if receipt.status != GateStatus::Blocked
+        || receipt.head_lock.status == LockStatus::Blocked
+        || receipt.store_compliance.status == StoreStatus::Blocked
+        || receipt
+            .static_findings
+            .iter()
+            .any(|f| f.severity == Severity::Critical)
+        || receipt.commands.iter().any(|c| !c.passed())
+        || !receipt
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("proof required:"))
+    {
+        return false;
+    }
+    !receipt.reasons.iter().any(|r| {
+        !(r.starts_with("proof required:")
+            || r.starts_with("commands skipped:")
+            || r.starts_with("warning:")
+            || r.starts_with(THROTTLE_NOTE)
+            || r.starts_with(DOCS_FAST_PATH_NOTE)
+            || r.starts_with("work tree: removed "))
+    })
+}
+
+fn has_host_proof_automation(cfg: &aaf_domain::config::ProofConfig) -> bool {
+    !cfg.capture_cmd.trim().is_empty() || !cfg.flows.is_empty()
+}
+
 fn already_emitted_clear_gate(deps: &Deps, task_id: &str, receipt: &Receipt) -> bool {
     if receipt.tree_fp.is_empty() {
         return false;
@@ -446,6 +476,15 @@ pub(crate) fn settle(
         }
         Verdict::Red(receipt) => {
             emit_gate(&receipt)?;
+            if is_proof_only_block(&receipt)
+                && !has_host_proof_automation(&deps.settings.repo.proof)
+            {
+                return blocked(format!(
+                    "missing signed device proof (host/operator must run `aaf proof` or configure \
+                     `[proof].capture_cmd` / `[[proof.flows]]`): {}",
+                    receipt.reasons.join("; ")
+                ));
+            }
             let mut signal = FailureSignal::empty();
             signal.gate = Some(receipt);
             let digest = failure_digest(&signal);

@@ -247,8 +247,7 @@ pub(crate) fn run_auditor_turn(
                 if last_succeeded
                     && !report.diff_truncated
                     && infra.is_none()
-                    && limit_hit.is_none()
-                    && !last_final_text.trim().is_empty() =>
+                    && limit_hit.is_none() =>
             {
                 reason.clone()
             }
@@ -271,6 +270,9 @@ pub(crate) fn run_auditor_turn(
             &last_final_text,
             max_diff_bytes,
         );
+        if repair_req.json_schema.is_none() {
+            repair_req.json_schema = Some(cross_audit::scored_audit_json_schema(require_scores));
+        }
         // Fall back to the latest Inconclusive verdict if the runner errors
         // on the retry (e.g. transient port failure or single-shot test mock).
         let Ok(repair_out) = runner.run(&repair_req) else {
