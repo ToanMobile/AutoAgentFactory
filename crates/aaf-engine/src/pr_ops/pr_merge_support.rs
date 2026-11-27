@@ -488,10 +488,10 @@ impl TempRefGuard {
 
 impl Drop for TempRefGuard {
     fn drop(&mut self) {
-        let _ = git_raw(
-            &self.repo_root,
-            &["update-ref", "-d", "--no-deref", &self.ref_name],
-        );
+        if worktree::ensure_plain_reflogs(&self.repo_root).is_ok() {
+            let args = ["update-ref", "-d", "--no-deref", &self.ref_name];
+            let _ = git_raw(&self.repo_root, &args);
+        }
     }
 }
 

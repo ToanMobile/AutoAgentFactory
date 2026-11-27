@@ -343,6 +343,12 @@ fn clean_repo_merge_refs(
             continue;
         }
         if !dry_run {
+            if let Err(err) = crate::git::ensure_plain_reflogs(repo) {
+                report
+                    .warnings
+                    .push(format!("{refname}: update-ref -d: {err}"));
+                continue;
+            }
             match git_raw(repo, &["update-ref", "-d", "--no-deref", refname]) {
                 Ok(out) if out.success() => {}
                 Ok(out) => {

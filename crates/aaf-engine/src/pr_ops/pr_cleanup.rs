@@ -493,6 +493,12 @@ fn delete_local_branch(
         ));
         return false;
     }
+    if let Err(err) = worktree::ensure_plain_reflogs(main_repo) {
+        report
+            .warnings
+            .push(format!("could not delete local branch `{branch}`: {err}"));
+        return false;
+    }
     let oid = expect_head.to_ascii_lowercase();
     match git_raw(
         main_repo,

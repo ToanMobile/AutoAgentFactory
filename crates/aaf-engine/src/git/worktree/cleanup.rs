@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use super::super::cmd::{failure, git, git_raw};
 use super::super::{GitError, path_str};
 use super::{
-    BRANCH_PREFIX, SNAPSHOT_REF_PREFIX, SUBMODULES_REFUSAL, TaskWorktree, ensure_clean, list,
-    prune, removal_refusal, resolved, validate_task_id, worktree_path,
+    BRANCH_PREFIX, SNAPSHOT_REF_PREFIX, SUBMODULES_REFUSAL, TaskWorktree, ensure_clean,
+    ensure_plain_reflogs, list, prune, removal_refusal, resolved, validate_task_id, worktree_path,
 };
 
 /// True when `wt` has an active git rebase, merge, cherry-pick, or revert.
@@ -53,6 +53,7 @@ fn is_valid_oid(oid: &str) -> bool {
 }
 
 pub(super) fn delete_branch_ignore_missing(repo_root: &Path, branch: &str) -> Result<(), GitError> {
+    ensure_plain_reflogs(repo_root)?;
     let args = ["branch", "-D", branch];
     let del = git_raw(repo_root, &args)?;
     if !del.success() && !del.stderr.to_ascii_lowercase().contains("not found") {
@@ -72,6 +73,7 @@ pub fn delete_snapshot_refs(repo_root: &Path, task_id: &str) -> Result<usize, Gi
         if !refname.starts_with(&prefix) {
             continue;
         }
+        ensure_plain_reflogs(repo_root)?;
         git(repo_root, &["update-ref", "-d", "--no-deref", refname])?;
         deleted += 1;
     }
@@ -158,6 +160,7 @@ pub fn cleanup_missing_worktree(
         return Err(GitError::Unmerged(branch));
     }
     prune(repo_root)?;
+    ensure_plain_reflogs(repo_root)?;
     git(repo_root, &["branch", "-D", &branch])?;
     delete_snapshot_refs(repo_root, task_id)?;
     Ok(())
@@ -268,6 +271,7 @@ fn delete_branch_if_at_head(
         )));
     }
     let oid = expected_head.to_ascii_lowercase();
+    ensure_plain_reflogs(repo_root)?;
     let del = git_raw(
         repo_root,
         &["update-ref", "-d", "--no-deref", &branch_ref, &oid],

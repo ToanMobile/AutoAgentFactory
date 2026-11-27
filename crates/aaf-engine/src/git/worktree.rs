@@ -272,6 +272,7 @@ pub fn remove(
         git(repo_root, &["worktree", "remove", path])?;
     }
     if delete_branch {
+        ensure_plain_reflogs(repo_root)?;
         // -D because "merged" was decided above against every branch, not
         // only the HEAD that `branch -d` would compare with.
         git(repo_root, &["branch", "-D", &worktree.branch])?;
