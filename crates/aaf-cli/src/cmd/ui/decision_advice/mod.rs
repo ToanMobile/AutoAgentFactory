@@ -12,12 +12,12 @@ pub mod store;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use aaf_domain::pipeline::PlanContract;
-use aaf_domain::ports::{Clock, TaskStore};
+use aaf_domain::ports::{AccountStore, Clock, TaskStore};
 use aaf_domain::task::{Task, TaskState};
 use aaf_engine::db::Db;
 use serde_json::{Value, json};
@@ -69,6 +69,11 @@ fn extract_blocked_text(task: &Task) -> String {
         .unwrap_or_default()
 }
 
+fn is_task_active(task_id: &str) -> bool {
+    let g = tracker().lock().unwrap_or_else(|e| e.into_inner());
+    g.active_task.as_deref() == Some(task_id)
+}
+
 /// Cheap GET-path hydration for `GET /api/task/<id>`.
 /// Never spawns a worker or calls an LLM; reads & validates the `0600` sidecar.
 pub(crate) fn read_for_task(ctx: &Ctx, task: &Task, plan_json: &Value) -> Value {
@@ -84,7 +89,13 @@ pub(crate) fn read_for_task(ctx: &Ctx, task: &Task, plan_json: &Value) -> Value 
     let input_hash = compute_input_hash(task, &blocked_text, &open_qs);
     let now = SystemClock.now();
     match read_valid_advice(&ctx.data_dir, &task.id, &input_hash, now) {
-        Some(rec) => serde_json::to_value(rec).unwrap_or(Value::Null),
+        Some(mut rec) => {
+            if rec.status == "pending" && !is_task_active(&task.id) {
+                rec.status = "error".into();
+                rec.error = Some("previous analysis was interrupted; click retry".into());
+            }
+            serde_json::to_value(rec).unwrap_or(Value::Null)
+        }
         None => Value::Null,
     }
 }
@@ -117,7 +128,7 @@ pub(crate) fn trigger_analysis(
 
     // 1. Return fresh ready/pending cache if available (and not force-refreshing).
     if let Some(existing) = read_valid_advice(&ctx.data_dir, &task.id, &input_hash, now) {
-        if existing.status == "pending" {
+        if existing.status == "pending" && is_task_active(&task.id) {
             return Ok(json!({
                 "action": "analyze_decisions",
                 "task_id": task.id,
@@ -184,8 +195,18 @@ pub(crate) fn trigger_analysis(
             ));
         }
         g.active_task = Some(task.id.clone());
+        g.last_trigger_by_task
+            .retain(|_, ts| now.saturating_sub(*ts) < TASK_COOLDOWN_SECS);
         g.last_trigger_by_task.insert(task.id.clone(), now);
     }
+
+    let cooldown_ids: HashSet<String> = db
+        .list_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.in_cooldown(now))
+        .map(|a| a.profile.id)
+        .collect();
 
     let pending = StoredAdvice {
         schema_version: ADVICE_SCHEMA_VERSION,
@@ -214,7 +235,7 @@ pub(crate) fn trigger_analysis(
             let _guard = ActiveGuard {
                 task_id: tid_bg.clone(),
             };
-            let finished = match run_ai_analysis(&ctx_bg, &input) {
+            let finished = match run_ai_analysis(&ctx_bg, &input, &cooldown_ids) {
                 Ok((model, items)) => StoredAdvice {
                     schema_version: ADVICE_SCHEMA_VERSION,
                     task_id: tid_bg,

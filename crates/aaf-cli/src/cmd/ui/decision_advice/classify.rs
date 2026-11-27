@@ -181,6 +181,29 @@ pub fn sanitize_text(raw: &str, max_chars: usize) -> String {
         .collect()
 }
 
+fn looks_vietnamese(items: &[String]) -> bool {
+    items.iter().any(|s| {
+        s.chars().any(|c| {
+            matches!(
+                c,
+                'ă' | 'â'
+                    | 'đ'
+                    | 'ê'
+                    | 'ô'
+                    | 'ơ'
+                    | 'ư'
+                    | 'Ă'
+                    | 'Â'
+                    | 'Đ'
+                    | 'Ê'
+                    | 'Ô'
+                    | 'Ơ'
+                    | 'Ư'
+            ) || ('\u{1EA0}'..='\u{1EF9}').contains(&c)
+        })
+    })
+}
+
 /// Returns `Some(items)` when every decision item is deterministically a human
 /// access/device blocker — avoids burning LLM tokens on tasks requiring physical
 /// action or external credentials.
@@ -195,21 +218,32 @@ pub fn try_deterministic_fast_path(raw_items: &[String]) -> Option<Vec<AdviceIte
     {
         return None;
     }
+    let vi = looks_vietnamese(raw_items);
     let items = raw_items
         .iter()
         .zip(kinds)
         .take(MAX_ITEMS)
         .map(|(q, kind)| {
-            let hint = match kind {
-                DecisionKind::NeedsAccess => "Mục này cần bạn cấp quyền truy cập / cấu hình secret hoặc biến môi trường cục bộ trước khi gỡ chặn. Nhập xác nhận hoặc cấu hình đã hoàn tất vào mục Quyết định khác rồi mới gửi.",
-                DecisionKind::NeedsDevice => "Mục này cần đo/kiểm tra thực tế trên thiết bị hoặc xe thật. Nhập kết quả đo thực tế vào mục Quyết định khác để gỡ chặn, hoặc chọn làm phần tự động trước nếu khả thi.",
+            let hint = match (kind, vi) {
+                (DecisionKind::NeedsAccess, true) => "Mục này cần bạn cấp quyền truy cập / cấu hình secret hoặc biến môi trường cục bộ trước khi gỡ chặn. Nhập xác nhận hoặc cấu hình đã hoàn tất vào mục Quyết định khác rồi mới gửi.",
+                (DecisionKind::NeedsAccess, false) => "This item requires granting access or configuring local secrets/credentials before unblocking. Enter confirmation or details in Custom decision before submitting.",
+                (DecisionKind::NeedsDevice, true) => "Mục này cần đo/kiểm tra thực tế trên thiết bị hoặc xe thật. Nhập kết quả đo thực tế vào mục Quyết định khác để gỡ chặn, hoặc chọn làm phần tự động trước nếu khả thi.",
+                (DecisionKind::NeedsDevice, false) => "This item requires real device/hardware verification. Enter actual measurements in Custom decision to unblock, or choose to complete automated work first if applicable.",
                 _ => unreachable!(),
             };
             let options = match kind {
                 DecisionKind::NeedsDevice => vec![AdviceOption {
                     num: "1".into(),
-                    title: "Hoãn bước đo thiết bị thật, làm phần mã tự động trước".into(),
-                    desc: "Chỉ chọn nếu task còn phần mã/test có thể hoàn tất độc lập mà không cần dữ liệu đo ngay.".into(),
+                    title: if vi {
+                        "Hoãn bước đo thiết bị thật, làm phần mã tự động trước".into()
+                    } else {
+                        "Defer real-device verification, finish automated code first".into()
+                    },
+                    desc: if vi {
+                        "Chỉ chọn nếu task còn phần mã/test có thể hoàn tất độc lập mà không cần dữ liệu đo ngay.".into()
+                    } else {
+                        "Pick only if automated code/tests can be completed independently without device data now.".into()
+                    },
                     recommended: false,
                 }],
                 _ => Vec::new(),
@@ -272,8 +306,6 @@ pub fn merge_and_harden_items(
         // Monotonic kind: server human-input kinds are sticky; model may tighten.
         let final_kind = if server_kind.requires_human_input() {
             server_kind
-        } else if model_kind.requires_human_input() {
-            model_kind
         } else if model_kind != DecisionKind::Unknown {
             model_kind
         } else {

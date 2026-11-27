@@ -143,6 +143,14 @@ pub fn read_valid_advice(
     }
     let mut raw = String::new();
     let f = fs::File::open(&path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let fmeta = f.metadata().ok()?;
+        if !fmeta.file_type().is_file() || fmeta.dev() != meta.dev() || fmeta.ino() != meta.ino() {
+            return None;
+        }
+    }
     f.take(MAX_SIDECAR_BYTES + 1)
         .read_to_string(&mut raw)
         .ok()?;

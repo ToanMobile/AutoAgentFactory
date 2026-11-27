@@ -11,6 +11,7 @@
 //!   delimiters with `neutralise()`.
 //! - Hard 90-second timeout with process kill and 256 KiB stdout cap.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -36,8 +37,10 @@ const MAX_STDOUT_BYTES: usize = 256 * 1024;
 const MAX_SPEC_PROMPT_CHARS: usize = 2800;
 const DECISIONS_BEGIN: &str = "<<<AAF_UNTRUSTED_DECISIONS_BEGIN>>>";
 const DECISIONS_END: &str = "<<<AAF_UNTRUSTED_DECISIONS_END>>>";
+const CLAUDE_ALLOWED_TOOLS: &str = "Read,Grep,Glob";
 const CLAUDE_DISALLOWED_TOOLS: &str =
     "Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Agent";
+const EMPTY_MCP_CONFIG: &str = r#"{"mcpServers":{}}"#;
 
 #[derive(Debug, Deserialize)]
 struct ModelAdviceEnvelope {
@@ -195,7 +198,11 @@ struct ChosenRunner {
     uses_tools: bool,
 }
 
-fn resolve_runner(ctx: &Ctx, repo_root: &Path) -> Result<ChosenRunner, String> {
+fn resolve_runner(
+    ctx: &Ctx,
+    repo_root: &Path,
+    cooldown_ids: &HashSet<String>,
+) -> Result<ChosenRunner, String> {
     let lookup = |name: &str| binary_on_path_in(&ctx.path_var, name);
     let cfg = ctx.load_config(repo_root).ok();
     let discovered = cfg
@@ -215,12 +222,13 @@ fn resolve_runner(ctx: &Ctx, repo_root: &Path) -> Result<ChosenRunner, String> {
         .and_then(|d| resolve_binary_with_home(d, &ctx.path_var, Some(&ctx.home)));
     let grok_bin = find_descriptor("grok")
         .and_then(|d| resolve_binary_with_home(d, &ctx.path_var, Some(&ctx.home)));
+    let is_ready = |id: &str| !cooldown_ids.contains(id);
 
-    // 1. Prefer repo-pinned account if available.
+    // 1. Prefer repo-pinned account if available and not in cooldown.
     if let Some(pin) = pinned.as_deref()
-        && let Some(acc) = discovered
-            .iter()
-            .find(|p| p.name.eq_ignore_ascii_case(pin) || p.id.eq_ignore_ascii_case(pin))
+        && let Some(acc) = discovered.iter().find(|p| {
+            is_ready(&p.id) && (p.name.eq_ignore_ascii_case(pin) || p.id.eq_ignore_ascii_case(pin))
+        })
     {
         if acc.provider == ProviderKind::ClaudeCode
             && let Some(bin) = claude_bin.clone()
@@ -246,11 +254,13 @@ fn resolve_runner(ctx: &Ctx, repo_root: &Path) -> Result<ChosenRunner, String> {
         }
     }
 
-    // 2. Prefer first discovered Claude Code profile (has dedicated config_dir + read-only repo tools).
+    // 2. Prefer first available (non-cooldown) Claude Code profile.
     if let Some(bin) = claude_bin
-        && let Some(acc) = discovered
-            .iter()
-            .find(|p| p.provider == ProviderKind::ClaudeCode && Path::new(&p.config_dir).is_dir())
+        && let Some(acc) = discovered.iter().find(|p| {
+            p.provider == ProviderKind::ClaudeCode
+                && is_ready(&p.id)
+                && Path::new(&p.config_dir).is_dir()
+        })
     {
         return Ok(ChosenRunner {
             kind: "claude",
@@ -297,10 +307,30 @@ fn git_repo_fingerprint(repo_root: &Path) -> Option<(String, String)> {
     ))
 }
 
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        let _ = Command::new("kill")
+            .args(["-9", "--", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_bounded_command(mut cmd: Command, timeout: Duration) -> Result<String, String> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn analyzer failed: {e}"))?;
@@ -327,8 +357,7 @@ fn run_bounded_command(mut cmd: Command, timeout: Duration) -> Result<String, St
             Ok(Some(st)) => break st,
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_tree(&mut child);
                     let _ = out_reader.join();
                     let _ = err_reader.join();
                     return Err(format!(
@@ -339,8 +368,7 @@ fn run_bounded_command(mut cmd: Command, timeout: Duration) -> Result<String, St
                 thread::sleep(Duration::from_millis(80));
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_process_tree(&mut child);
                 return Err(format!("wait analyzer failed: {e}"));
             }
         }
@@ -414,6 +442,7 @@ pub fn extract_first_json_object(raw: &str) -> Result<&str, String> {
 pub fn run_ai_analysis(
     ctx: &Ctx,
     input: &AnalysisInput,
+    cooldown_ids: &HashSet<String>,
 ) -> Result<(String, Vec<AdviceItem>), String> {
     let repo_path = Path::new(&input.task.repo_root);
     let canon_repo = std::fs::canonicalize(repo_path)
@@ -421,7 +450,7 @@ pub fn run_ai_analysis(
     if !canon_repo.is_dir() {
         return Err("task repo_root is not a directory".into());
     }
-    let runner = resolve_runner(ctx, &canon_repo)?;
+    let runner = resolve_runner(ctx, &canon_repo, cooldown_ids)?;
     let prompt = build_analysis_prompt(input);
     let before_fp = if runner.uses_tools {
         git_repo_fingerprint(&canon_repo)
@@ -443,11 +472,18 @@ pub fn run_ai_analysis(
                 "-p",
                 "--permission-mode",
                 "plan",
+                "--tools",
+                CLAUDE_ALLOWED_TOOLS,
                 "--disallowedTools",
                 CLAUDE_DISALLOWED_TOOLS,
+                "--strict-mcp-config",
+                "--mcp-config",
+                EMPTY_MCP_CONFIG,
+                "--disable-slash-commands",
                 "--no-session-persistence",
                 "--output-format",
                 "text",
+                "--",
                 &prompt,
             ]);
         }

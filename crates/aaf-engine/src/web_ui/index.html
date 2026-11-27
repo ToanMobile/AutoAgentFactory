@@ -2395,7 +2395,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       <div class="decision-head">
         <div>
           <div class="decision-title">🧭 ${esc(tr(titleKey, { n: parsed.length }))}</div>
-          <div class="muted" style="font-size:12px;margin-top:2px">${esc(tr("decision.subtitle"))}</div>
+          <div class="muted" style="font-size:12px;margin-top:2px">${esc(tr(hasAnyRec ? "decision.subtitle" : "decision.subtitleInputNeeded"))}</div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           ${!ro ? `<button type="button" class="btn-sm" data-dec-analyze="1" ${isPendingAi ? "disabled" : ""}>${esc(analyzeBtnLabel)}</button>` : ""}
@@ -2424,13 +2424,16 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       try {
         const d = await api("/api/task/" + encodeURIComponent(taskId));
         const st = d && d.decision_advice && d.decision_advice.status;
+        if (st === "pending") {
+          scheduleDecisionAdvicePoll(taskId, scopeId);
+          return;
+        }
         if (scopeId === "revdec" && selectedReviewId === taskId && activeTab === "review") {
           loadReviewDetail(taskId);
         } else if ($("drawerBg").classList.contains("open") && drawerTaskId === taskId) {
           drawerDetail = d;
           renderDrawerTab();
         }
-        if (st === "pending") scheduleDecisionAdvicePoll(taskId, scopeId);
       } catch (_) {}
     }, 2500);
   }
