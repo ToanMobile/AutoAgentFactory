@@ -75,6 +75,8 @@ pub(super) fn classify_text_failure(
         "authentication_error",
         "login required",
         "not logged in",
+        "failed keyring savetoken",
+        "failed to save refreshed token",
         "permission_denied",
     ];
     const NET: &[&str] = &[

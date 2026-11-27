@@ -9,6 +9,7 @@ mod confined_paths;
 pub mod env;
 pub mod generic;
 pub mod linux_sandbox;
+pub mod macos_oauth_refresh;
 pub mod pty;
 pub mod reaper;
 pub mod registry;
