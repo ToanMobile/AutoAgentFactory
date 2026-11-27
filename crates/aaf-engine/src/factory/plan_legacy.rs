@@ -98,8 +98,8 @@ fn run_plan_in_tree(
                 deps.settings.hook_required,
             ),
         };
-    let hook_exec = worker::stage_hook_executor(deps, stage);
-    if let Some(problem) = worker::hook_problem_if(deps, &tree.path, hook_req, &hook_exec) {
+    let hook_execs = worker::stage_hook_executor(deps, stage);
+    if let Some(problem) = worker::hook_problem_any(deps, &tree.path, hook_req, &hook_execs) {
         unblock::block_untried(deps, &task.id, &problem)?;
         return Ok(None);
     }

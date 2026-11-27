@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
-use aaf_domain::config::{AGENT_CONFIG_GLOBS, RepoConfig};
+use aaf_domain::config::{AGENT_CONFIG_GLOBS, CrossAuditConfig, RepoConfig};
 use aaf_domain::gate::ChangeKind;
 use aaf_domain::pipeline::{PlanContract, TaskTier, canonical_provider, is_known_real_provider};
 use aaf_domain::ports::{AgentRunner, LimitHit, PortError, PortResult};
@@ -15,7 +15,7 @@ use aaf_domain::task::{Priority, Task};
 use globset::{GlobBuilder, GlobSetBuilder};
 
 use super::adapters::provider_for;
-use super::audit_backend::audit_cmd_is_claude;
+use super::audit_backend::{audit_cmd_is_claude, build_audit_command};
 use super::ports::{AccountPool, Grant, Purpose};
 use crate::accounts::Lease;
 use crate::gate::changes::Change;
@@ -409,13 +409,31 @@ pub fn writer_requires_hook(executor: &str, executor_cmd: &str) -> bool {
         || (executor_cmd.trim().is_empty() && is_hooked_non_claude_executor(executor))
 }
 
-/// Host executor for `aaf-hook` checks (SEC-137): `"claude"` when Claude runs, else normalized.
-pub fn hook_host_executor(executor: &str, executor_cmd: &str) -> String {
-    if stage_uses_claude(executor, executor_cmd) {
-        "claude".to_string()
-    } else {
-        aaf_domain::pipeline::normalize_executor_id(executor)
+/// SEC-137: fail-closed check when joined `executor_cmd` may run `claude`.
+fn cmd_may_run_claude(executor_cmd: &str) -> bool {
+    let s = executor_cmd.trim();
+    !s.is_empty()
+        && (build_audit_command(&CrossAuditConfig {
+            executor_cmd: s.into(),
+            ..Default::default()
+        })
+        .is_err()
+            || s.split_whitespace().any(|w| {
+                Path::new(w.trim_matches(['\'', '"']))
+                    .file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("claude"))
+            }))
+}
+
+/// Host executors for `aaf-hook` checks (SEC-137): always normalized `executor`, plus `"claude"`.
+pub fn hook_host_executors(executor: &str, executor_cmd: &str) -> Vec<String> {
+    let mut hosts = vec![aaf_domain::pipeline::normalize_executor_id(executor)];
+    if hosts[0] != "claude"
+        && (stage_uses_claude(executor, executor_cmd) || cmd_may_run_claude(executor_cmd))
+    {
+        hosts.push("claude".to_string());
     }
+    hosts
 }
 
 /// Returns the set of lowercased non-Claude hooked executors required by any

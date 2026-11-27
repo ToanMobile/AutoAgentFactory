@@ -25,7 +25,7 @@ pub(crate) use super::prompt::PLAN_EXECUTOR;
 use super::prompt::{PromptContext, build_prompt_with_context, sandbox_policy_for};
 use super::scheduler::dual_coord;
 use super::stage_router::{
-    ProviderKey, StageRouter, StageTarget, hook_host_executor, rework_count,
+    ProviderKey, StageRouter, StageTarget, hook_host_executors, rework_count,
 };
 use super::{Deps, plan_job, plan_legacy, post_audit, unblock};
 use crate::cross_audit::AUDIT_EXECUTOR;
@@ -153,13 +153,12 @@ pub(super) fn request_with(
     // proposal) gets its request here: none starts where the hook is not
     // registered (for executors that require `aaf-hook`).
     let exec = executor_for_provider(provider, &settings.repo.run.executor);
-    let cmd = if provider.is_none() || provider == provider_for(&settings.repo.run.executor) {
-        settings.repo.run.executor_cmd.join(" ")
+    let hooks = if provider.is_none() || provider == provider_for(&settings.repo.run.executor) {
+        hook_host_executors(exec, &settings.repo.run.executor_cmd.join(" "))
     } else {
-        String::new()
+        vec![exec.to_string()]
     };
-    let hook = hook_host_executor(exec, &cmd);
-    if let Some(problem) = hook_problem_if(deps, Path::new(cwd), hook_required, &hook) {
+    if let Some(problem) = hook_problem_any(deps, Path::new(cwd), hook_required, &hooks) {
         return Err(PortError::Invalid(problem));
     }
     Ok(AgentRequest {
@@ -192,12 +191,16 @@ fn executor_for_provider(provider: Option<ProviderKind>, fallback: &str) -> &str
     }
 }
 
-pub(super) fn stage_hook_executor(deps: &Deps, stage: Option<&StageTarget>) -> String {
+pub(super) fn stage_hook_executor(deps: &Deps, stage: Option<&StageTarget>) -> Vec<String> {
     let run = &deps.settings.repo.run;
     match stage {
-        Some(t) => hook_host_executor(&t.executor, &t.executor_cmd),
-        None => hook_host_executor(&run.executor, &run.executor_cmd.join(" ")),
+        Some(t) => hook_host_executors(&t.executor, &t.executor_cmd),
+        None => hook_host_executors(&run.executor, &run.executor_cmd.join(" ")),
     }
+}
+
+pub(super) fn hook_problem_any(d: &Deps, p: &Path, req: bool, hosts: &[String]) -> Option<String> {
+    hosts.iter().find_map(|h| hook_problem_if(d, p, req, h))
 }
 
 /// Why an agent started in `cwd` would run without `aaf-hook`; `None` when
@@ -375,7 +378,7 @@ fn agent(
             super::audit_turn::EarlierAttempt::SkipRebase => skip_rebase = true,
             super::audit_turn::EarlierAttempt::Stop(next) => return Ok(next),
         }
-    } else if hook_problem_if(deps, &worktree.path, hook_req, &hook).is_some() {
+    } else if hook_problem_any(deps, &worktree.path, hook_req, &hook).is_some() {
         deps.git.rebase(&worktree)?;
     }
     if !skip_rebase
@@ -385,7 +388,7 @@ fn agent(
     {
         return Ok(next);
     }
-    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
+    if let Some(problem) = hook_problem_any(deps, &worktree.path, hook_req, &hook) {
         unblock::block_untried(deps, task_id, &problem)?;
         return Ok(Next::Blocked);
     }
@@ -432,7 +435,7 @@ fn agent(
     }
     // Before any early return: a run that tampered with its guard is blocked
     // whether it succeeded, failed, or ran into a limit or an infra error.
-    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
+    if let Some(problem) = hook_problem_any(deps, &worktree.path, hook_req, &hook) {
         unblock::block_untried(deps, task_id, &problem)?;
         return Ok(Next::Blocked);
     }
@@ -458,7 +461,7 @@ fn agent(
         {
             return after_commit_failure(deps, task_id, &worktree, outcome, error, grant, routed);
         }
-        if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
+        if let Some(problem) = hook_problem_any(deps, &worktree.path, hook_req, &hook) {
             unblock::block_untried(deps, task_id, &problem)?;
             return Ok(Next::Blocked);
         }
@@ -468,7 +471,7 @@ fn agent(
         if deps.git.has_changes(&worktree)? {
             match deps.gate.run_autofix(&worktree.path) {
                 Ok(crate::gate::autofix::AutofixOutcome::Formatted { .. }) => {
-                    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
+                    if let Some(problem) = hook_problem_any(deps, &worktree.path, hook_req, &hook) {
                         unblock::block_untried(deps, task_id, &problem)?;
                         return Ok(Next::Blocked);
                     }

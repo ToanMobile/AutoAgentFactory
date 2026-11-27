@@ -13,7 +13,7 @@ use super::adapters::provider_for;
 use super::audit_turn::InfraWatch;
 use super::ports::{AccountPool, Grant};
 use super::stage_router::StageTarget;
-use super::worker::{GateJob, Job, Next, ensure_budget, halt_on_infra_with, hook_problem_if};
+use super::worker::{GateJob, Job, Next, ensure_budget, halt_on_infra_with, hook_problem_any};
 use super::{Deps, Store};
 use crate::git::TaskWorktree;
 use crate::git::worktree::validate_task_id;
@@ -223,7 +223,7 @@ pub(crate) fn handle_with_opt(
     );
     let branch = worktree.map_or_else(String::new, |w| w.branch.clone());
     let exec = super::worker::stage_hook_executor(deps, stage);
-    if let Some(problem) = worktree.and_then(|w| hook_problem_if(deps, &w.path, hook_req, &exec)) {
+    if let Some(problem) = worktree.and_then(|w| hook_problem_any(deps, &w.path, hook_req, &exec)) {
         // The run that just failed changed its own guard (or the base lost
         // it): no further agent starts in this worktree, neither a retry
         // nor the subtask proposer. A person looks at it; what failed is

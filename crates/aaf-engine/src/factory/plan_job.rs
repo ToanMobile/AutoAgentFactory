@@ -14,7 +14,7 @@ use serde_json::json;
 use super::audit_backend;
 use super::ports::{Grant, IntegrationGuard};
 use super::prompt::{PLAN_EXECUTOR, PromptContext, STEER_PREFIX};
-use super::stage_router::{StageTarget, hook_host_executor, is_tier_s_skip_debate};
+use super::stage_router::{StageTarget, hook_host_executors, is_tier_s_skip_debate};
 use super::worker::{self, Next};
 use super::{Deps, unblock};
 use crate::git::TaskWorktree;
@@ -134,8 +134,8 @@ fn run_plan_turn_in(
     let task = deps.store.get_task(task_id)?;
     let snap = load_snapshot(deps, task_id)?;
     let root = &tree.path;
-    let hook_exec = hook_host_executor(&target.executor, &target.executor_cmd);
-    if let Some(problem) = worker::hook_problem_if(deps, root, target.hook_required, &hook_exec) {
+    let hook_execs = hook_host_executors(&target.executor, &target.executor_cmd);
+    if let Some(problem) = worker::hook_problem_any(deps, root, target.hook_required, &hook_execs) {
         unblock::block_untried(deps, task_id, &problem)?;
         return Ok(Next::Blocked);
     }
