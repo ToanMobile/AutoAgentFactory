@@ -5,9 +5,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use aaf_domain::account::ProviderKind;
-use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
+use aaf_domain::ports::{
+    AgentOutcome, AgentRequest, AgentRunner, InfraKind, PortError, PortResult,
+};
 
+use super::macos_oauth_refresh;
 use super::pty::CommandSpec;
+use super::stream_log::StreamLog;
 use super::{AccountPaths, ExecEnv, open_stream_log, run_confined};
 
 mod stream;
@@ -127,9 +131,86 @@ fn account_state_paths(config_dir: &str) -> Vec<String> {
     paths
 }
 
+struct ClaudeFinishMeta {
+    peak_context_tokens: u64,
+    cache_read_tokens: u64,
+    effective_model: Option<String>,
+    ctx_pct: Option<u8>,
+}
+
 impl AgentRunner for ClaudeCodeRunner {
     fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome> {
         let spec = self.command(request)?;
+        // Refresh expired/near-expiry macOS Keychain OAuth tokens on the host
+        // before entering Seatbelt (which keeps ~/Library/Keychains read-only).
+        let pre_run_expiry =
+            macos_oauth_refresh::preflight_claude(&self.bin, &self.env, request, &spec.env);
+        let log = Arc::new(Mutex::new(open_stream_log(&self.env, request)));
+        log.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write_start("claude", Some(&self.model));
+
+        let (mut outcome, mut meta) = self.run_once(request, &spec, &log)?;
+        let non_json_tail = macos_oauth_refresh::non_json_lines(&outcome.log_tail);
+        let auth_or_none = outcome
+            .infra
+            .as_ref()
+            .is_none_or(|i| i.kind == InfraKind::Auth);
+        let keychain_err = outcome.exit_code != Some(0)
+            && !outcome.timed_out
+            && outcome.limit_hit.is_none()
+            && auth_or_none
+            && (outcome
+                .infra
+                .as_ref()
+                .is_some_and(|i| macos_oauth_refresh::is_claude_keychain_save_error(&i.raw))
+                || macos_oauth_refresh::is_claude_keychain_save_error(&non_json_tail));
+        if keychain_err
+            && macos_oauth_refresh::refresh_claude_now(
+                &self.bin,
+                &self.env,
+                request,
+                &spec.env,
+                pre_run_expiry,
+            )
+        {
+            if outcome.tokens_in == 0 && outcome.tokens_out == 0 {
+                log.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .write_event("retry", Some("claude"), Some("oauth_refreshed_on_host"));
+                (outcome, meta) = self.run_once(request, &spec, &log)?;
+            } else {
+                outcome.infra =
+                    macos_oauth_refresh::reclassify_refreshed_keychain_failure(outcome.infra);
+            }
+        }
+        log.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write_claude_finish(
+                outcome.exit_code,
+                outcome.timed_out,
+                outcome.tokens_in,
+                outcome.tokens_out,
+                meta.peak_context_tokens,
+                meta.cache_read_tokens,
+                meta.effective_model.as_deref(),
+                meta.ctx_pct,
+            );
+        Ok(outcome)
+    }
+
+    fn reports_tokens(&self) -> bool {
+        true
+    }
+}
+
+impl ClaudeCodeRunner {
+    fn run_once(
+        &self,
+        request: &AgentRequest,
+        spec: &CommandSpec,
+        log: &Arc<Mutex<StreamLog>>,
+    ) -> PortResult<(AgentOutcome, ClaudeFinishMeta)> {
         // Where Claude Code keeps its own state: the account's directory, or
         // the default location when no account was assigned.
         let account = match (&request.account, &self.env.home) {
@@ -145,12 +226,14 @@ impl AgentRunner for ClaudeCodeRunner {
             },
             (None, None) => AccountPaths::default(),
         };
-        let mut log = open_stream_log(&self.env, request);
-        log.write_start("claude", Some(&self.model));
-        let state = Arc::new(Mutex::new((StreamParser::default(), log, (0u64, 0u64))));
+        let state = Arc::new(Mutex::new((
+            StreamParser::default(),
+            Arc::clone(log),
+            (0u64, 0u64),
+        )));
         let feed = Arc::clone(&state);
         let output = run_confined(
-            spec,
+            spec.clone(),
             request,
             &self.env,
             account,
@@ -158,16 +241,18 @@ impl AgentRunner for ClaudeCodeRunner {
             Some(Box::new(move |line| {
                 let mut guard = feed.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.0.feed_line(line);
-                guard.1.record_claude_line(line);
                 let snap = guard.0.summary();
                 let cur = (snap.tokens_in, snap.tokens_out);
+                let mut log_guard = guard.1.lock().unwrap_or_else(PoisonError::into_inner);
+                log_guard.record_claude_line(line);
                 if cur != guard.2 && (cur.0 > 0 || cur.1 > 0) {
+                    log_guard.write_usage(cur.0, cur.1);
+                    drop(log_guard);
                     guard.2 = cur;
-                    guard.1.write_usage(cur.0, cur.1);
                 }
             })),
         )?;
-        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         let summary = guard.0.summary();
         let exit_code =
             if (summary.is_error || summary.infra.is_some()) && output.exit_code == Some(0) {
@@ -177,9 +262,9 @@ impl AgentRunner for ClaudeCodeRunner {
             };
         let effective_model = summary
             .observed_model
-            .as_deref()
-            .or_else(|| (!self.model.trim().is_empty()).then_some(self.model.as_str()));
-        let ctx_pct = resolve_context_window(effective_model)
+            .clone()
+            .or_else(|| (!self.model.trim().is_empty()).then(|| self.model.clone()));
+        let ctx_pct = resolve_context_window(effective_model.as_deref())
             .filter(|&(win, _)| win > 0 && summary.peak_context_tokens > 0)
             .map(|(win, _)| {
                 let pct = summary
@@ -189,16 +274,12 @@ impl AgentRunner for ClaudeCodeRunner {
                     .unwrap_or(0);
                 u8::try_from(pct.min(100)).unwrap_or(100)
             });
-        guard.1.write_claude_finish(
-            exit_code,
-            output.timed_out,
-            summary.tokens_in,
-            summary.tokens_out,
-            summary.peak_context_tokens,
-            summary.cache_read_tokens,
+        let meta = ClaudeFinishMeta {
+            peak_context_tokens: summary.peak_context_tokens,
+            cache_read_tokens: summary.cache_read_tokens,
             effective_model,
             ctx_pct,
-        );
+        };
         let mut limit_hit = summary.limit_hit.filter(|_| !output.timed_out);
         let mut infra = summary.infra.filter(|_| !output.timed_out);
         if exit_code != Some(0)
@@ -221,33 +302,24 @@ impl AgentRunner for ClaudeCodeRunner {
             // telemetry (e.g. benign `rate_limit_event` `"status":"allowed"`)
             // or assistant prose cannot trigger false cooldowns, while real
             // mid-run HTTP 429/401/503/network crashes are still classified.
-            let non_json: String = output
-                .tail
-                .lines()
-                .filter(|line| {
-                    let trimmed = line.trim();
-                    !trimmed.is_empty()
-                        && !matches!(
-                            serde_json::from_str::<serde_json::Value>(trimmed),
-                            Ok(serde_json::Value::Object(_))
-                        )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let non_json = macos_oauth_refresh::non_json_lines(&output.tail);
             if !non_json.is_empty() {
                 (limit_hit, infra) =
                     super::generic::classify_generic_failure(exit_code, false, &non_json);
             }
         }
-        Ok(AgentOutcome {
-            exit_code,
-            timed_out: output.timed_out,
-            final_text: summary.final_text,
-            tokens_in: summary.tokens_in,
-            tokens_out: summary.tokens_out,
-            limit_hit,
-            infra,
-            log_tail: output.tail,
-        })
+        Ok((
+            AgentOutcome {
+                exit_code,
+                timed_out: output.timed_out,
+                final_text: summary.final_text,
+                tokens_in: summary.tokens_in,
+                tokens_out: summary.tokens_out,
+                limit_hit,
+                infra,
+                log_tail: output.tail,
+            },
+            meta,
+        ))
     }
 }

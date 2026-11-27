@@ -372,6 +372,17 @@ impl<'a> Scheduler<'a> {
         let state = self.deps.store.get_task(&task_id)?.state;
         self.requeue_if_ready(task_id.clone(), state);
         if matches!(self.mode, Mode::Once | Mode::Drain) {
+            let oauth_recovered =
+                detail.contains(crate::executors::macos_oauth_refresh::OAUTH_REFRESHED_MARKER);
+            let tries = self
+                .state
+                .transient_retries
+                .entry(task_id.clone())
+                .or_default();
+            if oauth_recovered && *tries == 0 {
+                *tries = 1;
+                return Ok(());
+            }
             self.record_halt(&task_id, detail);
             return Ok(());
         }
