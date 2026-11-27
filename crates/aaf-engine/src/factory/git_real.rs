@@ -188,6 +188,7 @@ impl GitOps for RealGit {
             }
             other => other,
         })?;
+        worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
         let args = [
             "-c",
             NO_HOOKS,
@@ -317,6 +318,7 @@ impl GitOps for RealGit {
     fn rebase(&self, worktree: &TaskWorktree) -> PortResult<Vec<String>> {
         let _admin = self.admin();
         let tree = worktree.path.as_path();
+        worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
         let start = self.start();
         let args = [
             "-c",

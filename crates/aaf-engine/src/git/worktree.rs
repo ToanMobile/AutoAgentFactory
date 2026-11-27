@@ -45,10 +45,21 @@ pub(crate) fn ensure_on_branch(tree: &Path, branch: &str) -> Result<(), GitError
     let expected = format!("refs/heads/{branch}");
     match git(tree, &["symbolic-ref", "-q", "HEAD"]) {
         Ok(head) if head == expected => Ok(()),
-        Ok(_) | Err(GitError::Command { .. }) => Err(GitError::Invalid(format!(
-            "{} is not on branch {branch}",
+        Ok(head) => Err(GitError::Invalid(format!(
+            "{} is not on branch {branch}: HEAD is {head}",
             tree.display()
         ))),
+        Err(GitError::Command { code, stderr, .. }) => {
+            let detail = if stderr.is_empty() {
+                format!("git symbolic-ref exited with {code:?}")
+            } else {
+                format!("git symbolic-ref exited with {code:?}: {stderr}")
+            };
+            Err(GitError::Invalid(format!(
+                "{} is not on branch {branch}: {detail}",
+                tree.display()
+            )))
+        }
         Err(err) => Err(err),
     }
 }
