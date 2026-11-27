@@ -436,6 +436,12 @@ pub(super) fn clean_task_artifacts_by_id(
         && has_branch
     {
         if !clean_opts.dry_run {
+            if let Err(err) = worktree::ensure_plain_reflogs(repo) {
+                report
+                    .warnings
+                    .push(format!("{task_id}: branch delete: {err}"));
+                return Ok(());
+            }
             let del = git_raw(
                 repo,
                 &["update-ref", "-d", "--no-deref", &branch_ref, verified_oid],

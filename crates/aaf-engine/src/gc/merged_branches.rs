@@ -490,6 +490,9 @@ fn apply_cleanup(main_repo: &Path, candidate: &Candidate, dry_run: bool, report:
         return push_warn(report, format!("prune for `{branch}` ({e}); branch kept"));
     }
     let (branch_ref, oid) = (format!("refs/heads/{branch}"), &candidate.oid);
+    if let Err(e) = worktree::ensure_plain_reflogs(main_repo) {
+        return push_warn(report, format!("delete `{branch}`: {e}"));
+    }
     match git_raw(
         main_repo,
         &["update-ref", "-d", "--no-deref", &branch_ref, oid],
