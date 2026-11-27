@@ -111,7 +111,7 @@ pub(super) fn check_ln(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let mut dirs = Vec::new();
     for &d in &pos {
         let p = ctx.expand_real_dotdot(d);
-        if matches!(d, "." | "..") || is_guarded_dir(&p) || p.is_dir() {
+        if matches!(d, "." | "..") || paths::has_glob(d) || is_guarded_dir(&p) || p.is_dir() {
             let real = paths::real(&p);
             if !seen_dirs.contains(&real) {
                 if dirs.len() == MAX_MODIFIERS {
