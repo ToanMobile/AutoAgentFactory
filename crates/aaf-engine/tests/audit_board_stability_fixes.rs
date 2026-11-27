@@ -129,7 +129,10 @@ fn a10_wrapper_shell_script_wrapping_gradlew_classifies_as_gradle() {
     )
     .unwrap();
     let script_str = script.to_string_lossy().into_owned();
-    assert_eq!(heavy_tool_argv(&[script_str.as_str()]), Some(HeavyTool::Gradle));
+    assert_eq!(
+        heavy_tool_argv(&[script_str.as_str()]),
+        Some(HeavyTool::Gradle)
+    );
     assert_eq!(
         heavy_tool_argv(&["bash", script_str.as_str()]),
         Some(HeavyTool::Gradle)

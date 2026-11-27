@@ -159,7 +159,11 @@ fn assigned_non_claude_account_routes_run_executor_to_gemini_or_grok() {
 
     // 1. Assign Grok -> switches executor from claude to grok, clears model & effort,
     //    and clears Claude-inherited pipeline writer stages.
-    std::fs::write(repo.join(".claude/settings.local.json"), r#"{"account":"grok"}"#).unwrap();
+    std::fs::write(
+        repo.join(".claude/settings.local.json"),
+        r#"{"account":"grok"}"#,
+    )
+    .unwrap();
     let mut cfg = ctx.load_config(&repo).unwrap();
     assert_eq!(cfg.repo.run.executor, "grok");
     cfg.repo.run.executor = "claude".into();
@@ -177,7 +181,11 @@ fn assigned_non_claude_account_routes_run_executor_to_gemini_or_grok() {
     assert!(cfg.repo.pipeline.implementer.effort.is_empty());
 
     // 2. Assign Gemini (case-insensitive) -> switches executor from claude to antigravity
-    std::fs::write(repo.join(".claude/settings.local.json"), r#"{"account":"GEMINI"}"#).unwrap();
+    std::fs::write(
+        repo.join(".claude/settings.local.json"),
+        r#"{"account":"GEMINI"}"#,
+    )
+    .unwrap();
     let mut cfg2 = ctx.load_config(&repo).unwrap();
     assert_eq!(cfg2.repo.run.executor, "antigravity");
     cfg2.repo.run.executor = "claude".into();

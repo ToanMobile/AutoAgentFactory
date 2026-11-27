@@ -3,16 +3,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::PoisonError;
+use std::time::Instant;
 
 use aaf_domain::ports::PortResult;
 
-use super::{GitOps, RealGit, err};
+use super::{GH_LIST_TIMEOUT, GitOps, RealGit, SQUASH_POLL_INTERVAL, err};
 use crate::git::cmd::git;
 use crate::git::pr_feedback_gh::PrRef;
 use crate::git::pr_merged_gh::{VerifiedPrMerge, verify_merged_pr};
 use crate::git::worktree;
 use crate::git::{GitError, TaskWorktree};
-use crate::process::CommandRunner;
+use crate::process::{CommandRunner, SystemRunner};
 
 impl RealGit {
     /// Checks whether a recorded PR URL is `MERGED` into the configured base
@@ -159,5 +161,72 @@ impl RealGit {
             effective_cwd,
         );
         Ok(report.warnings)
+    }
+
+    pub(super) fn sweep_orphan_batches_impl(
+        &self,
+        active_task_ids: &HashSet<String>,
+    ) -> Result<Vec<String>, GitError> {
+        let _admin = self.admin();
+        let repo_id = aaf_fp::repo_id(&self.repo_root);
+        worktree::remove_orphan_batch_worktrees(
+            &self.repo_root,
+            &self.worktrees_dir,
+            &repo_id,
+            active_task_ids,
+            false,
+        )
+        .map(|sweep| sweep.warnings)
+    }
+
+    pub(super) fn verified_squash_merges_impl(
+        &self,
+        candidates: &[(String, String)],
+    ) -> Result<HashMap<String, String>, GitError> {
+        if candidates.is_empty() {
+            return Ok(HashMap::new());
+        }
+        {
+            let mut last = self
+                .last_squash_poll
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if last.is_some_and(|t| t.elapsed() < SQUASH_POLL_INTERVAL) {
+                return Ok(HashMap::new());
+            }
+            *last = Some(Instant::now());
+        }
+        let runner = SystemRunner {
+            timeout: GH_LIST_TIMEOUT,
+        };
+        self.verify_squash_merges_with(candidates, &runner)
+    }
+
+    pub(super) fn create_turn_snapshot_impl(
+        &self,
+        worktree: &TaskWorktree,
+        run_id: &str,
+        now: i64,
+    ) -> Result<Option<(String, String)>, GitError> {
+        let _admin = self.admin();
+        let task_id = worktree.task_id()?;
+        super::super::snapshots::create_turn_snapshot_ref(
+            &self.repo_root,
+            &worktree.path,
+            task_id,
+            run_id,
+            now,
+        )
+        .map(Some)
+    }
+
+    pub(super) fn verified_merged_pr_impl(
+        &self,
+        pr: &PrRef,
+    ) -> Result<Option<VerifiedPrMerge>, GitError> {
+        let runner = SystemRunner {
+            timeout: GH_LIST_TIMEOUT,
+        };
+        self.verify_merged_pr_with(pr, &runner)
     }
 }

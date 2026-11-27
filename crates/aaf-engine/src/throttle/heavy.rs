@@ -556,7 +556,8 @@ pub fn heavy_tool_argv<S: AsRef<OsStr>>(argv: &[S]) -> Option<HeavyTool> {
             continue;
         }
         let path = std::path::Path::new(arg.as_ref());
-        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file() && m.len() <= 16_384)
+        if std::fs::symlink_metadata(path)
+            .is_ok_and(|m| m.file_type().is_file() && m.len() <= 16_384)
             && let Ok(body) = std::fs::read_to_string(path)
             && let Some(tool) = heavy_tool(&body)
         {

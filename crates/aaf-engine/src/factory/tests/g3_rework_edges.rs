@@ -181,8 +181,8 @@ fn collect_rework_findings_skips_passing_minor_nits_when_average_meets_threshold
         },
         GoldenScore {
             id: "G6".to_string(),
-            score: 96,
-            deduction_reason: "tiny style note".to_string(),
+            score: 93,
+            deduction_reason: "drags average below 95".to_string(),
         },
     ];
     let verdict = AuditVerdict::Pass {
@@ -196,7 +196,7 @@ fn collect_rework_findings_skips_passing_minor_nits_when_average_meets_threshold
 
     let low_avg = collect_rework_findings(&verdict, &scores, &reasons, 92, &cfg);
     let low_ids: Vec<&str> = low_avg.iter().map(|f| f.id.as_str()).collect();
-    assert_eq!(low_ids, vec!["G4", "G6", "G1"]);
+    assert_eq!(low_ids, vec!["G4", "G6"]);
 }
 
 #[test]
