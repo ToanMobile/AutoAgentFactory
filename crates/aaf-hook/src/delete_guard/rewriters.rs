@@ -107,13 +107,20 @@ pub(super) fn check_ln(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         Ok(pos) => pos,
         Err(denial) => return Some(denial),
     };
-    let is_dir = |d: &&str| {
+    let mut seen_dirs = Vec::new();
+    let mut dirs = Vec::new();
+    for &d in &pos {
         let p = ctx.expand_real_dotdot(d);
-        d.ends_with('/') || matches!(*d, "." | "..") || is_guarded_dir(&p) || p.is_dir()
-    };
-    let dirs: Vec<&str> = pos.iter().copied().filter(is_dir).collect();
-    if dirs.len() > MAX_MODIFIERS {
-        return Some(cant("ln", "more than 4 target directories"));
+        if matches!(d, "." | "..") || paths::has_glob(d) || is_guarded_dir(&p) || p.is_dir() {
+            let real = paths::real(&p);
+            if !seen_dirs.contains(&real) {
+                if dirs.len() == MAX_MODIFIERS {
+                    return Some(cant("ln", "more than 4 target directories"));
+                }
+                seen_dirs.push(real);
+                dirs.push(d);
+            }
+        }
     }
     let in_dir = |d: &str| {
         pos.iter()
@@ -155,11 +162,24 @@ fn unparseable_long(opt: &str, is_zstd: bool, is_lzop: bool) -> bool {
         || (is_lzop && (long_is(opt, "--path", 4) || long_is(opt, "--extract", 4)))
 }
 
+fn safe_env_opts(val: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    val.split_ascii_whitespace().all(|tok| {
+        matches!(tok, "--fast" | "--best")
+            || tok.strip_prefix("-T").is_some_and(digits)
+            || tok.strip_prefix('-').is_some_and(digits)
+    })
+}
+
 /// Fail-closed check for compressors/decompressors on env vars, options, and paths.
 pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let (name, args) = (cmd.name(), cmd.args());
     let (names, decomp, suffixes) = find_spec(name)?;
-    if let Some((var, _)) = cmd.assigns.iter().find(|(k, _)| has_word(ENV_OPTS, k)) {
+    if let Some((var, _)) = cmd
+        .assigns
+        .iter()
+        .find(|(k, v)| has_word(ENV_OPTS, k) && !safe_env_opts(v))
+    {
         return Some(cant(name, &format!("option env var {var}")));
     }
     let (is_lzop, is_zstd) = (names == "lzop", names.starts_with("zstd"));
