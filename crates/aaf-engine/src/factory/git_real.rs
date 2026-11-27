@@ -167,6 +167,7 @@ impl GitOps for RealGit {
 
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()> {
         let tree = worktree.path.as_path();
+        worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
         git(tree, &["add", "-A"]).map_err(err)?;
         if git(tree, &["status", "--porcelain"])
             .map_err(err)?
