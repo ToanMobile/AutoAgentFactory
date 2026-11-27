@@ -495,8 +495,7 @@ const ENV_VARIANTS: &[&str] = &[
     ".env.test",
 ];
 
-/// A file-name glob (as given to `find -name`) can match a protected file.
-pub fn may_name_protected(pattern: &str) -> bool {
+fn may_name_protected_with(pattern: &str, include_nested: bool) -> bool {
     if pattern.len() > MAX_PATTERN {
         return true;
     }
@@ -506,6 +505,7 @@ pub fn may_name_protected(pattern: &str) -> bool {
     let parts = glob_parts(pattern);
     if PROTECTED_GLOBS
         .iter()
+        .filter(|g| include_nested || !NESTED.iter().any(|(_, f)| f == *g))
         .any(|glob| globs_intersect(&parts, &glob_parts(glob)))
     {
         return true;
@@ -517,6 +517,16 @@ pub fn may_name_protected(pattern: &str) -> bool {
     globs_intersect(&parts, &glob_parts(".env.*"))
         && (parts.first() != Some(&Part::Star)
             || ENV_VARIANTS.iter().any(|name| glob_match(pattern, name)))
+}
+
+/// A file-name glob (as given to `find -name`) can match a protected file.
+pub fn may_name_protected(pattern: &str) -> bool {
+    may_name_protected_with(pattern, true)
+}
+
+/// Like [`may_name_protected`], excluding names only protected inside `.claude`/`.autofactory`.
+pub fn may_name_protected_anywhere(pattern: &str) -> bool {
+    may_name_protected_with(pattern, false)
 }
 
 /// A file-name glob can match a secret file (returns the matched pattern).

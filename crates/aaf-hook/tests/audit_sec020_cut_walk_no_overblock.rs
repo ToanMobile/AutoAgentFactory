@@ -41,7 +41,28 @@ fn cut_walk_allows_open_globs_and_non_guarded_literals() {
             ("rm -f **/core.*", ALLOW),
             ("rm -f **/dist/settings.json", ALLOW),
             ("rm **/build/config.toml", ALLOW),
+            ("rm **/build/*.toml", ALLOW),
+            ("rm **/dist/settings.jso?", ALLOW),
             ("cat */f.tx?", ALLOW),
+            ("rm **/.claude/settings.jso?", DELETE),
+            ("rm **/*.toml", DELETE),
+            ("rm **/settings.jso?", DELETE),
+        ],
+    );
+}
+
+#[test]
+fn copier_with_glob_parent_allows_toml_into_non_guarded_dir() {
+    let fx = Fixture::new();
+    fx.write("crates/a/Cargo.toml", "[package]\nname = \"a\"\n");
+    fx.write("crates/b/x.toml", "k = 1\n");
+    fs::create_dir_all(fx.root.join("dst")).unwrap();
+    fs::create_dir_all(fx.root.join("out")).unwrap();
+    run_corpus(
+        &fx,
+        &[
+            ("cp crates/*/*.toml dst/", ALLOW),
+            ("rsync -a crates/*/*.toml out/", ALLOW),
         ],
     );
 }
