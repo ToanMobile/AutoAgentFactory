@@ -284,6 +284,7 @@ fn glob_secret(raw: &str, ctx: &Ctx) -> Option<String> {
         return Some(format!("{last} (pattern {pat})"));
     }
     if walk.cut
+        && paths::bounded_glob(last)
         && let Some(pat) = paths::may_name_secret(last)
     {
         return Some(format!("{last} (pattern {pat})"));

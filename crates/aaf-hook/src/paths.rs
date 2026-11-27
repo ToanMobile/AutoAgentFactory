@@ -415,6 +415,12 @@ pub fn has_glob(text: &str) -> bool {
     text.contains(['*', '?', '['])
 }
 
+/// True when `last` is a glob with a bounded tail (does not end with `*`),
+/// e.g. `release.keystor?` or `*.pe?`, unlike open-ended `README*`/`mod.*`.
+pub fn bounded_glob(last: &str) -> bool {
+    has_glob(last) && !last.ends_with('*')
+}
+
 #[derive(PartialEq)]
 enum Part {
     Star,

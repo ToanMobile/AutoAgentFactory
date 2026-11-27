@@ -498,7 +498,7 @@ fn glob_hit(path: &Path, takes_dirs: bool, ctx: &Ctx) -> Option<String> {
             return None;
         }
         return ((pattern_could_match(path, last, takes_dirs)
-            || (walk.cut && paths::may_name_protected(last)))
+            || (walk.cut && paths::bounded_glob(last) && paths::may_name_protected(last)))
             && ctx.in_repo(path))
         .then(|| "the pattern can match a protected file".to_string());
     }
