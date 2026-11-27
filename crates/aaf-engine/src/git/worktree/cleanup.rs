@@ -72,7 +72,7 @@ pub fn delete_snapshot_refs(repo_root: &Path, task_id: &str) -> Result<usize, Gi
         if !refname.starts_with(&prefix) {
             continue;
         }
-        git(repo_root, &["update-ref", "-d", refname])?;
+        git(repo_root, &["update-ref", "-d", "--no-deref", refname])?;
         deleted += 1;
     }
     Ok(deleted)
@@ -267,10 +267,10 @@ fn delete_branch_if_at_head(
             "{branch} (tip {tip} != expected {expected_head})"
         )));
     }
-    let expected_lower = expected_head.to_ascii_lowercase();
+    let oid = expected_head.to_ascii_lowercase();
     let del = git_raw(
         repo_root,
-        &["update-ref", "-d", &branch_ref, &expected_lower],
+        &["update-ref", "-d", "--no-deref", &branch_ref, &oid],
     )?;
     if !del.success() && branch_exists(repo_root, &branch_ref)? {
         return Err(GitError::Unmerged(format!(

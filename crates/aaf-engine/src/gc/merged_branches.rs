@@ -489,10 +489,10 @@ fn apply_cleanup(main_repo: &Path, candidate: &Candidate, dry_run: bool, report:
     {
         return push_warn(report, format!("prune for `{branch}` ({e}); branch kept"));
     }
-    let branch_ref = format!("refs/heads/{branch}");
+    let (branch_ref, oid) = (format!("refs/heads/{branch}"), &candidate.oid);
     match git_raw(
         main_repo,
-        &["update-ref", "-d", &branch_ref, &candidate.oid],
+        &["update-ref", "-d", "--no-deref", &branch_ref, oid],
     ) {
         Ok(out) if out.success() => report.merged_branches_deleted.push(branch.clone()),
         Ok(out) => {

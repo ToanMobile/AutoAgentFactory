@@ -343,7 +343,7 @@ fn clean_repo_merge_refs(
             continue;
         }
         if !dry_run {
-            match git_raw(repo, &["update-ref", "-d", refname]) {
+            match git_raw(repo, &["update-ref", "-d", "--no-deref", refname]) {
                 Ok(out) if out.success() => {}
                 Ok(out) => {
                     report
