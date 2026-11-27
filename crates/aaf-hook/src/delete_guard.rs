@@ -143,7 +143,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             })
         }
         "cp" | "install" | "rsync" => writers::check_copier(name, args, ctx),
-        "ln" => rewriters::check_ln(args, ctx),
+        "ln" => rewriters::check_ln(cmd, ctx),
         _ if rewriters::is_compressor(name) => rewriters::check_compressor(cmd, ctx),
         "dd" => args.iter().find_map(|arg| {
             arg.strip_prefix("of=")
