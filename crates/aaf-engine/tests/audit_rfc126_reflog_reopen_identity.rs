@@ -132,7 +132,7 @@ mod real {
         let v = victim.display();
         let log2 = run_attack(
             &wt_a,
-            &format!("printf X >> '{v}'; echo append_rc=$?; : > '{v}'; echo trunc_rc=$?"),
+            &format!("printf X >> '{v}'; echo append_rc=$?; true > '{v}'; echo trunc_rc=$?"),
         );
         let ok = fs::symlink_metadata(&victim).is_ok_and(|m| m.file_type().is_file());
         assert!(
