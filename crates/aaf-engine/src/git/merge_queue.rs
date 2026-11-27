@@ -170,6 +170,7 @@ fn merge_locked(
     };
 
     let onto_sha = git(&req.repo_root, &["rev-parse", "--verify", &onto])?;
+    super::pseudo_ref_guard::ensure_plain_branch_ref(tree, &format!("refs/heads/{branch}"))?;
     super::pseudo_ref_guard::ensure_plain_pseudo_refs(tree)?;
     // Onto the resolved commit, not the ref: a ref that moved in between
     // would land the task on a base the gate is not told about.
@@ -317,6 +318,8 @@ fn local_fast_forward(req: &MergeRequest, head: &str) -> Result<MergeOutcome, Gi
             if !status.is_empty() {
                 return Ok(MergeOutcome::BaseCheckoutDirty { path: entry.path });
             }
+            // SEC-125: `merge --ff-only` writes `ORIG_HEAD` in this tree too.
+            super::pseudo_ref_guard::ensure_plain_pseudo_refs(&entry.path)?;
             git(&entry.path, &["merge", "--ff-only", head])?;
         }
         None => {

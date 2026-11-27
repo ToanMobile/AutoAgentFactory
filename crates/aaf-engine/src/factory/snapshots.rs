@@ -201,6 +201,12 @@ pub fn undo_latest_turn(
     let snap = preview_latest_undo(db, repo_root, task_id)?;
     let task = db.get_task(task_id).map_err(|e| e.to_string())?;
     let wt_path = verify_registered_worktree(repo_root, worktrees_root, task_id)?;
+    // SEC-125: a planted HEAD symref would let the reset move another branch.
+    let branch = format!("{BRANCH_PREFIX}{task_id}");
+    worktree::ensure_on_branch(&wt_path, &branch).map_err(|e| e.to_string())?;
+    let branch_ref = format!("refs/heads/{branch}");
+    crate::git::pseudo_ref_guard::ensure_plain_branch_ref(&wt_path, &branch_ref)
+        .map_err(|e| e.to_string())?;
     crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(&wt_path).map_err(|e| e.to_string())?;
 
     git(

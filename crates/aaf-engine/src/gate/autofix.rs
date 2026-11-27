@@ -95,6 +95,9 @@ pub fn run_autofix(
     let pre_head = before_run!(git_ok(&repo_root, &["rev-parse", "HEAD"]))
         .trim()
         .to_string();
+    // SEC-125: the branch HEAD names before the formatter runs; every reset
+    // below re-checks it, so a planted HEAD symref cannot redirect one.
+    let head_ref = before_run!(task_head_ref(&repo_root));
     let hidden_before = before_run!(super::hidden::inspect(
         &repo_root,
         policy,
@@ -218,7 +221,7 @@ pub fn run_autofix(
     let (cmd_res, _) = match run_res {
         Ok(r) => r,
         Err(err) => {
-            let _ = reset_clean(&repo_root, &pre_head);
+            let _ = reset_clean(&repo_root, &pre_head, &head_ref);
             return Err(err);
         }
     };
@@ -228,12 +231,12 @@ pub fn run_autofix(
     {
         Ok(h) => h,
         Err(err) => {
-            let _ = reset_clean(&repo_root, &pre_head);
+            let _ = reset_clean(&repo_root, &pre_head, &head_ref);
             return Err(err);
         }
     };
     if !cmd_res.passed() || !hidden_after.blocks.is_empty() {
-        reset_clean(&repo_root, &pre_head)?;
+        reset_clean(&repo_root, &pre_head, &head_ref)?;
         let reason = if !hidden_after.blocks.is_empty() {
             "hidden files created during autofix".to_string()
         } else if cmd_res.timed_out {
@@ -248,7 +251,7 @@ pub fn run_autofix(
         });
     }
 
-    plain_pseudo_refs(&repo_root)?;
+    reset_guard(&repo_root, &head_ref)?;
     // Undo any commits or index staging performed by the formatter while keeping worktree edits.
     if let Err(err) =
         git_ok(&repo_root, &["reset", "--mixed", "--quiet", &pre_head]).and_then(|_| {
@@ -261,13 +264,13 @@ pub fn run_autofix(
             )
         })
     {
-        let _ = reset_clean(&repo_root, &pre_head);
+        let _ = reset_clean(&repo_root, &pre_head, &head_ref);
         return Err(err);
     }
 
     let hl_after = super::head_lock::evaluate(data_dir, &repo_root, cfg, &base.diff_target);
     if hl_after.status != LockStatus::Clear {
-        reset_clean(&repo_root, &pre_head)?;
+        reset_clean(&repo_root, &pre_head, &head_ref)?;
         return Ok(AutofixOutcome::Failed {
             exit_code: Some(0),
             timed_out: false,
@@ -278,14 +281,14 @@ pub fn run_autofix(
     let remaining = match dirty_paths_z(&repo_root) {
         Ok(r) => r,
         Err(err) => {
-            let _ = reset_clean(&repo_root, &pre_head);
+            let _ = reset_clean(&repo_root, &pre_head, &head_ref);
             return Err(err);
         }
     };
     let mut formatted: Vec<String> = Vec::new();
     for entry in remaining {
         if entry.untracked || !allowed_paths.contains(&entry.path) {
-            reset_clean(&repo_root, &pre_head)?;
+            reset_clean(&repo_root, &pre_head, &head_ref)?;
             return Ok(AutofixOutcome::Failed {
                 exit_code: Some(0),
                 timed_out: false,
@@ -352,14 +355,36 @@ fn git_ok(repo_root: &Path, args: &[&str]) -> Result<String, GateError> {
     aaf_fp::git(repo_root, args, &[], GIT_TIMEOUT).map_err(GateError::from)
 }
 
-/// SEC-125: a planted `ORIG_HEAD` symref would let the reset move another ref.
-fn plain_pseudo_refs(repo_root: &Path) -> Result<(), GateError> {
-    crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(repo_root)
-        .map_err(|e| GateError::Git(e.to_string()))
+/// SEC-125: the task branch HEAD points at. `symbolic-ref` follows a `ref:`
+/// chain, so `aaf/<task>` itself saying `ref: refs/heads/main` shows as main.
+fn task_head_ref(repo_root: &Path) -> Result<String, GateError> {
+    let head = git_ok(repo_root, &["symbolic-ref", "-q", "HEAD"])?;
+    let head = head.trim();
+    let prefix = format!("refs/heads/{}", crate::git::worktree::BRANCH_PREFIX);
+    if !head.starts_with(&prefix) {
+        return Err(GateError::Git(format!(
+            "HEAD is `{head}`, not a task branch"
+        )));
+    }
+    Ok(head.to_string())
 }
 
-fn reset_clean(repo_root: &Path, pre_head: &str) -> Result<(), GateError> {
-    plain_pseudo_refs(repo_root)?;
+/// SEC-125: a planted HEAD or `ORIG_HEAD` symref would let a reset move
+/// another ref, so each reset first re-checks both and fails closed.
+fn reset_guard(repo_root: &Path, head_ref: &str) -> Result<(), GateError> {
+    let now = task_head_ref(repo_root)?;
+    if now != head_ref {
+        return Err(GateError::Git(format!(
+            "HEAD moved from `{head_ref}` to `{now}` during autofix"
+        )));
+    }
+    let gate_err = |e: crate::git::GitError| GateError::Git(e.to_string());
+    crate::git::pseudo_ref_guard::ensure_plain_branch_ref(repo_root, head_ref).map_err(gate_err)?;
+    crate::git::pseudo_ref_guard::ensure_plain_pseudo_refs(repo_root).map_err(gate_err)
+}
+
+fn reset_clean(repo_root: &Path, pre_head: &str, head_ref: &str) -> Result<(), GateError> {
+    reset_guard(repo_root, head_ref)?;
     let _ = git_ok(repo_root, &["reset", "--hard", "--quiet", pre_head])?;
     let _ = git_ok(repo_root, &["clean", "-ffdq"])?;
     Ok(())

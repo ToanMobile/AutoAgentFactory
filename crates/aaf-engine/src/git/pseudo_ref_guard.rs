@@ -37,6 +37,15 @@ pub(crate) fn ensure_plain_pseudo_refs(tree: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Same check on the loose file of `full_ref` (`refs/heads/aaf/<task>`) in
+/// the common dir. `git symbolic-ref HEAD` already reports the final target of
+/// a `ref:` chain, but names a filesystem-symlinked ref by its first name.
+pub(crate) fn ensure_plain_branch_ref(tree: &Path, full_ref: &str) -> Result<(), GitError> {
+    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+    let common = PathBuf::from(git(tree, &args)?);
+    check_one(&common.join(full_ref))
+}
+
 fn check_one(path: &Path) -> Result<(), GitError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
