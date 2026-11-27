@@ -179,7 +179,7 @@ fn check_copy_into_dir(
             }
             let dest = dir_path.join(fname);
             if (pattern_could_match(&dest, fname, recursive)
-                || (paths::bounded_glob(fname) && paths::may_name_protected(fname)))
+                || (paths::bounded_glob(fname) && paths::may_name_protected_anywhere(fname)))
                 && ctx.in_repo(&dir_path)
             {
                 return Some(deny(format!(
