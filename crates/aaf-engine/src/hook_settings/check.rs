@@ -417,6 +417,9 @@ pub fn check_worktree_for_executor(
     else {
         return Ok(());
     };
+    if let Some(base) = base {
+        host_file_matches_base(worktree, &normalized, base)?;
+    }
     let program = super::command_program(&reg.command).ok_or_else(|| {
         format!("the agent would run without {HOOK_BINARY}: empty hook command for {normalized}")
     })?;
@@ -428,6 +431,46 @@ pub fn check_worktree_for_executor(
                  with {HOOK_BINARY} on PATH, then `aaf board unblock` the task"
             )
         })
+}
+
+/// Why the host hook file of `normalized` in `worktree` is not the one the
+/// base branch had where the task's branch left `base`, or `Ok`. The file
+/// as it is in the working tree counts (an agent may leave it uncommitted);
+/// anything that cannot be compared fails closed, as [`check_dir`] does.
+fn host_file_matches_base(worktree: &Path, normalized: &str, base: &str) -> Result<(), String> {
+    let spec = host_base_spec(normalized);
+    let rel = spec.map_or(normalized, |(rel, _, _)| rel);
+    let fail = |problem: String| {
+        format!(
+            "the agent would run without {HOOK_BINARY}: {} in the task worktree: {problem} — \
+             fix: the hook registration changes only on the base branch, by a person: look at \
+             what the task did to {rel} in its worktree, then discard it or commit it on the \
+             base branch yourself, then `aaf board unblock` the task",
+            worktree.join(rel).display()
+        )
+    };
+    if spec.is_none() {
+        return Err(fail(format!(
+            "no hook settings file is known for {normalized}, so it cannot be compared with \
+             the base branch"
+        )));
+    }
+    let text = std::fs::read_to_string(worktree.join(rel))
+        .map_err(|err| fail(format!("the file cannot be read ({err})")))?;
+    let git = |args: &[&str]| aaf_fp::git(worktree, args, &[], crate::gate::GIT_TIMEOUT);
+    let compare_err = |err: aaf_fp::FpError| {
+        fail(format!(
+            "the file could not be compared with the base branch ({err})"
+        ))
+    };
+    let fork = git(&["merge-base", "HEAD", base]).map_err(compare_err)?;
+    let committed = git(&["show", &format!("{fork}:{rel}")]).map_err(compare_err)?;
+    if committed != text.trim() {
+        return Err(fail(
+            "the file is not what the base branch has: the task changed it".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 type HostTextCheck = fn(&str) -> Result<super::Registered, String>;
