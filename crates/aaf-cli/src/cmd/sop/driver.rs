@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use aaf_domain::config::RunConfig;
 use aaf_domain::gate::{GateMode, GateStatus, LockStatus, Receipt};
 use aaf_domain::ports::{AgentRequest, Clock};
 use aaf_domain::sop::{
@@ -12,6 +13,7 @@ use aaf_engine::config::EffectiveConfig;
 use aaf_engine::executors;
 use aaf_engine::factory::AccountPool;
 use aaf_engine::factory::adapters::provider_for;
+use aaf_engine::factory::audit_cmd_is_claude;
 use aaf_engine::factory::prompt::sandbox_policy_for;
 use aaf_engine::gate::{GIT_TIMEOUT, head_lock};
 use aaf_engine::hook_settings;
@@ -22,8 +24,10 @@ use aaf_engine::throttle::Progress;
 use super::super::gate::progress_line;
 use super::exec_support::{
     acquire_stage_account, build_exec_env, build_stage_run_config, host_sandbox_available,
+    stage_uses_custom_cmd,
 };
 use super::heavy::{run_heavy_script, script_outcome};
+use crate::cmd::run::run_executor_is_claude;
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::notice;
 
@@ -288,7 +292,17 @@ impl CliStageDriver<'_> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| self.cfg.repo.run.model.trim());
 
-        if aaf_domain::pipeline::normalize_executor_id(effective_exec) == "claude" {
+        let run_cfg = &self.cfg.repo.run;
+        let uses_custom_claude = stage_uses_custom_cmd(effective_exec, run_cfg)
+            && (audit_cmd_is_claude(&run_cfg.executor_cmd.join(" "))
+                || run_executor_is_claude(&RunConfig {
+                    executor: "custom".to_string(),
+                    executor_cmd: run_cfg.executor_cmd.clone(),
+                    ..RunConfig::default()
+                }));
+        if aaf_domain::pipeline::normalize_executor_id(effective_exec) == "claude"
+            || uses_custom_claude
+        {
             let hook_base = (work_dir != self.repo_root)
                 .then_some(self.base_sha.as_deref())
                 .flatten();
