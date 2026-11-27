@@ -87,6 +87,16 @@ pub const NON_INTERACTIVE_ENV: [(&str, &str); 5] = [
     ("NO_UPDATE_NOTIFIER", "1"),
 ];
 
+/// Non-overridable git reflog setting for confined runs (RFC-126): with
+/// `<git_dir>/logs` and `<own>/logs` write-denied in linked worktrees, turning
+/// off new reflog creation avoids `unable to append` errors on `git checkout -b`
+/// / `git branch`, while explicit `-c core.logAllRefUpdates=true` still wins.
+const REFLOG_ENV: [(&str, &str); 3] = [
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "core.logAllRefUpdates"),
+    ("GIT_CONFIG_VALUE_0", "false"),
+];
+
 /// Allowed names whose value is a URL that may carry a login
 /// (`http://user:password@proxy:3128`).
 const PROXY_URLS: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
@@ -363,6 +373,10 @@ pub(super) fn inject_non_interactive_env(env: &ExecEnv, spec_env: &mut Vec<(Stri
         if !overridden_by_pass && !already_set {
             spec_env.push((key.to_string(), val.to_string()));
         }
+    }
+    for (key, val) in REFLOG_ENV {
+        spec_env.retain(|(existing, _)| existing != key);
+        spec_env.push((key.to_string(), val.to_string()));
     }
 }
 
