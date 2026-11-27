@@ -3,6 +3,7 @@
 //! native clear-all cooldowns, and merged Repo <-> Account assignment.
 
 mod live_quota;
+mod live_quota_parse;
 mod switcher;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -48,10 +49,18 @@ fn native_repo_assignments(db: Option<&Db>, scoped_repo: Option<&Path>) -> Vec<V
         .collect()
 }
 
+fn provider_for_account_name(
+    discovered: &[AccountProfile],
+    account_name: &str,
+) -> Option<ProviderKind> {
+    aaf_engine::accounts::selection::match_account(account_name, discovered).map(|a| a.provider)
+}
+
 fn merge_repo_assignments(
     db: Option<&Db>,
     scoped_repo: Option<&Path>,
     sw: Option<&Value>,
+    discovered: &[AccountProfile],
 ) -> Vec<Value> {
     let canon_scope = scoped_repo.map(|s| fs::canonicalize(s).unwrap_or_else(|_| s.to_path_buf()));
     let mut by_key: BTreeMap<String, Value> = BTreeMap::new();
@@ -78,7 +87,24 @@ fn merge_repo_assignments(
             {
                 continue;
             }
-            by_key.insert(key, row.clone());
+            let mut merged = row.clone();
+            // Always prefer live `.claude/settings.local.json` on disk for non-app
+            // repos so native Gemini / Grok assignments and removals are never
+            // shadowed by stale cc-switcher entries.
+            if merged["source"].as_str() != Some("app")
+                && let Some(obj) = merged.as_object_mut()
+            {
+                let repo_path = Path::new(path_str);
+                if let Some(disk_acc) = read_repo_local_account(repo_path) {
+                    obj.insert("account".into(), Value::String(disk_acc));
+                    obj.insert("pinnedInFile".into(), Value::Bool(true));
+                } else if repo_path.join(".claude/settings.local.json").exists() {
+                    obj.insert("account".into(), Value::String(String::new()));
+                    obj.insert("pinnedInFile".into(), Value::Bool(false));
+                    obj.remove("provider");
+                }
+            }
+            by_key.insert(key, merged);
         }
     }
     for row in native_repo_assignments(db, scoped_repo) {
@@ -88,7 +114,19 @@ fn merge_repo_assignments(
         let key = canon_key(path_str);
         by_key.entry(key).or_insert(row);
     }
-    let mut rows: Vec<Value> = by_key.into_values().collect();
+    let mut rows: Vec<Value> = by_key
+        .into_values()
+        .map(|mut row| {
+            if row["pinnedInFile"].as_bool() == Some(true)
+                && let Some(acc_name) = row["account"].as_str()
+                && let Some(prov) = provider_for_account_name(discovered, acc_name)
+                && let Some(obj) = row.as_object_mut()
+            {
+                obj.insert("provider".into(), json!(prov));
+            }
+            row
+        })
+        .collect();
     rows.sort_by(|a, b| {
         let ka = (
             a["source"].as_str() == Some("app"),
@@ -159,30 +197,25 @@ pub(crate) fn sync_live_exhausted_cooldowns(
         if !zero_quota && !frozen {
             continue;
         }
-        let r5 = if rem5_zero {
-            p["resetAtMs"].as_i64().unwrap_or(0)
-        } else {
-            0
+        let window_until = |exhausted: bool, reset_ms: i64| -> i64 {
+            if !exhausted {
+                return 0;
+            }
+            if reset_ms > now_ms {
+                reset_ms.saturating_add(999) / 1000
+            } else if reset_ms <= 0 {
+                now_secs.saturating_add(FALLBACK_EXHAUSTED_COOLDOWN_SECS)
+            } else {
+                0
+            }
         };
-        let r7 = if rem7_zero {
-            p["weeklyResetAtMs"].as_i64().unwrap_or(0)
-        } else {
-            0
-        };
-        let rf = if frozen {
-            p["frozenUntilMs"].as_i64().unwrap_or(0)
-        } else {
-            0
-        };
-        let until_ms = rf.max(r5).max(r7);
-        let missing_reset = (rem5_zero && r5 <= 0) || (rem7_zero && r7 <= 0);
-        let until_secs = if until_ms > now_ms {
-            until_ms.saturating_add(999) / 1000
-        } else if missing_reset {
-            now_secs.saturating_add(FALLBACK_EXHAUSTED_COOLDOWN_SECS)
-        } else {
+        let u5 = window_until(rem5_zero, p["resetAtMs"].as_i64().unwrap_or(0));
+        let u7 = window_until(rem7_zero, p["weeklyResetAtMs"].as_i64().unwrap_or(0));
+        let uf = window_until(frozen, p["frozenUntilMs"].as_i64().unwrap_or(0));
+        let until_secs = u5.max(u7).max(uf);
+        if until_secs <= now_secs {
             continue;
-        };
+        }
         let sw_id = p["id"].as_str().unwrap_or("");
         let Some(acct) = find_unique_claude_account(discovered, sw_id) else {
             continue;
@@ -374,7 +407,8 @@ pub(super) fn read_accounts_panel(
     }
     let effective_db = rw_db.as_ref().or(db);
     let aaf_accounts = build_aaf_account_rows(effective_db, ctx, &discovered, max_conc, now)?;
-    let repo_assignments = merge_repo_assignments(effective_db, scoped_repo, sw_val.as_ref());
+    let repo_assignments =
+        merge_repo_assignments(effective_db, scoped_repo, sw_val.as_ref(), &discovered);
     Ok(json!({
         "aaf_accounts": aaf_accounts,
         "provider_quotas": provider_quotas,

@@ -248,13 +248,35 @@ pub(super) fn do_rework(db: &Db, ctx: &Ctx, task_id: &str, reason: &str) -> Resu
 }
 
 pub(super) fn collect_recent_runs(db: &Db, repo_root: Option<&str>) -> Vec<Value> {
+    let mut task_cache: std::collections::HashMap<String, Option<(String, String)>> =
+        std::collections::HashMap::new();
     db.recent_runs(repo_root, RECENT_RUNS_LIMIT)
         .unwrap_or_default()
         .into_iter()
         .map(|r| {
+            let meta = task_cache
+                .entry(r.task_id.clone())
+                .or_insert_with(|| {
+                    db.get_task(&r.task_id).ok().map(|t| {
+                        let repo_name = std::path::Path::new(&t.repo_root)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (t.title, repo_name)
+                    })
+                })
+                .clone();
+            let (task_title, repo_name) = meta.unwrap_or_default();
             json!({
-                "id": r.id, "task_id": r.task_id, "executor": r.executor,
-                "status": r.status.as_str(), "started_at": r.started_at, "ended_at": r.ended_at
+                "id": r.id,
+                "task_id": r.task_id,
+                "task_title": task_title,
+                "repo_name": repo_name,
+                "executor": r.executor,
+                "status": r.status.as_str(),
+                "started_at": r.started_at,
+                "ended_at": r.ended_at,
             })
         })
         .collect()

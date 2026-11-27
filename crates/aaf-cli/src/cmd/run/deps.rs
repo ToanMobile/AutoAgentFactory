@@ -86,6 +86,12 @@ pub(super) fn build_deps(
         .map_err(|e| err("accounts", e))?;
 
     let run_provider = provider_for(&cfg.repo.run.executor);
+    // R3-CONC-5: Antigravity is strictly serialized to 1 slot per account.
+    let eff_max_per_account = if run_provider == Some(ProviderKind::Antigravity) {
+        1
+    } else {
+        max_per_account
+    };
     // `run.max_parallel = 0` (the default) means the same as `--max-parallel auto`.
     let parallel_arg = match parallel_arg {
         None if cfg.repo.run.max_parallel == 0 => Some(ParallelArg::Auto),
@@ -109,14 +115,19 @@ pub(super) fn build_deps(
             };
             let base_auto = compute_auto_parallel(
                 provider_accounts,
-                max_per_account,
+                eff_max_per_account,
                 cores,
                 SystemProbe::detect().pressure(),
             );
             let ready_slots =
-                count_ready_provider_slots(db, run_provider, max_per_account, clock.now());
+                count_ready_provider_slots(db, run_provider, eff_max_per_account, clock.now());
             let active_repos = count_active_repos_for_fair_share(db, &ctx.data_dir, repo);
-            apply_multi_repo_fair_share(base_auto, ready_slots, active_repos)
+            let fair = apply_multi_repo_fair_share(base_auto, ready_slots, active_repos);
+            if run_provider == Some(ProviderKind::Antigravity) {
+                fair.min(1)
+            } else {
+                fair
+            }
         }
         Some(ParallelArg::Fixed(n)) => n,
         None => cfg.repo.run.max_parallel,
@@ -154,7 +165,7 @@ pub(super) fn build_deps(
             runs: Arc::new(db.clone()),
             clock: clock.clone(),
             leases_dir,
-            max_concurrent_per_account: max_per_account,
+            max_concurrent_per_account: eff_max_per_account,
             provider: provider_for(&cfg.repo.run.executor),
         },
         cfg.global.accounts.selection,

@@ -67,20 +67,36 @@ pub fn settings_account(repo_root: &Path) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// The account `wanted` names: its id, else the one account whose display
-/// name (an `accounts.aliases` entry, or the default derived from the config
-/// dir) or default name equals it. A name two accounts share names neither.
+/// The account `wanted` names: its id (exact, else unique case-insensitive),
+/// else the one account whose display name (an `accounts.aliases` entry, or the
+/// default derived from the config dir) or default name equals it (exact first,
+/// then case-insensitive). A name two accounts share names neither.
 pub fn match_account<'a>(
     wanted: &str,
     accounts: &'a [AccountProfile],
 ) -> Option<&'a AccountProfile> {
-    if let Some(by_id) = accounts.iter().find(|a| a.id == wanted) {
+    let key = wanted.trim();
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(by_id) = accounts.iter().find(|a| a.id == key) {
         return Some(by_id);
+    }
+    let mut by_id_ci = accounts.iter().filter(|a| a.id.eq_ignore_ascii_case(key));
+    if let (Some(one), None) = (by_id_ci.next(), by_id_ci.next()) {
+        return Some(one);
     }
     let mut named = accounts
         .iter()
-        .filter(|a| a.name == wanted || default_account_name(&a.config_dir) == wanted);
-    match (named.next(), named.next()) {
+        .filter(|a| a.name == key || default_account_name(&a.config_dir) == key);
+    if let (Some(one), None) = (named.next(), named.next()) {
+        return Some(one);
+    }
+    let mut named_ci = accounts.iter().filter(|a| {
+        a.name.eq_ignore_ascii_case(key)
+            || default_account_name(&a.config_dir).eq_ignore_ascii_case(key)
+    });
+    match (named_ci.next(), named_ci.next()) {
         (Some(one), None) => Some(one),
         _ => None,
     }

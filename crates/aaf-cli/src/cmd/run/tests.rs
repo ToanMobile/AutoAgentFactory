@@ -126,3 +126,91 @@ fn a_kill_that_gave_up_names_the_group_that_may_still_run() {
          they may still be running (`ps -o pid,command -g 4242`)"
     );
 }
+
+#[test]
+fn assigned_non_claude_account_routes_run_executor_to_gemini_or_grok() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let bin = tmp.path().join("bin");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(home.join(".gemini")).unwrap();
+    std::fs::create_dir_all(home.join(".grok")).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    for tool in ["agy", "grok"] {
+        let p = bin.join(tool);
+        std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let ctx = crate::ctx::Ctx {
+        cwd: repo.clone(),
+        home: home.clone(),
+        data_dir: tmp.path().join("data"),
+        worktrees_dir: tmp.path().join("wt"),
+        config_dir: tmp.path().join("cfg"),
+        path_var: bin.as_os_str().to_os_string(),
+        run_id: None,
+        stdin_is_tty: false,
+        aaf_env: Vec::new(),
+    };
+
+    // 1. Assign Grok -> switches executor from claude to grok, clears model & effort,
+    //    and clears Claude-inherited pipeline writer stages.
+    std::fs::write(repo.join(".claude/settings.local.json"), r#"{"account":"grok"}"#).unwrap();
+    let mut cfg = ctx.load_config(&repo).unwrap();
+    assert_eq!(cfg.repo.run.executor, "grok");
+    cfg.repo.run.executor = "claude".into();
+    cfg.repo.run.model = "claude-sonnet-4-6".into();
+    cfg.repo.run.effort = "max".into();
+    cfg.repo.pipeline.implementer.executor = "claude".into();
+    cfg.repo.pipeline.implementer.model = "claude-sonnet-4-6".into();
+    cfg.repo.pipeline.implementer.effort = "high".into();
+    ctx.apply_assigned_account_executor(&repo, &mut cfg);
+    assert_eq!(cfg.repo.run.executor, "grok");
+    assert!(cfg.repo.run.model.is_empty());
+    assert!(cfg.repo.run.effort.is_empty());
+    assert!(cfg.repo.pipeline.implementer.executor.is_empty());
+    assert!(cfg.repo.pipeline.implementer.model.is_empty());
+    assert!(cfg.repo.pipeline.implementer.effort.is_empty());
+
+    // 2. Assign Gemini (case-insensitive) -> switches executor from claude to antigravity
+    std::fs::write(repo.join(".claude/settings.local.json"), r#"{"account":"GEMINI"}"#).unwrap();
+    let mut cfg2 = ctx.load_config(&repo).unwrap();
+    assert_eq!(cfg2.repo.run.executor, "antigravity");
+    cfg2.repo.run.executor = "claude".into();
+    cfg2.repo.run.model = "claude-opus-4-6".into();
+    cfg2.repo.run.effort = "minimal".into();
+    ctx.apply_assigned_account_executor(&repo, &mut cfg2);
+    assert_eq!(cfg2.repo.run.executor, "antigravity");
+    assert!(cfg2.repo.run.model.is_empty());
+    assert!(cfg2.repo.run.effort.is_empty());
+
+    // 3. Explicit custom executor_cmd OR explicit non-Claude [run].executor is NOT overwritten
+    let mut cfg3 = ctx.load_config(&repo).unwrap();
+    cfg3.repo.run.executor = "claude".into();
+    cfg3.repo.run.executor_cmd = vec!["my-wrapper".into()];
+    ctx.apply_assigned_account_executor(&repo, &mut cfg3);
+    assert_eq!(cfg3.repo.run.executor, "claude");
+
+    let mut cfg4 = ctx.load_config(&repo).unwrap();
+    cfg4.repo.run.executor = "codex".into();
+    cfg4.repo.run.model = "o3".into();
+    ctx.apply_assigned_account_executor(&repo, &mut cfg4);
+    assert_eq!(cfg4.repo.run.executor, "codex");
+    assert_eq!(cfg4.repo.run.model, "o3");
+
+    // 4. Gemini-only PATH (without agy) routes to "gemini" instead of crashing on "antigravity"
+    let bin_gemini = tmp.path().join("bin-gemini");
+    std::fs::create_dir_all(&bin_gemini).unwrap();
+    let g = bin_gemini.join("gemini");
+    std::fs::write(&g, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&g, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut ctx_gemini = ctx.clone();
+    ctx_gemini.path_var = bin_gemini.as_os_str().to_os_string();
+    let cfg5 = ctx_gemini.load_config(&repo).unwrap();
+    assert_eq!(cfg5.repo.run.executor, "gemini");
+}

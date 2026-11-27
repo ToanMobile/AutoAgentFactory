@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::cmd::ui::extras::{canonical_under_allowed_roots, write_repo_local_account_native};
+use crate::cmd::ui::extras::{
+    canonical_under_allowed_roots, read_repo_local_account, write_repo_local_account_native,
+};
 use crate::ctx::Ctx;
 
 const CC_READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -359,47 +361,45 @@ pub(super) fn dispatch_repo_action(
             } else {
                 let canon = validate_repo_target(ctx, scoped_repo, task_id)?;
                 let repo_str = canon.to_string_lossy().into_owned();
-                let is_known_aaf_claude = || -> bool {
-                    let Ok(cfg) = ctx.load_config(&canon) else {
-                        return true;
-                    };
-                    let lookup =
-                        |name: &str| aaf_engine::accounts::binary_on_path_in(&ctx.path_var, name);
-                    let discovered: Vec<_> = aaf_engine::accounts::discover(
-                        &cfg.global.accounts,
-                        &aaf_engine::accounts::DiscoveryEnv {
-                            home: ctx.home.clone(),
-                            binary_on_path: &lookup,
-                        },
-                    )
-                    .into_iter()
-                    .filter(|a| a.provider == aaf_domain::account::ProviderKind::ClaudeCode)
-                    .collect();
-                    if discovered.is_empty() {
-                        return true;
-                    }
-                    discovered.iter().any(|a| {
-                        a.id.eq_ignore_ascii_case(account)
-                            || a.name.eq_ignore_ascii_case(account)
-                            || aaf_domain::account::default_account_name(&a.config_dir)
-                                .eq_ignore_ascii_case(account)
+                let discovered: Vec<aaf_domain::account::AccountProfile> = ctx
+                    .load_config(&canon)
+                    .map(|cfg| {
+                        let lookup = |name: &str| {
+                            aaf_engine::accounts::binary_on_path_in(&ctx.path_var, name)
+                        };
+                        aaf_engine::accounts::discover(
+                            &cfg.global.accounts,
+                            &aaf_engine::accounts::DiscoveryEnv {
+                                home: ctx.home.clone(),
+                                binary_on_path: &lookup,
+                            },
+                        )
                     })
-                };
+                    .unwrap_or_default();
+                let matched = aaf_engine::accounts::selection::match_account(account, &discovered);
+                let is_non_claude = matched.is_some_and(|a| {
+                    a.provider != aaf_domain::account::ProviderKind::ClaudeCode
+                });
                 let native_assign = || -> Result<Value, String> {
-                    if !is_known_aaf_claude() {
-                        return Err(format!("invalid account: unknown Claude account '{account}'"));
+                    if !discovered.is_empty() && matched.is_none() {
+                        return Err(format!("invalid account: unknown account '{account}'"));
                     }
-                    write_repo_local_account_native(&canon, Some(account))?;
+                    let assigned_name = matched.map(|a| a.name.as_str()).unwrap_or(account);
+                    write_repo_local_account_native(&canon, Some(assigned_name))?;
                     Ok(json!({
                         "action": "cc_repo_assign",
                         "repo": repo_str,
-                        "account": account,
+                        "account": assigned_name,
+                        "provider": matched.map(|a| a.provider),
                         "native": true,
                     }))
                 };
                 let has_switcher =
                     find_cc_switcher_script(ctx).is_some() && find_node_bin(ctx).is_some();
-                if has_switcher {
+                // Non-Claude providers (Google/Antigravity/Gemini, Grok, Codex, OpenCode)
+                // are written natively to `.claude/settings.local.json`; cc-switcher only
+                // tracks Anthropic profiles and would reject them.
+                if has_switcher && !is_non_claude {
                     match run_cc_switcher(
                         ctx,
                         &[
@@ -455,13 +455,18 @@ pub(super) fn dispatch_repo_action(
             if has_switcher {
                 match run_cc_switcher(ctx, &["--panel-action", "repo_remove", "--repo", &repo_str])
                 {
-                    Ok(v) => Ok(v),
+                    Ok(v) => {
+                        if read_repo_local_account(&canon).is_some() {
+                            write_repo_local_account_native(&canon, None)?;
+                        }
+                        Ok(v)
+                    }
                     Err(e) => {
                         let low = e.to_lowercase();
                         let unregistered = low.contains("không nằm trong danh sách")
                             || low.contains("chưa")
                             || low.contains("not found");
-                        if unregistered {
+                        if unregistered || read_repo_local_account(&canon).is_some() {
                             native_remove()
                         } else {
                             Err(e)

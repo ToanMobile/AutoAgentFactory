@@ -81,6 +81,7 @@ pub fn plan_contract_json_schema() -> &'static str {
     },
     "open_questions": {
       "type": "array",
+      "description": "Only genuine human product/scope decisions written in natural plain language in the task's language (never code jargon or internal dev notes). Format each item: '<Plain question> | (1) <Option A> (Recommended) — <impact> | (2) <Option B> — <impact> | Hint: <item-specific recommendation & reason>' (use '(Khuyến nghị)' and 'Gợi ý:' when the task is in Vietnamese).",
       "items": { "type": "string" }
     }
   }

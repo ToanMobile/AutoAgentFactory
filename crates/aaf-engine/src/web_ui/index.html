@@ -370,7 +370,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   <section id="view-stream" class="hidden">
     <div class="card">
       <div class="filters" style="margin-bottom:10px">
-        <select id="runSelect" style="min-width:220px"><option value="" data-i18n="stream.selectRecent">Select recent run…</option></select>
+        <select id="runSelect" style="min-width:280px;max-width:520px"><option value="" data-i18n="stream.selectRecent">Select recent run…</option></select>
         <input id="runManual" class="mono" data-i18n-placeholder="stream.manualPlaceholder" placeholder="Or enter run_id…" style="min-width:200px">
         <button id="watchRunBtn" class="btn-primary btn-sm" data-i18n="stream.followRun">Follow Run</button>
         <button id="stopStreamRunBtn" class="btn-danger btn-sm hidden" type="button" data-i18n="stream.stopRun">Stop Run</button>
@@ -861,9 +861,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     } else if (lastStreamError) {
       $("streamStatus").textContent = tr("stream.error", { msg: lastStreamError });
     } else {
-      $("streamStatus").textContent = tr("stream.status", { runId: activeRunId, n: lastStreamLineCount });
+      const displayLabel = formatRunDisplayLabel(activeRunId);
+      $("streamStatus").textContent = tr("stream.status", { runId: displayLabel, n: lastStreamLineCount });
       if (lastStreamLineCount === 0 && $("streamBox")) {
-        $("streamBox").innerHTML = `<div class="muted">${esc(tr("stream.noLines", { runId: activeRunId }))}</div>`;
+        $("streamBox").innerHTML = `<div class="muted">${esc(tr("stream.noLines", { runId: displayLabel }))}</div>`;
       }
     }
   }
@@ -1475,13 +1476,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     $("unfreezeBtn").disabled = ro;
     $("unfreezeBtn").title = ro ? roHint() : tr("topbar.unfreezeTitle");
     const runs = (statusData && statusData.recent_runs) || [];
-    const runsSig = runs.map((r) => `${r.id}:${r.status}`).join("|");
+    const langForRuns = window.AafI18n ? window.AafI18n.getLang() : "en";
+    const runsSig = langForRuns + "|" + runs.map((r) => `${r.id}:${r.status}:${r.task_title || ""}:${r.repo_name || ""}`).join("|");
     const sel = $("runSelect");
     if (runsSig !== lastRunsSig) {
       lastRunsSig = runsSig;
       const prev = sel.value || activeRunId;
       sel.innerHTML = `<option value="">${esc(tr("stream.selectRecent"))}</option>` + runs.map((r) =>
-        `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.task_id)} (${esc(r.status)})</option>`
+        `<option value="${esc(r.id)}">${esc(formatRunOptionLabel(r))}</option>`
       ).join("");
       if (prev && runs.some((r) => r.id === prev)) sel.value = prev;
     }
@@ -1947,8 +1949,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   function parseDecisionQuestion(raw, idx) {
     let text = String(raw || "").trim();
     let hint = "";
-    const hintRe = /(?:\s*\|\s*|\s+)(?:gợi ý|hint|khuyến nghị|recommendation|suggestion)\s*:\s*([\s\S]+)$/i;
-    const hm = text.match(hintRe);
+    // Match trailing hint without swallowing subsequent `| (2)` options.
+    const pipeHintRe = /\s*\|\s*(?:gợi ý|hint(?:\s*\/\s*gợi ý)?|khuyến nghị|recommendation|suggestion)\s*:\s*([^|]+)$/i;
+    const tailHintRe = /\s+(?:gợi ý|hint(?:\s*\/\s*gợi ý)?|khuyến nghị|recommendation|suggestion)\s*:\s*([^|]+)$/i;
+    const hm = text.match(pipeHintRe) || text.match(tailHintRe);
     if (hm) {
       hint = hm[1].trim();
       text = text.slice(0, hm.index).replace(/[\s|\-:]+$/, "").trim();
@@ -1974,12 +1978,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     }
     if (matches.length >= 2) {
       const rawPrefix = text.slice(0, matches[0].start).replace(/[\s|:\-]+$/, "").trim();
+      const recTagRe = /[\(\[]\s*(?:khuyến nghị|khuyên dùng|nên chọn|recommended(?:\s*\/\s*khuyến nghị)?)\s*[\)\]]/i;
+      const recStripRe = /\s*[\(\[]\s*(?:khuyến nghị|khuyên dùng|nên chọn|recommended(?:\s*\/\s*khuyến nghị)?)\s*[\)\]]\s*/gi;
       const options = matches.map((cur, i) => {
         const end = i + 1 < matches.length ? matches[i + 1].start : text.length;
         const body = text.slice(cur.contentStart, end).trim().replace(/[\s|.]+$/, "");
-        const recommended = /\((?:khuyến nghị|recommended)\)/i.test(body);
+        const recommended = recTagRe.test(body);
         const cleanBody = body
-          .replace(/\s*\((?:khuyến nghị|recommended)\)\s*/gi, " ")
+          .replace(recStripRe, " ")
           .replace(/\s+/g, " ")
           .trim();
         const { title, desc } = splitOptionTitleDesc(cleanBody);
@@ -2001,8 +2007,10 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const name = `${scopeId}_q_${item.idx}`;
       const recOpt = item.options.find((o) => o.recommended);
       const effectiveHint = item.hint
-        || (recOpt ? tr("decision.recHint", { num: recOpt.num, label: recOpt.shortLabel }) : tr("decision.defaultHint"));
-      const hintHtml = `<div class="decision-hint">💡 <b>${esc(tr("decision.hintLabel"))}:</b> ${formatDecisionText(effectiveHint)}</div>`;
+        || (recOpt ? `(${recOpt.num}) ${recOpt.title}${recOpt.desc ? ` — ${recOpt.desc}` : ""}` : "");
+      const hintHtml = effectiveHint
+        ? `<div class="decision-hint">💡 <b>${esc(tr("decision.hintLabel"))}:</b> ${formatDecisionText(effectiveHint)}</div>`
+        : "";
       if (item.options.length >= 2) {
         const optsHtml = item.options.map((opt, oi) => `
           <label class="decision-opt">
@@ -2862,17 +2870,61 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     lastFocusBeforeModal = null;
   }
 
+  function runStatusText(status) {
+    const s = String(status || "").toLowerCase();
+    if (s === "running") return stateLabel("running");
+    if (s === "succeeded" || s === "ok") return tr("stream.stSucceeded");
+    if (s === "failed" || s === "error") return tr("stream.stFailed");
+    if (s === "timed_out") return tr("stream.stTimedOut");
+    if (s === "cancelled" || s === "canceled") return stateLabel("cancelled");
+    if (s === "rate_limited") return tr("stream.stRateLimited");
+    return status || "";
+  }
+
+  function resolveRunMeta(runId) {
+    const runs = (statusData && statusData.recent_runs) || [];
+    const found = runs.find((r) => r && r.id === runId) || null;
+    const taskId = found ? found.task_id : "";
+    const boardTask = taskId && Array.isArray(boardTasks)
+      ? boardTasks.find((t) => t && t.id === taskId)
+      : null;
+    const title = ((found && found.task_title) || (boardTask && boardTask.title) || "").trim();
+    const repo = ((found && found.repo_name) || (boardTask && boardTask.repo_name) || "").trim();
+    const status = found ? found.status : "";
+    const executor = found ? found.executor : "";
+    return { runId, taskId, title, repo, status, executor };
+  }
+
+  function formatRunOptionLabel(r) {
+    const m = resolveRunMeta(r.id);
+    const shortTitle = m.title.length > 64 ? `${m.title.slice(0, 63)}…` : m.title;
+    const prefix = m.repo ? `[${m.repo}] ` : "";
+    const main = shortTitle || m.taskId || r.id;
+    const st = runStatusText(r.status);
+    const execTag = r.executor ? ` · ${r.executor}` : "";
+    return `${prefix}${main}${st ? ` (${st})` : ""}${execTag}`;
+  }
+
+  function formatRunDisplayLabel(runId) {
+    if (!runId) return "";
+    const m = resolveRunMeta(runId);
+    if (!m.title) return runId;
+    const prefix = m.repo ? `[${m.repo}] ` : "";
+    return `${prefix}${m.title}`;
+  }
+
   function renderStreamLines(runId, lines) {
     const safeLines = Array.isArray(lines) ? lines : [];
-    const sig = runId + "\0" + safeLines.length + "\0" + safeLines.join("\n");
+    const displayLabel = formatRunDisplayLabel(runId);
+    const sig = runId + "\0" + displayLabel + "\0" + safeLines.length + "\0" + safeLines.join("\n");
     if (sig === lastStreamSig) return;
     lastStreamSig = sig;
     lastStreamLineCount = safeLines.length;
     lastStreamError = "";
-    $("streamStatus").textContent = runId ? tr("stream.status", { runId, n: safeLines.length }) : tr("stream.noRunSelected");
+    $("streamStatus").textContent = runId ? tr("stream.status", { runId: displayLabel, n: safeLines.length }) : tr("stream.noRunSelected");
     const box = $("streamBox");
     if (!safeLines.length) {
-      box.innerHTML = runId ? `<div class="muted">${esc(tr("stream.noLines", { runId }))}</div>` : "";
+      box.innerHTML = runId ? `<div class="muted">${esc(tr("stream.noLines", { runId: displayLabel }))}</div>` : "";
       return;
     }
     box.innerHTML = safeLines.map((line) => {
@@ -3047,6 +3099,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const sw = data.switcher || null;
     const profiles = (sw && Array.isArray(sw.profiles)) ? sw.profiles : [];
     const claudes = accts.filter((a) => a.provider === "claude_code");
+    const readyAll = accts.filter((a) => !isAccountInCooldown(a)).length;
     const claudeReady = claudes.filter((a) => !isAccountInCooldown(a)).length;
     const anthProfiles = profiles.filter((p) => p && p.vendor === "anthropic");
     const liveCnt = anthProfiles.filter((p) => p.quota && p.quota.live).length;
@@ -3056,6 +3109,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const claudeSub = anthProfiles.length
       ? tr("acc.liveQuotaSub", { live: liveCnt, total: anthProfiles.length, ago: tsSync })
       : tr("acc.pureMode");
+    const card1Lbl = claudes.length ? tr("acc.summaryClaudeReady") : tr("acc.summaryPoolReady");
+    const card1Val = claudes.length ? `${claudeReady} / ${claudes.length}` : `${readyAll} / ${accts.length}`;
 
     const provCounts = [];
     const byProv = new Map();
@@ -3070,7 +3125,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     const selMode = data.selection_mode || "sticky";
     const crossExec = (data.cross_audit_executor || "auto").trim() || "auto";
     usageBar.innerHTML = `
-      <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.summaryClaudeReady"))}</div><div class="acc-stat-val">${claudeReady} / ${claudes.length}</div><div class="acc-stat-sub">${esc(claudeSub)}</div></div>
+      <div class="acc-stat"><div class="acc-stat-lbl">${esc(card1Lbl)}</div><div class="acc-stat-val">${card1Val}</div><div class="acc-stat-sub">${esc(claudeSub)}</div></div>
       <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.summaryProviders"))}</div><div class="acc-stat-val">${esc(tr("acc.providersCount", { n: orderedKeys.length }))}</div><div class="acc-stat-sub">${esc(provCounts.join(" · "))}</div></div>
       <div class="acc-stat"><div class="acc-stat-lbl">${esc(tr("acc.summaryPolicy"))}</div><div class="acc-stat-val mono">${esc(selMode)}</div><div class="acc-stat-sub">${esc(tr("acc.crossAuditSub", { exec: crossExec }))}</div></div>`;
     usageBar.classList.remove("hidden");
@@ -3158,12 +3213,24 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           cell5h = quotaCellLive(swp ? swp.remainingPct : null, swp ? swp.resetRemainHuman : "", a.tokens_5h, issueHtml);
           cell7d = quotaCellLive(swp ? swp.weeklyRemainingPct : null, swp ? swp.weeklyResetFormatted : "", a.tokens_7d, "");
         } else if (pqLive) {
+          const allGroups = (prov === "antigravity" && Array.isArray(pq.groups)) ? pq.groups : [];
+          const primaryGeminiIdx = allGroups.findIndex((g) => g && g.name && String(g.name).toLowerCase().includes("gemini"));
+          const extraGroups = allGroups.filter((g, idx) => g && g.name && idx !== primaryGeminiIdx);
+          const grpSub = (field) => {
+            if (!extraGroups.length) return "";
+            const parts = extraGroups
+              .filter((g) => typeof g[field] === "number")
+              .map((g) => `${esc(g.name)}: ${Math.max(0, Math.min(100, g[field]))}%`);
+            return parts.length ? `<div class="muted" style="font-size:11px;margin-top:3px">${parts.join(" · ")}</div>` : "";
+          };
           cell5h = typeof pq.remainingPct === "number"
-            ? quotaCellLive(pq.remainingPct, pq.resetRemainHuman || "", a.tokens_5h, "")
-            : quotaCellNoLive(a.tokens_5h);
+            ? `${quotaCellLive(pq.remainingPct, pq.resetRemainHuman || "", a.tokens_5h, "")}${grpSub("remainingPct")}`
+            : (prov === "grok"
+              ? quotaCellNoLive(a.tokens_5h, "acc.grokWeeklyOnly", "acc.grokWeeklyOnlyTitle")
+              : `${quotaCellLive(null, "", a.tokens_5h, "")}${grpSub("remainingPct")}`);
           cell7d = typeof pq.weeklyRemainingPct === "number"
-            ? quotaCellLive(pq.weeklyRemainingPct, pq.weeklyResetFormatted || "", a.tokens_7d, "")
-            : quotaCellNoLive(a.tokens_7d);
+            ? `${quotaCellLive(pq.weeklyRemainingPct, pq.weeklyResetFormatted || "", a.tokens_7d, "")}${grpSub("weeklyRemainingPct")}`
+            : `${quotaCellLive(null, "", a.tokens_7d, "")}${grpSub("weeklyRemainingPct")}`;
         } else if (prov === "grok" && pq && pq.reason === "tui_only") {
           cell5h = quotaCellNoLive(a.tokens_5h, "acc.grokTuiOnly", "acc.grokTuiOnlyTitle");
           cell7d = quotaCellNoLive(a.tokens_7d, "acc.grokTuiOnly", "acc.grokTuiOnlyTitle");
@@ -3171,13 +3238,14 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           cell5h = quotaCellNoLive(a.tokens_5h);
           cell7d = quotaCellNoLive(a.tokens_7d);
         }
+        const emailSub = (pq && pq.accountEmail) ? `<div class="muted" style="font-size:11px">${esc(pq.accountEmail)}</div>` : "";
         const dirSub = a.config_dir ? `<div class="acc-dir mono" title="${esc(a.config_dir)}">${esc(a.config_dir)}</div>` : "";
         const controls = !ro ? `<td><div style="display:flex;gap:4px">${
           inCd
             ? `<button type="button" class="btn-ok btn-sm" ${dis} data-acc-clear="${esc(acctKey)}">${esc(tr("acc.clearCd"))}</button>`
             : `<button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="5">${esc(tr("acc.cd5m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="15">${esc(tr("acc.cd15m"))}</button><button type="button" class="btn-sm" ${dis} data-acc-cd="${esc(acctKey)}" data-mins="300">${esc(tr("acc.cd5h"))}</button>`
         }</div></td>` : "";
-        return `<tr><td><strong>${esc(a.name)}</strong>${dirSub}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":(inCd?"pill-blocked":"pill-running")}">${esc(accountStateLabel(st))}</span>${liveTag}</td><td class="mono">${esc(cdText)}</td><td>${cell5h}</td><td>${cell7d}</td>${controls}</tr>`;
+        return `<tr><td><strong>${esc(a.name)}</strong>${emailSub}${dirSub}</td><td><span class="pill ${st==="available"||st==="ready"?"pill-ok":(inCd?"pill-blocked":"pill-running")}">${esc(accountStateLabel(st))}</span>${liveTag}</td><td class="mono">${esc(cdText)}</td><td>${cell5h}</td><td>${cell7d}</td>${controls}</tr>`;
       }).join("");
 
       sectionsHtml.push(`
@@ -3393,54 +3461,151 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 
     const aafClaudeNames = accts.filter((a) => a.provider === "claude_code").map((a) => a.name);
     const swClaudeNames = (sw && Array.isArray(sw.claudeAccounts)) ? sw.claudeAccounts : [];
-    const claudeOpts = [...new Set([...aafClaudeNames, ...swClaudeNames])];
+    const dedupCi = (arr) => {
+      const seen = new Set();
+      const out = [];
+      for (const item of arr) {
+        if (!item) continue;
+        const k = String(item).toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(item);
+      }
+      return out;
+    };
+    const claudeOpts = dedupCi([...aafClaudeNames, ...swClaudeNames]);
+    const acctProviderByName = new Map();
+    const groupedAssignOpts = new Map();
+    const groupedSeenCi = new Map();
+    for (const p of PROVIDER_ORDER) {
+      groupedAssignOpts.set(p, []);
+      groupedSeenCi.set(p, new Set());
+    }
+    const addGroupedOpt = (prov, name) => {
+      if (!name) return;
+      if (!groupedAssignOpts.has(prov)) {
+        groupedAssignOpts.set(prov, []);
+        groupedSeenCi.set(prov, new Set());
+      }
+      const low = String(name).toLowerCase();
+      if (!groupedSeenCi.get(prov).has(low)) {
+        groupedSeenCi.get(prov).add(low);
+        groupedAssignOpts.get(prov).push(name);
+      }
+    };
+    for (const a of accts) {
+      const p = String(a.provider || "claude_code").toLowerCase();
+      addGroupedOpt(p, a.name);
+      if (a.name) acctProviderByName.set(String(a.name).toLowerCase(), p);
+      if (a.id) acctProviderByName.set(String(a.id).toLowerCase(), p);
+    }
+    for (const cname of swClaudeNames) {
+      addGroupedOpt("claude_code", cname);
+      if (cname && !acctProviderByName.has(String(cname).toLowerCase())) {
+        acctProviderByName.set(String(cname).toLowerCase(), "claude_code");
+      }
+    }
+    const buildAssignOptionsHtml = (selectedVal, isApp) => {
+      const selLow = String(selectedVal || "").toLowerCase();
+      let curSeen = false;
+      if (isApp) {
+        const opts = claudeOpts.map((id) => {
+          const sel = selLow !== "" && id.toLowerCase() === selLow;
+          if (sel) curSeen = true;
+          return `<option value="${esc(id)}" ${sel ? "selected" : ""}>${esc(id)}</option>`;
+        }).join("");
+        return selectedVal && !curSeen
+          ? `${opts}<option value="${esc(selectedVal)}" selected>${esc(selectedVal)}</option>`
+          : opts;
+      }
+      const chunks = [];
+      for (const [prov, names] of groupedAssignOpts.entries()) {
+        if (!names.length) continue;
+        const pm = providerMeta(prov);
+        const opts = names.map((id) => {
+          const sel = selLow !== "" && id.toLowerCase() === selLow;
+          if (sel) curSeen = true;
+          return `<option value="${esc(id)}" ${sel ? "selected" : ""}>${esc(id)} (${esc(pm.shortName)})</option>`;
+        }).join("");
+        chunks.push(`<optgroup label="${esc(pm.title)}">${opts}</optgroup>`);
+      }
+      if (selectedVal && !curSeen) {
+        chunks.push(`<option value="${esc(selectedVal)}" selected>${esc(selectedVal)}</option>`);
+      }
+      return chunks.join("");
+    };
     const repos = Array.isArray(data.repo_assignments) && data.repo_assignments.length
       ? data.repo_assignments
       : ((sw && Array.isArray(sw.repoAssignments)) ? sw.repoAssignments : []);
-    if (!repos.length) {
-      $("repoAssignBox").innerHTML = `<div class="muted">${esc(tr("acc.noRepos"))}</div>`;
-    } else {
-      $("repoAssignBox").innerHTML = `<table><thead><tr><th>${esc(tr("acc.thRepo"))}</th><th>${esc(tr("acc.thCurrentAcc"))}</th>${!ro ? `<th>${esc(tr("acc.thAssignClaude"))}</th>` : ""}</tr></thead><tbody>` +
-        repos.map((rp) => {
-          const cur = rp.pinnedInFile && rp.account ? rp.account : "";
-          const isApp = rp.source === "app";
-          const badge = cur ? `<span class="pill pill-ok mono">${esc(cur)}</span>` : `<span class="pill pill-slate">${esc(tr("acc.defaultHome"))}</span>`;
-          const ctrl = !ro ? `<td><div style="display:flex;gap:6px;align-items:center">
-            <select data-repo-sel="${esc(rp.path)}" aria-label="${esc(tr("acc.selectAccAria", { name: rp.name }))}" style="min-width:150px">
-              <option value="">${esc(tr("acc.selectAccOpt"))}</option>
-              ${claudeOpts.map((id) => `<option value="${esc(id)}" ${id === cur ? "selected" : ""}>${esc(id)}</option>`).join("")}
-            </select>
-            <button type="button" class="btn-primary btn-sm" data-repo-save="${esc(rp.path)}">${esc(tr("acc.save"))}</button>
-            ${cur && !isApp ? `<button type="button" class="btn-sm" data-repo-rm="${esc(rp.path)}">${esc(tr("acc.remove"))}</button>` : ""}
-          </div></td>` : "";
-          return `<tr><td><strong>${esc(rp.name)}</strong><div class="mono muted" style="font-size:11px">${esc(rp.path)}</div></td><td>${badge}</td>${ctrl}</tr>`;
-        }).join("") + `</tbody></table>`;
-      $("repoAssignBox").querySelectorAll("[data-repo-save]").forEach((btn) => {
-        btn.onclick = async () => {
-          const repoPath = btn.dataset.repoSave;
-          const sel = $("repoAssignBox").querySelector(`select[data-repo-sel="${CSS.escape(repoPath)}"]`);
-          const acc = sel ? sel.value.trim() : "";
-          if (!acc) { toast(tr("toast.selectAccFirst")); return; }
-          btn.disabled = true;
-          try {
-            const res = await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_assign", task_id: repoPath, note: acc }) });
-            toast(res.message || tr("toast.assignedRepo", { acc }));
-            await loadAccountsPanel(false);
-          } catch (e) { toast(tr("toast.error", { msg: e.message })); }
-          finally { btn.disabled = false; }
-        };
-      });
-      $("repoAssignBox").querySelectorAll("[data-repo-rm]").forEach((btn) => {
-        btn.onclick = async () => {
-          btn.disabled = true;
-          try {
-            await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_remove", task_id: btn.dataset.repoRm, note: "" }) });
-            toast(tr("toast.removedRepo"));
-            await loadAccountsPanel(false);
-          } catch (e) { toast(tr("toast.error", { msg: e.message })); }
-          finally { btn.disabled = false; }
-        };
-      });
+    // Preserve any unsaved dropdown selection across background refreshes.
+    const dirtyRepoSel = new Map();
+    $("repoAssignBox").querySelectorAll("select[data-repo-sel]").forEach((sel) => {
+      const rp = sel.dataset.repoSel;
+      const orig = sel.dataset.repoCur || "";
+      if (rp && sel.value !== orig) dirtyRepoSel.set(rp, sel.value);
+    });
+    const langNowRepo = window.AafI18n ? window.AafI18n.getLang() : "en";
+    const repoAssignSig = JSON.stringify([langNowRepo, ro, repos, [...groupedAssignOpts.entries()]]);
+    const repoFocusInside = $("repoAssignBox").contains(document.activeElement);
+    const shouldRebuildRepos = repoAssignSig !== window._lastRepoAssignSig || (!repoFocusInside && !dirtyRepoSel.size && !$("repoAssignBox").querySelector("table"));
+    if (shouldRebuildRepos) {
+      window._lastRepoAssignSig = repoAssignSig;
+      if (!repos.length) {
+        $("repoAssignBox").innerHTML = `<div class="muted">${esc(tr("acc.noRepos"))}</div>`;
+      } else {
+        $("repoAssignBox").innerHTML = `<table><thead><tr><th>${esc(tr("acc.thRepo"))}</th><th>${esc(tr("acc.thCurrentAcc"))}</th>${!ro ? `<th>${esc(tr("acc.thAssignAccount"))}</th>` : ""}</tr></thead><tbody>` +
+          repos.map((rp) => {
+            const cur = rp.pinnedInFile && rp.account ? rp.account : "";
+            const displaySel = dirtyRepoSel.has(rp.path) ? dirtyRepoSel.get(rp.path) : cur;
+            const isApp = rp.source === "app";
+            const curProv = cur ? (rp.provider || acctProviderByName.get(cur.toLowerCase()) || "") : "";
+            const curPm = curProv ? providerMeta(curProv) : null;
+            const badge = cur
+              ? `<span class="pill pill-ok mono" style="display:inline-flex;align-items:center;gap:5px">${curPm ? `<span class="acc-provider-dot" style="background:${curPm.color};width:7px;height:7px"></span><span>${esc(curPm.shortName)}</span> · ` : ""}${esc(cur)}</span>`
+              : `<span class="pill pill-slate">${esc(tr("acc.defaultHome"))}</span>`;
+            const ctrl = !ro ? `<td><div style="display:flex;gap:6px;align-items:center">
+              <select data-repo-sel="${esc(rp.path)}" data-repo-cur="${esc(cur)}" aria-label="${esc(tr("acc.selectAccAria", { name: rp.name }))}" style="min-width:170px">
+                <option value="">${esc(tr("acc.selectAccOpt"))}</option>
+                ${buildAssignOptionsHtml(displaySel, isApp)}
+              </select>
+              <button type="button" class="btn-primary btn-sm" data-repo-save="${esc(rp.path)}">${esc(tr("acc.save"))}</button>
+              ${cur && !isApp ? `<button type="button" class="btn-sm" data-repo-rm="${esc(rp.path)}">${esc(tr("acc.remove"))}</button>` : ""}
+            </div></td>` : "";
+            return `<tr><td><strong>${esc(rp.name)}</strong><div class="mono muted" style="font-size:11px">${esc(rp.path)}</div></td><td>${badge}</td>${ctrl}</tr>`;
+          }).join("") + `</tbody></table>`;
+        $("repoAssignBox").querySelectorAll("[data-repo-save]").forEach((btn) => {
+          btn.onclick = async () => {
+            const repoPath = btn.dataset.repoSave;
+            const sel = $("repoAssignBox").querySelector(`select[data-repo-sel="${CSS.escape(repoPath)}"]`);
+            const acc = sel ? sel.value.trim() : "";
+            if (!acc) { toast(tr("toast.selectAccFirst")); return; }
+            btn.disabled = true;
+            try {
+              const res = await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_assign", task_id: repoPath, note: acc }) });
+              if (sel) sel.dataset.repoCur = acc;
+              window._lastRepoAssignSig = "";
+              toast(res.message || tr("toast.assignedRepo", { acc }));
+              await loadAccountsPanel(false);
+            } catch (e) { toast(tr("toast.error", { msg: e.message })); }
+            finally { btn.disabled = false; }
+          };
+        });
+        $("repoAssignBox").querySelectorAll("[data-repo-rm]").forEach((btn) => {
+          btn.onclick = async () => {
+            const repoPath = btn.dataset.repoRm;
+            const sel = $("repoAssignBox").querySelector(`select[data-repo-sel="${CSS.escape(repoPath)}"]`);
+            btn.disabled = true;
+            try {
+              await api("/api/action", { method: "POST", body: JSON.stringify({ action: "cc_repo_remove", task_id: repoPath, note: "" }) });
+              if (sel) { sel.value = ""; sel.dataset.repoCur = ""; }
+              window._lastRepoAssignSig = "";
+              toast(tr("toast.removedRepo"));
+              await loadAccountsPanel(false);
+            } catch (e) { toast(tr("toast.error", { msg: e.message })); }
+            finally { btn.disabled = false; }
+          };
+        });
+      }
     }
     renderAccountsPool(true);
   }

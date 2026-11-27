@@ -128,10 +128,13 @@ pub fn build_author_prompt(
             concrete codebase evidence.\n\
          4. Keep `summary` concise and `tier_assessment` strictly one of `\"S\"`, `\"M\"`, `\"L\"`.\n\
          5. Only populate `open_questions` when a genuine product, UX, or scope choice requires a \
-            human decision. Write EVERY `open_questions` item in plain, natural language for a \
-            non-coding reader in the task's language (NEVER raw code/symbol/function dumps or \
-            unexplained technical jargon). Format each item as:\n\
-            `<Short plain question> | (1) <Plain option A> (Recommended/Khuyến nghị) — <1-sentence benefit/tradeoff> | (2) <Plain option B> — <1-sentence benefit/tradeoff> | Hint/Gợi ý: <1 plain sentence explaining why the recommended choice is safest/best>`."
+            human decision — NEVER dump internal reminders, git SHAs, commit logistics, or grep \
+            TODOs into `open_questions`. Write EVERY item in plain, natural language for a \
+            non-coding reader in the task's language (no raw code/class/symbol jargon). Each item \
+            MUST include concrete plain-language options AND a specific, tailored `Hint:` (use \
+            `Gợi ý:` and `(Khuyến nghị)` when writing in Vietnamese) explaining the exact tradeoff \
+            for THAT specific item:\n\
+            `<Short plain question> | (1) <Plain option A> (Recommended) — <clear impact> | (2) <Plain option B> — <clear impact> | Hint: <1 item-specific sentence explaining why (1) is preferred or when to pick (2)>`."
     );
 
     append_task_spec(&mut out, task);

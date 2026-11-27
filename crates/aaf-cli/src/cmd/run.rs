@@ -288,6 +288,7 @@ pub fn run(args: &RunArgs, ctx: &Ctx) -> CmdResult {
     };
     let repo = repo_root(ctx)?;
     let mut cfg = load_config(args, ctx, &repo)?;
+    ctx.apply_assigned_account_executor(&repo, &mut cfg);
     if cfg
         .repo
         .cross_audit

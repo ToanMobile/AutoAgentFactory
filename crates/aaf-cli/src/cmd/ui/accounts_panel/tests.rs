@@ -119,9 +119,9 @@ fn merge_repo_assignments_deduplicates_and_scopes() {
             { "name": "repo-b", "path": repo_b.to_string_lossy(), "account": "", "pinnedInFile": false }
         ]
     });
-    let all = merge_repo_assignments(None, None, Some(&sw));
+    let all = merge_repo_assignments(None, None, Some(&sw), &[]);
     assert_eq!(all.len(), 2);
-    let scoped = merge_repo_assignments(None, Some(&repo_a), Some(&sw));
+    let scoped = merge_repo_assignments(None, Some(&repo_a), Some(&sw), &[]);
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0]["name"].as_str(), Some("repo-a"));
 
@@ -130,7 +130,24 @@ fn merge_repo_assignments_deduplicates_and_scopes() {
             { "name": "ghost", "path": tmp.path().join("nope").to_string_lossy(), "pathExists": false }
         ]
     });
-    assert!(merge_repo_assignments(None, None, Some(&sw_missing)).is_empty());
+    assert!(merge_repo_assignments(None, None, Some(&sw_missing), &[]).is_empty());
+
+    // Live `.claude/settings.local.json` with non-Claude account (grok/gemini)
+    // must override stale cc-switcher entries and attach `provider`.
+    fs::create_dir_all(repo_a.join(".claude")).unwrap();
+    fs::write(
+        repo_a.join(".claude/settings.local.json"),
+        r#"{"account":"grok"}"#,
+    )
+    .unwrap();
+    let discovered = vec![
+        mk_profile("grok-1", ProviderKind::Grok, "grok", &repo_b),
+        mk_profile("antigravity-1", ProviderKind::Antigravity, "gemini", &repo_b),
+    ];
+    let overridden = merge_repo_assignments(None, Some(&repo_a), Some(&sw), &discovered);
+    assert_eq!(overridden.len(), 1);
+    assert_eq!(overridden[0]["account"].as_str(), Some("grok"));
+    assert_eq!(overridden[0]["provider"].as_str(), Some("grok"));
 }
 
 #[test]
@@ -206,4 +223,118 @@ fn do_account_clear_all_clears_active_cooldowns_only() {
             .iter()
             .all(|s| s.cooldown_until.is_none())
     );
+}
+
+#[test]
+fn parses_live_agy_usage_tsv_and_utc_timestamps() {
+    let sample = "\
+Gemini Models\tWeekly Limit Remaining\t84%\t2026-12-03T07:07:12Z\n\
+Gemini Models\tFive Hour Limit Remaining\t85%\t2026-11-27T03:07:12Z\n\
+Claude and GPT models\tWeekly Limit Remaining\t100%\t1970-01-01T00:00:00Z\n";
+    let now = live_quota::parse_rfc3339_utc_ms("2026-11-27T01:07:12Z").unwrap();
+    let parsed = live_quota::parse_agy_usage_output(sample, now).unwrap();
+    assert_eq!(parsed["live"].as_bool(), Some(true));
+    assert_eq!(parsed["remainingPct"].as_i64(), Some(85));
+    assert_eq!(parsed["weeklyRemainingPct"].as_i64(), Some(84));
+    assert_eq!(parsed["resetRemainHuman"].as_str(), Some("2h 00m"));
+    assert_eq!(parsed["weeklyResetFormatted"].as_str(), Some("6d 6h"));
+}
+
+#[test]
+fn parses_live_agy_usage_json_with_groups() {
+    let sample = r#"{
+        "status": "SUCCESS",
+        "command": {
+            "name": "usage",
+            "data": {
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {"window": "weekly", "remaining_fraction": 0.836, "reset_time": "2026-12-03T07:07:12Z"},
+                            {"window": "5h", "remaining_fraction": 0.824, "reset_time": "2026-11-27T03:07:12Z"}
+                        ]
+                    },
+                    {
+                        "name": "Claude and GPT models",
+                        "buckets": [
+                            {"window": "weekly", "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z"},
+                            {"window": "5h", "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z"}
+                        ]
+                    }
+                ]
+            }
+        }
+    }"#;
+    let now = live_quota::parse_rfc3339_utc_ms("2026-11-27T01:07:12Z").unwrap();
+    let parsed = live_quota::parse_agy_usage_output(sample, now).unwrap();
+    assert_eq!(parsed["live"].as_bool(), Some(true));
+    assert_eq!(parsed["remainingPct"].as_i64(), Some(82));
+    assert_eq!(parsed["weeklyRemainingPct"].as_i64(), Some(84));
+    assert_eq!(parsed["groups"].as_array().map(Vec::len), Some(2));
+    assert_eq!(parsed["groups"][1]["name"].as_str(), Some("Claude and GPT models"));
+    assert_eq!(parsed["groups"][1]["remainingPct"].as_i64(), Some(100));
+}
+
+#[test]
+fn rejects_epoch_zero_sentinel_timestamp() {
+    assert_eq!(live_quota::parse_rfc3339_utc_ms("1970-01-01T00:00:00Z"), None);
+    assert!(live_quota::parse_rfc3339_utc_ms("2026-11-27T03:07:12Z").unwrap() > 0);
+}
+
+#[test]
+fn parses_live_grok_pty_usage_output() {
+    let sample = "Session usage: no model calls yet in this session.\n\
+        minimal · /help ❯Grok4.7\n\
+        Weekly limit: 6%\n\
+        Next reset: December 2, 11:40\n";
+    let parsed = live_quota::parse_grok_pty_usage(sample, 1_700_000_000_000).unwrap();
+    assert_eq!(parsed["live"].as_bool(), Some(true));
+    assert_eq!(parsed["weeklyRemainingPct"].as_i64(), Some(94));
+    assert_eq!(
+        parsed["weeklyResetFormatted"].as_str(),
+        Some("December 2, 11:40")
+    );
+    assert!(parsed["remainingPct"].is_null());
+
+    // Missing `%` must NOT be treated as a percentage (prevents false 0% cooldown).
+    assert!(live_quota::parse_grok_pty_usage("Weekly limit: 500\n", 1_700_000_000_000).is_none());
+    // Decimal `%` supported and 99.6% used does not prematurely report 0% remaining.
+    let near_cap = live_quota::parse_grok_pty_usage("Weekly limit: 99.6%\n", 1_700_000_000_000).unwrap();
+    assert_eq!(near_cap["weeklyRemainingPct"].as_i64(), Some(1));
+}
+
+#[test]
+fn rejects_negative_rfc3339_fields_and_negative_remaining_fraction() {
+    assert_eq!(live_quota::parse_rfc3339_utc_ms("2026-11-27T-5:-10:-20Z"), None);
+    assert_eq!(live_quota::parse_rfc3339_utc_ms("2026-11-27T03:07:12:99Z"), None);
+    let neg_frac = r#"{
+        "command": { "data": { "groups": [{
+            "name": "Gemini Models",
+            "buckets": [
+                {"window": "5h", "remaining_fraction": -1.0, "reset_time": "2026-11-27T03:07:12Z"}
+            ]
+        }]}}
+    }"#;
+    assert!(live_quota::parse_agy_usage_output(neg_frac, 1_700_000_000_000).is_none());
+}
+
+#[test]
+fn merge_repo_assignments_clears_stale_switcher_entry_when_local_file_unpinned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_a = tmp.path().join("repo-a");
+    fs::create_dir_all(repo_a.join(".claude")).unwrap();
+    // `.claude/settings.local.json` exists with no `account` key (after removal)
+    fs::write(repo_a.join(".claude/settings.local.json"), "{}\n").unwrap();
+    let sw = json!({
+        "repoAssignments": [
+            { "name": "repo-a", "path": repo_a.to_string_lossy(), "account": "finos_toan", "pinnedInFile": true }
+        ]
+    });
+    let discovered = vec![mk_profile("claude_code-1", ProviderKind::ClaudeCode, "finos_toan", &repo_a)];
+    let merged = merge_repo_assignments(None, Some(&repo_a), Some(&sw), &discovered);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0]["account"].as_str(), Some(""));
+    assert_eq!(merged[0]["pinnedInFile"].as_bool(), Some(false));
+    assert!(merged[0].get("provider").is_none());
 }

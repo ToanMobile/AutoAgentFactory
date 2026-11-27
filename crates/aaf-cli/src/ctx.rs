@@ -110,6 +110,8 @@ impl Ctx {
     }
 
     /// The three config tiers plus the `AAF_*` environment, for `repo_root`.
+    /// Also applies non-Claude repo account assignment routing from
+    /// `.claude/settings.local.json` when `[run].executor` is default Claude.
     pub fn load_config(&self, repo_root: &Path) -> Result<EffectiveConfig, CmdError> {
         let env = |key: &str| {
             self.aaf_env
@@ -117,13 +119,87 @@ impl Ctx {
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.clone())
         };
-        config::load(&ConfigInputs {
+        let mut cfg = config::load(&ConfigInputs {
             global_config: Some(self.config_dir.join("config.toml")),
             repo_root: repo_root.to_path_buf(),
             env: &env,
             cli: ConfigOverlay::default(),
         })
-        .map_err(|e| CmdError::new(format!("config: {e}")))
+        .map_err(|e| CmdError::new(format!("config: {e}")))?;
+        self.apply_assigned_account_executor(repo_root, &mut cfg);
+        Ok(cfg)
+    }
+
+    /// If `repo_root/.claude/settings.local.json` pins a discovered non-Claude
+    /// account (e.g. `gemini` / `antigravity`, `grok`, `codex`, `opencode`) AND
+    /// the repo is using default Claude (`[run].executor` is empty or `"claude"`,
+    /// with empty `executor_cmd`), route `[run].executor` and matching writer
+    /// pipeline stages to that account's provider. Never overwrites an explicit
+    /// non-Claude `[run].executor` (such as `"codex"`) or custom `executor_cmd`.
+    pub fn apply_assigned_account_executor(&self, repo_root: &Path, cfg: &mut EffectiveConfig) {
+        use aaf_domain::account::ProviderKind;
+        use aaf_engine::accounts::{self, DiscoveryEnv};
+        use aaf_engine::factory::adapters::provider_for;
+
+        if !cfg.repo.run.executor_cmd.is_empty() {
+            return;
+        }
+        let cur_exec = cfg.repo.run.executor.trim();
+        let is_default_claude = cur_exec.is_empty()
+            || aaf_domain::pipeline::normalize_executor_id(cur_exec) == "claude";
+        if !is_default_claude {
+            return;
+        }
+        let Some(wanted) = accounts::selection::settings_account(repo_root) else {
+            return;
+        };
+        let on_path = |name: &str| accounts::binary_on_path_in(&self.path_var, name);
+        let found = accounts::discover(
+            &cfg.global.accounts,
+            &DiscoveryEnv {
+                home: self.home.clone(),
+                binary_on_path: &on_path,
+            },
+        );
+        let Some(matched) = accounts::selection::match_account(&wanted, &found) else {
+            return;
+        };
+        if matched.provider == ProviderKind::ClaudeCode {
+            return;
+        }
+        let target_exec = match matched.provider {
+            ProviderKind::ClaudeCode => "claude",
+            ProviderKind::Antigravity => {
+                if on_path("agy") || on_path("antigravity") {
+                    "antigravity"
+                } else if on_path("gemini") {
+                    "gemini"
+                } else {
+                    "antigravity"
+                }
+            }
+            ProviderKind::Grok => "grok",
+            ProviderKind::Codex => "codex",
+            ProviderKind::OpenCode => "opencode",
+        };
+        let old_provider = provider_for(cur_exec);
+        cfg.repo.run.executor = target_exec.to_string();
+        cfg.repo.run.model.clear();
+        cfg.repo.run.effort.clear();
+        for stage in [
+            &mut cfg.repo.pipeline.implementer,
+            &mut cfg.repo.pipeline.implementer_escalated,
+            &mut cfg.repo.pipeline.plan_author,
+        ] {
+            if stage.executor_cmd.trim().is_empty()
+                && (stage.executor.trim().is_empty()
+                    || provider_for(&stage.executor) == old_provider)
+            {
+                stage.executor.clear();
+                stage.model.clear();
+                stage.effort.clear();
+            }
+        }
     }
 
     /// Builds a [`CostPolicy`] from tier-1 `[accounts.billing]` and persisted accounts.
