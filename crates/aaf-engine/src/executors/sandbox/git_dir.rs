@@ -231,13 +231,17 @@ pub(super) fn linked_worktree_rules(git_dir: &Path, worktree: Option<&Path>) -> 
 
 /// Returns up to two pre-existing reflog files owned by linked worktree
 /// `worktree` under `git_dir` (RFC-126): `<own>/logs/HEAD` and
-/// `<git_dir>/logs/<ref>` where `<ref>` comes from `<own>/HEAD`
-/// (`ref: refs/heads/<branch>`).
+/// `<git_dir>/logs/<ref>`.
 ///
-/// `<own>/HEAD` is write-denied in both macOS Seatbelt (`[^/]*HEAD`) and Linux
-/// Bubblewrap (`protect_git_dir`), so reading it host-side while building the
-/// sandbox profile is trustworthy. Only regular files with `nlink == 1` and no
-/// symlink directory between `git_dir` and the file are kept (fail-closed).
+/// `<own>/HEAD` is agent-writable in both Seatbelt and Bubblewrap, so `<ref>`
+/// is chosen from host-known identity first: for factory worktrees
+/// (`<worktrees_dir>/<repo_id>/<task_id>`), `refs/heads/aaf/<task_id>` is used
+/// without reading `<own>/HEAD`. For other layouts, `<own>/HEAD` is used only
+/// when it names a non-protected `refs/heads/*` branch (checked via
+/// `crate::git::is_protected_branch`) not checked out by `<git_dir>/HEAD` or
+/// any other `<git_dir>/worktrees/*/HEAD` (fail-closed on read errors).
+/// Only regular files with `nlink == 1` and no symlink directory between
+/// `git_dir` and the file are kept.
 pub(crate) fn own_reflog_files(worktree: &Path, git_dir: &Path) -> Vec<PathBuf> {
     let Some(own) = linked_worktree_admin_dir(worktree, git_dir) else {
         return Vec::new();
@@ -256,7 +260,9 @@ pub(crate) fn own_reflog_files(worktree: &Path, git_dir: &Path) -> Vec<PathBuf> 
         return Vec::new();
     }
     let mut rels = vec![own_rel.join("logs/HEAD")];
-    if let Some(ref_name) = read_own_branch_ref(&own) {
+    let branch_ref = factory_branch_ref(worktree, &git_dir_canon)
+        .or_else(|| fallback_branch_ref(&git_dir_canon, &own));
+    if let Some(ref_name) = branch_ref {
         rels.push(Path::new("logs").join(ref_name));
     }
     rels.into_iter()
@@ -264,23 +270,83 @@ pub(crate) fn own_reflog_files(worktree: &Path, git_dir: &Path) -> Vec<PathBuf> 
         .collect()
 }
 
-fn read_own_branch_ref(own: &Path) -> Option<String> {
-    let head = own.join("HEAD");
-    if !std::fs::symlink_metadata(&head).is_ok_and(|m| m.file_type().is_file()) {
-        return None;
+fn factory_branch_ref(worktree: &Path, git_dir_canon: &Path) -> Option<String> {
+    let wt_canon = std::fs::canonicalize(worktree).ok()?;
+    let task = wt_canon.file_name()?.to_str()?;
+    let rid = wt_canon.parent()?.file_name()?.to_str()?;
+    let repo_root = match git_dir_canon.parent() {
+        Some(parent) if git_dir_canon.file_name().is_some_and(|n| n == ".git") => parent,
+        _ => git_dir_canon,
+    };
+    if rid == aaf_fp::repo_id(repo_root) && crate::git::worktree::validate_task_id(task).is_ok() {
+        Some(format!(
+            "refs/heads/{}{task}",
+            crate::git::worktree::BRANCH_PREFIX
+        ))
+    } else {
+        None
     }
-    let text = std::fs::read_to_string(&head).ok()?;
-    let ref_name = text.lines().next()?.strip_prefix("ref:")?.trim();
+}
+
+fn fallback_branch_ref(git_dir_canon: &Path, own: &Path) -> Option<String> {
+    let ref_name = read_head_symref(&own.join("HEAD")).ok().flatten()?;
     let branch = ref_name.strip_prefix("refs/heads/")?;
     if branch.is_empty()
         || ref_name.contains("..")
         || ref_name.contains('\\')
         || ref_name.chars().any(char::is_control)
         || branch.split('/').any(|seg| seg.is_empty() || seg == ".")
+        || crate::git::is_protected_branch(branch, "")
+        || branch.eq_ignore_ascii_case("release")
     {
         return None;
     }
-    Some(ref_name.to_string())
+    is_exclusive_checkout(git_dir_canon, own, &ref_name).then_some(ref_name)
+}
+
+fn read_head_symref(head: &Path) -> Result<Option<String>, ()> {
+    let meta = std::fs::symlink_metadata(head).map_err(|_| ())?;
+    if !meta.file_type().is_file() {
+        return Err(());
+    }
+    let text = std::fs::read_to_string(head).map_err(|_| ())?;
+    let first = text.lines().next().ok_or(())?;
+    Ok(first.strip_prefix("ref:").map(|r| r.trim().to_string()))
+}
+
+fn is_exclusive_checkout(git_dir_canon: &Path, own: &Path, ref_name: &str) -> bool {
+    let Ok(main_ref) = read_head_symref(&git_dir_canon.join("HEAD")) else {
+        return false;
+    };
+    if main_ref.as_deref() == Some(ref_name) {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(git_dir_canon.join("worktrees")) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let path = entry.path();
+        if path == own {
+            continue;
+        }
+        let Ok(ft) = entry.file_type() else {
+            return false;
+        };
+        if ft.is_symlink() {
+            return false;
+        }
+        if !ft.is_dir() {
+            continue;
+        }
+        match read_head_symref(&path.join("HEAD")) {
+            Ok(other) if other.as_deref() != Some(ref_name) => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn verified_reflog_file(git_dir_canon: &Path, rel: &Path) -> Option<PathBuf> {
