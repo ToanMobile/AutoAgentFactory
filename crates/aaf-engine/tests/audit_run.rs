@@ -187,6 +187,7 @@ fn request_keeps_the_template_and_carries_the_audit_prompt() {
     assert_eq!(requests.len(), 1);
     let expected = AgentRequest {
         prompt: aaf_engine::cross_audit::build_prompt(&input),
+        json_schema: Some(aaf_engine::cross_audit::scored_audit_json_schema(false)),
         ..template()
     };
     assert_eq!(requests[0], expected);

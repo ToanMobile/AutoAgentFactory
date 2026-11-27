@@ -190,13 +190,17 @@ pub(crate) fn run_auditor_turn(
         } else {
             AUDIT_REPAIR_MAX_TURNS
         });
-        repair_req.prompt = cross_audit::prompt::build_format_repair_prompt_with_limit(
-            &prepared_input,
-            require_scores,
-            &reason,
-            &last_final_text,
-            max_diff_bytes,
-        );
+        repair_req.prompt = if prior_empty {
+            run.request.prompt.clone()
+        } else {
+            cross_audit::prompt::build_format_repair_prompt_with_limit(
+                &prepared_input,
+                require_scores,
+                &reason,
+                &last_final_text,
+                max_diff_bytes,
+            )
+        };
         repair_req.json_schema =
             use_schema.then(|| cross_audit::scored_audit_json_schema(require_scores));
         // Fall back to the latest Inconclusive verdict if the runner errors

@@ -161,7 +161,7 @@ fn config(executor: &str, cmd: &[&str]) -> RunConfig {
 
 #[test]
 fn build_runner_rejects_unknown_executors() {
-    for name in ["", "Claude", "bash", "claude "] {
+    for name in ["", "unknown_exec", "bash", "claude-unknown"] {
         let err = build_runner_with(
             &config(name, &["/bin/echo", "{prompt}"]),
             ExecEnv::default(),
