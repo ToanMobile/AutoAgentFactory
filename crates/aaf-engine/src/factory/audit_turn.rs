@@ -483,6 +483,12 @@ pub(super) fn note_no_change_reason(
     deps.store.append_context_note(task_id, &note, deps.now())
 }
 
+pub(super) enum EarlierAttempt {
+    Proceed,
+    SkipRebase,
+    Stop(Next),
+}
+
 /// O12-R10-3 (c): the edits of an earlier run are kept as a commit before the
 /// rebase. A commit the repository refuses is left for the agent to fix: it
 /// works on the tree as it is, without the rebase.
@@ -490,16 +496,16 @@ pub(super) fn commit_earlier_attempt(
     deps: &Deps,
     task: &Task,
     worktree: &TaskWorktree,
-) -> PortResult<Option<Next>> {
+) -> PortResult<EarlierAttempt> {
     let message = format!("aaf: {} (earlier attempt)", task.title);
     match deps.git.commit_all(worktree, &message) {
         // A rerun picks up what landed on the base since (finished
         // subtasks, other tasks). A conflict is aborted and left for the
         // merge step, where it is classified as one.
-        Ok(()) => deps.git.rebase(worktree).map(|_| None),
-        Err(PortError::Conflict(_)) => Ok(None),
+        Ok(()) => deps.git.rebase(worktree).map(|_| EarlierAttempt::Proceed),
+        Err(PortError::Conflict(_)) => Ok(EarlierAttempt::SkipRebase),
         Err(PortError::Io(why)) if why.starts_with(COMMIT_DEFERRED) => {
-            wait_for_commit(deps, &task.id, &why).map(Some)
+            wait_for_commit(deps, &task.id, &why).map(EarlierAttempt::Stop)
         }
         Err(other) => Err(other),
     }

@@ -504,14 +504,25 @@ impl Db {
 }
 
 fn is_human_unblock_payload(payload_json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(payload_json)
-        .ok()
-        .is_some_and(|p| {
-            p["to"].as_str() == Some("ready")
-                && p["why"]
-                    .as_str()
-                    .is_some_and(|why| why == "unblocked" || why.ends_with(" unblock"))
-        })
+    let Ok(p) = serde_json::from_str::<serde_json::Value>(payload_json) else {
+        return false;
+    };
+    if p["to"].as_str() != Some("ready")
+        || p["why"].as_str() == Some("plan_approved")
+        || p["plan_approved"].as_bool() == Some(true)
+        || p["from"].as_str().is_some_and(|from| from != "blocked")
+    {
+        return false;
+    }
+    let why_is_unblock = p["why"].as_str().is_some_and(|w| {
+        w == "unblocked"
+            || w.ends_with(" unblock")
+            || w.contains(" unblock ")
+            || w.ends_with(" unblock-all")
+    });
+    let blocked_by_human = (p["from"].as_str() == Some("blocked") || p.get("was").is_some())
+        && p["by"].as_str() == Some("human");
+    why_is_unblock || blocked_by_human
 }
 
 fn is_cross_audit_fail_payload(payload_json: &str) -> bool {

@@ -176,11 +176,15 @@ fn apply_plan_debate_turn(snap: &mut DebateSnapshot, payload_json: &str) {
             if let Some((plan, hash)) = parse_plan_and_hash(&payload) {
                 snap.latest_plan = Some(plan);
                 snap.latest_plan_hash = Some(hash);
+                snap.converged = None;
                 snap.pending_challenger = true;
                 snap.stalled_reason = None;
             }
         }
         "challenger" => {
+            if payload["converged"].as_bool() != Some(true) {
+                snap.converged = None;
+            }
             if let Ok(critique) =
                 serde_json::from_value::<PlanCritique>(payload["critique"].clone())
             {

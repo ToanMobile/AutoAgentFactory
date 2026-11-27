@@ -69,6 +69,8 @@ do_backup = sys.argv[7] == "1"
 KEEP_EVENT_KINDS = ("task_created", "detector_hit", "plan_generated", "pr_opened")
 
 # Telemetry / history events that pollute Studio reports & alerts.
+# NOTE: `task_state_changed` and `rework_requested` on active tasks carry Plan Debate
+# epoch boundaries and must only be deleted for closed (`done`/`cancelled`) tasks.
 TELEMETRY_EVENT_KINDS = (
     "run_started",
     "run_finished",
@@ -80,11 +82,10 @@ TELEMETRY_EVENT_KINDS = (
     "factory_unfrozen",
     "factory_halted",
     "account_cooldown",
-    "rework_requested",
-    "task_state_changed",
     "merge_result",
     "pr_feedback",
 )
+EPOCH_BOUNDARY_KINDS = ("rework_requested", "task_state_changed")
 
 now = int(time.time())
 conn = sqlite3.connect(str(db_path), timeout=30.0)
@@ -103,15 +104,21 @@ running_run_ids = {
 finished_runs_cnt = cur.execute("SELECT COUNT(*) FROM runs WHERE status != 'running'").fetchone()[0]
 
 placeholders = ",".join("?" for _ in TELEMETRY_EVENT_KINDS)
+epoch_ph = ",".join("?" for _ in EPOCH_BOUNDARY_KINDS)
+closed_epoch_clause = (
+    f"(kind IN ({epoch_ph}) AND task_id IN "
+    f"(SELECT id FROM tasks WHERE state IN ('done', 'cancelled')))"
+)
 if running_run_ids:
     run_ph = ",".join("?" for _ in running_run_ids)
     del_events_where = (
-        f"kind IN ({placeholders}) AND (run_id IS NULL OR run_id NOT IN ({run_ph}))"
+        f"((kind IN ({placeholders}) AND (run_id IS NULL OR run_id NOT IN ({run_ph}))) "
+        f"OR {closed_epoch_clause})"
     )
-    del_events_params = list(TELEMETRY_EVENT_KINDS) + sorted(running_run_ids)
+    del_events_params = list(TELEMETRY_EVENT_KINDS) + sorted(running_run_ids) + list(EPOCH_BOUNDARY_KINDS)
 else:
-    del_events_where = f"kind IN ({placeholders})"
-    del_events_params = list(TELEMETRY_EVENT_KINDS)
+    del_events_where = f"(kind IN ({placeholders}) OR {closed_epoch_clause})"
+    del_events_params = list(TELEMETRY_EVENT_KINDS) + list(EPOCH_BOUNDARY_KINDS)
 
 telemetry_events_cnt = cur.execute(
     f"SELECT COUNT(*) FROM events WHERE {del_events_where}", del_events_params
@@ -182,12 +189,13 @@ try:
     if running_run_ids:
         run_ph = ",".join("?" for _ in running_run_ids)
         del_events_where = (
-            f"kind IN ({placeholders}) AND (run_id IS NULL OR run_id NOT IN ({run_ph}))"
+            f"((kind IN ({placeholders}) AND (run_id IS NULL OR run_id NOT IN ({run_ph}))) "
+            f"OR {closed_epoch_clause})"
         )
-        del_events_params = list(TELEMETRY_EVENT_KINDS) + sorted(running_run_ids)
+        del_events_params = list(TELEMETRY_EVENT_KINDS) + sorted(running_run_ids) + list(EPOCH_BOUNDARY_KINDS)
     else:
-        del_events_where = f"kind IN ({placeholders})"
-        del_events_params = list(TELEMETRY_EVENT_KINDS)
+        del_events_where = f"(kind IN ({placeholders}) OR {closed_epoch_clause})"
+        del_events_params = list(TELEMETRY_EVENT_KINDS) + list(EPOCH_BOUNDARY_KINDS)
 
     cur.execute("DELETE FROM runs WHERE status != 'running'")
     deleted_runs = cur.rowcount

@@ -297,6 +297,27 @@ pub(super) fn build_sandbox_paths(
     } else {
         None
     };
+    let mut writable_data_files = Vec::new();
+    if !read_only
+        && cfg!(target_os = "macos")
+        && let Some(home) = env.home.as_deref().filter(|h| !h.is_empty())
+    {
+        let lock = Path::new(home.trim_end_matches('/')).join(".robolectric-download-lock");
+        let safe_regular = match std::fs::symlink_metadata(&lock) {
+            Ok(meta) => meta.file_type().is_file(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&lock)
+                    .is_ok()
+            }
+            Err(_) => false,
+        };
+        if safe_regular {
+            push_unique(&mut writable_data_files, lock.to_string_lossy().into_owned());
+        }
+    }
     Ok(SandboxPaths {
         writable,
         writable_regex: account.writable_regex,
@@ -311,6 +332,7 @@ pub(super) fn build_sandbox_paths(
         worktrees_root,
         extra_worktrees_roots,
         path_dirs,
+        writable_data_files,
         run_mark,
         deny_keychain_dir,
     })

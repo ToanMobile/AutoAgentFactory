@@ -27,26 +27,69 @@ fn outage_wait_secs(tries: u32) -> i64 {
     (OUTAGE_WAIT_SECS << doublings).min(OUTAGE_WAIT_MAX_SECS)
 }
 
+fn parse_kv_u64(text: &str, key: &str) -> u64 {
+    text.split_whitespace()
+        .find_map(|tok| tok.strip_prefix(key)?.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn recover_stream_usage(data_dir: &std::path::Path, run_id: &str) -> (u64, u64) {
+    let path = data_dir.join("streams").join(format!("{run_id}.jsonl"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (0, 0);
+    };
+    for line in text.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if matches!(v["type"].as_str(), Some("usage" | "finish")) {
+            let target = v["target"].as_str().unwrap_or("");
+            let tin = v["tokens_in"]
+                .as_u64()
+                .unwrap_or_else(|| parse_kv_u64(target, "tokens_in="));
+            let tout = v["tokens_out"]
+                .as_u64()
+                .unwrap_or_else(|| parse_kv_u64(target, "tokens_out="));
+            if tin > 0 || tout > 0 {
+                return (tin, tout);
+            }
+        }
+    }
+    (0, 0)
+}
+
 fn reap_running_runs(
     deps: &Deps,
     task_id: &str,
     reap: &dyn Fn(&str) -> PortResult<()>,
 ) -> PortResult<()> {
+    let root_id = deps.store.get_task(task_id).ok().map(|t| t.root_id);
     for run in deps.store.runs_for_task(task_id)? {
         if run.status != RunStatus::Running {
             continue;
         }
         reap(&run.id)?;
+        let (tin, tout) = if run.tokens_in == 0 && run.tokens_out == 0 {
+            recover_stream_usage(&deps.settings.data_dir, &run.id)
+        } else {
+            (run.tokens_in, run.tokens_out)
+        };
         deps.store.finish_run(
             &run.id,
             &RunFinish {
                 status: RunStatus::Killed,
                 exit_code: None,
-                tokens_in: run.tokens_in,
-                tokens_out: run.tokens_out,
+                tokens_in: tin,
+                tokens_out: tout,
                 ended_at: deps.now(),
             },
         )?;
+        let total = tin.saturating_add(tout);
+        if total > 0
+            && let Some(rid) = root_id.as_deref()
+        {
+            let _ = deps.store.add_usage(rid, total, 0, 0);
+        }
     }
     Ok(())
 }

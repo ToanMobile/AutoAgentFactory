@@ -8,9 +8,12 @@ use std::path::{Path, PathBuf};
 
 mod budget;
 mod dag;
+mod plan;
 pub(crate) use budget::{reset_budget_for_unblock, reset_exhausted_budget};
 pub(crate) use dag::compute_critical_path;
+use plan::maybe_approve_on_unblock;
 
+#[cfg(test)]
 use aaf_domain::blocked::BlockedReason;
 use aaf_domain::config::RepoConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
@@ -305,32 +308,6 @@ pub(crate) fn emit_human_plan_converged(
         _ => json!({ "forced_by": "human", "summary": plan.summary }),
     };
     emit_task_event(db, EventKind::PlanConverged, payload, task_id, now)
-}
-
-fn maybe_approve_on_unblock(
-    db: &Db,
-    task: &Task,
-    now: i64,
-) -> Result<(bool, Option<LatestPlan>), PortError> {
-    if matches!(task.blocked_reason, Some(BlockedReason::BudgetExceeded { .. }))
-        && plan_from_task_notes(task).is_some()
-    {
-        let converged = latest_plan_info(db, &task.id)?.filter(|i| i.plan_contract.is_some());
-        return Ok((true, converged));
-    }
-    let Some(BlockedReason::NeedsHuman { why }) = &task.blocked_reason else {
-        return Ok((false, None));
-    };
-    let Some(rest) = why.strip_prefix(PLAN_APPROVAL_PREFIX) else {
-        return Ok((false, None));
-    };
-    if let Some(info) = latest_plan_info(db, &task.id)? {
-        db.append_context_note(&task.id, &format_approved_plan_note(&info), now)?;
-        return Ok((true, info.plan_contract.is_some().then_some(info)));
-    }
-    let plan = if rest.trim().is_empty() { why } else { rest.trim() };
-    db.append_context_note(&task.id, &format!("{PLAN_APPROVED_PREFIX} {plan}"), now)?;
-    Ok((true, None))
 }
 
 pub(crate) fn resolve_task_tree(db: &Db, task: &Task, ctx: &Ctx) -> PathBuf {

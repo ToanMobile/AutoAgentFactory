@@ -70,6 +70,9 @@ pub struct SandboxPaths {
     /// the owner's shell would run next. Relative and empty entries are
     /// skipped: what they name depends on who looks.
     pub path_dirs: Vec<String>,
+    /// Single pre-created regular files (e.g. `~/.robolectric-download-lock`)
+    /// that need `file-write-data` only (never unlink/rename/create).
+    pub writable_data_files: Vec<String>,
     /// The run's mark file ([`super::reaper::RunMarks`]): the profile lets
     /// the run write its data and nothing else about it, so the kernel's
     /// answer for that file tells this run's sandbox from every other one.
@@ -177,11 +180,14 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // Every link met on the way to a closed path, including links between
     // links: replacing one would point the closed path somewhere else.
     let mut chain_links = BTreeSet::new();
+    let mut write_denied_canon = BTreeSet::new();
     for raw in &extra.write_denied {
         let entry = canonical_entry(raw)?;
         let resolved = canonical(raw)?;
         let path = sbpl_string(&entry)?;
         profile.push_str(&format!("(deny file-write* (subpath {path}))\n"));
+        write_denied_canon.insert(entry.clone());
+        write_denied_canon.insert(resolved.clone());
         chain_links.extend(links_to(raw)?);
         if resolved != entry {
             symlink_targets.insert(resolved);
@@ -288,13 +294,28 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // attributes), not creating, renaming or deleting what is in it. One
     // that does not exist cannot be created; the executor makes the roots
     // builds need before the run.
+    let dot_git_path = worktree.as_ref().map(|w| w.join(".git"));
     let mut guarded = BTreeSet::new();
     for path in &closed {
         guarded.extend(entries_to(path)?.into_iter().filter(|entry| opened(entry)));
     }
     for entry in &guarded {
-        let entry = sbpl_string(entry)?;
-        profile.push_str(&format!("(deny file-write* (literal {entry}))\n"));
+        let sbpl_entry = sbpl_string(entry)?;
+        profile.push_str(&format!("(deny file-write* (literal {sbpl_entry}))\n"));
+        // Preserve POSIX `access(dir, W_OK)` / JVM `File.canWrite()` on existing
+        // guarded ancestor directories (e.g. worktree root, `~/.gradle`) while
+        // keeping unlink/rename/create/chmod/xattr/owner denied. Never open
+        // missing paths, symlinks, `.git`, denied subtrees, or PATH dirs.
+        let is_real_dir = std::fs::symlink_metadata(entry).is_ok_and(|m| m.file_type().is_dir());
+        let is_closed_target = dot_git_path.as_deref() == Some(entry.as_path())
+            || write_denied_canon.iter().any(|d| entry.starts_with(d))
+            || on_path.contains(entry)
+            || denied.iter().any(|d| entry.starts_with(d))
+            || worktrees_roots.iter().any(|r| entry == r)
+            || git_dirs.iter().any(|g| entry.starts_with(g));
+        if is_real_dir && !is_closed_target {
+            profile.push_str(&format!("(allow file-write-data (literal {sbpl_entry}))\n"));
+        }
     }
     // Last, so a denied directory stays closed even inside a writable one.
     for path in &denied {
@@ -327,6 +348,11 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // file tells the run's sandbox from every other ([`super::reaper`]).
     // Data only: the agent can neither remove nor replace the mark to hide
     // what it leaves behind.
+    for raw in &extra.writable_data_files {
+        let target = canonical(raw)?;
+        let target = sbpl_string(&target)?;
+        profile.push_str(&format!("(allow file-write-data (literal {target}))\n"));
+    }
     if let Some(mark) = &extra.run_mark {
         let mark = canonical(mark)?;
         let mark = sbpl_string(&mark)?;

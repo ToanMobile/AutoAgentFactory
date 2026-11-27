@@ -61,7 +61,7 @@ pub fn run_args(ctx: &Ctx, args: &ApprovePlanArgs) -> CmdResult {
     let mut skipped = Vec::new();
 
     for task in blocked {
-        if !is_waiting_for_plan_approval(task.blocked_reason.as_ref()) {
+        if !is_awaiting_explicit_plan_approval(task.blocked_reason.as_ref()) {
             continue;
         }
         let Some(plan) = latest_plan_info(&db, &task.id).map_err(port)? else {
@@ -122,13 +122,19 @@ pub fn run(ctx: &Ctx, task_id: &str) -> Result<CmdOutput, CmdError> {
     )
 }
 
-fn is_waiting_for_plan_approval(reason: Option<&BlockedReason>) -> bool {
+fn is_awaiting_explicit_plan_approval(reason: Option<&BlockedReason>) -> bool {
     matches!(
         reason,
-        Some(BlockedReason::NeedsHuman { why })
-            if why.starts_with(PLAN_APPROVAL_PREFIX)
-                || why.starts_with(PLAN_DEBATE_STALLED_PREFIX)
+        Some(BlockedReason::NeedsHuman { why }) if why.starts_with(PLAN_APPROVAL_PREFIX)
     )
+}
+
+fn is_waiting_for_plan_approval(reason: Option<&BlockedReason>) -> bool {
+    is_awaiting_explicit_plan_approval(reason)
+        || matches!(
+            reason,
+            Some(BlockedReason::NeedsHuman { why }) if why.starts_with(PLAN_DEBATE_STALLED_PREFIX)
+        )
 }
 
 fn apply_plan_approval(db: &Db, task: &Task, plan: &LatestPlan, now: i64) -> Result<(), CmdError> {

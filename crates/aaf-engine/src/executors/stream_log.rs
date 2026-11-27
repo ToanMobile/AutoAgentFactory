@@ -192,6 +192,15 @@ impl StreamLog {
         self.write_event("finish", Some(program), Some(&target));
     }
 
+    /// Emits a lightweight cumulative token checkpoint so killed runs keep usage.
+    pub fn write_usage(&mut self, tokens_in: u64, tokens_out: u64) {
+        if tokens_in == 0 && tokens_out == 0 {
+            return;
+        }
+        let target = format!("tokens_in={tokens_in} tokens_out={tokens_out}");
+        self.write_event("usage", None, Some(&target));
+    }
+
     /// Projects one line of Claude `stream-json` into compact sanitized events.
     ///
     /// Never writes raw stream JSON; ignores `system`, `user`, and unparseable lines.

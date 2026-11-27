@@ -547,6 +547,23 @@ pub fn heavy_tool_argv<S: AsRef<OsStr>>(argv: &[S]) -> Option<HeavyTool> {
             Step::Family(_) | Step::Next => {}
         }
     }
+    // Fallback for wrapper shell scripts (`aaf slot -- /tmp/foo/run.sh` or
+    // `aaf slot -- bash /tmp/foo/run.sh`): inspect small regular `.sh` files so
+    // Gradle/Xcode/Unity wrappers are not misclassified as `Unmeasured` drainers.
+    for arg in argv {
+        let s = arg.as_ref().to_string_lossy();
+        if s.starts_with('-') || !s.ends_with(".sh") {
+            continue;
+        }
+        let path = std::path::Path::new(arg.as_ref());
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file() && m.len() <= 16_384)
+            && let Ok(body) = std::fs::read_to_string(path)
+            && let Some(tool) = heavy_tool(&body)
+        {
+            return Some(tool);
+        }
+        break;
+    }
     None
 }
 

@@ -329,15 +329,20 @@ fn agent(
             PLAN_EXECUTOR | AUDIT_EXECUTOR | PROPOSER_EXECUTOR
         )
     });
-    if has_impl_runs {
-        if let Some(next) = commit_earlier_attempt(deps, &task, &worktree)? {
-            return Ok(next);
+    let mut skip_rebase = false;
+    if has_impl_runs || deps.git.is_dirty(&worktree)? {
+        match commit_earlier_attempt(deps, &task, &worktree)? {
+            super::audit_turn::EarlierAttempt::Proceed => {}
+            super::audit_turn::EarlierAttempt::SkipRebase => skip_rebase = true,
+            super::audit_turn::EarlierAttempt::Stop(next) => return Ok(next),
         }
     } else if hook_problem_if(deps, &worktree.path, hook_req, exec).is_some() {
         deps.git.rebase(&worktree)?;
     }
-    if let Some(next) =
-        guards::rebase_if_gate_infra_drifted(deps, task_id, &worktree, grant, routed)?
+    if !skip_rebase
+        && !deps.git.is_dirty(&worktree)?
+        && let Some(next) =
+            guards::rebase_if_gate_infra_drifted(deps, task_id, &worktree, grant, routed)?
     {
         return Ok(next);
     }

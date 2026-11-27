@@ -211,6 +211,14 @@ impl GitOps for RealGit {
         Ok(())
     }
 
+    fn is_dirty(&self, worktree: &TaskWorktree) -> PortResult<bool> {
+        match worktree::ensure_clean(&worktree.path) {
+            Ok(()) => Ok(false),
+            Err(GitError::Dirty(_)) => Ok(true),
+            Err(other) => Err(err(other)),
+        }
+    }
+
     fn has_changes(&self, worktree: &TaskWorktree) -> PortResult<bool> {
         let range = format!("{}...HEAD", self.start());
         let out = git_raw(&worktree.path, &["diff", "--quiet", &range]).map_err(err)?;
@@ -537,51 +545,24 @@ impl GitOps for RealGit {
             }
             *last = Some(Instant::now());
         }
-        let runner = SystemRunner {
-            timeout: GH_LIST_TIMEOUT,
-        };
+        let runner = SystemRunner { timeout: GH_LIST_TIMEOUT };
         self.verify_squash_merges_with(candidates, &runner)
     }
 
-    fn remove_verified_merged(
-        &self,
-        worktree: &TaskWorktree,
-        expected_head_oid: &str,
-    ) -> Result<(), GitError> {
+    fn remove_verified_merged(&self, worktree: &TaskWorktree, expected_head_oid: &str) -> Result<(), GitError> {
         let _admin = self.admin();
         worktree::remove_verified_merged(&self.repo_root, worktree, expected_head_oid)
     }
 
-    fn create_turn_snapshot(
-        &self,
-        worktree: &TaskWorktree,
-        run_id: &str,
-        now: i64,
-    ) -> Result<Option<(String, String)>, GitError> {
+    fn create_turn_snapshot(&self, worktree: &TaskWorktree, run_id: &str, now: i64) -> Result<Option<(String, String)>, GitError> {
         let _admin = self.admin();
         let task_id = worktree.task_id()?;
-        super::snapshots::create_turn_snapshot_ref(
-            &self.repo_root,
-            &worktree.path,
-            task_id,
-            run_id,
-            now,
-        )
-        .map(Some)
+        super::snapshots::create_turn_snapshot_ref(&self.repo_root, &worktree.path, task_id, run_id, now).map(Some)
     }
 
-    fn pr_feedback(
-        &self,
-        repo_root: &Path,
-        pr: &PrRef,
-        expected_head_branch: &str,
-    ) -> PortResult<Option<PrFeedbackSnapshot>> {
-        let runner = SystemRunner {
-            timeout: GH_TIMEOUT,
-        };
-        fetch_pr_feedback(&runner, repo_root, pr, expected_head_branch)
-            .map(Some)
-            .map_err(err)
+    fn pr_feedback(&self, repo_root: &Path, pr: &PrRef, expected_head_branch: &str) -> PortResult<Option<PrFeedbackSnapshot>> {
+        let runner = SystemRunner { timeout: GH_TIMEOUT };
+        fetch_pr_feedback(&runner, repo_root, pr, expected_head_branch).map(Some).map_err(err)
     }
 
     fn verified_merged_pr(

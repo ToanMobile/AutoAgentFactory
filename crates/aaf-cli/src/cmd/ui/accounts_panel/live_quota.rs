@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aaf_domain::account::{AccountProfile, ProviderKind};
 use aaf_domain::ports::AccountStore;
+use aaf_engine::accounts::Lease;
 use aaf_engine::db::Db;
 use aaf_engine::executors::agy::AgyRunner;
 use aaf_engine::executors::registry::{find_descriptor, resolve_binary_with_home};
@@ -25,7 +26,8 @@ use crate::cmd::ui::extras::read_regular_bounded;
 use crate::ctx::Ctx;
 
 const FALLBACK_EXHAUSTED_COOLDOWN_SECS: i64 = 3600;
-const LIVE_QUOTA_TTL: Duration = Duration::from_secs(60);
+const LIVE_QUOTA_TTL: Duration = Duration::from_secs(180);
+const ANTIGRAVITY_LEASE_STEM: &str = "provider-antigravity";
 const AGY_USAGE_TIMEOUT: Duration = Duration::from_secs(15);
 const GROK_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GROK_PTY_USAGE_TIMEOUT: Duration = Duration::from_secs(12);
@@ -89,11 +91,11 @@ finally:
     if p is not None:
         try: os.killpg(p.pid, signal.SIGTERM)
         except OSError: pass
-        try: p.wait(timeout=1.0)
+        try: p.wait(timeout=0.4)
         except Exception:
             try: os.killpg(p.pid, signal.SIGKILL)
             except OSError: pass
-            try: p.wait(timeout=1.0)
+            try: p.wait(timeout=0.4)
             except Exception: pass
     try: os.close(master)
     except OSError: pass
@@ -147,7 +149,7 @@ fn terminate_child(child: &mut std::process::Child) {
     {
         let pid = child.id();
         signal_process_group(pid, "-TERM");
-        let grace = Instant::now() + Duration::from_millis(300);
+        let grace = Instant::now() + Duration::from_millis(1200);
         while Instant::now() < grace {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 return;
@@ -158,6 +160,26 @@ fn terminate_child(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn spawn_pipe_reader(
+    pipe: Option<impl Read + Send + 'static>,
+    cap: u64,
+) -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
+    let pipe = pipe?;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("aaf-quota-pipe".into())
+        .spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.take(cap + 1).read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+    Some(rx)
+}
+
+fn recv_pipe(rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>, wait: Duration) -> Vec<u8> {
+    rx.and_then(|r| r.recv_timeout(wait).ok()).unwrap_or_default()
 }
 
 fn run_cmd_bounded(
@@ -181,51 +203,29 @@ fn run_cmd_bounded(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    let out_reader = stdout_pipe.map(|pipe| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = pipe.take(MAX_STDOUT_BYTES + 1).read_to_end(&mut buf);
-            buf
-        })
-    });
-    let err_reader = stderr_pipe.map(|pipe| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = pipe.take(MAX_STDERR_BYTES + 1).read_to_end(&mut buf);
-            buf
-        })
-    });
+    let out_rx = spawn_pipe_reader(child.stdout.take(), MAX_STDOUT_BYTES);
+    let err_rx = spawn_pipe_reader(child.stderr.take(), MAX_STDERR_BYTES);
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) if Instant::now() >= deadline => {
                 terminate_child(&mut child);
-                if let Some(h) = out_reader {
-                    let _ = h.join();
-                }
-                if let Some(h) = err_reader {
-                    let _ = h.join();
-                }
+                let _ = recv_pipe(out_rx, Duration::from_millis(250));
+                let _ = recv_pipe(err_rx, Duration::from_millis(250));
                 return Err(format!("timed out after {}s", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(40)),
             Err(e) => {
                 terminate_child(&mut child);
-                if let Some(h) = out_reader {
-                    let _ = h.join();
-                }
-                if let Some(h) = err_reader {
-                    let _ = h.join();
-                }
+                let _ = recv_pipe(out_rx, Duration::from_millis(250));
+                let _ = recv_pipe(err_rx, Duration::from_millis(250));
                 return Err(format!("wait failed: {e}"));
             }
         }
     };
-    let out_bytes = out_reader.and_then(|h| h.join().ok()).unwrap_or_default();
-    let err_bytes = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    let out_bytes = recv_pipe(out_rx, Duration::from_secs(2));
+    let err_bytes = recv_pipe(err_rx, Duration::from_secs(2));
     let out = String::from_utf8_lossy(&out_bytes).into_owned();
     let err = String::from_utf8_lossy(&err_bytes).into_owned();
     if status.success() {
@@ -270,6 +270,16 @@ fn probe_antigravity_quota(ctx: &Ctx) -> Value {
     let fetched_ms = now_ms();
     let Some(bin) = resolve_agy_bin(ctx) else {
         return json!({ "live": false, "reason": "not_installed" });
+    };
+    let leases_dir = ctx.data_dir.join("leases");
+    let _provider_lease = match Lease::try_acquire(&leases_dir, ANTIGRAVITY_LEASE_STEM) {
+        Ok(Some(lease)) => lease,
+        Ok(None) => {
+            return json!({ "live": false, "reason": "busy", "fetchedAtMs": fetched_ms });
+        }
+        Err(_) => {
+            return json!({ "live": false, "reason": "lease_error", "fetchedAtMs": fetched_ms });
+        }
     };
     let args = ["-p=/usage", "--mode", "plan", "--output-format", "json"];
     let mut out_val = match run_cmd_bounded(ctx, &bin, &args, AGY_USAGE_TIMEOUT) {
@@ -341,22 +351,35 @@ fn probe_and_store(ctx: &Ctx) -> Value {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let seq = LIVE_QUOTA_SEQ.fetch_add(1, Ordering::AcqRel);
+    let (grok_tx, grok_rx) = std::sync::mpsc::sync_channel(1);
     let ctx_grok = ctx.clone();
-    let grok_handle = std::thread::Builder::new()
+    let grok_spawned = std::thread::Builder::new()
         .name("aaf-grok-quota".into())
-        .spawn(move || probe_grok_quota(&ctx_grok));
-    let agy = probe_antigravity_quota(ctx);
-    let grok = match grok_handle {
-        Ok(h) => h
-            .join()
-            .unwrap_or_else(|_| json!({ "live": false, "reason": "unavailable" })),
-        Err(_) => probe_grok_quota(ctx),
+        .spawn(move || {
+            let _ = grok_tx.send(probe_grok_quota(&ctx_grok));
+        })
+        .is_ok();
+    let agy_raw = probe_antigravity_quota(ctx);
+    let grok = if grok_spawned {
+        grok_rx
+            .recv_timeout(GROK_PTY_USAGE_TIMEOUT + Duration::from_secs(5))
+            .unwrap_or_else(|_| json!({ "live": false, "reason": "timeout" }))
+    } else {
+        probe_grok_quota(ctx)
+    };
+    let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let agy = if agy_raw["reason"].as_str() == Some("busy")
+        && let Some(prev) = map.get(&ctx.home).and_then(|e| e.payload.get("antigravity"))
+        && prev["live"].as_bool() == Some(true)
+    {
+        prev.clone()
+    } else {
+        agy_raw
     };
     let payload = json!({
         "antigravity": agy,
         "grok": grok,
     });
-    let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
     let should_store = map.get(&ctx.home).is_none_or(|cur| seq >= cur.seq);
     if should_store {
         map.insert(

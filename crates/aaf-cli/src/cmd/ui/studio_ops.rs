@@ -416,12 +416,8 @@ pub(super) fn collect_ops_diagnostics(input: &OpsInput<'_>) -> Value {
         .unwrap_or(0);
     // Use `done_with_runs` so archived historical done tasks with zero runs in the
     // current window (e.g., after `/aaf-studio-reset`) never dilute tokens_per_done.
-    let tpd_denom = if done_with_runs > 0 {
-        done_with_runs
-    } else {
-        done_window
-    };
-    let tokens_per_done = (tpd_denom > 0 && total_tokens > 0).then(|| total_tokens / tpd_denom);
+    let tokens_per_done =
+        (done_with_runs > 0 && total_tokens > 0).then(|| total_tokens / done_with_runs);
     let in_out_ratio =
         (tokens_out > 0).then(|| ((tokens_in as f64 / tokens_out as f64) * 10.0).round() / 10.0);
 

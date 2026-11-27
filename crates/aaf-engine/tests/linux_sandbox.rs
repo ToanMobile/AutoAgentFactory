@@ -135,6 +135,7 @@ fn build_bwrap_args_enforces_least_privilege_mounts_and_hides_data_dir() {
         worktrees_root: Some(wt_root_str),
         extra_worktrees_roots: vec![],
         path_dirs: vec![],
+        writable_data_files: vec![],
         run_mark: None,
         deny_keychain_dir: None,
     };

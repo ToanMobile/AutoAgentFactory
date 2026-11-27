@@ -295,11 +295,12 @@ fn agy_account_paths_precreates_runtime_dirs_and_protects_config() {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        assert_eq!(paths.writable_regex.len(), 1);
+        assert_eq!(paths.writable_regex.len(), 2);
         assert!(
             paths.writable_regex[0]
                 .ends_with(r"/antigravity/conversation_summaries\.db(-wal|-shm|-journal)?$")
         );
+        assert!(paths.writable_regex[1].contains("/antigravity-cli/"));
         let extra = SandboxPaths {
             writable: paths.writable,
             writable_regex: paths.writable_regex,

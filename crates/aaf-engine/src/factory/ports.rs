@@ -137,6 +137,10 @@ pub trait GitOps: Send + Sync {
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()>;
     /// True when the branch differs from the base.
     fn has_changes(&self, worktree: &TaskWorktree) -> PortResult<bool>;
+    /// True when the worktree has uncommitted staged, unstaged, or untracked edits.
+    fn is_dirty(&self, _worktree: &TaskWorktree) -> PortResult<bool> {
+        Ok(false)
+    }
     /// The branch's diff against the base, for the cross-audit.
     fn diff(&self, worktree: &TaskWorktree) -> PortResult<String>;
     /// Merges the tasks' branches into a fresh integration worktree.

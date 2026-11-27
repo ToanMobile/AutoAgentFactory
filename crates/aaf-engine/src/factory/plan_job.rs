@@ -237,8 +237,9 @@ fn run_and_parse<T>(
     parse: fn(&str) -> Result<T, String>,
 ) -> PortResult<Parsed<T>> {
     let mut prompt = base_prompt.to_string();
+    let mut active_schema = schema;
     for attempt in 0..2u8 {
-        let (run_id, outcome) = execute_runner(ctx, prompt, schema)?;
+        let (run_id, outcome) = execute_runner(ctx, prompt, active_schema)?;
         if let Some(next) = handle_limit_or_infra(ctx, &outcome)? {
             return Ok(Parsed::Exit(next));
         }
@@ -253,6 +254,9 @@ fn run_and_parse<T>(
                     && worker::ensure_budget(ctx.deps, &ctx.task.root_id)?.check()
                         == BudgetCheck::Ok =>
             {
+                if outcome.final_text.trim().is_empty() {
+                    active_schema = "";
+                }
                 let repair = build_plan_format_repair_prompt(ctx.role, &err, "");
                 prompt = format!("{base_prompt}\n\n{repair}");
             }

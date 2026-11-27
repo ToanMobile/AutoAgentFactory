@@ -387,13 +387,21 @@ if os.path.exists(db_path):
         repo = os.path.basename(r["repo_root"] or "")
         br_raw = r["blocked_reason"] or ""
         br_kind = ""
+        br_why = ""
         if br_raw:
             try:
                 parsed_br = json.loads(br_raw)
-                br_kind = parsed_br.get("kind", "") if isinstance(parsed_br, dict) else str(parsed_br)
+                if isinstance(parsed_br, dict):
+                    br_kind = parsed_br.get("kind", "")
+                    br_why = str(parsed_br.get("why", ""))
+                else:
+                    br_kind = str(parsed_br)
             except Exception:
                 br_kind = br_raw[:40]
-        if r["state"] == "blocked" and br_kind not in ("needs_human", "dependency"):
+        if r["state"] == "blocked" and (
+            br_kind not in ("needs_human", "dependency")
+            or (br_kind == "needs_human" and br_why.startswith("factory error:"))
+        ):
             factory_blocked.append(f"{r['id']}({br_kind or 'blocked'})")
         if studio_ok != 1 and r["state"] == "gating" and r["updated_at"]:
             age = max(0, now - int(r["updated_at"]))

@@ -190,6 +190,7 @@ impl Ctx {
             &mut cfg.repo.pipeline.implementer,
             &mut cfg.repo.pipeline.implementer_escalated,
             &mut cfg.repo.pipeline.plan_author,
+            &mut cfg.repo.pipeline.plan_challenger,
         ] {
             if stage.executor_cmd.trim().is_empty()
                 && (stage.executor.trim().is_empty()

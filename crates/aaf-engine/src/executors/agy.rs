@@ -38,7 +38,13 @@ pub const GEMINI_CONFIG_CLOSED: &[&str] = &[
     "config",
     "skills",
     "agents",
-    "antigravity-cli",
+    "antigravity-cli/antigravity-oauth-token",
+    "antigravity-cli/bin",
+    "antigravity-cli/builtin",
+    "antigravity-cli/mcp",
+    "antigravity-cli/plugin_data",
+    "antigravity-cli/settings.json",
+    "antigravity-cli/updater",
     "antigravity-ide",
     "antigravity/mcp",
     "antigravity/builtin",
@@ -57,6 +63,17 @@ pub const AGY_RUNTIME_WRITABLE_SUBDIRS: &[&str] = &[
     "antigravity/annotations",
     "antigravity/cache",
     "antigravity/tmp",
+    "antigravity-cli/log",
+    "antigravity-cli/presence",
+    "antigravity-cli/annotations",
+    "antigravity-cli/brain",
+    "antigravity-cli/cache",
+    "antigravity-cli/conversations",
+    "antigravity-cli/crashes",
+    "antigravity-cli/implicit",
+    "antigravity-cli/knowledge",
+    "antigravity-cli/persistent_terminals",
+    "antigravity-cli/scratch",
 ];
 
 /// Returns absolute write-denied paths for every entry in [`GEMINI_CONFIG_CLOSED`].
@@ -259,10 +276,28 @@ impl AgyRunner {
             let canon_ag_str = canon_ag.to_str().ok_or_else(|| {
                 PortError::Invalid(format!("gemini path is not UTF-8: {}", canon_ag.display()))
             })?;
-            vec![format!(
-                "^{}/conversation_summaries\\.db(-wal|-shm|-journal)?$",
-                sandbox::regex_escape(canon_ag_str)
-            )]
+            let cli_dir = root.join("antigravity-cli");
+            if request.sandbox.enabled {
+                let _ = std::fs::create_dir_all(&cli_dir);
+            }
+            let cli_str = cli_dir.to_string_lossy();
+            let canon_cli = sandbox::canonical(&cli_str)?;
+            let canon_cli_str = canon_cli.to_str().ok_or_else(|| {
+                PortError::Invalid(format!(
+                    "gemini cli path is not UTF-8: {}",
+                    canon_cli.display()
+                ))
+            })?;
+            vec![
+                format!(
+                    "^{}/conversation_summaries\\.db(-wal|-shm|-journal)?$",
+                    sandbox::regex_escape(canon_ag_str)
+                ),
+                format!(
+                    "^{}/(conversation_summaries\\.db(-wal|-shm|-journal)?|cli\\.log|jetbox_summaries_proto\\.pb|jetski_state\\.pbtxt|last_check\\.timestamp)$",
+                    sandbox::regex_escape(canon_cli_str)
+                ),
+            ]
         };
         Ok(AccountPaths {
             writable,

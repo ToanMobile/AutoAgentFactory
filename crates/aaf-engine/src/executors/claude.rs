@@ -147,7 +147,7 @@ impl AgentRunner for ClaudeCodeRunner {
         };
         let mut log = open_stream_log(&self.env, request);
         log.write_start("claude", Some(&self.model));
-        let state = Arc::new(Mutex::new((StreamParser::default(), log)));
+        let state = Arc::new(Mutex::new((StreamParser::default(), log, (0u64, 0u64))));
         let feed = Arc::clone(&state);
         let output = run_confined(
             spec,
@@ -159,6 +159,12 @@ impl AgentRunner for ClaudeCodeRunner {
                 let mut guard = feed.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.0.feed_line(line);
                 guard.1.record_claude_line(line);
+                let snap = guard.0.summary();
+                let cur = (snap.tokens_in, snap.tokens_out);
+                if cur != guard.2 && (cur.0 > 0 || cur.1 > 0) {
+                    guard.2 = cur;
+                    guard.1.write_usage(cur.0, cur.1);
+                }
             })),
         )?;
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
