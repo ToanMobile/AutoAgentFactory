@@ -469,15 +469,17 @@ pub(super) fn fetch_base(
     check_branch_name(repo_root, base_ref_name)?;
     worktree::ensure_plain_reflogs(repo_root)?;
     let base_refspec = format!("+refs/heads/{base_ref_name}:refs/remotes/{remote}/{base_ref_name}");
-    let mut args = vec!["fetch", "--quiet", "--no-write-fetch-head", "--", remote];
-    args.push(&base_refspec);
-    git(repo_root, &args)?;
+    git(
+        repo_root,
+        &["fetch", "--quiet", "--", remote, &base_refspec],
+    )?;
     let base_ref = format!("refs/remotes/{remote}/{base_ref_name}");
     git(repo_root, &["rev-parse", &base_ref])
 }
 
-fn fetch_no_head(repo: &Path, remote: &str, specs: &[&str]) -> Result<bool, GitError> {
-    let mut args = vec!["fetch", "--quiet", "--no-write-fetch-head", "--", remote];
+/// Runs `git fetch --quiet -- <remote> <specs...>` and reports exit status.
+fn fetch_specs(repo: &Path, remote: &str, specs: &[&str]) -> Result<bool, GitError> {
+    let mut args = vec!["fetch", "--quiet", "--", remote];
     args.extend_from_slice(specs);
     Ok(git_raw(repo, &args)?.success())
 }
@@ -536,17 +538,18 @@ pub(super) fn fetch_base_and_pr(
 
     // Combine base + PR refspecs into a single network fetch; fall back to
     // separate fetches when `refs/pull/<n>/head` is missing or lagging.
-    let base_sha = if fetch_no_head(repo_root, remote, &[&base_refspec, &pr_ref])? {
+    let base_sha = if fetch_specs(repo_root, remote, &[&base_refspec, &pr_ref])? {
         git(repo_root, &["rev-parse", &base_ref])?
     } else {
         let base_sha = fetch_base(repo_root, remote, &pr.base_ref_name)?;
-        let _ = fetch_no_head(repo_root, remote, &[&pr_ref])?;
+        let _ = fetch_specs(repo_root, remote, &[&pr_ref])?;
         base_sha
     };
 
     // GitHub can update `refs/pull/<n>/head` asynchronously right after a push;
+    // fall back to fetching the head branch ref without `:dst`.
     if let Some(br) = branch_ref.as_deref().filter(|_| !pull_ok && branch_ok) {
-        let _ = fetch_no_head(repo_root, remote, &[br])?;
+        let _ = fetch_specs(repo_root, remote, &[br])?;
     }
     let fetched_head = pull_oid.filter(|_| pull_ok || !branch_ok).or(branch_oid);
     let fetched_head = fetched_head
