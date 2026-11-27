@@ -46,6 +46,21 @@ pub enum AutofixOutcome {
     },
 }
 
+/// Steps 1-4 run before the formatter is spawned: an error there leaves the
+/// worktree untouched, so autofix is skipped rather than blocking the task.
+macro_rules! before_run {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(err) => {
+                return Ok(AutofixOutcome::Skipped {
+                    reason: format!("autofix unavailable: {err}"),
+                });
+            }
+        }
+    };
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_autofix(
     data_dir: &Path,
@@ -56,44 +71,59 @@ pub fn run_autofix(
     machine: &MachineConfig,
     progress: &dyn Fn(&Progress<'_>),
 ) -> Result<AutofixOutcome, GateError> {
-    let repo_root = fs::canonicalize(tree)?;
-    let base = super::base::resolve(&repo_root, &cfg.gate.base_ref, GIT_TIMEOUT)?;
+    let repo_root = before_run!(fs::canonicalize(tree));
+    let base = before_run!(super::base::resolve(
+        &repo_root,
+        &cfg.gate.base_ref,
+        GIT_TIMEOUT
+    ));
     let Some(base_sha) = base.sha.as_deref() else {
         return Ok(AutofixOutcome::Skipped {
             reason: "no base_sha resolved".to_string(),
         });
     };
     // Step 1: Load `commands.autofix` strictly from immutable `base_sha`.
-    let Some((autofix_cmd, light_commands)) = load_base_autofix_cmd(&repo_root, base_sha)? else {
+    let Some((autofix_cmd, light_commands)) =
+        before_run!(load_base_autofix_cmd(&repo_root, base_sha))
+    else {
         return Ok(AutofixOutcome::Skipped {
             reason: "commands.autofix is empty at base_sha".to_string(),
         });
     };
 
     // Step 2: Capture `pre_head`, inspect hidden files, check changes and docs fast path.
-    let pre_head = git_ok(&repo_root, &["rev-parse", "HEAD"])?
+    let pre_head = before_run!(git_ok(&repo_root, &["rev-parse", "HEAD"]))
         .trim()
         .to_string();
-    let hidden_before = super::hidden::inspect(&repo_root, policy, When::BeforeCommands, false)?;
+    let hidden_before = before_run!(super::hidden::inspect(
+        &repo_root,
+        policy,
+        When::BeforeCommands,
+        false
+    ));
     if !hidden_before.blocks.is_empty() {
         return Ok(AutofixOutcome::Skipped {
             reason: "hidden files flagged before autofix".to_string(),
         });
     }
-    let set = super::changes::collect(&repo_root, &base.diff_target, GIT_TIMEOUT)?;
+    let set = before_run!(super::changes::collect(
+        &repo_root,
+        &base.diff_target,
+        GIT_TIMEOUT
+    ));
     if set.changes.is_empty() {
         return Ok(AutofixOutcome::Skipped {
             reason: "no changes against base".to_string(),
         });
     }
     if cfg.gate.docs_fast_path
-        && super::docs_fast::is_docs_only_in_repo(
+        && before_run!(super::docs_fast::is_docs_only_in_repo(
             &repo_root,
             &set.changes,
             &cfg.gate.head_lock_globs,
             &cfg.gate.docs_fast_path_exclude_globs,
             GIT_TIMEOUT,
-        )?
+        ))
     {
         return Ok(AutofixOutcome::Skipped {
             reason: "docs_fast_path".to_string(),
@@ -132,7 +162,11 @@ pub fn run_autofix(
             reason: "no unlocked editable paths in diff".to_string(),
         });
     }
-    let diff_env = DiffEnvFiles::write(GateMode::Scoped, Some(base_sha), &allowed_changes)?;
+    let diff_env = before_run!(DiffEnvFiles::write(
+        GateMode::Scoped,
+        Some(base_sha),
+        &allowed_changes
+    ));
     let env_owned = diff_env.env_pairs();
     let env_refs: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
@@ -146,7 +180,7 @@ pub fn run_autofix(
         idle: (cfg.gate.idle_timeout_secs > 0)
             .then(|| Duration::from_secs(cfg.gate.idle_timeout_secs)),
     };
-    let cmd_res = if super::runner::is_heavy_with_light("autofix", &autofix_cmd, &light_commands) {
+    let run_res = if super::runner::is_heavy_with_light("autofix", &autofix_cmd, &light_commands) {
         let stats_id = super::stats_repo_id(&repo_root);
         let probe = SystemProbe::detect();
         let throttle = Throttle::system(machine, &probe, progress);
@@ -169,8 +203,7 @@ pub fn run_autofix(
             &heavy,
             env,
             &mut notes,
-        )?
-        .0
+        )
     } else {
         super::runner::run_command_confined(
             &repo_root,
@@ -180,12 +213,25 @@ pub fn run_autofix(
             &env_refs,
             AUTOFIX_ENV_REMOVE,
             Some(data_dir),
-        )?
-        .0
+        )
+    };
+    let (cmd_res, _) = match run_res {
+        Ok(r) => r,
+        Err(err) => {
+            let _ = reset_clean(&repo_root, &pre_head);
+            return Err(err);
+        }
     };
 
     // Step 6: Fail-closed post-run quarantine.
-    let hidden_after = super::hidden::inspect(&repo_root, policy, When::AfterCommands, false)?;
+    let hidden_after = match super::hidden::inspect(&repo_root, policy, When::AfterCommands, false)
+    {
+        Ok(h) => h,
+        Err(err) => {
+            let _ = reset_clean(&repo_root, &pre_head);
+            return Err(err);
+        }
+    };
     if !cmd_res.passed() || !hidden_after.blocks.is_empty() {
         reset_clean(&repo_root, &pre_head)?;
         let reason = if !hidden_after.blocks.is_empty() {
@@ -203,14 +249,20 @@ pub fn run_autofix(
     }
 
     // Undo any commits or index staging performed by the formatter while keeping worktree edits.
-    let _ = git_ok(&repo_root, &["reset", "--mixed", "--quiet", &pre_head])?;
-    quarantine_worktree(
-        &repo_root,
-        &pre_head,
-        &allowed_paths,
-        &is_locked,
-        &is_agent_cfg,
-    )?;
+    if let Err(err) =
+        git_ok(&repo_root, &["reset", "--mixed", "--quiet", &pre_head]).and_then(|_| {
+            quarantine_worktree(
+                &repo_root,
+                &pre_head,
+                &allowed_paths,
+                &is_locked,
+                &is_agent_cfg,
+            )
+        })
+    {
+        let _ = reset_clean(&repo_root, &pre_head);
+        return Err(err);
+    }
 
     let hl_after = super::head_lock::evaluate(data_dir, &repo_root, cfg, &base.diff_target);
     if hl_after.status != LockStatus::Clear {
@@ -222,7 +274,13 @@ pub fn run_autofix(
         });
     }
 
-    let remaining = dirty_paths_z(&repo_root)?;
+    let remaining = match dirty_paths_z(&repo_root) {
+        Ok(r) => r,
+        Err(err) => {
+            let _ = reset_clean(&repo_root, &pre_head);
+            return Err(err);
+        }
+    };
     let mut formatted: Vec<String> = Vec::new();
     for entry in remaining {
         if entry.untracked || !allowed_paths.contains(&entry.path) {

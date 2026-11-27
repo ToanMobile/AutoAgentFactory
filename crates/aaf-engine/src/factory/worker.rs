@@ -427,20 +427,29 @@ fn agent(
             return Ok(Next::Blocked);
         }
         if deps.git.has_changes(&worktree)? {
-            if let Ok(crate::gate::autofix::AutofixOutcome::Formatted { .. }) =
-                deps.gate.run_autofix(&worktree.path)
-            {
-                if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
-                    unblock::block_untried(deps, task_id, &problem)?;
-                    return Ok(Next::Blocked);
+            match deps.gate.run_autofix(&worktree.path) {
+                Ok(crate::gate::autofix::AutofixOutcome::Formatted { .. }) => {
+                    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
+                        unblock::block_untried(deps, task_id, &problem)?;
+                        return Ok(Next::Blocked);
+                    }
+                    if let Err(error) = deps
+                        .git
+                        .commit_all(&worktree, crate::gate::autofix::AUTOFIX_COMMIT_MSG)
+                    {
+                        return after_commit_failure(
+                            deps, task_id, &worktree, outcome, error, grant, routed,
+                        );
+                    }
                 }
-                if let Err(error) = deps
-                    .git
-                    .commit_all(&worktree, crate::gate::autofix::AUTOFIX_COMMIT_MSG)
-                {
-                    return after_commit_failure(
-                        deps, task_id, &worktree, outcome, error, grant, routed,
-                    );
+                Ok(_) => {}
+                Err(error) => {
+                    unblock::block_untried(
+                        deps,
+                        task_id,
+                        &format!("autofix left the worktree in an unknown state: {error}"),
+                    )?;
+                    return Ok(Next::Blocked);
                 }
             }
             deps.move_to(task_id, TaskState::Gating, None, "agent run finished")?;
