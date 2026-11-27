@@ -59,6 +59,8 @@ pub fn create_turn_snapshot_ref(
         )));
     }
     let ref_name = format!("{SNAPSHOT_REF_PREFIX}{task_id}/{:020}-{run_id}", now.max(0));
+    worktree::ensure_plain_reflogs(repo_root)?;
+    worktree::ensure_plain_reflogs(worktree)?;
     git(repo_root, &["update-ref", &ref_name, &oid])?;
     Ok((ref_name, oid))
 }
@@ -201,6 +203,8 @@ pub fn undo_latest_turn(
     let snap = preview_latest_undo(db, repo_root, task_id)?;
     let task = db.get_task(task_id).map_err(|e| e.to_string())?;
     let wt_path = verify_registered_worktree(repo_root, worktrees_root, task_id)?;
+    worktree::ensure_plain_reflogs(repo_root).map_err(|e| e.to_string())?;
+    worktree::ensure_plain_reflogs(&wt_path).map_err(|e| e.to_string())?;
 
     git(
         &wt_path,

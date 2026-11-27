@@ -1,6 +1,9 @@
 //! One task = one worktree = one branch `aaf/<task_id>`.
 
 use std::fs;
+use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::cmd::{git, git_raw};
@@ -62,6 +65,84 @@ pub(crate) fn ensure_on_branch(tree: &Path, branch: &str) -> Result<(), GitError
         }
         Err(err) => Err(err),
     }
+}
+
+const MAX_REFLOG_WALKED: usize = 10_000;
+
+fn resolve_git_dir(tree: &Path, flag: &str) -> Result<PathBuf, GitError> {
+    let path = PathBuf::from(git(tree, &["rev-parse", flag])?);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        tree.join(path)
+    })
+}
+
+/// Fails closed with [`GitError::Invalid`] if `<common>/logs` or `<git-dir>/logs`
+/// contains a symlink, non-file/non-dir entry, multi-link regular file (`nlink > 1`),
+/// unreadable directory/entry, or exceeds `MAX_REFLOG_WALKED` entries.
+pub(crate) fn ensure_plain_reflogs(tree: &Path) -> Result<(), GitError> {
+    let common = resolve_git_dir(tree, "--git-common-dir")?;
+    let git_dir = resolve_git_dir(tree, "--git-dir")?;
+    let mut walked = 0;
+    check_reflog_tree(&common.join("logs"), &mut walked)?;
+    if git_dir != common && resolved(&git_dir) != resolved(&common) {
+        check_reflog_tree(&git_dir.join("logs"), &mut walked)?;
+    }
+    Ok(())
+}
+
+fn check_reflog_tree(root: &Path, walked: &mut usize) -> Result<(), GitError> {
+    let io_err = |p: &Path, e: io::Error| GitError::Invalid(format!("reflog {}: {e}", p.display()));
+    let meta = match fs::symlink_metadata(root) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io_err(root, e)),
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return Err(GitError::Invalid(format!(
+            "unsafe reflog root: {}",
+            root.display()
+        )));
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| io_err(&dir, e))? {
+            *walked += 1;
+            if *walked > MAX_REFLOG_WALKED {
+                return Err(GitError::Invalid(format!(
+                    "reflog walk exceeded {MAX_REFLOG_WALKED} entries under {}",
+                    root.display()
+                )));
+            }
+            let path = entry.map_err(|e| io_err(&dir, e))?.path();
+            let meta = fs::symlink_metadata(&path).map_err(|e| io_err(&path, e))?;
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                return Err(GitError::Invalid(format!(
+                    "reflog symlink: {}",
+                    path.display()
+                )));
+            } else if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                #[cfg(unix)]
+                if meta.nlink() > 1 {
+                    return Err(GitError::Invalid(format!(
+                        "reflog hardlink (nlink={}): {}",
+                        meta.nlink(),
+                        path.display()
+                    )));
+                }
+            } else {
+                return Err(GitError::Invalid(format!(
+                    "non-regular reflog: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

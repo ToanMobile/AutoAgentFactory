@@ -8,7 +8,7 @@ use aaf_domain::proof::ProofRecord;
 use serde::{Deserialize, Serialize};
 
 use super::cmd::git;
-use super::worktree::TaskWorktree;
+use super::worktree::{self, TaskWorktree};
 use super::{GitError, check_branch_name, has_remote};
 use crate::process::CommandRunner;
 
@@ -221,6 +221,8 @@ pub fn open_pr_with_proof(
 
     let branch = req.worktree.branch.as_str();
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    worktree::ensure_plain_reflogs(&req.repo_root)?;
+    worktree::ensure_plain_reflogs(&req.worktree.path)?;
     if let Err(push_err) = git(&req.repo_root, &["push", &req.remote, &refspec]) {
         if is_non_fast_forward(&push_err) {
             git(

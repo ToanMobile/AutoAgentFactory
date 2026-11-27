@@ -168,6 +168,7 @@ impl GitOps for RealGit {
     fn commit_all(&self, worktree: &TaskWorktree, message: &str) -> PortResult<()> {
         let tree = worktree.path.as_path();
         worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
+        worktree::ensure_plain_reflogs(tree).map_err(err)?;
         git(tree, &["add", "-A"]).map_err(err)?;
         if git(tree, &["status", "--porcelain"])
             .map_err(err)?
@@ -189,6 +190,7 @@ impl GitOps for RealGit {
             other => other,
         })?;
         worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
+        worktree::ensure_plain_reflogs(tree).map_err(err)?;
         let args = [
             "-c",
             NO_HOOKS,
@@ -258,6 +260,7 @@ impl GitOps for RealGit {
         );
         let tree = {
             let _admin = self.admin();
+            worktree::ensure_plain_reflogs(&self.repo_root).map_err(err)?;
             worktree::create(&self.repo_root, &self.worktrees_dir, &name, &self.start())
                 .map_err(err)?
         };
@@ -327,6 +330,7 @@ impl GitOps for RealGit {
         let _admin = self.admin();
         let tree = worktree.path.as_path();
         worktree::ensure_on_branch(tree, &worktree.branch).map_err(err)?;
+        worktree::ensure_plain_reflogs(tree).map_err(err)?;
         let start = self.start();
         let args = [
             "-c",
@@ -360,6 +364,7 @@ impl GitOps for RealGit {
 
     fn reset_to(&self, worktree: &TaskWorktree, sha: &str) -> PortResult<()> {
         let tree = worktree.path.as_path();
+        worktree::ensure_plain_reflogs(tree).map_err(err)?;
         git(tree, &["reset", "--hard", "--quiet", sha]).map_err(err)?;
         git(tree, &["clean", "-ffdq"]).map_err(err)?;
         Ok(())
@@ -463,6 +468,7 @@ impl GitOps for RealGit {
         let Some(remote) = self.base.remote.as_deref() else {
             return Ok(None);
         };
+        worktree::ensure_plain_reflogs(&self.repo_root).map_err(err)?;
         let note = crate::pr_ops::sync_local_base(&self.repo_root, remote, &self.base.branch);
         Ok(Some(note))
     }
@@ -471,6 +477,7 @@ impl GitOps for RealGit {
         let Some(remote) = &self.base.remote else {
             return Ok(());
         };
+        worktree::ensure_plain_reflogs(&self.repo_root).map_err(err)?;
         let branch = &self.base.branch;
         let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
         git(&self.repo_root, &["fetch", remote, &refspec]).map_err(err)?;

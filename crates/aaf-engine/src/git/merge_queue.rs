@@ -155,6 +155,8 @@ fn merge_locked(
     }
     // Uncommitted work would be neither rebased nor gated nor merged.
     worktree::ensure_clean(tree)?;
+    worktree::ensure_plain_reflogs(&req.repo_root)?;
+    worktree::ensure_plain_reflogs(tree)?;
 
     let remote_name = match req.remote.as_deref() {
         Some(name) if has_remote(&req.repo_root, name)? => Some(name),
@@ -263,6 +265,8 @@ fn push_fast_forward(
     remote: &str,
     head: &str,
 ) -> Result<MergeOutcome, GitError> {
+    worktree::ensure_plain_reflogs(&req.repo_root)?;
+    worktree::ensure_plain_reflogs(&req.worktree.path)?;
     let refspec = format!("{head}:refs/heads/{}", req.base);
     let args = ["push", "--porcelain", remote, &refspec];
     let out = git_raw(&req.repo_root, &args)?;
@@ -307,8 +311,13 @@ fn local_fast_forward(req: &MergeRequest, head: &str) -> Result<MergeOutcome, Gi
     let checked_out = worktree::list(repo)?
         .into_iter()
         .find(|entry| entry.branch.as_deref() == Some(req.base.as_str()));
+    worktree::ensure_plain_reflogs(repo)?;
+    worktree::ensure_plain_reflogs(&req.worktree.path)?;
     match checked_out {
         Some(entry) => {
+            if entry.path != repo {
+                worktree::ensure_plain_reflogs(&entry.path)?;
+            }
             // Moving the ref under a checked-out tree would make its files
             // look like a revert, so the tree itself is fast-forwarded, and
             // only when no tracked change could get mixed in.
