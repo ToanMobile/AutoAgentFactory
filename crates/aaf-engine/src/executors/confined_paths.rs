@@ -305,17 +305,18 @@ pub(super) fn build_sandbox_paths(
         let lock = Path::new(home.trim_end_matches('/')).join(".robolectric-download-lock");
         let safe_regular = match std::fs::symlink_metadata(&lock) {
             Ok(meta) => meta.file_type().is_file(),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&lock)
-                    .is_ok()
-            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock)
+                .is_ok(),
             Err(_) => false,
         };
         if safe_regular {
-            push_unique(&mut writable_data_files, lock.to_string_lossy().into_owned());
+            push_unique(
+                &mut writable_data_files,
+                lock.to_string_lossy().into_owned(),
+            );
         }
     }
     Ok(SandboxPaths {

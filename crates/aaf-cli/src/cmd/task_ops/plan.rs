@@ -45,7 +45,11 @@ pub(super) fn maybe_approve_on_unblock(
                 db.append_context_note(&task.id, &format_approved_plan_note(&info), now)?;
                 return Ok((true, info.plan_contract.is_some().then_some(info)));
             }
-            let plan = if rest.trim().is_empty() { why } else { rest.trim() };
+            let plan = if rest.trim().is_empty() {
+                why
+            } else {
+                rest.trim()
+            };
             db.append_context_note(&task.id, &format!("{PLAN_APPROVED_PREFIX} {plan}"), now)?;
             return Ok((true, None));
         }
@@ -73,8 +77,10 @@ pub(super) fn maybe_approve_on_unblock(
                 }),
             ));
         }
-        if matches!(task.blocked_reason, Some(BlockedReason::BudgetExceeded { .. }))
-            && snap.latest_plan.is_none()
+        if matches!(
+            task.blocked_reason,
+            Some(BlockedReason::BudgetExceeded { .. })
+        ) && snap.latest_plan.is_none()
             && plan_from_task_notes(task).is_some()
         {
             return Ok((true, None));
