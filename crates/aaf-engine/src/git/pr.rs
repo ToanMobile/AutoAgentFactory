@@ -221,6 +221,7 @@ pub fn open_pr_with_proof(
 
     let branch = req.worktree.branch.as_str();
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    super::ensure_plain_reflogs_all(&[&req.repo_root, &req.worktree.path])?;
     if let Err(push_err) = git(&req.repo_root, &["push", &req.remote, &refspec]) {
         if is_non_fast_forward(&push_err) {
             git(

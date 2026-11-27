@@ -130,6 +130,7 @@ fn verify_already_merged_ancestry(
     if remote.is_empty() || remote.starts_with('-') || check_branch_name(main_repo, base).is_err() {
         return Err("invalid remote or base branch".to_string());
     }
+    worktree::ensure_plain_reflogs(main_repo).map_err(|e| e.to_string())?;
     let refspec = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
     if !git_raw(main_repo, &["fetch", "--quiet", "--", remote, &refspec])
         .is_ok_and(|out| out.success())
@@ -231,6 +232,12 @@ fn delete_remote_branch(
             "skipped remote branch delete: invalid remote {:?} or branch {:?}",
             req.remote, pr.head_ref_name
         ));
+        return;
+    }
+    if let Err(err) = worktree::ensure_plain_reflogs(main_repo) {
+        report
+            .warnings
+            .push(format!("skipped remote branch delete: {err}"));
         return;
     }
     let lease = format!(

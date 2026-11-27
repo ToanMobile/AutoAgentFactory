@@ -158,6 +158,7 @@ pub(super) fn merge_pr_real(
         machine,
         global_config,
     };
+    crate::git::ensure_plain_reflogs_all(&[repo_root, &worktree.path]).map_err(err)?;
     merge_pr(&req, &SystemGh, &SystemClock, &|_| {}).map_err(err)
 }
 

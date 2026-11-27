@@ -148,7 +148,7 @@ pub(crate) fn retry_task(deps: &Deps, task: &Task) -> PortResult<bool> {
     if deps.now().saturating_sub(p.last_ts) < backoff_secs(p.attempts) {
         return Ok(false);
     }
-    // The path is only read when no head is pinned, which is ruled out above.
+    // `head_sha` is pinned above; `merge_pr` still checks reflogs on `wt.path` (`repo_root`).
     let wt = TaskWorktree {
         path: std::path::PathBuf::from(&deps.settings.repo_root),
         branch: format!("aaf/{}", task.id),

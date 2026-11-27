@@ -64,6 +64,8 @@ pub(crate) fn ensure_on_branch(tree: &Path, branch: &str) -> Result<(), GitError
     }
 }
 
+pub(crate) use super::reflog_guard::ensure_plain_reflogs;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskWorktree {
     pub path: PathBuf,
@@ -171,6 +173,7 @@ pub fn create_with_warning(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    ensure_plain_reflogs(repo_root)?;
     git(
         repo_root,
         &["worktree", "add", "-b", &branch, path_str(&path)?, base_ref],

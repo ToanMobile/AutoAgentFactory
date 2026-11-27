@@ -296,6 +296,8 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
         global_config: Some(cfg.global.clone()),
     };
     let progress = |event: &Progress<'_>| notice("merge", &progress_line(event));
+    aaf_engine::git::ensure_plain_reflogs(&req.repo_root)
+        .map_err(|e| CmdError::new(format!("merge: {e}")))?;
     let (outcome, cleanup) = merge_pr_with_cwd(
         &req,
         Some(ctx.cwd.as_path()),
