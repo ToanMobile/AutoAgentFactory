@@ -1,7 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Root budget boundaries and the subtask depth rule.
 
-use aaf_domain::budget::{BudgetCheck, MAX_SUBTASK_DEPTH, RootBudget, can_spawn_subtask};
+use aaf_domain::budget::{
+    BudgetCheck, MAX_SUBTASK_DEPTH, RootBudget, can_spawn_subtask, scaled_token_limit,
+    scaled_wall_limit,
+};
 use aaf_domain::config::UnblockerConfig;
 
 fn budget() -> RootBudget {
@@ -133,4 +136,49 @@ fn only_a_root_task_may_spawn_and_config_cannot_raise_the_cap() {
     assert!(!can_spawn_subtask(1, u8::MAX));
     assert!(!can_spawn_subtask(2, u8::MAX));
     assert!(!can_spawn_subtask(u8::MAX, u8::MAX));
+}
+
+#[test]
+fn scaled_limits_and_new_scaled_cover_bounds_odd_bases_and_i64_clamp() {
+    let cfg = UnblockerConfig {
+        max_token_budget: 2_000_000,
+        max_wall_clock_secs: 10_800,
+        max_unblock_cycles: 5,
+        ..UnblockerConfig::default()
+    };
+    for (subs, exp_tok, exp_wall) in [
+        (0, 2_000_000, 10_800),
+        (1, 2_000_000, 10_800),
+        (2, 3_000_000, 16_200),
+        (3, 4_000_000, 21_600),
+        (4, 5_000_000, 27_000),
+        (9, 5_000_000, 27_000),
+        (usize::MAX, 5_000_000, 27_000),
+    ] {
+        let b = RootBudget::new_scaled("r-s", &cfg, subs);
+        assert_eq!(
+            (b.token_limit, b.wall_secs_limit, b.cycles_limit),
+            (exp_tok, exp_wall, 5)
+        );
+        assert_eq!(scaled_token_limit(cfg.max_token_budget, subs), exp_tok);
+        assert_eq!(scaled_wall_limit(cfg.max_wall_clock_secs, subs), exp_wall);
+    }
+    // Odd bases avoid truncation drift across extra subtasks.
+    assert_eq!(
+        (
+            scaled_wall_limit(101, 2),
+            scaled_wall_limit(101, 3),
+            scaled_wall_limit(101, 4)
+        ),
+        (151, 202, 252)
+    );
+    assert_eq!((scaled_wall_limit(1, 3), scaled_wall_limit(1, 4)), (2, 2));
+    // TOML-representable bases (<= i64::MAX) stay clamped within SQLite i64 range.
+    assert_eq!(
+        scaled_token_limit(5_000_000_000_000_000_000, 4),
+        i64::MAX as u64
+    );
+    assert_eq!(scaled_wall_limit(i64::MAX as u64, 4), i64::MAX as u64);
+    // Domain u64::MAX saturates safely without wrapping or panicking.
+    assert_eq!(scaled_token_limit(u64::MAX, 4), u64::MAX);
 }

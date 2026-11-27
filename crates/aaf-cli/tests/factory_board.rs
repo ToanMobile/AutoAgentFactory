@@ -301,3 +301,45 @@ fn unfreeze_clears_the_flag_and_the_failure_counter() {
         Some("0")
     );
 }
+
+#[test]
+fn unblock_on_split_root_scales_both_token_and_wall_limits_from_config() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.repo.join(".autofactory")).unwrap();
+    std::fs::write(
+        fx.repo.join(".autofactory/config.toml"),
+        "[unblocker]\nmax_token_budget = 2000000\nmax_wall_clock_secs = 10800\nmax_unblock_cycles = 5\n",
+    )
+    .unwrap();
+    let id = fx.add("split root");
+    {
+        let db = fx.db();
+        let root = db.get_task(&id).unwrap();
+        for i in 1..=3 {
+            let child = aaf_domain::task::Task::new_subtask(
+                format!("{id}-s{i}"),
+                &root,
+                format!("sub {i}"),
+                root.spec.clone(),
+                2_000,
+            )
+            .unwrap();
+            db.insert_task(&child).unwrap();
+        }
+        let mut budget = RootBudget::new(&id, &UnblockerConfig::default());
+        budget.wall_secs_limit = 3_600;
+        budget.wall_secs_used = 4_000;
+        budget.frozen = true;
+        db.put_budget(&budget).unwrap();
+    }
+    block(&fx, &id);
+
+    let out = fx.aaf(&["board", "unblock", &id]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json["budget_reset"], json!(true));
+    let budget = &fx.show(&id)["budget"];
+    assert_eq!(budget["frozen"], json!(false));
+    assert_eq!(budget["wall_secs_used"], json!(0));
+    assert_eq!(budget["token_limit"], json!(4_000_000));
+    assert_eq!(budget["wall_secs_limit"], json!(21_600));
+}

@@ -9,7 +9,7 @@ mod repo_freeze;
 use serde::Serialize;
 
 use aaf_domain::blocked::{BlockedReason, UnblockAction, UnblockTier};
-use aaf_domain::budget::{BudgetCheck, RootBudget, can_spawn_subtask, scaled_token_limit};
+use aaf_domain::budget::{BudgetCheck, RootBudget, can_spawn_subtask};
 use aaf_domain::config::UnblockerConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{
@@ -270,9 +270,7 @@ impl<'a> Ladder<'a> {
                 .filter(|t| t.state != aaf_domain::task::TaskState::Cancelled)
                 .count()
         });
-        let mut b = RootBudget::new(root_id, self.cfg);
-        b.token_limit = scaled_token_limit(self.cfg.max_token_budget, active);
-        b
+        RootBudget::new_scaled(root_id, self.cfg, active)
     }
 
     fn ensure_budget(&self, root_id: &str) -> PortResult<RootBudget> {

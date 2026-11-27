@@ -112,11 +112,7 @@ pub trait Store:
         parent_note: &str,
         now: i64,
     ) -> PortResult<()> {
-        match self.get_budget(&budget.root_id) {
-            Ok(_) => {}
-            Err(aaf_domain::ports::PortError::NotFound(_)) => self.put_budget(budget)?,
-            Err(err) => return Err(err),
-        }
+        let _ = self.ensure_budget_if_missing(budget)?;
         for child in children {
             self.insert_task(child)?;
         }

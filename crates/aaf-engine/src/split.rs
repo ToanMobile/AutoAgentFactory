@@ -222,11 +222,7 @@ pub fn apply_split(
         });
     }
 
-    let mut budget = RootBudget::new(&parent.root_id, budget_cfg);
-    budget.token_limit = aaf_domain::budget::scaled_token_limit(
-        budget_cfg.max_token_budget,
-        prepared.children.len(),
-    );
+    let budget = RootBudget::new_scaled(&parent.root_id, budget_cfg, prepared.children.len());
     store.apply_split_atomic(
         &parent.id,
         &budget,
@@ -276,7 +272,11 @@ pub fn propose_and_apply_split(
         return Ok(no_split(parent, dry_run, "task already has subtasks"));
     }
     if !dry_run {
-        ensure_root_budget(store, &parent.root_id, budget_cfg)?;
+        let existing =
+            store.ensure_budget_if_missing(&RootBudget::new(&parent.root_id, budget_cfg))?;
+        if existing.check() != aaf_domain::budget::BudgetCheck::Ok {
+            return Ok(no_split(parent, dry_run, "root budget exhausted"));
+        }
     }
     const SPLIT_MAX_TURNS: u32 = 12;
     let mut request = AgentRequest {
@@ -369,12 +369,6 @@ fn no_split(parent: &Task, dry_run: bool, reason: &str) -> SplitOutcome {
 
 fn has_existing_subtasks(store: &dyn Store, parent: &Task) -> PortResult<bool> {
     Ok(!store.children_of(&parent.id)?.is_empty())
-}
-
-fn ensure_root_budget(store: &dyn Store, root_id: &str, cfg: &UnblockerConfig) -> PortResult<()> {
-    store
-        .ensure_budget_if_missing(&RootBudget::new(root_id, cfg))
-        .map(|_| ())
 }
 
 fn id_exists(store: &dyn Store, id: &str) -> PortResult<bool> {

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use aaf_domain::budget::{BudgetCheck, RootBudget, scaled_token_limit};
+use aaf_domain::budget::{BudgetCheck, RootBudget, scaled_token_limit, scaled_wall_limit};
 use aaf_domain::ports::{BudgetStore, PortError, TaskStore};
 use aaf_domain::task::TaskState;
 use aaf_engine::db::Db;
@@ -19,9 +19,6 @@ fn active_subtask_count(db: &Db, root_id: &str) -> usize {
 
 fn repo_unblocker_limits(repo_root: &str) -> Option<(u64, u64, u32)> {
     let root = Path::new(repo_root);
-    if !root.join(".autofactory/config.toml").is_file() {
-        return None;
-    }
     let global_config = std::env::var_os("AAF_CONFIG_DIR")
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
@@ -31,6 +28,10 @@ fn repo_unblocker_limits(repo_root: &str) -> Option<(u64, u64, u32)> {
         })
         .map(|d| d.join("config.toml"))
         .filter(|p| p.is_file());
+    let has_repo_cfg = root.join(".autofactory/config.toml").is_file();
+    if !has_repo_cfg && global_config.is_none() {
+        return None;
+    }
     let no_env = |_: &str| None;
     let eff = aaf_engine::config::load(&aaf_engine::config::ConfigInputs {
         global_config,
@@ -59,11 +60,8 @@ pub(crate) fn reset_budget_for_unblock(
                 || budget.wall_secs_used > 0
                 || budget.cycles_used > 0;
             let cfg_limits = repo_unblocker_limits(repo_root).map(|(t, w, c)| {
-                (
-                    scaled_token_limit(t, active_subtask_count(db, root_id)),
-                    w,
-                    c,
-                )
+                let subs = active_subtask_count(db, root_id);
+                (scaled_token_limit(t, subs), scaled_wall_limit(w, subs), c)
             });
             let limits_changed = cfg_limits.is_some_and(|(t, w, c)| {
                 budget.token_limit != t || budget.wall_secs_limit != w || budget.cycles_limit != c
@@ -102,11 +100,8 @@ pub(crate) fn reset_exhausted_budget(
         Ok(budget) if budget.check() != BudgetCheck::Ok => {
             let (token_limit, wall_secs_limit, cycles_limit) = repo_unblocker_limits(repo_root)
                 .map(|(t, w, c)| {
-                    (
-                        scaled_token_limit(t, active_subtask_count(db, root_id)),
-                        w,
-                        c,
-                    )
+                    let subs = active_subtask_count(db, root_id);
+                    (scaled_token_limit(t, subs), scaled_wall_limit(w, subs), c)
                 })
                 .unwrap_or((
                     budget.token_limit,

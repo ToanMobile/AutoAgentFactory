@@ -101,11 +101,23 @@ pub trait TaskStore: Send + Sync {
 pub trait BudgetStore: Send + Sync {
     fn put_budget(&self, budget: &RootBudget) -> PortResult<()>;
     fn get_budget(&self, root_id: &str) -> PortResult<RootBudget>;
-    /// Atomically inserts `budget` only if missing, returning the existing or
-    /// newly inserted row without clobbering concurrent `add_usage` writes.
+    /// Atomically inserts `budget` only if missing, monotonically raising
+    /// `token_limit` and `wall_secs_limit` on unfrozen, non-exhausted existing
+    /// rows when `budget` has higher limits, without clobbering concurrent
+    /// `add_usage` writes.
     fn ensure_budget_if_missing(&self, budget: &RootBudget) -> PortResult<RootBudget> {
         match self.get_budget(&budget.root_id) {
-            Ok(existing) => Ok(existing),
+            Ok(mut existing) => {
+                if existing.check() == crate::budget::BudgetCheck::Ok
+                    && (existing.token_limit < budget.token_limit
+                        || existing.wall_secs_limit < budget.wall_secs_limit)
+                {
+                    existing.token_limit = existing.token_limit.max(budget.token_limit);
+                    existing.wall_secs_limit = existing.wall_secs_limit.max(budget.wall_secs_limit);
+                    self.put_budget(&existing)?;
+                }
+                Ok(existing)
+            }
             Err(PortError::NotFound(_)) => {
                 self.put_budget(budget)?;
                 Ok(budget.clone())

@@ -44,6 +44,17 @@ impl RootBudget {
         }
     }
 
+    pub fn new_scaled(
+        root_id: impl Into<String>,
+        cfg: &UnblockerConfig,
+        active_subtasks: usize,
+    ) -> RootBudget {
+        let mut budget = RootBudget::new(root_id, cfg);
+        budget.token_limit = scaled_token_limit(cfg.max_token_budget, active_subtasks);
+        budget.wall_secs_limit = scaled_wall_limit(cfg.max_wall_clock_secs, active_subtasks);
+        budget
+    }
+
     /// A limit of `N` allows exactly `N`; the budget is exceeded past it.
     pub fn check(&self) -> BudgetCheck {
         if self.frozen {
@@ -71,10 +82,26 @@ pub fn can_spawn_subtask(parent_depth: u8, max_depth: u8) -> bool {
     parent_depth < max_depth.min(MAX_SUBTASK_DEPTH)
 }
 
+fn scale_by_subtasks(base: u64, active_subtasks: usize) -> u64 {
+    let extra = active_subtasks.saturating_sub(1).min(3) as u128;
+    let added = (u128::from(base) * extra) / 2;
+    let scaled = base.saturating_add(u64::try_from(added).unwrap_or(u64::MAX));
+    if base <= i64::MAX as u64 {
+        scaled.min(i64::MAX as u64)
+    } else {
+        scaled
+    }
+}
+
 /// Scales a root task's `max_token_budget` when T4 splits it into multiple
 /// active (non-cancelled) subtasks: 0–1 subtask keeps `base` unchanged; each
 /// additional subtask adds `base / 2`, capped at +3 extra subtasks (2.5× base).
 pub fn scaled_token_limit(base: u64, active_subtasks: usize) -> u64 {
-    let extra = active_subtasks.saturating_sub(1).min(3) as u64;
-    base.saturating_add((base / 2).saturating_mul(extra))
+    scale_by_subtasks(base, active_subtasks)
+}
+
+/// Scales a root task's `max_wall_clock_secs` across active (non-cancelled)
+/// subtasks using the same 1.0×..2.5× curve as [`scaled_token_limit`].
+pub fn scaled_wall_limit(base: u64, active_subtasks: usize) -> u64 {
+    scale_by_subtasks(base, active_subtasks)
 }
