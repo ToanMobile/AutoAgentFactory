@@ -256,7 +256,7 @@ pub fn merge_deferred_outcome(
     }
 }
 
-pub(super) fn is_inconclusive_partial(p: &PartialAuditRecord) -> bool {
+pub(crate) fn is_inconclusive_partial(p: &PartialAuditRecord) -> bool {
     !p.verdict.eq_ignore_ascii_case("PASS") && !p.verdict.eq_ignore_ascii_case("FAIL")
 }
 

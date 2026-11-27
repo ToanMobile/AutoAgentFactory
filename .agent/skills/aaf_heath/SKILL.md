@@ -2,20 +2,20 @@
 name: aaf_heath
 description: >-
   Bật, chạy 1 lần, hoặc tắt bộ giám sát toàn diện 4 trụ cột (Lỗi/Rò rỉ + Chất lượng
-  + Tốc độ/Slot + Hiệu quả Token) định kỳ mỗi 5 phút cho AutoAgentFactory (AAF) trên
+  + Tốc độ/Slot + Hiệu quả Token) định kỳ mỗi 15 phút cho AutoAgentFactory (AAF) trên
   GeelyEx2, OfficeReader và các repo đang auto-run: kiểm tra `aaf status --all`,
   `/api/report?since=24`, DB tasks/runs/events, `throttle/` locks, supervisor logs và
   Cockpit UI; đánh giá Factory Score, First-Pass Gate, Cross-Audit & mechanical_score,
   vacuous tests, tốc độ gate/coding/audit, worker treo/deadlock heavy slot, tốc độ đốt
   token & token/task done, rò rỉ RAM/FD/WAL/worktree, tự chẩn đoán & sửa lỗi hoặc tối
   ưu AAF khi cần. Kích hoạt khi gõ `/aaf_heath`, `/aaf_health`, `/aaf-health`,
-  "monitor aaf", "bật monitor 5 phút aaf", "theo dõi board aaf", "check sức khỏe aaf",
+  "monitor aaf", "bật monitor 15 phút aaf", "theo dõi board aaf", "check sức khỏe aaf",
   hoặc "tắt monitor aaf".
 ---
 
 # AAF Board Health, Quality, Speed & Token Monitor (`/aaf_heath`)
 
-Skill giám sát toàn diện **4 trụ cột** của AutoAgentFactory (`aaf`) định kỳ mỗi 5 phút (hoặc chạy 1 lần theo yêu cầu):
+Skill giám sát toàn diện **4 trụ cột** của AutoAgentFactory (`aaf`) định kỳ mỗi 15 phút (hoặc chạy 1 lần theo yêu cầu):
 1. **Lỗi & Rò rỉ hệ thống** (factory bug, deadlock, RAM/FD trend, orphan worker, WAL/disk/worktree bloat).
 2. **Chất lượng đầu ra** (Factory Score & 5 pillars, First-Pass Gate, `mechanical_score` & `llm_average` của Cross-Audit, cảnh báo `vacuous test`, vòng lặp rework/churn).
 3. **Tốc độ & Thông lượng** (thời gian `coding`/`audit`/`gate` p50/p90, throughput `done_1h`/`done_24h`, hàng đợi `throttle/queue/*.wait`, phát hiện worker đứng im không xuất stream và deadlock `drain.lock` ↔ dead orphan slot).
@@ -33,7 +33,7 @@ Skill giám sát toàn diện **4 trụ cột** của AutoAgentFactory (`aaf`) �
 
 | Ý định người dùng | Hành động |
 |---|---|
-| Mặc định (`/aaf_heath`, "bật monitor 5 phút") | Chạy kiểm tra ngay lập tức 1 lần → kiểm tra `manage_task(Action="list")` để tránh trùng → tạo cron `*/5 * * * *` (`IsDaemon: true`). |
+| Mặc định (`/aaf_heath`, "bật monitor 15 phút") | Chạy kiểm tra ngay lập tức 1 lần → kiểm tra `manage_task(Action="list")` để tránh trùng → tạo cron `*/15 * * * *` (`IsDaemon: true`). |
 | Kiểm tra nhanh 1 lần (`/aaf_heath once`, "check 1 lần") | Chỉ chạy script kiểm tra và báo cáo đủ 4 trụ cột, **không** tạo cron. |
 | Tắt lịch monitor (`/aaf_heath stop`, "tắt monitor") | Gọi `manage_task(Action="list")` tìm task cron có `[AAF Board Auto-Monitor Tick]` → gọi `manage_task(Action="kill", TaskId=...)`. |
 
@@ -47,7 +47,7 @@ bash ~/.gemini/config/skills/aaf_heath/scripts/aaf_health_check.sh
 
 *(Đường dẫn trực tiếp trong repo: `bash /Volumes/Data/Toan/AutoAgentFactory/.agent/skills/aaf_heath/scripts/aaf_health_check.sh`.)*
 
-Script **đồng bộ trực tiếp với `/api/report?since=24` của `http://127.0.0.1:4317/health`** (tên cũ `/studio` vẫn hoạt động song song; `score`, `ops_diagnostics`, `token_diagnostics`, `runtime_health` — **Single Source of Truth**, không tính trùng trong bash; tự đọc token từ `~/.local/share/autofactory/ui-service.token`, không in lộ token) **và** bổ sung các check tầng OS (`metrics.jsonl` 5-tick RSS/FD trend, macOS `memory_pressure`/swap, orphan worker process) vào chuỗi mẫu vòng tròn atomic tại `~/.cache/aaf-health/metrics.jsonl` (tối đa 288 mẫu = 24h @ 5 phút):
+Script **đồng bộ trực tiếp với `/api/report?since=24` của `http://127.0.0.1:4317/health`** (tên cũ `/studio` vẫn hoạt động song song; `score`, `ops_diagnostics`, `token_diagnostics`, `runtime_health` — **Single Source of Truth**, không tính trùng trong bash; tự đọc token từ `~/.local/share/autofactory/ui-service.token`, không in lộ token) **và** bổ sung các check tầng OS (`metrics.jsonl` 5-tick RSS/FD trend, macOS `memory_pressure`/swap, orphan worker process) vào chuỗi mẫu vòng tròn atomic tại `~/.cache/aaf-health/metrics.jsonl` (tối đa 288 mẫu = 72h @ 15 phút):
 
 ### A. Trụ cột Chất lượng (Quality — từ Studio `score` + `ops_diagnostics.quality`)
 - **Factory Score & Grade** (`score/100`, 5 pillars: `first_pass_gate`, `autonomy_discipline`, `audit_integrity`, `block_health`, `flow_efficiency`, và top bottlenecks).
@@ -72,7 +72,7 @@ Script **đồng bộ trực tiếp với `/api/report?since=24` của `http://1
 
 ### C. Trụ cột Hiệu quả Token & Chi phí (Token Efficiency — từ Health `token_diagnostics` + `ops_diagnostics.efficiency`)
 - Đồng bộ 100% từ `/health` (`/api/report?since=24`): `total_tokens`, tỷ lệ `in:out`, `wasted%`, `audit%`, `avg_coding_tokens`, `avg_audit_tokens`, `burn_rate` (`5m`/`1h`/`24h`), `unmeas_long`, `zero_tok`, `dup_audits`, và **top 3 task đốt nhiều token nhất**.
-- Cảnh báo hiệu quả: `studio_ops:efficiency:high_tokens_per_done` (`> 450K tok/done`, mẫu số chỉ tính task `done` có run thật), `studio_ops:efficiency:high_burn_zero_done` (`> 800K tok` mà `0 done`), `token_spike_since_prev_tick` (`> +180K` / `<= 15p`), `token_burn_spike_1h` (theo `burn_rate.spike_limit_1h` hoặc mặc định `> 350K` / `1h`), `accounts_in_cooldown`.
+- Cảnh báo hiệu quả: `studio_ops:efficiency:high_tokens_per_done` (`> 450K tok/done`, mẫu số chỉ tính task `done` có run thật), `studio_ops:efficiency:high_burn_zero_done` (`> 800K tok` mà `0 done`), `token_spike_since_prev_tick` (`> +450K` / `<= 30p`), `token_burn_spike_1h` (theo `burn_rate.spike_limit_1h` hoặc mặc định `> 350K` / `1h`), `accounts_in_cooldown`.
 
 ### D. Trụ cột Sức khoẻ Hệ thống, OS & Đồng bộ (Memory / FD / WAL / Disk / Daemons)
 - `health_sync_failed`: UI `/api/health` sống nhưng `/api/report?since=24` timeout/lỗi HTTP (ANOMALY ngay lập tức + tự kích hoạt fallback SQLite/FS cho `stuck_gating`, `stalled_worker`, `long_running_worker`, `queue/*.wait`).
@@ -83,12 +83,12 @@ Script **đồng bộ trực tiếp với `/api/report?since=24` của `http://1
 
 ---
 
-## 3. Đăng ký cron 5 phút (chế độ mặc định)
+## 3. Đăng ký cron 15 phút (chế độ mặc định)
 
 Trước khi tạo cron, gọi `manage_task(Action="list")`. Nếu đã có cron `[AAF Board Auto-Monitor Tick]` đang chạy thì **không** tạo trùng (chỉ báo lại TaskId đang chạy).
 
 Nếu chưa có, gọi tool `schedule`:
-- `CronExpression`: `"*/5 * * * *"`
+- `CronExpression`: `"*/15 * * * *"`
 - `IsDaemon`: `true`
 - `ExactTiming`: `false`
 - `Prompt`:

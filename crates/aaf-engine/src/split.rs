@@ -222,7 +222,11 @@ pub fn apply_split(
         });
     }
 
-    let budget = RootBudget::new(&parent.root_id, budget_cfg);
+    let mut budget = RootBudget::new(&parent.root_id, budget_cfg);
+    budget.token_limit = aaf_domain::budget::scaled_token_limit(
+        budget_cfg.max_token_budget,
+        prepared.children.len(),
+    );
     store.apply_split_atomic(
         &parent.id,
         &budget,

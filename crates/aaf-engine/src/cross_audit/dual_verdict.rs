@@ -16,7 +16,7 @@ use super::checklist::{self, ID_ASSERT, ID_GATE_CI, ID_HARDCODED, ID_SECRET, ID_
 use super::diff_hunks::{
     DiffHunks, evidence_in_diff, extract_citations, parse_diff_hunks_with_truncation,
 };
-use super::prompt::truncate_diff;
+use super::prompt::{neutralise, truncate_diff};
 use super::scoring::{GOLDEN_IDS, MechanicalScoreReport, evaluate_score_gate};
 use super::verdict::strip_ansi_escapes;
 
@@ -324,8 +324,22 @@ pub fn parse_and_validate_dual_review(
             .keys()
             .map(|k| normalize_repo_path(k).unwrap_or_else(|_| k.clone()))
             .collect();
+        let format_rejected = |id: &str, raw_loc: &str| -> String {
+            let clean = |s: &str| -> String {
+                let filtered: String = s
+                    .chars()
+                    .map(|c| if c.is_control() || c == '`' { ' ' } else { c })
+                    .collect();
+                neutralise(&filtered.split_whitespace().collect::<Vec<_>>().join(" "))
+            };
+            let cid = clean(id);
+            let cloc = clean(raw_loc);
+            let cloc = if cloc.is_empty() { "<empty>" } else { &cloc };
+            format!("{cid}({cloc})")
+        };
         let reported = blocking.len();
         let mut valid = Vec::new();
+        let mut rejected_locations: Vec<String> = Vec::new();
         for mut iss in blocking {
             let linked = yes_ev
                 .get(&iss.id.to_ascii_uppercase())
@@ -347,11 +361,28 @@ pub fn parse_and_validate_dual_review(
                 if let Some(norm) = hit {
                     iss.location = format!("{norm}:1");
                     valid.push(iss);
+                } else {
+                    rejected_locations.push(format_rejected(&iss.id, &iss.location));
                 }
+            } else {
+                rejected_locations.push(format_rejected(&iss.id, &iss.location));
             }
         }
         if reported > 0 && valid.is_empty() {
-            return Err("all reported blocking issues failed citation verification".into());
+            if trunc {
+                return Err("diff was truncated: unseen changes cannot be approved".into());
+            }
+            let preview: Vec<String> = rejected_locations
+                .into_iter()
+                .take(4)
+                .map(|s| s.chars().take(100).collect())
+                .collect();
+            return Err(format!(
+                "all reported blocking issues failed citation verification \
+                 (rejected: {}; cite an exact `file:line` inside a changed diff hunk, \
+                 not untouched code outside the diff)",
+                preview.join(", ")
+            ));
         }
         p2.retain(|i| {
             evidence_in_diff(&i.location, &hunks)

@@ -125,6 +125,68 @@ fn validate_plans_is_all_or_nothing() {
     assert!(validate_plans((0..5).map(|i| plan(&format!("p{i}"))).collect()).is_empty());
 }
 
+#[test]
+fn validate_plans_rejects_red_only_test_subtasks_but_allows_red_to_green_pairs() {
+    let mut red_only_vi = plan("PERF-201 (1/3): Test đỏ cho trần nạp TTS");
+    red_only_vi.description = "Chỉ viết unit test đỏ để chứng minh lỗi OOM.".into();
+    assert!(
+        validate_plans(vec![red_only_vi, plan("fix")]).is_empty(),
+        "red-only Vietnamese test subtask must be rejected all-or-nothing"
+    );
+
+    let mut red_only_en = plan("Add failing test");
+    red_only_en.description = "Add failing test for parser. Do not modify production code.".into();
+    assert!(
+        validate_plans(vec![red_only_en]).is_empty(),
+        "red-only English test subtask must be rejected"
+    );
+
+    let mut paired = plan("PERF-201: Cài trần nạp TTS kèm test đỏ→xanh");
+    paired.description =
+        "Viết test đỏ cho PlainTextSourceCapTest rồi sửa PlainTextSource.kt để test chuyển xanh."
+            .into();
+    assert_eq!(
+        validate_plans(vec![paired]).len(),
+        1,
+        "paired red-to-green subtask with production fix must be accepted"
+    );
+
+    // False-positive regression cases caught by adversarial audit:
+    let mut required_test = plan("Add required test coverage");
+    required_test.description =
+        "Add required test for parser edge cases; do not modify production signatures.".into();
+    assert_eq!(
+        validate_plans(vec![required_test]).len(),
+        1,
+        "word boundary: 'required test' must not match 'red test'"
+    );
+
+    let mut negated = plan("Add parser fix and unit test");
+    negated.description =
+        "This is not a red-only test subtask; fix parser and verify green.".into();
+    assert_eq!(
+        validate_plans(vec![negated]).len(),
+        1,
+        "negated phrasing must not trigger explicit red-only guard"
+    );
+
+    let mut fix_test = plan("Fix the failing test");
+    fix_test.description =
+        "Fix the failing test fixture in FooTest.kt; do not modify production code.".into();
+    assert_eq!(
+        validate_plans(vec![fix_test]).len(),
+        1,
+        "repairing an existing broken test without touching production must be allowed"
+    );
+
+    let mut plural_red = plan("Add failing tests");
+    plural_red.description = "Only add failing tests for now.".into();
+    assert!(
+        validate_plans(vec![plural_red]).is_empty(),
+        "plural 'only add failing tests' must be rejected"
+    );
+}
+
 fn answer(text: &str) -> AgentOutcome {
     AgentOutcome {
         final_text: text.to_string(),

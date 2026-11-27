@@ -70,3 +70,11 @@ impl RootBudget {
 pub fn can_spawn_subtask(parent_depth: u8, max_depth: u8) -> bool {
     parent_depth < max_depth.min(MAX_SUBTASK_DEPTH)
 }
+
+/// Scales a root task's `max_token_budget` when T4 splits it into multiple
+/// active (non-cancelled) subtasks: 0–1 subtask keeps `base` unchanged; each
+/// additional subtask adds `base / 2`, capped at +3 extra subtasks (2.5× base).
+pub fn scaled_token_limit(base: u64, active_subtasks: usize) -> u64 {
+    let extra = active_subtasks.saturating_sub(1).min(3) as u64;
+    base.saturating_add((base / 2).saturating_mul(extra))
+}

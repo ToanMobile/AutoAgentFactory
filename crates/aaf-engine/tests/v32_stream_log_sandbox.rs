@@ -347,7 +347,15 @@ fn claude_runner_writes_sanitized_projections_not_raw_stream_json() {
         .collect();
     assert_eq!(
         types,
-        vec!["start", "tool_use", "assistant", "result", "finish"]
+        vec![
+            "start",
+            "tool_use",
+            "assistant",
+            "usage",
+            "result",
+            "usage",
+            "finish"
+        ]
     );
 }
 

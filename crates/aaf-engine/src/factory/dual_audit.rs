@@ -12,11 +12,12 @@ use serde_json::json;
 mod matrix;
 mod turn;
 
+pub(crate) use matrix::is_inconclusive_partial;
+use matrix::issues_to_findings;
 pub use matrix::{
     DeferredSiblingOutcome, DualMatrixDecision, build_dual_audit_record, decide_dual_matrix,
     dual_audit_satisfies_policy, governing_reviewer, merge_deferred_outcome, validate_dual_quorum,
 };
-use matrix::{is_inconclusive_partial, issues_to_findings};
 pub(crate) use turn::{run_adjudicate_turn, run_reviewer_turn};
 
 use super::audit_backend::audit_rejection_signal;
@@ -31,6 +32,7 @@ pub(crate) struct DualReviewCoord {
     pub in_flight: usize,
     pub aborted: bool,
     pub deferred_outcome: Option<DeferredSiblingOutcome>,
+    pub inconclusive_partials: Vec<PartialAuditRecord>,
     pub job: GateJob,
     pub receipt: Box<Receipt>,
     pub plan_hash: String,
@@ -195,6 +197,27 @@ fn emit_fail_and_rework(
     )
 }
 
+fn partial_verdict_body(verdict: &str) -> &str {
+    let rest = verdict
+        .strip_prefix("INCONCLUSIVE:")
+        .unwrap_or(verdict)
+        .trim_start();
+    rest.strip_prefix("inconclusive:")
+        .unwrap_or(rest)
+        .trim_start()
+}
+
+fn partials_have_prefix(partials: &[PartialAuditRecord], prefix: &str) -> bool {
+    partials
+        .iter()
+        .any(|p| is_inconclusive_partial(p) && partial_verdict_body(&p.verdict).starts_with(prefix))
+}
+
+fn is_deterministic_quorum_inconclusive(reason: &str) -> bool {
+    reason.starts_with("dual review requires >= 2 reviewers")
+        || reason.starts_with("dual review consensus requires >= 2 distinct")
+}
+
 /// Aggregates all completed partials via [`decide_dual_matrix`], emitting 1 `CrossAudit` per round.
 pub(crate) fn finalize_dual_review(
     deps: &Deps,
@@ -243,6 +266,18 @@ pub(crate) fn finalize_dual_review(
                     "tree_fp": receipt.tree_fp, "config_hash": receipt.config_hash,
                 }),
             )?;
+            if is_deterministic_quorum_inconclusive(&reason) {
+                unblock::block_untried(deps, &task.id, &verdict)?;
+                return Ok(DualFinalizeResult::Done(Next::Blocked));
+            }
+            let diff_truncated = partials_have_prefix(partials, "diff was truncated");
+            let empty_diff = partials_have_prefix(partials, "empty diff");
+            if !diff_truncated
+                && !empty_diff
+                && super::infra_retry::block_inconclusive_audit(deps, &task, true, false, &verdict)?
+            {
+                return Ok(DualFinalizeResult::Done(Next::Blocked));
+            }
             let next = reject_dual_audit(deps, task.id, job.worktree.clone(), &verdict, &[])?;
             Ok(DualFinalizeResult::Done(next))
         }

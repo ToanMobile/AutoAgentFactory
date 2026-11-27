@@ -114,6 +114,7 @@ pub(crate) enum Next {
     },
     DualReviewPartial {
         reviewer_id: String,
+        inconclusive: Option<Box<PartialAuditRecord>>,
     },
     Blocked,
 }

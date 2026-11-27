@@ -9,7 +9,7 @@ mod repo_freeze;
 use serde::Serialize;
 
 use aaf_domain::blocked::{BlockedReason, UnblockAction, UnblockTier};
-use aaf_domain::budget::{BudgetCheck, RootBudget, can_spawn_subtask};
+use aaf_domain::budget::{BudgetCheck, RootBudget, can_spawn_subtask, scaled_token_limit};
 use aaf_domain::config::UnblockerConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{
@@ -264,9 +264,20 @@ impl<'a> Ladder<'a> {
         })
     }
 
+    fn scaled_budget(&self, root_id: &str) -> RootBudget {
+        let active = self.tasks.children_of(root_id).map_or(0, |kids| {
+            kids.iter()
+                .filter(|t| t.state != aaf_domain::task::TaskState::Cancelled)
+                .count()
+        });
+        let mut b = RootBudget::new(root_id, self.cfg);
+        b.token_limit = scaled_token_limit(self.cfg.max_token_budget, active);
+        b
+    }
+
     fn ensure_budget(&self, root_id: &str) -> PortResult<RootBudget> {
         self.budgets
-            .ensure_budget_if_missing(&RootBudget::new(root_id, self.cfg))
+            .ensure_budget_if_missing(&self.scaled_budget(root_id))
     }
 
     fn charge_cycle(&self, root_id: &str) -> PortResult<RootBudget> {
@@ -274,7 +285,7 @@ impl<'a> Ladder<'a> {
             // A root that never ran has no budget row yet.
             Err(PortError::NotFound(_)) => {
                 self.budgets
-                    .ensure_budget_if_missing(&RootBudget::new(root_id, self.cfg))?;
+                    .ensure_budget_if_missing(&self.scaled_budget(root_id))?;
                 self.budgets.add_usage(root_id, 0, 0, 1)
             }
             other => other,

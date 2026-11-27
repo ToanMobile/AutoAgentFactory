@@ -531,3 +531,55 @@ fn ensure_budget_if_missing_preserves_existing_usage() {
     assert_eq!(second.wall_secs_used, 300);
     assert_eq!(second.cycles_used, 1);
 }
+
+#[test]
+fn sync_repo_budget_limits_scales_multi_subtask_roots_and_ignores_cancelled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Db::open(&tmp.path().join("aaf.db")).unwrap();
+    let repo = "/repo/multi";
+    let spec = ImmutableSpec {
+        description: "d".into(),
+        acceptance: vec!["ok".into()],
+    };
+    let root = Task::new_root("t-root", repo, "root", spec.clone(), Priority::P1, 1_000);
+    db.insert_task(&root).unwrap();
+    for i in 1..=4 {
+        let mut child =
+            Task::new_subtask(format!("t-root-s{i}"), &root, "sub", spec.clone(), 1_000).unwrap();
+        if i == 4 {
+            child.state = TaskState::Cancelled;
+        }
+        db.insert_task(&child).unwrap();
+    }
+    let cfg = aaf_domain::config::UnblockerConfig {
+        max_token_budget: 2_000_000,
+        ..Default::default()
+    };
+    db.put_budget(&RootBudget::new("t-root", &cfg)).unwrap();
+
+    // 3 active (non-cancelled) subtasks -> 1.0x + 2 * 0.5x = 2.0x = 4_000_000.
+    db.sync_repo_budget_limits(repo, &cfg).unwrap();
+    assert_eq!(db.get_budget("t-root").unwrap().token_limit, 4_000_000);
+
+    // Cancelling subtasks after spending 3.5M must not drop limit below tokens_used.
+    db.add_usage("t-root", 3_500_000, 0, 0).unwrap();
+    db.set_state("t-root-s2", TaskState::Cancelled, None, 2_000)
+        .unwrap();
+    db.set_state("t-root-s3", TaskState::Cancelled, None, 2_000)
+        .unwrap();
+    db.sync_repo_budget_limits(repo, &cfg).unwrap();
+    assert_eq!(db.get_budget("t-root").unwrap().token_limit, 3_500_000);
+
+    assert_eq!(
+        aaf_domain::budget::scaled_token_limit(2_000_000, 1),
+        2_000_000
+    );
+    assert_eq!(
+        aaf_domain::budget::scaled_token_limit(2_000_000, 4),
+        5_000_000
+    );
+    assert_eq!(
+        aaf_domain::budget::scaled_token_limit(2_000_000, 9),
+        5_000_000
+    );
+}

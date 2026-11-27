@@ -47,9 +47,14 @@ pub(crate) fn run_dual_job(
             match dual_audit::run_reviewer_turn(
                 deps, target, &reviewer, &job, &receipt, &plan_hash, grant,
             )? {
-                PartialTurnResult::Completed(rec) => Ok(Next::DualReviewPartial {
-                    reviewer_id: rec.reviewer_id,
-                }),
+                PartialTurnResult::Completed(rec) => {
+                    let reviewer_id = rec.reviewer_id.clone();
+                    let inconclusive = dual_audit::is_inconclusive_partial(&rec).then_some(rec);
+                    Ok(Next::DualReviewPartial {
+                        reviewer_id,
+                        inconclusive,
+                    })
+                }
                 PartialTurnResult::Deferred(Next::Switch) => {
                     Ok(Next::SwitchJob(Box::new(Job::DualReviewTurn {
                         job,
@@ -256,6 +261,7 @@ impl Scheduler<'_> {
             in_flight: missing.len(),
             aborted: false,
             deferred_outcome: None,
+            inconclusive_partials: Vec::new(),
             job: job.clone(),
             receipt: receipt.clone(),
             plan_hash: plan_hash.clone(),
@@ -284,7 +290,20 @@ impl Scheduler<'_> {
             return Ok(());
         };
         let non_partial = match outcome.next {
-            Next::DualReviewPartial { reviewer_id } if !reviewer_id.is_empty() => None,
+            Next::DualReviewPartial {
+                reviewer_id,
+                inconclusive,
+            } if !reviewer_id.is_empty() => {
+                if let Some(rec) = inconclusive
+                    && let Some(coord) = self.state.dual_review_in_flight.get_mut(&task_id)
+                {
+                    coord
+                        .inconclusive_partials
+                        .retain(|p| p.reviewer_id != rec.reviewer_id);
+                    coord.inconclusive_partials.push(*rec);
+                }
+                None
+            }
             Next::DualReviewPartial { .. } => {
                 let out = worker::block_infra(
                     self.deps,
@@ -403,7 +422,15 @@ impl Scheduler<'_> {
         };
         let now = self.deps.now();
         for rev in &still_missing {
-            partials.push(synthetic_inconclusive_partial(&coord, rev, now));
+            if let Some(rec) = coord
+                .inconclusive_partials
+                .iter()
+                .find(|p| p.reviewer_id == rev.id)
+            {
+                partials.push(rec.clone());
+            } else {
+                partials.push(synthetic_inconclusive_partial(&coord, rev, now));
+            }
         }
         self.finish_dual_review(coord.job, coord.receipt, coord.plan_hash, partials)
     }

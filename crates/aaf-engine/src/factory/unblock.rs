@@ -467,6 +467,7 @@ fn spawn_subtasks(deps: &Deps, parent: &Task, plans: Vec<SubtaskPlan>) -> PortRe
             json!({ "parent": parent.id, "title": child.title }),
         )?;
     }
+    let _ = ensure_budget(deps, &parent.root_id)?;
     Ok(())
 }
 

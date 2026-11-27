@@ -234,7 +234,13 @@ fn all_hallucinated_citations_return_inconclusive_never_pass() {
     let out =
         parse_and_validate_dual_review(&payload, &checklist, SAMPLE_DIFF, None, true, 95, 90, 100);
     assert!(
-        matches!(out, DualReviewerOutcome::Inconclusive { ref reason } if reason.contains("citation"))
+        matches!(
+            out,
+            DualReviewerOutcome::Inconclusive { ref reason }
+                if reason.contains("citation")
+                    && reason.contains("HALL-1(src/does_not_exist.rs:99)")
+        ),
+        "expected rejected location in citation error, got {out:?}"
     );
 }
 

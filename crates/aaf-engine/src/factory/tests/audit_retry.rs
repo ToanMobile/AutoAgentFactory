@@ -272,3 +272,181 @@ fn scored_audit_sets_json_schema_and_retries_empty_auditor_response() {
         "format-repair audit prompt must forbid Bash/shell commands"
     );
 }
+
+fn dual_partial(
+    id: &str,
+    executor: &str,
+    provider: &str,
+    verdict: &str,
+) -> aaf_fp::PartialAuditRecord {
+    aaf_fp::PartialAuditRecord {
+        repo_root: "/fake/wt/t1".to_string(),
+        tree_fp: "git-tree:t1".to_string(),
+        base_sha: "deadbeef".to_string(),
+        config_hash: "cfg1".to_string(),
+        plan_contract_hash: String::new(),
+        reviewer_id: id.to_string(),
+        executor: executor.to_string(),
+        canonical_provider: provider.to_string(),
+        model: String::new(),
+        effort: String::new(),
+        verdict: verdict.to_string(),
+        p0: 0,
+        p1: 0,
+        p2: 0,
+        mechanical_score: 100,
+        llm_average: verdict.eq_ignore_ascii_case("PASS").then_some(98),
+        effective_score: 98,
+        scores: vec![],
+        issues: vec![],
+        created_at: 100,
+    }
+}
+
+#[test]
+fn inconclusive_dual_review_blocks_infra_without_blind_rework() {
+    let mut world = World::new();
+    world.repo.cross_audit.dual_review = true;
+    world.repo.cross_audit.score_gate = false;
+    world.add("t1");
+    let deps = world.deps();
+    let wt = std::path::PathBuf::from("/fake/wt/t1");
+    let job = crate::factory::worker::GateJob {
+        task_id: "t1".to_string(),
+        worktree: crate::git::TaskWorktree {
+            path: wt.clone(),
+            branch: "aaf/t1".to_string(),
+        },
+        audited: false,
+        cached_receipt: None,
+    };
+    let receipt = super::fakes::receipt(&wt, aaf_domain::gate::GateStatus::Clear, vec![]);
+    let partials = vec![
+        dual_partial("antigravity", "antigravity", "gemini", "PASS"),
+        dual_partial(
+            "claude",
+            "claude",
+            "claude",
+            "INCONCLUSIVE: all reported blocking issues failed citation verification",
+        ),
+    ];
+
+    let out =
+        crate::factory::dual_audit::finalize_dual_review(&deps, &job, &receipt, &partials).unwrap();
+
+    assert!(matches!(
+        out,
+        crate::factory::dual_audit::DualFinalizeResult::Done(crate::factory::worker::Next::Blocked)
+    ));
+    assert_eq!(world.state("t1"), TaskState::Blocked);
+    assert!(matches!(
+        world.task("t1").blocked_reason,
+        Some(aaf_domain::blocked::BlockedReason::Infra { .. })
+    ));
+    assert!(
+        world.task("t1").context_notes.is_empty(),
+        "auditor inconclusive must not inject blind implementer rework notes"
+    );
+}
+
+#[test]
+fn truncated_diff_inconclusive_dual_review_still_routes_to_unblock() {
+    let mut world = World::new();
+    world.repo.cross_audit.dual_review = true;
+    world.repo.cross_audit.score_gate = false;
+    world.add("t1");
+    let deps = world.deps();
+    let wt = std::path::PathBuf::from("/fake/wt/t1");
+    let job = crate::factory::worker::GateJob {
+        task_id: "t1".to_string(),
+        worktree: crate::git::TaskWorktree {
+            path: wt.clone(),
+            branch: "aaf/t1".to_string(),
+        },
+        audited: false,
+        cached_receipt: None,
+    };
+    let receipt = super::fakes::receipt(&wt, aaf_domain::gate::GateStatus::Clear, vec![]);
+    let partials = vec![
+        dual_partial("antigravity", "antigravity", "gemini", "PASS"),
+        dual_partial(
+            "claude",
+            "claude",
+            "claude",
+            "INCONCLUSIVE: diff was truncated: unseen changes cannot be approved",
+        ),
+    ];
+
+    let out =
+        crate::factory::dual_audit::finalize_dual_review(&deps, &job, &receipt, &partials).unwrap();
+
+    assert!(matches!(
+        out,
+        crate::factory::dual_audit::DualFinalizeResult::Done(
+            crate::factory::worker::Next::Unblock { .. }
+        )
+    ));
+}
+
+#[test]
+fn spoofed_truncated_phrase_in_citation_failure_still_blocks_infra_and_quorum_blocks_human() {
+    let mut world = World::new();
+    world.repo.cross_audit.dual_review = true;
+    world.repo.cross_audit.score_gate = false;
+    world.add("t1");
+    world.add("t2");
+    let deps = world.deps();
+    let wt1 = std::path::PathBuf::from("/fake/wt/t1");
+    let job1 = crate::factory::worker::GateJob {
+        task_id: "t1".to_string(),
+        worktree: crate::git::TaskWorktree {
+            path: wt1.clone(),
+            branch: "aaf/t1".to_string(),
+        },
+        audited: false,
+        cached_receipt: None,
+    };
+    let receipt1 = super::fakes::receipt(&wt1, aaf_domain::gate::GateStatus::Clear, vec![]);
+    let spoofed = vec![
+        dual_partial("antigravity", "antigravity", "gemini", "PASS"),
+        dual_partial(
+            "claude",
+            "claude",
+            "claude",
+            "INCONCLUSIVE: all reported blocking issues failed citation verification (rejected: X(diff was truncated))",
+        ),
+    ];
+    let out1 = crate::factory::dual_audit::finalize_dual_review(&deps, &job1, &receipt1, &spoofed)
+        .unwrap();
+    assert!(matches!(
+        out1,
+        crate::factory::dual_audit::DualFinalizeResult::Done(crate::factory::worker::Next::Blocked)
+    ));
+    assert!(matches!(
+        world.task("t1").blocked_reason,
+        Some(aaf_domain::blocked::BlockedReason::Infra { .. })
+    ));
+
+    let wt2 = std::path::PathBuf::from("/fake/wt/t2");
+    let job2 = crate::factory::worker::GateJob {
+        task_id: "t2".to_string(),
+        worktree: crate::git::TaskWorktree {
+            path: wt2.clone(),
+            branch: "aaf/t2".to_string(),
+        },
+        audited: false,
+        cached_receipt: None,
+    };
+    let receipt2 = super::fakes::receipt(&wt2, aaf_domain::gate::GateStatus::Clear, vec![]);
+    let quorum = vec![dual_partial("antigravity", "antigravity", "gemini", "PASS")];
+    let out2 =
+        crate::factory::dual_audit::finalize_dual_review(&deps, &job2, &receipt2, &quorum).unwrap();
+    assert!(matches!(
+        out2,
+        crate::factory::dual_audit::DualFinalizeResult::Done(crate::factory::worker::Next::Blocked)
+    ));
+    assert!(matches!(
+        world.task("t2").blocked_reason,
+        Some(aaf_domain::blocked::BlockedReason::NeedsHuman { .. })
+    ));
+}

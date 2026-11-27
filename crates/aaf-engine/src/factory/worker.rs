@@ -125,8 +125,21 @@ pub(crate) fn block_infra(deps: &Deps, task_id: &str, error: &str) -> Outcome {
 }
 
 pub(crate) fn ensure_budget(deps: &Deps, root_id: &str) -> PortResult<RootBudget> {
-    deps.store
-        .ensure_budget_if_missing(&RootBudget::new(root_id, &deps.settings.repo.unblocker))
+    let mut initial = RootBudget::new(root_id, &deps.settings.repo.unblocker);
+    let active_subtasks = deps
+        .store
+        .children_of(root_id)
+        .map(|kids| {
+            kids.into_iter()
+                .filter(|t| t.state != TaskState::Cancelled)
+                .count()
+        })
+        .unwrap_or(0);
+    initial.token_limit = aaf_domain::budget::scaled_token_limit(
+        deps.settings.repo.unblocker.max_token_budget,
+        active_subtasks,
+    );
+    deps.store.ensure_budget_if_missing(&initial)
 }
 
 pub(super) fn request_with(

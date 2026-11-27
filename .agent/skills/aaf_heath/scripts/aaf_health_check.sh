@@ -539,7 +539,7 @@ if orphan_workers:
 
 if ui_log_path and os.path.isfile(ui_log_path):
     try:
-        if (now - int(os.path.getmtime(ui_log_path))) <= 900:
+        if (now - int(os.path.getmtime(ui_log_path))) <= 1200:
             with open(ui_log_path, "rb") as uf:
                 uf.seek(0, os.SEEK_END)
                 size = uf.tell()
@@ -584,7 +584,7 @@ if len(history) >= 2:
     d_rss = (ui_rss_kb - prev.get("ui_rss_kb", ui_rss_kb)) / 1024.0 if ui_pid == prev.get("ui_pid") else 0.0
     d_fds = (ui_fds - prev.get("ui_fds", ui_fds)) if ui_pid == prev.get("ui_pid") else 0
     print(f"  since_prev ({dt_s}s): delta_tok=+{d_tok:,} ui_rss_delta={d_rss:+.1f}MB ui_fds_delta={d_fds:+d} samples={len(history)}")
-    if dt_s <= 900 and d_tok > 180000:
+    if dt_s <= 1800 and d_tok > 450000:
         anomalies.append(f"token_spike_since_prev_tick: +{d_tok:,} total tokens in {dt_s}s")
 else:
     print("  baseline recorded (sample #1)")

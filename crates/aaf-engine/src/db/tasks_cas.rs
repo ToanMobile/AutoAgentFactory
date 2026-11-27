@@ -260,6 +260,12 @@ impl Db {
                 ])
             })
             .map_err(sql_err)?;
+            tx.prepare_cached(
+                "UPDATE root_budgets SET token_limit = MAX(token_limit, ?1) \
+                 WHERE root_id = ?2 AND frozen = 0 AND token_limit < ?1",
+            )
+            .and_then(|mut stmt| stmt.execute(params![token_limit, budget.root_id]))
+            .map_err(sql_err)?;
 
             for enc in &encoded_children {
                 insert_task_row(tx, enc, parent_state.as_str())?;
@@ -309,8 +315,9 @@ impl Db {
         })
     }
 
-    /// Atomically inserts `budget` only when no row exists for `budget.root_id`,
-    /// then reads and returns the stored row inside the same write transaction.
+    /// Atomically inserts `budget` when no row exists for `budget.root_id`,
+    /// monotonically raises `token_limit` for unfrozen rows when `budget.token_limit`
+    /// is higher (e.g. after spawning subtasks), then reads and returns the stored row.
     pub fn ensure_budget_if_missing_tx(&self, budget: &RootBudget) -> PortResult<RootBudget> {
         let budget = budget.clone();
         let tokens_used = to_i64(budget.tokens_used, "tokens_used")?;
@@ -335,6 +342,12 @@ impl Db {
                     budget.frozen,
                 ])
             })
+            .map_err(sql_err)?;
+            tx.prepare_cached(
+                "UPDATE root_budgets SET token_limit = MAX(token_limit, ?1) \
+                 WHERE root_id = ?2 AND frozen = 0 AND token_limit < ?1",
+            )
+            .and_then(|mut stmt| stmt.execute(params![token_limit, budget.root_id]))
             .map_err(sql_err)?;
             let mut stmt = tx
                 .prepare_cached(
@@ -371,37 +384,68 @@ impl Db {
 
     /// Atomically synchronizes `token_limit`, `wall_secs_limit`, and `cycles_limit`
     /// from `cfg` into all non-frozen active root budgets of `repo_root` without
-    /// touching `*_used` or `frozen`.
+    /// touching `*_used` or `frozen`. Roots with multiple non-cancelled subtasks
+    /// scale `token_limit` via `aaf_domain::budget::scaled_token_limit` (`1.0x..2.5x`).
     pub fn sync_repo_budget_limits(
         &self,
         repo_root: &str,
         cfg: &aaf_domain::config::UnblockerConfig,
     ) -> PortResult<usize> {
-        let token_limit = to_i64(cfg.max_token_budget, "token_limit")?;
+        let base_token_budget = cfg.max_token_budget;
         let wall_secs_limit = to_i64(cfg.max_wall_clock_secs, "wall_secs_limit")?;
         let cycles_limit = cfg.max_unblock_cycles;
         let repo_root = repo_root.to_string();
         self.write(move |tx| {
-            tx.prepare_cached(
-                "UPDATE root_budgets \
-                 SET token_limit = ?1, wall_secs_limit = ?2, cycles_limit = ?3 \
-                 WHERE frozen = 0 \
-                   AND (token_limit != ?1 OR wall_secs_limit != ?2 OR cycles_limit != ?3) \
-                   AND root_id IN ( \
-                       SELECT DISTINCT root_id FROM tasks \
-                       WHERE repo_root = ?4 \
-                         AND state IN ('backlog', 'ready', 'running', 'gating', 'review') \
-                   )",
-            )
-            .and_then(|mut stmt| {
-                stmt.execute(params![
-                    token_limit,
-                    wall_secs_limit,
-                    cycles_limit,
-                    repo_root
-                ])
-            })
-            .map_err(sql_err)
+            let rows: Vec<(String, i64, i64, i64, u32, i64)> = tx
+                .prepare_cached(
+                    "SELECT rb.root_id, rb.tokens_used, rb.token_limit, rb.wall_secs_limit, \
+                            rb.cycles_limit, \
+                            (SELECT COUNT(*) FROM tasks c \
+                             WHERE c.root_id = rb.root_id \
+                               AND c.depth > 0 AND c.state != 'cancelled') \
+                     FROM root_budgets rb \
+                     WHERE rb.frozen = 0 \
+                       AND rb.root_id IN ( \
+                           SELECT DISTINCT root_id FROM tasks \
+                           WHERE repo_root = ?1 \
+                             AND state IN ('backlog', 'ready', 'running', 'gating', 'review') \
+                       )",
+                )
+                .and_then(|mut stmt| {
+                    stmt.query_map(params![repo_root], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })?
+                    .collect()
+                })
+                .map_err(sql_err)?;
+            let mut updated = 0usize;
+            for (root_id, cur_used, cur_tok, cur_wall, cur_cyc, active_subtasks) in rows {
+                let count = usize::try_from(active_subtasks.max(0)).unwrap_or(0);
+                let scaled = aaf_domain::budget::scaled_token_limit(base_token_budget, count)
+                    .min(i64::MAX as u64);
+                let target_tok = to_i64(scaled, "token_limit")?.max(cur_used.max(0));
+                if cur_tok == target_tok && cur_wall == wall_secs_limit && cur_cyc == cycles_limit {
+                    continue;
+                }
+                updated += tx
+                    .prepare_cached(
+                        "UPDATE root_budgets \
+                         SET token_limit = ?1, wall_secs_limit = ?2, cycles_limit = ?3 \
+                         WHERE root_id = ?4 AND frozen = 0",
+                    )
+                    .and_then(|mut stmt| {
+                        stmt.execute(params![target_tok, wall_secs_limit, cycles_limit, root_id])
+                    })
+                    .map_err(sql_err)?;
+            }
+            Ok(updated)
         })
     }
 }
