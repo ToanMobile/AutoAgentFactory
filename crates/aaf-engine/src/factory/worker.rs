@@ -24,7 +24,9 @@ use super::ports::{AccountPool, Grant};
 pub(crate) use super::prompt::PLAN_EXECUTOR;
 use super::prompt::{PromptContext, build_prompt_with_context, sandbox_policy_for};
 use super::scheduler::dual_coord;
-use super::stage_router::{ProviderKey, StageRouter, rework_count};
+use super::stage_router::{
+    ProviderKey, StageRouter, StageTarget, hook_host_executor, rework_count,
+};
 use super::{Deps, plan_job, plan_legacy, post_audit, unblock};
 use crate::cross_audit::AUDIT_EXECUTOR;
 use crate::git::TaskWorktree;
@@ -151,7 +153,13 @@ pub(super) fn request_with(
     // proposal) gets its request here: none starts where the hook is not
     // registered (for executors that require `aaf-hook`).
     let exec = executor_for_provider(provider, &settings.repo.run.executor);
-    if let Some(problem) = hook_problem_if(deps, Path::new(cwd), hook_required, exec) {
+    let cmd = if provider.is_none() || provider == provider_for(&settings.repo.run.executor) {
+        settings.repo.run.executor_cmd.join(" ")
+    } else {
+        String::new()
+    };
+    let hook = hook_host_executor(exec, &cmd);
+    if let Some(problem) = hook_problem_if(deps, Path::new(cwd), hook_required, &hook) {
         return Err(PortError::Invalid(problem));
     }
     Ok(AgentRequest {
@@ -181,6 +189,14 @@ fn executor_for_provider(provider: Option<ProviderKind>, fallback: &str) -> &str
         Some(ProviderKind::OpenCode) => "opencode",
         Some(ProviderKind::Grok) => "grok",
         None => fallback,
+    }
+}
+
+pub(super) fn stage_hook_executor(deps: &Deps, stage: Option<&StageTarget>) -> String {
+    let run = &deps.settings.repo.run;
+    match stage {
+        Some(t) => hook_host_executor(&t.executor, &t.executor_cmd),
+        None => hook_host_executor(&run.executor, &run.executor_cmd.join(" ")),
     }
 }
 
@@ -344,6 +360,7 @@ fn agent(
     let exec = routed.map_or(deps.settings.repo.run.executor.as_str(), |t| {
         t.executor.as_str()
     });
+    let hook = stage_hook_executor(deps, routed);
     let worktree = deps.git.task_worktree(task_id)?;
     let has_impl_runs = deps.store.runs_for_task(task_id)?.iter().any(|r| {
         !matches!(
@@ -358,7 +375,7 @@ fn agent(
             super::audit_turn::EarlierAttempt::SkipRebase => skip_rebase = true,
             super::audit_turn::EarlierAttempt::Stop(next) => return Ok(next),
         }
-    } else if hook_problem_if(deps, &worktree.path, hook_req, exec).is_some() {
+    } else if hook_problem_if(deps, &worktree.path, hook_req, &hook).is_some() {
         deps.git.rebase(&worktree)?;
     }
     if !skip_rebase
@@ -368,7 +385,7 @@ fn agent(
     {
         return Ok(next);
     }
-    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
+    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
         unblock::block_untried(deps, task_id, &problem)?;
         return Ok(Next::Blocked);
     }
@@ -415,7 +432,7 @@ fn agent(
     }
     // Before any early return: a run that tampered with its guard is blocked
     // whether it succeeded, failed, or ran into a limit or an infra error.
-    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
+    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
         unblock::block_untried(deps, task_id, &problem)?;
         return Ok(Next::Blocked);
     }
@@ -441,7 +458,7 @@ fn agent(
         {
             return after_commit_failure(deps, task_id, &worktree, outcome, error, grant, routed);
         }
-        if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
+        if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
             unblock::block_untried(deps, task_id, &problem)?;
             return Ok(Next::Blocked);
         }
@@ -451,7 +468,7 @@ fn agent(
         if deps.git.has_changes(&worktree)? {
             match deps.gate.run_autofix(&worktree.path) {
                 Ok(crate::gate::autofix::AutofixOutcome::Formatted { .. }) => {
-                    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, exec) {
+                    if let Some(problem) = hook_problem_if(deps, &worktree.path, hook_req, &hook) {
                         unblock::block_untried(deps, task_id, &problem)?;
                         return Ok(Next::Blocked);
                     }

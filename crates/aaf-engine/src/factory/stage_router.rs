@@ -409,6 +409,15 @@ pub fn writer_requires_hook(executor: &str, executor_cmd: &str) -> bool {
         || (executor_cmd.trim().is_empty() && is_hooked_non_claude_executor(executor))
 }
 
+/// Host executor for `aaf-hook` checks (SEC-137): `"claude"` when Claude runs, else normalized.
+pub fn hook_host_executor(executor: &str, executor_cmd: &str) -> String {
+    if stage_uses_claude(executor, executor_cmd) {
+        "claude".to_string()
+    } else {
+        aaf_domain::pipeline::normalize_executor_id(executor)
+    }
+}
+
 /// Returns the set of lowercased non-Claude hooked executors required by any
 /// configured code-writing stage (`run`, `pipeline.implementer`,
 /// `pipeline.implementer_escalated`).
