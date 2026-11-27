@@ -42,6 +42,7 @@ struct VerifiedMerge {
 }
 
 fn fetch_remote_base(repo: &Path, remote: &str, branch: &str) -> Result<(), crate::git::GitError> {
+    worktree::ensure_plain_reflogs(repo)?;
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     git(repo, &["fetch", "--quiet", "--", remote, &refspec]).map(|_| ())
 }

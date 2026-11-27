@@ -53,6 +53,7 @@ impl ScratchWorktree {
         pr_number: u64,
         base_sha: &str,
     ) -> Result<ScratchWorktree, GitError> {
+        worktree::ensure_plain_reflogs(repo_root)?;
         let slot = WarmSlot::acquire(
             repo_root,
             data_dir,
@@ -369,6 +370,9 @@ pub(super) fn sync_checked_out_local_base(
 /// - when `HEAD != base_branch` and `worktree::list` confirms no worktree has
 ///   `base_branch` checked out, fast-forwards via `--is-ancestor` + CAS `update-ref`.
 pub(super) fn sync_local_base(repo_root: &Path, remote: &str, base_branch: &str) -> String {
+    if let Err(err) = worktree::ensure_plain_reflogs(repo_root) {
+        return format!("warning: skipped local base sync: {err}");
+    }
     let current = git(repo_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
     if current == base_branch {
         return sync_checked_out_local_base(repo_root, remote, base_branch);
@@ -490,6 +494,7 @@ pub(super) fn fetch_base(
     base_ref_name: &str,
 ) -> Result<String, GitError> {
     check_branch_name(repo_root, base_ref_name)?;
+    worktree::ensure_plain_reflogs(repo_root)?;
     let base_refspec = format!("+refs/heads/{base_ref_name}:refs/remotes/{remote}/{base_ref_name}");
     git(
         repo_root,
@@ -526,6 +531,7 @@ pub(super) fn fetch_base_and_pr(
     }
 
     check_branch_name(repo_root, &pr.base_ref_name)?;
+    worktree::ensure_plain_reflogs(repo_root)?;
     let base_refspec = format!(
         "+refs/heads/{}:refs/remotes/{remote}/{}",
         pr.base_ref_name, pr.base_ref_name

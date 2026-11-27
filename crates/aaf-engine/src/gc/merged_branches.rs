@@ -430,6 +430,7 @@ fn verify_squash_candidates(
         if remote.is_empty() || remote.starts_with('-') {
             return Err(GitError::Invalid(format!("remote {remote:?}")));
         }
+        worktree::ensure_plain_reflogs(main_repo)?;
         let refspec = format!(
             "+refs/heads/{}:refs/remotes/{remote}/{}",
             base.branch, base.branch
