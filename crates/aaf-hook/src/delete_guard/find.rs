@@ -32,6 +32,10 @@ pub(super) const DELETERS: &[&str] = &[
 
 const EXEC_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
+pub(super) fn is_deleter(name: &str) -> bool {
+    DELETERS.contains(&name) || name == "ln" || super::rewriters::is_compressor(name)
+}
+
 /// The argv after `find -exec` runs a deleting tool, seen through the same
 /// wrapper stripping as a typed command (`env rm`, `nice /bin/rm`,
 /// `sh -c …`). A tool chosen at run time, or an argv that cannot be
@@ -42,7 +46,7 @@ fn runs_deleter(argv: &[String]) -> bool {
         || script
             .cmds
             .iter()
-            .any(|cmd| cmd.dynamic_name || DELETERS.contains(&cmd.name()))
+            .any(|cmd| cmd.dynamic_name || is_deleter(cmd.name()))
 }
 
 /// A global option `find` reads before its search roots: `-H`, `-L`, `-P`
