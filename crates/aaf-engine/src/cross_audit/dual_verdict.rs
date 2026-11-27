@@ -369,6 +369,7 @@ pub fn parse_and_validate_dual_review_with_limit(
         let reported = blocking.len();
         let mut valid = Vec::new();
         let mut rejected_locations: Vec<String> = Vec::new();
+        let mut path_hints: BTreeSet<String> = BTreeSet::new();
         for mut iss in blocking {
             let linked = yes_ev
                 .get(&iss.id.to_ascii_uppercase())
@@ -394,6 +395,14 @@ pub fn parse_and_validate_dual_review_with_limit(
                     rejected_locations.push(format_rejected(&iss.id, &iss.location));
                 }
             } else {
+                for c in extract_citations(&iss.location) {
+                    let suffix = format!("/{}", c.path.trim_start_matches("./"));
+                    for full in &dp {
+                        if full.ends_with(&suffix) {
+                            path_hints.insert(full.clone());
+                        }
+                    }
+                }
                 rejected_locations.push(format_rejected(&iss.id, &iss.location));
             }
         }
@@ -406,10 +415,19 @@ pub fn parse_and_validate_dual_review_with_limit(
                 .take(4)
                 .map(|s| s.chars().take(100).collect())
                 .collect();
+            let hint_clause = if path_hints.is_empty() {
+                String::new()
+            } else {
+                let sample: Vec<&str> = path_hints.iter().take(3).map(String::as_str).collect();
+                format!(
+                    "; use full repo-relative path from diff header (e.g. {}), not bare filename",
+                    sample.join(", ")
+                )
+            };
             return Err(format!(
                 "all reported blocking issues failed citation verification \
                  (rejected: {}; cite an exact `file:line` inside a changed diff hunk, \
-                 not untouched code outside the diff)",
+                 not untouched code outside the diff{hint_clause})",
                 preview.join(", ")
             ));
         }

@@ -240,6 +240,10 @@ impl<'a> Scheduler<'a> {
             let halted = self.summary.halted.is_some();
             let stopping = self.is_stopping();
             if !frozen && !halted && !paused && !stopping {
+                let _woken = self
+                    .deps
+                    .store
+                    .wake_due_blocked_tasks(&self.deps.settings.repo_root, self.deps.now())?;
                 if matches!(self.mode, Mode::Auto | Mode::Drain) {
                     self.poll_gating()?;
                 }
