@@ -3,7 +3,8 @@
 
 use std::path::Path;
 
-use crate::{Ctx, Denial};
+use crate::shell::Cmd;
+use crate::{Ctx, Denial, paths};
 
 use super::{deny, is_guarded_dir, target};
 
@@ -21,46 +22,9 @@ fn has_word(list: &str, word: &str) -> bool {
     list.split_ascii_whitespace().any(|w| w == word)
 }
 
-/// Long-option match from `known` (`=` takes arg, `!` output-dir, `?` file-list).
-struct LongHit<'a>(&'a str, bool, bool, bool, bool); // (name, exact, takes_val, unp_out, unp_in)
-
-enum Opt<'a> {
-    Long(LongHit<'a>),
-    Short(char),
-}
-
-/// Resolves `--opt` by exact match or unique prefix (`getopt_long`). Ambiguous
-/// prefixes where every candidate is unparseable still fail closed.
-fn match_long<'a>(opt: &'a str, known: &'static str) -> Option<LongHit<'a>> {
-    if opt.len() <= 2 {
-        return None;
-    }
-    let (mut hit, mut n, mut all_out, mut all_in, mut any_val) = (None, 0usize, true, true, false);
-    for tok in known.split_ascii_whitespace() {
-        let name = tok.trim_end_matches(['=', '!', '?']);
-        let (tv, uo, ui) = (tok.contains('='), tok.ends_with('!'), tok.ends_with('?'));
-        if name == opt {
-            return Some(LongHit(name, true, tv, uo, ui));
-        }
-        if name.starts_with(opt) {
-            hit = Some(LongHit(name, false, tv, uo, ui));
-            (n, all_out, all_in, any_val) = (n + 1, all_out && uo, all_in && ui, any_val || tv);
-        }
-    }
-    match n {
-        1 => hit,
-        2.. if all_out || all_in => Some(LongHit(opt, false, any_val, all_out, all_in)),
-        _ => None,
-    }
-}
-
-fn walk_args<'a>(
-    args: &'a [String],
-    known_long: &'static str,
-    valued_short: &str,
-    mut on_opt: impl FnMut(Opt<'a>, Option<&'a str>),
-) -> Vec<&'a str> {
-    let (mut pos, mut only_pos, mut i) = (Vec::new(), false, 0);
+fn parse_ln_args(args: &[String]) -> (Vec<&str>, Vec<&str>, Option<&str>) {
+    let (mut pos, mut dirs, mut suffix, mut only_pos, mut i) =
+        (Vec::new(), Vec::new(), None, false, 0);
     while i < args.len() {
         let arg = args[i].as_str();
         let mut step = 1;
@@ -74,49 +38,46 @@ fn walk_args<'a>(
             let (opt, eq) = arg
                 .split_once('=')
                 .map_or((arg, None), |(o, v)| (o, Some(v)));
-            if let Some(mut hit) = match_long(opt, known_long) {
-                hit.1 &= eq.is_none();
-                let val = if hit.2 && eq.is_none() {
+            let is_td = opt.len() >= 3 && "--target-directory".starts_with(opt);
+            let is_sfx = opt.len() >= 4 && "--suffix".starts_with(opt);
+            if is_td || is_sfx {
+                let val = eq.or_else(|| {
                     step = 2;
                     args.get(i + 1).map(String::as_str)
+                });
+                if is_td {
+                    dirs.extend(val);
                 } else {
-                    eq
-                };
-                on_opt(Opt::Long(hit), val);
+                    suffix = val;
+                }
             }
         } else {
             let mut chars = arg[1..].chars();
             while let Some(c) = chars.next() {
-                if valued_short.contains(c) {
+                if matches!(c, 't' | 'S') {
                     let rest = chars.as_str();
-                    let val = if rest.is_empty() {
+                    let val = (!rest.is_empty()).then_some(rest).or_else(|| {
                         step = 2;
                         args.get(i + 1).map(String::as_str)
+                    });
+                    if c == 't' {
+                        dirs.extend(val);
                     } else {
-                        Some(rest)
-                    };
-                    on_opt(Opt::Short(c), val);
+                        suffix = val;
+                    }
                     break;
                 }
-                on_opt(Opt::Short(c), None);
             }
         }
         i += step;
     }
-    pos
+    (pos, dirs, suffix)
 }
-
-const LN_LONG: &str = "--suffix= --symbolic --target-directory=";
 
 /// Checks `ln` operands (and `-t`/`--target-directory`, `-S`/`--suffix`, or
 /// directory destinations) so links cannot overwrite protected files.
 pub(super) fn check_ln(args: &[String], ctx: &Ctx) -> Option<Denial> {
-    let (mut target_dirs, mut suffix) = (Vec::new(), None);
-    let pos = walk_args(args, LN_LONG, "tS", |opt, v| match opt {
-        Opt::Long(LongHit("--target-directory", ..)) | Opt::Short('t') => target_dirs.extend(v),
-        Opt::Long(LongHit("--suffix", ..)) | Opt::Short('S') => suffix = v,
-        _ => {}
-    });
+    let (pos, target_dirs, suffix) = parse_ln_args(args);
     let check = |p: &str| {
         target(p, false, "ln", ctx).or_else(|| {
             suffix
@@ -152,42 +113,27 @@ pub(super) fn check_ln(args: &[String], ctx: &Ctx) -> Option<Denial> {
     is_dir.then(|| in_dir(dst, srcs)).flatten()
 }
 
-// Rows: "names|decomp|flags|rm|suffixes[first=default]|valued_short|known_long"
-// flags: D=deletes_default k=keep r=recursive N=name S=suffix o=output 2=pos2_out p=path_p
-const SPECS: &[&str] = &[
-    "gzip gunzip pigz unpigz|gunzip unpigz|DkrNS||.gz -gz .z -z _z .Z .zz|S|\
-     --decompress --keep --name --no-name --recursive --rsyncable --stdout --suffix= \
-     --synchronous --test --to-stdout --uncompress",
-    "bzip2 bunzip2 pbzip2 pbunzip2 lbzip2 lbunzip2|bunzip2 pbunzip2 lbunzip2|Dk||.bz2 .bz||\
-     --compress --decompress --keep --small --stdout --test --to-stdout --uncompress",
-    "xz unxz lzma unlzma|unxz unlzma|DkS||.xz .lzma|SFCMT|\
-     --check= --compress --decompress --files? --files0? --force --format= --keep --memlimit= \
-     --memlimit-compress= --memlimit-decompress= --stdout --suffix= --test --threads= \
-     --to-stdout --uncompress",
-    "lzip||Dko||.lz|bmosS|\
-     --decompress --dictionary-size= --keep --match-length= --member-size= --output= --stdout \
-     --volume-size=",
-    "compress uncompress|uncompress|Dr||.Z|b|",
-    "zstd unzstd zstdmt|unzstd|kro|--rm|.zst .zstd .gz .xz .lzma .lz4|oD|\
-     --check --compress --decompress --fast --filelist=? --force --format= --keep --memory= \
-     --output-dir-flat=! --output-dir-mirror=! --rm --rsyncable --single-thread --stdout \
-     --threads= --uncompress",
-    "lz4 unlz4|unlz4|kr2|--rm|.lz4|D|\
-     --compress --decompress --keep --multiple --recursive --rm --stdout --test --to-stdout \
-     --uncompress",
-    "brotli||kSo|j --rm|.br|oSqwD|\
-     --decompress --dictionary= --keep --lgwin= --output= --quality= --repeat --rm --stdout \
-     --suffix=",
-    "lzop||kNSop|U --unlink --delete|.lzo|oS|\
-     --archive-name= --decompress --delete --filter= --keep --name --no-name --output= --path=! \
-     --stdout --suffix= --test --to-stdout --uncompress --unlink",
+// Rows: "names|default-decompress names|default suffixes"
+const COMPRESSORS: &[&str] = &[
+    "gzip gunzip pigz unpigz|gunzip unpigz|.gz -gz .z -z _z .Z .zz",
+    "bzip2 bunzip2 pbzip2 pbunzip2 lbzip2 lbunzip2|bunzip2 pbunzip2 lbunzip2|.bz2 .bz",
+    "xz unxz lzma unlzma|unxz unlzma|.xz .lzma",
+    "lzip||.lz",
+    "compress uncompress|uncompress|.Z",
+    "zstd unzstd zstdmt|unzstd|.zst .zstd .gz .xz .lzma .lz4",
+    "lz4 unlz4|unlz4|.lz4",
+    "brotli||.br",
+    "lzop||.lzo",
 ];
 
-fn find_spec(name: &str) -> Option<&'static str> {
-    SPECS
-        .iter()
-        .copied()
-        .find(|r| has_word(r.split('|').next().unwrap_or(""), name))
+const ENV_OPTS: &str = "GZIP XZ_OPT XZ_DEFAULTS BZIP BZIP2 ZSTD_CLEVEL ZSTD_NBTHREADS LZ4 BROTLI";
+
+fn find_spec(name: &str) -> Option<(&'static str, &'static str)> {
+    COMPRESSORS.iter().find_map(|row| {
+        let mut parts = row.splitn(3, '|');
+        let names = parts.next()?;
+        has_word(names, name).then(|| (parts.next().unwrap_or(""), parts.next().unwrap_or("")))
+    })
 }
 
 pub(super) fn is_compressor(name: &str) -> bool {
@@ -203,107 +149,136 @@ fn strip_suffix_ci<'a>(arg: &'a str, sfx: &str) -> Option<&'a str> {
     .then(|| &arg[..arg.len() - len])
 }
 
-/// Checks compressors/decompressors against protected files and guarded dirs.
-pub(super) fn check_compressor(name: &str, args: &[String], ctx: &Ctx) -> Option<Denial> {
-    let mut c = find_spec(name)?.splitn(7, '|');
-    let [
-        _,
-        decomp,
-        flags,
-        rm_flags,
-        suffixes,
-        valued_short,
-        known_long,
-    ] = std::array::from_fn(|_| c.next().unwrap_or(""));
-    let has = |ch: char| flags.contains(ch);
-    let has_compress = has_word(known_long, "--compress");
-    let (mut to_stdout, mut keeps, mut has_rm) = (false, false, false);
-    let (mut recursive, mut restore_name, mut multiple) = (false, false, false);
-    let (mut unp_out, mut unp_in) = (false, false);
-    let mut decompressing = has_word(decomp, name);
-    let (mut custom_suffix, mut output_files) = (None, Vec::new());
-
-    let positionals = walk_args(args, known_long, valued_short, |opt, val| {
-        if let Opt::Long(h) = &opt {
-            (unp_out, unp_in) = (unp_out || h.3, unp_in || h.4);
-        }
-        match opt {
-            Opt::Long(LongHit("--stdout" | "--to-stdout", true, ..)) | Opt::Short('c') => {
-                to_stdout = true;
-            }
-            Opt::Long(LongHit("--keep", true, ..)) | Opt::Short('k') if has('k') => keeps = true,
-            Opt::Long(LongHit("--decompress" | "--uncompress", ..)) | Opt::Short('d') => {
-                decompressing = true;
-            }
-            Opt::Long(LongHit("--compress", ..)) => decompressing = false,
-            Opt::Short('z') if has_compress => decompressing = false,
-            Opt::Long(LongHit("--recursive", ..)) | Opt::Short('r') if has('r') => recursive = true,
-            Opt::Long(LongHit("--name", ..)) | Opt::Short('N') if has('N') => restore_name = true,
-            Opt::Long(LongHit("--multiple", ..)) | Opt::Short('m') if has('2') => multiple = true,
-            Opt::Long(LongHit("--suffix", ..)) | Opt::Short('S') if has('S') => custom_suffix = val,
-            Opt::Long(LongHit("--output", ..)) | Opt::Short('o') if has('o') => {
-                output_files.extend(val);
-            }
-            Opt::Short('p') if has('p') => unp_out = true,
-            Opt::Long(h) if has_word(rm_flags, h.0) => has_rm = true,
-            Opt::Short(ch) if has_word(rm_flags, ch.encode_utf8(&mut [0; 4])) => has_rm = true,
-            _ => {}
-        }
-    });
-
-    let default_sfx = match name {
-        "lzma" | "unlzma" => ".lzma",
-        _ => suffixes.split(' ').next().unwrap_or(""),
-    };
-    let suffix = custom_suffix.unwrap_or(default_sfx);
-    if let Some(d) = output_files.iter().find_map(|out| {
-        target(out, false, name, ctx).or_else(|| {
-            (!decompressing)
-                .then(|| target(&format!("{out}{suffix}"), false, name, ctx))
-                .flatten()
+fn is_env_template(raw: &str) -> bool {
+    Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| {
+            matches!(
+                paths::fold(n).as_str(),
+                ".env.example" | ".env.sample" | ".env.template"
+            )
         })
-    }) {
-        return Some(d);
+}
+
+fn unparseable_long(opt: &str, is_zstd: bool, is_lzop: bool) -> bool {
+    (opt.len() >= 4 && ("--filelist".starts_with(opt) || "--files0".starts_with(opt)))
+        || ((is_zstd && opt.len() >= 3 || opt.starts_with("--output-dir"))
+            && ("--output-dir-flat".starts_with(opt) || "--output-dir-mirror".starts_with(opt)))
+        || (is_lzop
+            && opt.len() >= 4
+            && ("--path".starts_with(opt) || "--extract".starts_with(opt)))
+}
+
+/// Fail-closed check for compressors/decompressors: treats every non-flag
+/// token (and `--opt=VALUE` / attached `-oVALUE`) as a potential path, checks
+/// raw and suffix-added/stripped variants, and denies unparseable options or
+/// option-bearing env assignments when operands are present.
+pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
+    let (name, args) = (cmd.name(), cmd.args());
+    let (decomp, suffixes) = find_spec(name)?;
+    let (is_lzop, is_zstd) = (name == "lzop", matches!(name, "zstd" | "unzstd" | "zstdmt"));
+    let has_name = matches!(name, "gzip" | "gunzip" | "pigz" | "unpigz" | "lzop");
+    let mut decompressing = has_word(decomp, name);
+    let (mut recursive, mut restore_name, mut has_operand, mut only_pos) =
+        (false, false, false, false);
+    let (mut candidates, mut custom_suffixes) = (Vec::new(), Vec::new());
+
+    for (i, arg) in args.iter().map(String::as_str).enumerate() {
+        if only_pos || !arg.starts_with('-') {
+            has_operand = true;
+            candidates.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            only_pos = true;
+            continue;
+        }
+        if arg == "-" {
+            continue;
+        }
+        if arg.starts_with("--") {
+            let (opt, eq) = arg
+                .split_once('=')
+                .map_or((arg, None), |(o, v)| (o, Some(v)));
+            candidates.extend(eq);
+            if unparseable_long(opt, is_zstd, is_lzop) {
+                return Some(deny(format!("{name}: {opt} cannot be verified")));
+            }
+            decompressing |= opt.len() >= 3
+                && ("--decompress".starts_with(opt) || "--uncompress".starts_with(opt));
+            recursive |= opt.len() >= 5 && "--recursive".starts_with(opt);
+            restore_name |= has_name && opt.len() >= 4 && "--name".starts_with(opt);
+            if opt.len() >= 4 && "--suffix".starts_with(opt) {
+                let val = eq.or_else(|| args.get(i + 1).map(String::as_str));
+                custom_suffixes.extend(val.filter(|s| !s.is_empty()));
+            }
+            continue;
+        }
+        let mut chars = arg[1..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                'd' => decompressing = true,
+                'r' => recursive = true,
+                'N' if has_name => restore_name = true,
+                'x' | 'P' | 'p' if is_lzop => {
+                    return Some(deny(format!("{name}: -{c} output path cannot be verified")));
+                }
+                'S' => {
+                    let rest = chars.as_str();
+                    let val = (!rest.is_empty())
+                        .then_some(rest)
+                        .or_else(|| args.get(i + 1).map(String::as_str));
+                    custom_suffixes.extend(val.filter(|s| !s.is_empty()));
+                    break;
+                }
+                'o' => {
+                    let rest = chars.as_str();
+                    if !rest.is_empty() {
+                        candidates.push(rest);
+                        candidates.extend(rest.strip_prefix('='));
+                    }
+                    if is_lzop || rest.contains(['/', '.']) {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
-    if unp_out {
-        return Some(deny(format!(
-            "{name}: output-directory option cannot be verified"
-        )));
-    }
-    if has('2')
-        && !multiple
-        && !recursive
-        && let Some(&out) = positionals.get(1)
-        && let Some(d) = target(out, false, name, ctx)
-    {
-        return Some(d);
-    }
-    if to_stdout {
-        return None;
-    }
-    if unp_in {
-        return Some(deny(format!("{name}: file-list option cannot be verified")));
-    }
+
     if decompressing && restore_name {
         return Some(deny(format!(
             "{name}: -N/--name filename cannot be verified"
         )));
     }
+    if has_operand && let Some((var, _)) = cmd.assigns.iter().find(|(k, _)| has_word(ENV_OPTS, k)) {
+        return Some(deny(format!(
+            "{name}: option env var {var} cannot be verified"
+        )));
+    }
 
-    let removes_input = if has('D') { !keeps } else { has_rm };
-    positionals.iter().find_map(|pos| {
-        if (removes_input || recursive)
-            && let Some(d) = target(pos, recursive, name, ctx)
-        {
-            return Some(d);
-        }
-        if decompressing {
-            custom_suffix
-                .and_then(|s| strip_suffix_ci(pos, s))
-                .or_else(|| suffixes.split(' ').find_map(|s| strip_suffix_ci(pos, s)))
-                .and_then(|o| target(o, false, name, ctx))
-        } else {
-            target(&format!("{pos}{suffix}"), false, name, ctx)
-        }
+    let check_sfx = |tok: &str, sfx: &str, is_default: bool| {
+        let cand = format!("{tok}{sfx}");
+        let skip_tpl = is_default && is_env_template(tok) && {
+            let p = ctx.expand_real_dotdot(&cand);
+            p.parent()
+                .zip(p.file_name())
+                .is_some_and(|(d, f)| paths::real(d).join(f) == paths::real(&p))
+        };
+        (!skip_tpl)
+            .then(|| target(&cand, false, name, ctx))
+            .flatten()
+            .or_else(|| strip_suffix_ci(tok, sfx).and_then(|o| target(o, false, name, ctx)))
+    };
+
+    candidates.into_iter().find_map(|tok| {
+        target(tok, recursive, name, ctx).or_else(|| {
+            suffixes
+                .split(' ')
+                .map(|s| (s, true))
+                .chain(custom_suffixes.iter().map(|&s| (s, false)))
+                .find_map(|(s, is_default)| check_sfx(tok, s, is_default))
+        })
     })
 }
