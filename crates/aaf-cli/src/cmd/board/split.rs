@@ -272,6 +272,7 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         timeout_secs: SPLIT_TIMEOUT_SECS,
         sandbox,
         json_schema: None,
+        max_turns: None,
     };
     let max_subtasks = usize::try_from(args.max)
         .unwrap_or(MAX_SPLIT_SUBTASKS)
@@ -389,6 +390,7 @@ pub(crate) fn run_auto_split_with_stop(
             timeout_secs: SPLIT_TIMEOUT_SECS,
             sandbox,
             json_schema: None,
+            max_turns: None,
         };
         let watch = SplitInfraWatch::new(&*deps.runner);
         let result = propose_and_apply_split(

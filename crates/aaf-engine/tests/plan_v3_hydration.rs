@@ -436,6 +436,7 @@ fn real_git_task_worktree_hydrates_and_wires_sandbox_write_denied() {
                 read_denied_paths: Vec::new(),
             },
             json_schema: None,
+            max_turns: None,
         };
 
         // Writing inside hydrated clone_dirs must be blocked by Seatbelt.

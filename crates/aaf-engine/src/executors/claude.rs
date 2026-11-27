@@ -214,12 +214,30 @@ impl AgentRunner for ClaudeCodeRunner {
         if exit_code != Some(0)
             && !output.timed_out
             && !summary.saw_result
-            && summary.final_text.is_empty()
             && limit_hit.is_none()
             && infra.is_none()
         {
-            (limit_hit, infra) =
-                super::generic::classify_generic_failure(exit_code, false, &output.tail);
+            // Scan only non-JSON stderr/crash lines so structured stream-json
+            // telemetry (e.g. benign `rate_limit_event` `"status":"allowed"`)
+            // or assistant prose cannot trigger false cooldowns, while real
+            // mid-run HTTP 429/401/503/network crashes are still classified.
+            let non_json: String = output
+                .tail
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.is_empty()
+                        && !matches!(
+                            serde_json::from_str::<serde_json::Value>(trimmed),
+                            Ok(serde_json::Value::Object(_))
+                        )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !non_json.is_empty() {
+                (limit_hit, infra) =
+                    super::generic::classify_generic_failure(exit_code, false, &non_json);
+            }
         }
         Ok(AgentOutcome {
             exit_code,

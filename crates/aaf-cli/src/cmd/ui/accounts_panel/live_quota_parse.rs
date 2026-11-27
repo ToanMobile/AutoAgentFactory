@@ -149,7 +149,9 @@ pub(crate) fn parse_agy_usage_output(raw: &str, fetched_ms: i64) -> Option<Value
                             if is_gemini {
                                 merge_min_window(&mut rem5, &mut reset5_ms, pct_val, ts);
                             }
-                        } else if win == "weekly" || bname.contains("weekly") || bname.contains("7d")
+                        } else if win == "weekly"
+                            || bname.contains("weekly")
+                            || bname.contains("7d")
                         {
                             g7 = Some(pct_val);
                             if is_gemini {

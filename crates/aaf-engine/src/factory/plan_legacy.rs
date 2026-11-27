@@ -118,6 +118,7 @@ fn run_plan_in_tree(
     let profiles = accounts.profiles()?;
     run.request.sandbox =
         plan_sandbox_policy_for(&deps.settings, provider, grant.account.as_ref(), &profiles);
+    run.request.max_turns = Some(16);
     let profile = crate::config::effective_profile(&deps.settings.repo, &tree.path);
     let env_ctx = PromptContext {
         repo_root: &tree.path,

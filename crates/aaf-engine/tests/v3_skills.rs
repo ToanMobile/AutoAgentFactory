@@ -361,6 +361,7 @@ fn inspect_skills_flags_symlinks_and_phase0_security_invariants_hold() {
                 ..Default::default()
             },
             json_schema: None,
+            max_turns: None,
         })
         .unwrap();
     let mode_idx = spec

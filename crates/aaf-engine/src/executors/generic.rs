@@ -410,7 +410,10 @@ pub fn classify_generic_failure(
     let cleaned = strip_aaf_notices(&strip_ansi_basic(tail));
     let raw: String = cleaned.chars().take(RAW_ERROR_CHARS).collect();
     let json_status = extract_json_error_status(&cleaned);
-    let lower = cleaned.to_ascii_lowercase();
+    let lower = cleaned
+        .to_ascii_lowercase()
+        .replace("rate_limit_event", " ")
+        .replace("rate_limit_info", " ");
     if json_status == Some(429) || LIMIT_NEEDLES.iter().any(|n| lower.contains(n)) {
         return (
             Some(LimitHit {

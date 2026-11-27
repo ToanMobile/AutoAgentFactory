@@ -264,28 +264,29 @@ fn build_aaf_account_rows(
             max_concurrent
         }
     };
-    let row_for = |p: &AccountProfile, cooldown_until: Option<i64>, leased: Option<bool>| -> Value {
-        let in_cd = cooldown_until.is_some_and(|u| u > now);
-        let (st, until) = if in_cd {
-            ("cooldown", cooldown_until)
-        } else if leased.unwrap_or_else(|| {
-            Lease::all_slots_leased_ro(&leases_dir, &p.id, eff_conc_for(p.provider))
-        }) {
-            ("leased", None)
-        } else {
-            ("available", None)
+    let row_for =
+        |p: &AccountProfile, cooldown_until: Option<i64>, leased: Option<bool>| -> Value {
+            let in_cd = cooldown_until.is_some_and(|u| u > now);
+            let (st, until) = if in_cd {
+                ("cooldown", cooldown_until)
+            } else if leased.unwrap_or_else(|| {
+                Lease::all_slots_leased_ro(&leases_dir, &p.id, eff_conc_for(p.provider))
+            }) {
+                ("leased", None)
+            } else {
+                ("available", None)
+            };
+            json!({
+                "id": p.id,
+                "name": p.name,
+                "provider": p.provider,
+                "config_dir": p.config_dir,
+                "state": st,
+                "cooldown_until": until,
+                "tokens_5h": tok_5h.get(&p.id).copied().unwrap_or(0),
+                "tokens_7d": tok_7d.get(&p.id).copied().unwrap_or(0),
+            })
         };
-        json!({
-            "id": p.id,
-            "name": p.name,
-            "provider": p.provider,
-            "config_dir": p.config_dir,
-            "state": st,
-            "cooldown_until": until,
-            "tokens_5h": tok_5h.get(&p.id).copied().unwrap_or(0),
-            "tokens_7d": tok_7d.get(&p.id).copied().unwrap_or(0),
-        })
-    };
     let mut rows = Vec::with_capacity(discovered.len());
     for p in discovered {
         seen_ids.insert(p.id.clone());
@@ -388,7 +389,8 @@ pub(super) fn read_accounts_panel(
         let router = Router::new(rw, rw, &clock, ctx.data_dir.join("leases"), max_conc);
         router.sync(&discovered).map_err(|e| e.to_string())?;
         if sw_err.is_empty() {
-            synced_cooldowns += sync_live_exhausted_cooldowns(rw, &discovered, sw_val.as_ref(), now);
+            synced_cooldowns +=
+                sync_live_exhausted_cooldowns(rw, &discovered, sw_val.as_ref(), now);
         }
         synced_cooldowns += live_quota::sync_live_provider_cooldown(
             rw,

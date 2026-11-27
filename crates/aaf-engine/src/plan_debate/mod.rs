@@ -18,7 +18,7 @@ pub const MAX_CONSECUTIVE_TURN_FAILS: u32 = 2;
 
 pub use prompt::{
     build_author_prompt, build_challenger_prompt, build_plan_format_repair_prompt,
-    format_plan_for_implementer,
+    build_plan_format_repair_prompt_with_prior, format_plan_for_implementer,
 };
 pub use schema::{
     canonical_plan_hash, extract_plan_contract_hash, format_plan_approved_note,

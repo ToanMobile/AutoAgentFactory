@@ -377,9 +377,8 @@ pub(super) fn dispatch_repo_action(
                     })
                     .unwrap_or_default();
                 let matched = aaf_engine::accounts::selection::match_account(account, &discovered);
-                let is_non_claude = matched.is_some_and(|a| {
-                    a.provider != aaf_domain::account::ProviderKind::ClaudeCode
-                });
+                let is_non_claude = matched
+                    .is_some_and(|a| a.provider != aaf_domain::account::ProviderKind::ClaudeCode);
                 let native_assign = || -> Result<Value, String> {
                     if !discovered.is_empty() && matched.is_none() {
                         return Err(format!("invalid account: unknown account '{account}'"));

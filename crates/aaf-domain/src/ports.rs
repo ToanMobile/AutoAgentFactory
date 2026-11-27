@@ -225,6 +225,10 @@ pub struct AgentRequest {
     /// Optional inline JSON schema string for structured output enforcement.
     #[serde(default)]
     pub json_schema: Option<String>,
+    /// Optional upper bound on agentic turns for executors that support it
+    /// (e.g. Claude `--max-turns`). Ignored cleanly by executors without turn caps.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

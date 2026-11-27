@@ -327,8 +327,8 @@ impl AgentRunner for AgyRunner {
             GENERIC_TAIL_BYTES,
         )?;
         let mut parsed = parse_agy_output(&out.tail, expect_structured);
-        let should_scan_tail =
-            !parsed.usage_present || parsed.is_error || parsed.final_text.is_empty();
+        let should_scan_tail = !parsed.is_local_cap_error
+            && (!parsed.usage_present || parsed.is_error || parsed.final_text.is_empty());
         if out.exit_code != Some(0)
             && parsed.limit_hit.is_none()
             && parsed.infra.is_none()
@@ -374,6 +374,7 @@ pub struct AgyParsed {
     pub tokens_out: u64,
     pub usage_present: bool,
     pub is_error: bool,
+    pub is_local_cap_error: bool,
     pub limit_hit: Option<LimitHit>,
     pub infra: Option<InfraFailure>,
 }
@@ -411,6 +412,12 @@ pub fn parse_agy_output(stdout: &str, expect_structured: bool) -> AgyParsed {
     };
 
     let (tokens_in, tokens_out, usage_present) = extract_usage(&obj);
+    let subtype = obj.get("subtype").and_then(Value::as_str);
+    let is_local_cap = subtype.is_some_and(|s| {
+        s.eq_ignore_ascii_case("error_max_turns")
+            || s.eq_ignore_ascii_case("error_max_budget_usd")
+            || s.eq_ignore_ascii_case("error_max_structured_output_retries")
+    });
     let is_error = obj
         .get("is_error")
         .and_then(Value::as_bool)
@@ -420,10 +427,15 @@ pub fn parse_agy_output(stdout: &str, expect_structured: bool) -> AgyParsed {
             .get("status")
             .and_then(Value::as_str)
             .is_some_and(|s| s.eq_ignore_ascii_case("error"))
-        || obj.get("subtype").and_then(Value::as_str)
-            == Some("error_max_structured_output_retries");
-    let (limit_hit, infra) = if is_error {
-        let (status, msg) = extract_error_details(&obj, &response_text);
+        || subtype.is_some_and(|s| {
+            s.as_bytes()
+                .get(..6)
+                .is_some_and(|p| p.eq_ignore_ascii_case(b"error_"))
+        });
+    let (status, msg) = extract_error_details(&obj, &response_text);
+    let is_local_cap_error =
+        is_local_cap && status.is_none() && obj.get("error").is_none_or(Value::is_null);
+    let (limit_hit, infra) = if is_error && !is_local_cap_error {
         classify_text_failure(status, &msg)
     } else {
         (None, None)
@@ -434,6 +446,7 @@ pub fn parse_agy_output(stdout: &str, expect_structured: bool) -> AgyParsed {
         tokens_out,
         usage_present,
         is_error,
+        is_local_cap_error,
         limit_hit,
         infra,
     }

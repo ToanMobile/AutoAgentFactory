@@ -111,14 +111,50 @@ pub fn build_prompt(task: &Task, branch: &str) -> String {
              approach. For a merge conflict, run `git rebase <base>` onto this branch and \
              resolve conflicts linearly — do not create merge commits.\n\n",
         );
-        let skipped = failure_notes.len().saturating_sub(MAX_FAILURE_NOTES);
+        // Deduplicate globally keeping the latest occurrence of each exact note
+        // (catches interleaved paired notes such as `unblock[T3]` + `gate_diagnostic:`
+        // or `post-gate rejected` + `post_audit_findings:`), and pin the latest
+        // human `rework:` directive so machine failure notes never evict it.
+        let mut seen = std::collections::HashSet::with_capacity(failure_notes.len());
+        let mut deduped: Vec<&str> = failure_notes
+            .iter()
+            .rev()
+            .copied()
+            .filter(|note| seen.insert(*note))
+            .collect();
+        deduped.reverse();
+        let skipped = deduped.len().saturating_sub(MAX_FAILURE_NOTES);
+        let latest_rework = deduped.iter().rposition(|n| n.starts_with("rework:"));
+        let latest_unblocked = deduped.iter().rposition(|n| n.starts_with("unblocked:"));
+        let pinned_rework = latest_rework
+            .filter(|&idx| idx < skipped && latest_unblocked.is_none_or(|u| u < idx))
+            .map(|idx| deduped[idx]);
+        let tail_start = if pinned_rework.is_some() {
+            (skipped + 1).min(deduped.len())
+        } else {
+            skipped
+        };
         if skipped > 0 {
+            if pinned_rework.is_some() {
+                let tail_len = deduped.len().saturating_sub(tail_start);
+                prompt.push_str(&format!(
+                    "*(showing pinned rework + last {tail_len} of {} prior notes)*\n",
+                    deduped.len()
+                ));
+            } else {
+                prompt.push_str(&format!(
+                    "*(showing last {MAX_FAILURE_NOTES} of {} prior notes)*\n",
+                    deduped.len()
+                ));
+            }
+        }
+        if let Some(rework) = pinned_rework {
             prompt.push_str(&format!(
-                "*(showing last {MAX_FAILURE_NOTES} of {} prior notes)*\n",
-                failure_notes.len()
+                "- {}\n",
+                aaf_domain::prompt_fence::neutralise(rework)
             ));
         }
-        for note in &failure_notes[skipped..] {
+        for note in &deduped[tail_start..] {
             prompt.push_str(&format!(
                 "- {}\n",
                 aaf_domain::prompt_fence::neutralise(note)
@@ -158,8 +194,18 @@ pub fn build_plan_prompt(task: &Task, ctx: &PromptContext<'_>) -> String {
         .collect();
     if !steering.is_empty() {
         prompt.push_str("\n# Operator Steering\n\n");
-        for note in steering {
-            prompt.push_str(&format!("- {note}\n"));
+        let skipped = steering.len().saturating_sub(MAX_STEERING_NOTES);
+        if skipped > 0 {
+            prompt.push_str(&format!(
+                "*(showing last {MAX_STEERING_NOTES} of {} steering notes)*\n",
+                steering.len()
+            ));
+        }
+        for note in &steering[skipped..] {
+            prompt.push_str(&format!(
+                "- {}\n",
+                aaf_domain::prompt_fence::neutralise(note)
+            ));
         }
     }
     append_repo_environment(&mut prompt, ctx);

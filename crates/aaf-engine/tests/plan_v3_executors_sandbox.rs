@@ -35,6 +35,7 @@ fn req(prompt: &str, cwd: &str) -> AgentRequest {
         timeout_secs: 30,
         sandbox: SandboxPolicy::default(),
         json_schema: None,
+        max_turns: None,
     }
 }
 

@@ -17,6 +17,7 @@ fn paths_for(provider: ProviderKind, dir: &str) -> AccountPaths {
         timeout_secs: 60,
         sandbox: SandboxPolicy::default(),
         json_schema: None,
+        max_turns: None,
     })
 }
 
@@ -101,6 +102,7 @@ fn gemini_command_sets_headless_workspace_trust_env() {
         timeout_secs: 60,
         sandbox: SandboxPolicy::default(),
         json_schema: None,
+        max_turns: None,
     };
     let runner = GenericRunner::new(
         vec![
@@ -189,6 +191,7 @@ fn grok_sandbox_cli_flags_enforce_plan_and_bypass_permissions() {
             ..SandboxPolicy::default()
         },
         json_schema: None,
+        max_turns: None,
     };
     let ro = runner.command(&mk_req(true, true));
     assert_eq!(
@@ -218,9 +221,8 @@ fn grok_sandbox_cli_flags_enforce_plan_and_bypass_permissions() {
         &["--permission-mode", "plan", "--no-subagents"]
     );
     assert!(
-        !forced_ro
-            .args
-            .iter()
-            .any(|a| a == "--always-approve" || a == "--no-plan" || a.contains("bypassPermissions"))
+        !forced_ro.args.iter().any(|a| a == "--always-approve"
+            || a == "--no-plan"
+            || a.contains("bypassPermissions"))
     );
 }

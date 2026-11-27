@@ -80,6 +80,7 @@ fn template() -> AgentRequest {
             read_denied_paths: vec!["/data".to_string()],
         },
         json_schema: None,
+        max_turns: None,
     }
 }
 

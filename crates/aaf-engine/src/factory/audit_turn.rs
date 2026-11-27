@@ -12,12 +12,12 @@ use aaf_domain::task::{Task, TaskState};
 mod watch;
 
 pub(super) use watch::InfraWatch;
+use watch::classify_auditor_log_tail;
 
 use super::adapters::provider_for;
 use super::audit_backend::{AuditBackend, audit_cmd_is_claude};
 use super::git_real::COMMIT_DEFERRED;
 use super::ports::{AccountPool, Grant};
-use super::scheduler::DEFAULT_RATE_LIMIT_COOLDOWN_SECS;
 use super::stage_router::StageTarget;
 use super::worker::{self, Next};
 use super::{Deps, unblock};
@@ -68,94 +68,6 @@ pub(super) fn short_circuit_audit_reason_with_limit(
     None
 }
 
-fn has_status_code(lower: &str, code: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "http ",
-        "http/1.1 ",
-        "http/2 ",
-        "status ",
-        "status: ",
-        "status=",
-        "code ",
-        "code: ",
-        "code=",
-        "error ",
-        "error: ",
-    ];
-    PREFIXES
-        .iter()
-        .any(|p| lower.contains(&format!("{p}{code}")))
-}
-
-/// Reads an auditor's failed log tail for a rate limit, a refused login or a
-/// network failure. A rate limit found this way carries no reset time of its
-/// own, so it gets the default pause from `now` (the account router would
-/// otherwise cool the account down for its 5-hour unknown-reset fallback).
-fn classify_auditor_log_tail(
-    tail: &str,
-    now: i64,
-    infra: &mut Option<InfraFailure>,
-    limit_hit: &mut Option<LimitHit>,
-) {
-    let lower = tail.to_ascii_lowercase();
-    let raw = unblock::one_line(tail, 300);
-    let has_any = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
-    let quota_hit = has_status_code(&lower, "429")
-        || has_any(&[
-            "429 too many",
-            "too many requests",
-            "rate limit",
-            "rate_limit",
-            "quota",
-        ]);
-    let auth_hit = has_status_code(&lower, "401")
-        || has_status_code(&lower, "403")
-        || has_any(&[
-            "401 unauthorized",
-            "403 forbidden",
-            "unauthorized",
-            "invalid api key",
-            "invalid_api_key",
-            "authentication failed",
-        ]);
-    let net_hit = has_any(&[
-        "econnrefused",
-        "etimedout",
-        "econnreset",
-        "enotfound",
-        "eai_again",
-        "ehostunreach",
-        "enetunreach",
-        "connection refused",
-        "connection timed out",
-        "connection dropped",
-        "can't reach the api server",
-        "unable to connect to api",
-        "could not resolve host",
-        "no internet route",
-        "503 service unavailable",
-        "529 overloaded",
-    ]) || ["502", "503", "504", "529"]
-        .iter()
-        .any(|c| has_status_code(&lower, c));
-    if quota_hit {
-        *limit_hit = Some(LimitHit {
-            reset_at: Some(now.saturating_add(DEFAULT_RATE_LIMIT_COOLDOWN_SECS)),
-            raw,
-        });
-    } else if auth_hit {
-        *infra = Some(InfraFailure {
-            kind: InfraKind::Auth,
-            raw,
-        });
-    } else if net_hit {
-        *infra = Some(InfraFailure {
-            kind: InfraKind::Network,
-            raw,
-        });
-    }
-}
-
 /// One recorded auditor run in `tree`, plus any infra failure or rate limit.
 /// Summarizes allowlisted lockfiles before diff truncation and performs up to
 /// [`MAX_AUDITOR_INCONCLUSIVE_RETRIES`] (2) format/citation-repair retries when
@@ -189,7 +101,10 @@ pub(crate) fn run_auditor_turn(
         hook_required,
         accounts,
     )?;
+    const AUDIT_INITIAL_MAX_TURNS: u32 = 16;
+    const AUDIT_REPAIR_MAX_TURNS: u32 = 8;
     run.request.sandbox.read_only = true;
+    run.request.max_turns = Some(AUDIT_INITIAL_MAX_TURNS);
     let prepared_input = AuditInput {
         spec: input.spec.clone(),
         diff: cross_audit::prompt::summarize_diff_for_audit(&input.diff),
@@ -233,10 +148,17 @@ pub(crate) fn run_auditor_turn(
         && infra.is_none()
         && let Some(tail) = failed_tail.as_deref()
     {
-        classify_auditor_log_tail(tail, deps.now(), &mut infra, &mut limit_hit);
+        classify_auditor_log_tail(
+            tail,
+            tokens_measured,
+            deps.now(),
+            &mut infra,
+            &mut limit_hit,
+        );
     }
 
     let mut saw_named_blocker = false;
+    let mut use_schema = true;
     for _attempt in 0..MAX_AUDITOR_INCONCLUSIVE_RETRIES {
         let reason = match &report.verdict {
             AuditVerdict::Inconclusive { reason }
@@ -257,8 +179,17 @@ pub(crate) fn run_auditor_turn(
         if projected.check() != BudgetCheck::Ok {
             break;
         }
+        let prior_empty = last_final_text.trim().is_empty();
+        if prior_empty {
+            use_schema = false;
+        }
         let mut repair_req = run.request.clone();
         repair_req.run_id = unblock::unique_id();
+        repair_req.max_turns = Some(if prior_empty {
+            AUDIT_INITIAL_MAX_TURNS
+        } else {
+            AUDIT_REPAIR_MAX_TURNS
+        });
         repair_req.prompt = cross_audit::prompt::build_format_repair_prompt_with_limit(
             &prepared_input,
             require_scores,
@@ -266,9 +197,8 @@ pub(crate) fn run_auditor_turn(
             &last_final_text,
             max_diff_bytes,
         );
-        if repair_req.json_schema.is_none() {
-            repair_req.json_schema = Some(cross_audit::scored_audit_json_schema(require_scores));
-        }
+        repair_req.json_schema =
+            use_schema.then(|| cross_audit::scored_audit_json_schema(require_scores));
         // Fall back to the latest Inconclusive verdict if the runner errors
         // on the retry (e.g. transient port failure or single-shot test mock).
         let Ok(repair_out) = runner.run(&repair_req) else {
@@ -292,6 +222,7 @@ pub(crate) fn run_auditor_turn(
             if !repair_out.log_tail.trim().is_empty() {
                 classify_auditor_log_tail(
                     &repair_out.log_tail,
+                    tokens_measured,
                     deps.now(),
                     &mut infra,
                     &mut limit_hit,

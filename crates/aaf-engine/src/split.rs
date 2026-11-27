@@ -278,11 +278,15 @@ pub fn propose_and_apply_split(
     if !dry_run {
         ensure_root_budget(store, &parent.root_id, budget_cfg)?;
     }
+    const SPLIT_MAX_TURNS: u32 = 12;
     let mut request = AgentRequest {
         prompt: build_split_prompt(parent, max_subtasks),
         ..base_request.clone()
     };
     request.sandbox.read_only = true;
+    if request.max_turns.is_none() {
+        request.max_turns = Some(SPLIT_MAX_TURNS);
+    }
     let outcome = runner.run(&request)?;
     if !dry_run {
         let tokens = outcome.tokens_in.saturating_add(outcome.tokens_out);

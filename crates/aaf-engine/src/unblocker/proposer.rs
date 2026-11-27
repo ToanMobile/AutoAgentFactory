@@ -403,6 +403,7 @@ impl SubtaskProposer for AgentSubtaskProposer<'_> {
     ) -> PortResult<Vec<SubtaskPlan>> {
         let request = AgentRequest {
             prompt: build_prompt(task, reason, digest),
+            max_turns: self.base.max_turns.or(Some(12)),
             ..self.base.clone()
         };
         let outcome = self.runner.run(&request)?;
@@ -440,6 +441,7 @@ impl SubtaskProposer for AgentSubtaskProposer<'_> {
         let repair_request = AgentRequest {
             run_id: format!("{}-repair", self.base.run_id),
             prompt: build_format_repair_prompt(task, reason, digest, &outcome.final_text),
+            max_turns: Some(6),
             ..self.base.clone()
         };
         let Ok(repair_out) = self.runner.run(&repair_request) else {

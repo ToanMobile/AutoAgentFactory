@@ -339,27 +339,34 @@ pub(super) fn collect_score_issues(
         }
         let low_avg = eval.effective_score < cfg.min_average_score;
         let before = out.len();
-        for s in &p.scores {
-            if s.score < cfg.min_criterion_score
-                || (low_avg && s.score < 100 && !s.deduction_reason.trim().is_empty())
-            {
-                let reason = if s.deduction_reason.trim().is_empty() {
-                    format!("score {}/100 < min {}", s.score, cfg.min_criterion_score)
-                } else {
-                    s.deduction_reason.trim().to_string()
-                };
-                out.push(ReviewIssue {
-                    id: s.id.clone(),
-                    severity: IssueSeverity::P1,
-                    category: s.id.clone(),
-                    location: reason.clone(),
-                    description: format!(
-                        "[{}] {} scored {}/100: {reason}",
-                        p.reviewer_id, s.id, s.score
-                    ),
-                    proposed_fix: String::new(),
-                });
-            }
+        let mut culprit_scores: Vec<_> = p
+            .scores
+            .iter()
+            .filter(|s| {
+                s.score < cfg.min_criterion_score
+                    || (low_avg
+                        && s.score < cfg.min_average_score
+                        && !s.deduction_reason.trim().is_empty())
+            })
+            .collect();
+        culprit_scores.sort_by_key(|s| s.score);
+        for s in culprit_scores {
+            let reason = if s.deduction_reason.trim().is_empty() {
+                format!("score {}/100 < min {}", s.score, cfg.min_criterion_score)
+            } else {
+                s.deduction_reason.trim().to_string()
+            };
+            out.push(ReviewIssue {
+                id: s.id.clone(),
+                severity: IssueSeverity::P1,
+                category: s.id.clone(),
+                location: format!(
+                    "{}/100 (min avg {}, crit {})",
+                    s.score, cfg.min_average_score, cfg.min_criterion_score
+                ),
+                description: format!("[{}] {}: {reason}", p.reviewer_id, s.id),
+                proposed_fix: String::new(),
+            });
         }
         if out.len() == before {
             for reason in eval.reasons {

@@ -48,6 +48,7 @@ fn req() -> AgentRequest {
             read_denied_paths: vec![],
         },
         json_schema: None,
+        max_turns: None,
     }
 }
 

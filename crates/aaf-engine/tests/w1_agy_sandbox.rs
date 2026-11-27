@@ -31,6 +31,7 @@ fn base_request(cwd: &Path, sandbox: SandboxPolicy) -> AgentRequest {
         timeout_secs: 60,
         sandbox,
         json_schema: None,
+        max_turns: None,
     }
 }
 

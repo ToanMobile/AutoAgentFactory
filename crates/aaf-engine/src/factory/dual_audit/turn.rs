@@ -22,7 +22,9 @@ use crate::cross_audit::dual_verdict::{
     build_dual_checklist, build_dual_review_prompt_with_limit, dual_review_json_schema,
     evaluate_adjudication, names_dual_blocker, parse_and_validate_dual_review_with_limit,
 };
-use crate::cross_audit::prompt::{PRIOR_BEGIN, PRIOR_END, neutralise, summarize_diff_for_audit};
+use crate::cross_audit::prompt::{
+    PRIOR_BEGIN, PRIOR_END, clip_repair_prior, neutralise, summarize_diff_for_audit,
+};
 use crate::factory::audit_backend::{report_audit_limit, route_audit_limit};
 use crate::factory::audit_turn::short_circuit_audit_reason_with_limit;
 use crate::factory::plan_job;
@@ -35,6 +37,10 @@ use crate::git::TaskWorktree;
 use crate::unblocker::QuotaRoute;
 
 const AUTH_QUARANTINE_SECS: i64 = 3600;
+const DUAL_REVIEW_MAX_TURNS: u32 = 16;
+const DUAL_REPAIR_MAX_TURNS: u32 = 8;
+const DUAL_ADJUDICATE_MAX_TURNS: u32 = 12;
+const DUAL_REPAIR_PRIOR_CHARS: usize = 12_000;
 const BEHAVIORAL_RED_NOTE: &str = "Oracle behavioral_red_unproven: verify that the new module's \
      tests contain non-vacuous behavioral assertions exercising real production logic and edge cases";
 
@@ -46,6 +52,7 @@ fn with_clean_tree<T>(
     f(&clean.integration().tree)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_clean_turn(
     deps: &Deps,
     target: &StageTarget,
@@ -53,6 +60,7 @@ fn run_clean_turn(
     clean_tree: &TaskWorktree,
     prompt: String,
     schema: String,
+    max_turns: u32,
     grant: &Grant,
 ) -> PortResult<Result<(String, AgentOutcome), Next>> {
     let mut run = worker::begin_run_with(
@@ -67,7 +75,8 @@ fn run_clean_turn(
     )?;
     run.request.sandbox.read_only = true;
     run.request.prompt = prompt;
-    run.request.json_schema = Some(schema);
+    run.request.json_schema = (!schema.trim().is_empty()).then_some(schema);
+    run.request.max_turns = Some(max_turns);
     let out = match target.runner.run(&run.request) {
         Ok(o) => o,
         Err(err) => {
@@ -286,16 +295,26 @@ pub(crate) fn run_reviewer_turn(
     let schema = dual_review_json_schema(cfg.score_gate);
     let (parsed, last_run_id) = match with_clean_tree(deps, |tree| {
         let (mut prompt, mut run_id) = (base_prompt.clone(), String::new());
+        let mut active_schema = schema.clone();
+        let mut max_turns = DUAL_REVIEW_MAX_TURNS;
         let mut res = DualReviewerOutcome::Inconclusive {
             reason: "reviewer did not run".to_string(),
         };
         let (mut saw_named_blocker, mut prior_inconclusive) = (false, String::new());
         for attempt in 0..2u8 {
-            let (rid, out) =
-                match run_clean_turn(deps, target, &task, tree, prompt, schema.clone(), grant)? {
-                    Ok(pair) => pair,
-                    Err(next) => return Ok(Err(next)),
-                };
+            let (rid, out) = match run_clean_turn(
+                deps,
+                target,
+                &task,
+                tree,
+                prompt,
+                active_schema.clone(),
+                max_turns,
+                grant,
+            )? {
+                Ok(pair) => pair,
+                Err(next) => return Ok(Err(next)),
+            };
             run_id = rid;
             if !out.succeeded() {
                 res = DualReviewerOutcome::Inconclusive {
@@ -328,20 +347,29 @@ pub(crate) fn run_reviewer_turn(
             }
             if let DualReviewerOutcome::Inconclusive { reason } = &res
                 && attempt == 0
-                && !out.final_text.trim().is_empty()
                 && worker::ensure_budget(deps, &task.root_id)?.check() == BudgetCheck::Ok
             {
+                let prior_empty = out.final_text.trim().is_empty();
+                if prior_empty {
+                    active_schema.clear();
+                    max_turns = DUAL_REVIEW_MAX_TURNS;
+                } else {
+                    max_turns = DUAL_REPAIR_MAX_TURNS;
+                }
                 if names_dual_blocker(&out.final_text, &checklist)
                     || reason.contains("citation verification")
                 {
                     saw_named_blocker = true;
                     prior_inconclusive = reason.clone();
                 }
+                let clipped = clip_repair_prior(&out.final_text, DUAL_REPAIR_PRIOR_CHARS);
                 prompt = format!(
-                    "{base_prompt}\n\nYour previous reply failed validation. Reply with ONE strict \
-                     JSON object matching the schema.\n{PRIOR_BEGIN}\nParse error: {}\n{}\n{PRIOR_END}\n",
+                    "{base_prompt}\n\nYour previous reply failed validation. Fix the JSON/citation \
+                     error directly using the supplied DIFF without re-scanning the repository, \
+                     and reply with ONE strict JSON object matching the schema.\n{PRIOR_BEGIN}\n\
+                     Parse error: {}\n{}\n{PRIOR_END}\n",
                     neutralise(reason),
-                    neutralise(&unblock::one_line(&out.final_text, 4000))
+                    neutralise(&clipped)
                 );
             } else {
                 break;
@@ -399,7 +427,16 @@ pub(crate) fn run_adjudicate_turn(
     );
     let schema = adjudicate_json_schema().to_string();
     let (run_id, adj) = match with_clean_tree(deps, |tree| {
-        match run_clean_turn(deps, target, &task, tree, prompt, schema, grant)? {
+        match run_clean_turn(
+            deps,
+            target,
+            &task,
+            tree,
+            prompt,
+            schema,
+            DUAL_ADJUDICATE_MAX_TURNS,
+            grant,
+        )? {
             Ok((rid, out)) => {
                 let raw = if out.succeeded() { &out.final_text } else { "" };
                 Ok(Ok((

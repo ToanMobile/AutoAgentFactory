@@ -258,6 +258,7 @@ fn generic_runner_writes_sanitized_summary_lines() {
             timeout_secs: 30,
             sandbox: SandboxPolicy::default(),
             json_schema: None,
+            max_turns: None,
         })
         .unwrap();
     assert_eq!(outcome.exit_code, Some(0));
@@ -326,6 +327,7 @@ fn claude_runner_writes_sanitized_projections_not_raw_stream_json() {
             timeout_secs: 30,
             sandbox: SandboxPolicy::default(),
             json_schema: None,
+            max_turns: None,
         })
         .unwrap();
     assert!(outcome.succeeded(), "{outcome:?}");
@@ -452,6 +454,7 @@ mod seatbelt_macos {
                     read_denied_paths: Vec::new(),
                 },
                 json_schema: None,
+                max_turns: None,
             })
             .unwrap();
         assert!(!outcome.timed_out, "{}", outcome.log_tail);
@@ -540,6 +543,7 @@ mod seatbelt_macos {
                     ..SandboxPolicy::default()
                 },
                 json_schema: None,
+                max_turns: None,
             })
             .unwrap();
         assert!(!outcome.timed_out, "{}", outcome.log_tail);

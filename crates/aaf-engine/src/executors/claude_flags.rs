@@ -27,12 +27,16 @@ pub(super) fn auth_wording_infra(text: &str, max_chars: usize) -> Option<InfraFa
         })
 }
 
-/// Write, web, and notebook tools disabled on `read_only` Claude runs.
+/// Write, shell, subagent, web, and notebook tools disabled on `read_only`
+/// Claude runs.
 ///
-/// Read-only inspection tools (`Read`, `Grep`, `Glob`, `Bash`, and `Agent`)
-/// remain enabled so auditors and planners keep full codebase-verification
-/// capability without quality degradation.
-pub(crate) const READ_ONLY_DISALLOWED_TOOLS: &str = "Edit,Write,NotebookEdit,WebFetch,WebSearch";
+/// Read-only in-process inspection tools (`Read`, `Grep`, `Glob`, and
+/// `StructuredOutput`) remain enabled so auditors and planners keep full
+/// codebase-verification capability, while `Bash` (auto-denied in plan mode)
+/// and `Agent` (which would bypass parent `--max-turns` via unconstrained
+/// subagents) are blocked cleanly.
+pub(crate) const READ_ONLY_DISALLOWED_TOOLS: &str =
+    "Edit,Write,NotebookEdit,WebFetch,WebSearch,Bash,Agent";
 
 fn flag_value(key: &str, value: &str) -> PortResult<()> {
     if value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -45,10 +49,11 @@ fn flag_value(key: &str, value: &str) -> PortResult<()> {
 
 /// Builds the full `claude` argv for `request` (before sandboxing).
 ///
-/// Permission & MCP confinement (`claude --help`, 2.1.330):
+/// Permission & MCP confinement (`claude --help`, 2.1.332):
 /// - Read-only (`sandbox.read_only == true`): `--permission-mode plan`,
-///   `--no-session-persistence`, `--disallowedTools <write/web tools>`, and
-///   `--strict-mcp-config` (fail-closed: zero external MCP schemas loaded).
+///   `--no-session-persistence`, `--disable-slash-commands`,
+///   `--disallowedTools <write/shell/web tools>`, and `--strict-mcp-config`
+///   (fail-closed: zero external MCP schemas or skill catalogs loaded).
 /// - Sandboxed write (or explicit non-persistent opt-in): `bypassPermissions`.
 /// - Default unsandboxed write: `acceptEdits` + `--permission-prompts none`.
 pub(super) fn build_claude_args(
@@ -70,6 +75,7 @@ pub(super) fn build_claude_args(
                 "--permission-mode",
                 "plan",
                 "--no-session-persistence",
+                "--disable-slash-commands",
                 "--disallowedTools",
                 READ_ONLY_DISALLOWED_TOOLS,
                 "--strict-mcp-config",
@@ -94,6 +100,9 @@ pub(super) fn build_claude_args(
             flag_value(key, value)?;
             args.extend([flag.to_string(), value.to_string()]);
         }
+    }
+    if let Some(turns) = request.max_turns.filter(|&n| n > 0) {
+        args.extend(["--max-turns".to_string(), turns.to_string()]);
     }
     if let Some(schema) = request
         .json_schema

@@ -14,149 +14,34 @@ const MAX_JSON_SCAN_BYTES: usize = MAX_PLAN_CONTRACT_BYTES * 8;
 
 /// Strict JSON Schema for [`PlanContract`] passed to `--json-schema`.
 pub fn plan_contract_json_schema() -> &'static str {
-    r#"{
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "summary",
-    "tier_assessment",
-    "tier_reasons",
-    "files_to_change",
-    "invariants_and_edge_cases",
-    "red_green_tests",
-    "dispositions",
-    "open_questions"
-  ],
-  "properties": {
-    "summary": { "type": "string", "minLength": 1 },
-    "tier_assessment": { "type": "string", "enum": ["S", "M", "L"] },
-    "tier_reasons": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "files_to_change": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["path", "responsibility", "risk"],
-        "properties": {
-          "path": { "type": "string", "minLength": 1 },
-          "responsibility": { "type": "string", "minLength": 1 },
-          "risk": { "type": "string" }
-        }
-      }
-    },
-    "invariants_and_edge_cases": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "red_green_tests": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["ac_ref", "test_path", "red_condition", "green_condition"],
-        "properties": {
-          "ac_ref": { "type": "string", "minLength": 1 },
-          "test_path": { "type": "string", "minLength": 1 },
-          "red_condition": { "type": "string", "minLength": 1 },
-          "green_condition": { "type": "string", "minLength": 1 }
-        }
-      }
-    },
-    "dispositions": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["issue_id", "action", "response", "evidence"],
-        "properties": {
-          "issue_id": { "type": "string", "minLength": 1 },
-          "action": { "type": "string", "enum": ["ACCEPTED", "DISPUTED"] },
-          "response": { "type": "string", "minLength": 1 },
-          "evidence": { "type": "string" }
-        }
-      }
-    },
-    "open_questions": {
-      "type": "array",
-      "description": "Only genuine human product/scope decisions written in natural plain language in the task's language (never disk-verifiable facts or internal dev notes). Rank options strictly: Correctness & zero-regression > Full AC compliance > Clean architecture/scope > Speed. Every multi-option item MUST mark the single highest-quality option as (Recommended)/(Khuyến nghị) and end with a codebase-grounded Hint:/Gợi ý:. Format: '<Plain question> | (1) <Option A> — <impact> | (2) <Option B> (Recommended) — <impact> | Hint: <codebase-grounded quality rationale>'.",
-      "items": { "type": "string" }
-    }
-  }
-}"#
+    concat!(
+        r#"{"type":"object","additionalProperties":false,"#,
+        r#""required":["summary","tier_assessment","tier_reasons","files_to_change","invariants_and_edge_cases","red_green_tests","dispositions","open_questions"],"#,
+        r#""properties":{"#,
+        r#""summary":{"type":"string","minLength":1},"#,
+        r#""tier_assessment":{"type":"string","enum":["S","M","L"]},"#,
+        r#""tier_reasons":{"type":"array","items":{"type":"string"}},"#,
+        r#""files_to_change":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["path","responsibility","risk"],"properties":{"path":{"type":"string","minLength":1},"responsibility":{"type":"string","minLength":1},"risk":{"type":"string"}}}},"#,
+        r#""invariants_and_edge_cases":{"type":"array","items":{"type":"string"}},"#,
+        r#""red_green_tests":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["ac_ref","test_path","red_condition","green_condition"],"properties":{"ac_ref":{"type":"string","minLength":1},"test_path":{"type":"string","minLength":1},"red_condition":{"type":"string","minLength":1},"green_condition":{"type":"string","minLength":1}}}},"#,
+        r#""dispositions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["issue_id","action","response","evidence"],"properties":{"issue_id":{"type":"string","minLength":1},"action":{"type":"string","enum":["ACCEPTED","DISPUTED"]},"response":{"type":"string","minLength":1},"evidence":{"type":"string"}}}},"#,
+        r#""open_questions":{"type":"array","items":{"type":"string"}}"#,
+        r#"}}"#
+    )
 }
 
 /// Strict JSON Schema for [`PlanCritique`] passed to `--json-schema`.
 pub fn plan_critique_json_schema() -> &'static str {
-    r#"{
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "checklist",
-    "resolved_from_previous",
-    "issues",
-    "verdict"
-  ],
-  "properties": {
-    "checklist": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "pass", "evidence"],
-        "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "pass": { "type": "boolean" },
-          "evidence": { "type": "string" }
-        }
-      }
-    },
-    "resolved_from_previous": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["issue_id", "status", "reason"],
-        "properties": {
-          "issue_id": { "type": "string", "minLength": 1 },
-          "status": {
-            "type": "string",
-            "enum": ["VERIFIED_FIXED", "WITHDRAWN", "UPHELD"]
-          },
-          "reason": { "type": "string" }
-        }
-      }
-    },
-    "issues": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "severity",
-          "category",
-          "location",
-          "description",
-          "proposed_fix"
-        ],
-        "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
-          "category": { "type": "string", "minLength": 1 },
-          "location": { "type": "string", "minLength": 1 },
-          "description": { "type": "string", "minLength": 1 },
-          "proposed_fix": { "type": "string" }
-        }
-      }
-    },
-    "verdict": { "type": "string", "enum": ["CONVERGED", "REVISE"] }
-  }
-}"#
+    concat!(
+        r#"{"type":"object","additionalProperties":false,"#,
+        r#""required":["checklist","resolved_from_previous","issues","verdict"],"#,
+        r#""properties":{"#,
+        r#""checklist":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["id","pass","evidence"],"properties":{"id":{"type":"string","minLength":1},"pass":{"type":"boolean"},"evidence":{"type":"string"}}}},"#,
+        r#""resolved_from_previous":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["issue_id","status","reason"],"properties":{"issue_id":{"type":"string","minLength":1},"status":{"type":"string","enum":["VERIFIED_FIXED","WITHDRAWN","UPHELD"]},"reason":{"type":"string"}}}},"#,
+        r#""issues":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","severity","category","location","description","proposed_fix"],"properties":{"id":{"type":"string","minLength":1},"severity":{"type":"string","enum":["P0","P1","P2"]},"category":{"type":"string","minLength":1},"location":{"type":"string","minLength":1},"description":{"type":"string","minLength":1},"proposed_fix":{"type":"string"}}}},"#,
+        r#""verdict":{"type":"string","enum":["CONVERGED","REVISE"]}"#,
+        r#"}}"#
+    )
 }
 
 /// Returns the byte offset just past the matching `}` for the `{` at `start`.
