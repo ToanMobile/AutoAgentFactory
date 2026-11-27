@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::unimplemented)]
 //! SEC-137: when a hooked non-Claude executor label (e.g. `codex`) is paired
 //! with an `executor_cmd` that invokes `claude`, the worker must enforce
 //! Claude's `.claude/settings.json` hook check instead of accepting
