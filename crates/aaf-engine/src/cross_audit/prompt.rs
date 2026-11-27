@@ -2,6 +2,7 @@
 //! agent under review, so they are embedded as inert, delimited data.
 
 use std::fmt::Write as _;
+pub(crate) mod locale_summary;
 pub(crate) mod lockfile_summary;
 
 use super::AuditInput;
@@ -9,10 +10,22 @@ use super::checklist::build_checklist;
 use super::scoring::GOLDEN_STANDARDS;
 
 pub use aaf_domain::prompt_fence::{GUARD, NEUTRALISED, SPEC_BEGIN, SPEC_END, neutralise};
+pub use locale_summary::{
+    MIN_LOCALE_FILES_TO_SUMMARIZE, is_secondary_locale_file, summarize_diff_locales,
+    summarize_diff_locales_with_min_files,
+};
 pub use lockfile_summary::{
     ALLOWLISTED_LOCKFILES, LOCKFILE_SUMMARY_THRESHOLD_BYTES, is_allowlisted_lockfile,
     summarize_diff_lockfiles, summarize_diff_lockfiles_with_threshold,
 };
+
+/// Prepares a raw git diff for cross-audit by applying both deterministic
+/// allowlisted lockfile summarization and multi-locale mobile translation
+/// summarization (fail closed on suspicious or unparseable sections).
+pub fn summarize_diff_for_audit(diff: &str) -> String {
+    let after_locks = summarize_diff_lockfiles(diff);
+    summarize_diff_locales(&after_locks)
+}
 
 /// Largest diff, in bytes, shown to the auditor by default. Anything longer is
 /// cut and the audit can no longer pass: unseen changes cannot be approved.

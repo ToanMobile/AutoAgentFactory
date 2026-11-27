@@ -143,7 +143,7 @@ pub fn build_audit_command(cfg: &CrossAuditConfig) -> Result<Vec<String>, String
 }
 
 pub(crate) use super::audit_turn::run_auditor_turn;
-use super::audit_turn::short_circuit_audit_reason;
+use super::audit_turn::short_circuit_audit_reason_with_limit;
 use super::ports::{AccountPool, Grant, IntegrationGuard};
 use super::rework_filter;
 use super::worker::{GateJob, Job, Next, PLAN_EXECUTOR, PreGateAudit};
@@ -360,7 +360,7 @@ pub(crate) fn execute_audit(
         diff: deps.git.diff(&job.worktree)?,
         mobile: deps.settings.mobile,
     };
-    if let Some(reason) = short_circuit_audit_reason(&input.diff) {
+    if let Some(reason) = short_circuit_audit_reason_with_limit(&input.diff, cfg.max_diff_bytes) {
         deps.emit(
             EventKind::CrossAudit,
             &task.id,
@@ -372,7 +372,12 @@ pub(crate) fn execute_audit(
         let note = format!("cross-audit rejected the changes to locked files ({reason})");
         deps.store
             .append_context_note(&task.id, &unblock::one_line(&note, 400), deps.now())?;
-        let signal = audit_rejection_signal("cross-audit rejected the changes to locked files");
+        let signal_tail = if reason.contains("diff was truncated") {
+            format!("audit_diff_truncated: {reason}")
+        } else {
+            "cross-audit rejected the changes to locked files".to_string()
+        };
+        let signal = audit_rejection_signal(&signal_tail);
         return Ok(Next::Unblock {
             task_id: task.id,
             worktree: job.worktree,

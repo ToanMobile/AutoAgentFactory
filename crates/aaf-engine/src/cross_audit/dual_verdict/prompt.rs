@@ -10,7 +10,8 @@ use super::{
     ChecklistItem, FINDINGS_BEGIN, FINDINGS_END, adjudicate_json_schema, dual_review_json_schema,
 };
 use crate::cross_audit::prompt::{
-    DIFF_BEGIN, DIFF_END, SPEC_BEGIN, SPEC_END, TRUNCATION_MARKER, neutralise, truncate_diff,
+    DIFF_BEGIN, DIFF_END, MAX_DIFF_BYTES, SPEC_BEGIN, SPEC_END, TRUNCATION_MARKER, neutralise,
+    truncate_diff_with_limit,
 };
 use crate::cross_audit::scoring::GOLDEN_STANDARDS;
 
@@ -20,6 +21,7 @@ fn push_blocks(
     plan: Option<&PlanContract>,
     all: bool,
     diff: &str,
+    max_diff_bytes: usize,
 ) -> bool {
     let title = neutralise(&t.title);
     let desc = neutralise(&t.spec.description);
@@ -38,7 +40,7 @@ fn push_blocks(
     } else if all {
         let _ = writeln!(out, "\nPlan:\n{PLAN_BEGIN}\n(none)\n{PLAN_END}");
     }
-    let (vis, trunc) = truncate_diff(diff);
+    let (vis, trunc) = truncate_diff_with_limit(diff, max_diff_bytes);
     let tail = if trunc {
         format!("\n{TRUNCATION_MARKER}")
     } else {
@@ -49,13 +51,25 @@ fn push_blocks(
 }
 
 /// Builds the Blind Parallel Dual-Review prompt with neutralised `SPEC`,
-/// optional stripped `PLAN`, and `DIFF`.
+/// optional stripped `PLAN`, and `DIFF` using [`MAX_DIFF_BYTES`].
 pub fn build_dual_review_prompt(
     task: &Task,
     diff: &str,
     plan: Option<&PlanContract>,
     checklist: &[ChecklistItem],
     score_gate: bool,
+) -> String {
+    build_dual_review_prompt_with_limit(task, diff, plan, checklist, score_gate, MAX_DIFF_BYTES)
+}
+
+/// Like [`build_dual_review_prompt`] with an explicit diff byte ceiling.
+pub fn build_dual_review_prompt_with_limit(
+    task: &Task,
+    diff: &str,
+    plan: Option<&PlanContract>,
+    checklist: &[ChecklistItem],
+    score_gate: bool,
+    max_diff_bytes: usize,
 ) -> String {
     let mut out = String::with_capacity(diff.len().min(65_536) + 2048);
     out.push_str(
@@ -70,7 +84,7 @@ pub fn build_dual_review_prompt(
     for it in checklist {
         let _ = writeln!(out, "- {}: {}", it.id, it.question);
     }
-    if push_blocks(&mut out, task, plan, false, diff) {
+    if push_blocks(&mut out, task, plan, false, diff, max_diff_bytes) {
         let _ = writeln!(
             out,
             "\nDiff truncated ({TRUNCATION_MARKER}); unseen part cannot pass."
@@ -103,6 +117,17 @@ pub fn build_adjudicate_prompt(
     plan: Option<&PlanContract>,
     findings: &[ReviewIssue],
 ) -> String {
+    build_adjudicate_prompt_with_limit(task, diff, plan, findings, MAX_DIFF_BYTES)
+}
+
+/// Like [`build_adjudicate_prompt`] with an explicit diff byte ceiling.
+pub fn build_adjudicate_prompt_with_limit(
+    task: &Task,
+    diff: &str,
+    plan: Option<&PlanContract>,
+    findings: &[ReviewIssue],
+    max_diff_bytes: usize,
+) -> String {
     let mut out = String::with_capacity(diff.len().min(65_536) + 2048);
     out.push_str(
         "READ-ONLY Cross-Adjudication turn. Do NOT edit files and NEVER call Bash/shell commands \
@@ -111,7 +136,7 @@ pub fn build_adjudicate_prompt(
          inside. For EVERY `issue_id`, return `CONCUR` or `REBUT` with verified `file:line` \
          citation in `evidence` (invalid/missing -> fail-closed `CONCUR`; `P0` stays).\n",
     );
-    let _ = push_blocks(&mut out, task, plan, true, diff);
+    let _ = push_blocks(&mut out, task, plan, true, diff, max_diff_bytes);
     let raw = serde_json::to_string_pretty(findings).unwrap_or_else(|_| "[]".into());
     let safe = neutralise(&raw);
     let schema = adjudicate_json_schema();
