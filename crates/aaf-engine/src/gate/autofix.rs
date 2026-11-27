@@ -185,7 +185,14 @@ pub fn run_autofix(
     };
 
     // Step 6: Fail-closed post-run quarantine.
-    let hidden_after = super::hidden::inspect(&repo_root, policy, When::AfterCommands, false)?;
+    let hidden_after = match super::hidden::inspect(&repo_root, policy, When::AfterCommands, false)
+    {
+        Ok(h) => h,
+        Err(err) => {
+            let _ = reset_clean(&repo_root, &pre_head);
+            return Err(err);
+        }
+    };
     if !cmd_res.passed() || !hidden_after.blocks.is_empty() {
         reset_clean(&repo_root, &pre_head)?;
         let reason = if !hidden_after.blocks.is_empty() {
@@ -203,14 +210,20 @@ pub fn run_autofix(
     }
 
     // Undo any commits or index staging performed by the formatter while keeping worktree edits.
-    let _ = git_ok(&repo_root, &["reset", "--mixed", "--quiet", &pre_head])?;
-    quarantine_worktree(
-        &repo_root,
-        &pre_head,
-        &allowed_paths,
-        &is_locked,
-        &is_agent_cfg,
-    )?;
+    if let Err(err) =
+        git_ok(&repo_root, &["reset", "--mixed", "--quiet", &pre_head]).and_then(|_| {
+            quarantine_worktree(
+                &repo_root,
+                &pre_head,
+                &allowed_paths,
+                &is_locked,
+                &is_agent_cfg,
+            )
+        })
+    {
+        let _ = reset_clean(&repo_root, &pre_head);
+        return Err(err);
+    }
 
     let hl_after = super::head_lock::evaluate(data_dir, &repo_root, cfg, &base.diff_target);
     if hl_after.status != LockStatus::Clear {
@@ -222,7 +235,13 @@ pub fn run_autofix(
         });
     }
 
-    let remaining = dirty_paths_z(&repo_root)?;
+    let remaining = match dirty_paths_z(&repo_root) {
+        Ok(r) => r,
+        Err(err) => {
+            let _ = reset_clean(&repo_root, &pre_head);
+            return Err(err);
+        }
+    };
     let mut formatted: Vec<String> = Vec::new();
     for entry in remaining {
         if entry.untracked || !allowed_paths.contains(&entry.path) {
