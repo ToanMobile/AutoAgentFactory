@@ -22,6 +22,18 @@ const PSEUDO_REFS: [&str; 7] = [
     "REBASE_HEAD",
 ];
 
+/// Git operation-state markers in `<git-dir>` that must be absent before a
+/// host rebase starts (SEC-117).
+const OPERATION_STATE_MARKERS: [&str; 7] = [
+    "rebase-merge",
+    "rebase-apply",
+    "sequencer",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+];
+
 const MAX_WALK: usize = 10_000;
 
 /// Fails closed when a pseudo-ref in `tree`'s git dir, or (linked worktree)
@@ -80,6 +92,26 @@ pub(crate) fn ensure_plain_branch_ref(tree: &Path, full_ref: &str) -> Result<(),
         }
     }
     check_one(&common.join(full_ref))
+}
+
+/// Fails closed when `tree`'s git dir already holds an in-progress git
+/// operation state (`rebase-merge`, `rebase-apply`, `sequencer`, `MERGE_HEAD`,
+/// `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `BISECT_LOG`), including dangling
+/// symlinks. Prevents planted state from hijacking a host `git rebase --abort`
+/// into updating another ref such as `refs/heads/main` (SEC-117).
+pub(crate) fn ensure_no_operation_state(tree: &Path) -> Result<(), GitError> {
+    let git_dir = PathBuf::from(git(tree, &["rev-parse", "--absolute-git-dir"])?);
+    for marker in OPERATION_STATE_MARKERS {
+        let path = git_dir.join(marker);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                return Err(refused(&path, "is an unexpected git operation state"));
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
 }
 
 fn check_one(path: &Path) -> Result<(), GitError> {

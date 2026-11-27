@@ -201,6 +201,7 @@ fn merge_locked(
 /// the task's own (in-tree `core.hooksPath`) would run with the gate's trust
 /// and could rewrite the working tree the gate is about to judge.
 fn rebase(tree: &Path, onto: &str) -> Result<Option<Vec<String>>, GitError> {
+    super::pseudo_ref_guard::ensure_no_operation_state(tree)?;
     let args = [
         "-c",
         "core.hooksPath=/dev/null",
