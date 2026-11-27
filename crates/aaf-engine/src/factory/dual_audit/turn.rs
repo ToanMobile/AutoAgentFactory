@@ -18,11 +18,11 @@ use super::{
 };
 use crate::cross_audit::AUDIT_EXECUTOR;
 use crate::cross_audit::dual_verdict::{
-    DualReviewerOutcome, adjudicate_json_schema, build_adjudicate_prompt, build_dual_checklist,
-    build_dual_review_prompt, dual_review_json_schema, evaluate_adjudication, names_dual_blocker,
-    parse_and_validate_dual_review,
+    DualReviewerOutcome, adjudicate_json_schema, build_adjudicate_prompt_with_limit,
+    build_dual_checklist, build_dual_review_prompt_with_limit, dual_review_json_schema,
+    evaluate_adjudication, names_dual_blocker, parse_and_validate_dual_review_with_limit,
 };
-use crate::cross_audit::prompt::{PRIOR_BEGIN, PRIOR_END, neutralise, summarize_diff_lockfiles};
+use crate::cross_audit::prompt::{PRIOR_BEGIN, PRIOR_END, neutralise, summarize_diff_for_audit};
 use crate::factory::audit_backend::{report_audit_limit, route_audit_limit};
 use crate::factory::audit_turn::short_circuit_audit_reason_with_limit;
 use crate::factory::plan_job;
@@ -268,15 +268,21 @@ pub(crate) fn run_reviewer_turn(
         )?;
         return Ok(PartialTurnResult::Completed(Box::new(rec)));
     }
-    let diff = summarize_diff_lockfiles(&raw_diff);
+    let diff = summarize_diff_for_audit(&raw_diff);
     let plan = plan_job::latest_converged_plan(deps, &task.id)?.map(|(p, _)| p);
     let mut spec = task.spec.clone();
     if post_audit::has_behavioral_red_unproven(receipt) {
         spec.acceptance.push(BEHAVIORAL_RED_NOTE.to_string());
     }
     let checklist = build_dual_checklist(&spec, deps.settings.mobile, plan.is_some());
-    let base_prompt =
-        build_dual_review_prompt(&task, &diff, plan.as_ref(), &checklist, cfg.score_gate);
+    let base_prompt = build_dual_review_prompt_with_limit(
+        &task,
+        &diff,
+        plan.as_ref(),
+        &checklist,
+        cfg.score_gate,
+        cfg.max_diff_bytes,
+    );
     let schema = dual_review_json_schema(cfg.score_gate);
     let (parsed, last_run_id) = match with_clean_tree(deps, |tree| {
         let (mut prompt, mut run_id) = (base_prompt.clone(), String::new());
@@ -300,7 +306,7 @@ pub(crate) fn run_reviewer_turn(
                 };
                 break;
             }
-            res = parse_and_validate_dual_review(
+            res = parse_and_validate_dual_review_with_limit(
                 &out.final_text,
                 &checklist,
                 &diff,
@@ -309,6 +315,7 @@ pub(crate) fn run_reviewer_turn(
                 cfg.min_average_score,
                 cfg.min_criterion_score,
                 mech,
+                cfg.max_diff_bytes,
             );
             if attempt == 1 && saw_named_blocker && matches!(res, DualReviewerOutcome::Pass { .. })
             {
@@ -381,9 +388,15 @@ pub(crate) fn run_adjudicate_turn(
     grant: &Grant,
 ) -> PortResult<Next> {
     let task = deps.store.get_task(&job.task_id)?;
-    let diff = summarize_diff_lockfiles(&deps.git.diff(&job.worktree)?);
+    let diff = summarize_diff_for_audit(&deps.git.diff(&job.worktree)?);
     let plan = plan_job::latest_converged_plan(deps, &task.id)?.map(|(p, _)| p);
-    let prompt = build_adjudicate_prompt(&task, &diff, plan.as_ref(), findings);
+    let prompt = build_adjudicate_prompt_with_limit(
+        &task,
+        &diff,
+        plan.as_ref(),
+        findings,
+        deps.settings.repo.cross_audit.max_diff_bytes,
+    );
     let schema = adjudicate_json_schema().to_string();
     let (run_id, adj) = match with_clean_tree(deps, |tree| {
         match run_clean_turn(deps, target, &task, tree, prompt, schema, grant)? {

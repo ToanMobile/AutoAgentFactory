@@ -111,7 +111,7 @@ pub fn summarize_diff_lockfiles_with_threshold(diff: &str, threshold_bytes: usiz
     out
 }
 
-fn parse_hunk_counts(line: &str) -> Option<(u32, u32)> {
+pub(super) fn parse_hunk_counts(line: &str) -> Option<(u32, u32)> {
     let mut parts = line
         .strip_prefix("@@")?
         .split("@@")
@@ -126,7 +126,7 @@ fn parse_hunk_counts(line: &str) -> Option<(u32, u32)> {
 
 /// Splits a unified git diff on top-level `diff --git ` headers while tracking
 /// hunk body line counts so diff content cannot forge section boundaries.
-fn split_diff_sections(diff: &str) -> Vec<&str> {
+pub(super) fn split_diff_sections(diff: &str) -> Vec<&str> {
     let mut starts: Vec<usize> = Vec::new();
     let (mut old_rem, mut new_rem, mut offset) = (0u32, 0u32, 0usize);
     for raw in diff.split_inclusive('\n') {
@@ -175,7 +175,7 @@ fn split_diff_sections(diff: &str) -> Vec<&str> {
     sections
 }
 
-fn strip_prefix_path(raw: &str, prefix: &str) -> Option<String> {
+pub(super) fn strip_prefix_path(raw: &str, prefix: &str) -> Option<String> {
     let field = raw.split('\t').next().unwrap_or(raw).trim();
     if field.is_empty() || field == "/dev/null" {
         return None;
@@ -278,7 +278,7 @@ impl SummaryAcc {
     }
 }
 
-fn sanitize_inline(text: &str) -> String {
+pub(super) fn sanitize_inline(text: &str) -> String {
     neutralise(text.replace(['\r', '\n'], " ").trim())
 }
 

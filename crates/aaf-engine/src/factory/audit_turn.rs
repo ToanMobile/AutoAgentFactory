@@ -51,7 +51,7 @@ pub(super) fn short_circuit_audit_reason_with_limit(
     if diff.trim().is_empty() {
         return Some("inconclusive: empty diff: nothing to audit".to_string());
     }
-    let prepared = cross_audit::prompt::summarize_diff_lockfiles(diff);
+    let prepared = cross_audit::prompt::summarize_diff_for_audit(diff);
     if cross_audit::prompt::truncate_diff_with_limit(&prepared, max_diff_bytes).1 {
         let top = cross_audit::prompt::top_diff_files(&prepared);
         let hint = if top.is_empty() {
@@ -66,10 +66,6 @@ pub(super) fn short_circuit_audit_reason_with_limit(
         ));
     }
     None
-}
-
-pub(super) fn short_circuit_audit_reason(diff: &str) -> Option<String> {
-    short_circuit_audit_reason_with_limit(diff, cross_audit::prompt::MAX_DIFF_BYTES)
 }
 
 fn has_status_code(lower: &str, code: &str) -> bool {
@@ -196,7 +192,7 @@ pub(crate) fn run_auditor_turn(
     run.request.sandbox.read_only = true;
     let prepared_input = AuditInput {
         spec: input.spec.clone(),
-        diff: cross_audit::prompt::summarize_diff_lockfiles(&input.diff),
+        diff: cross_audit::prompt::summarize_diff_for_audit(&input.diff),
         mobile: input.mobile,
     };
     let max_diff_bytes = deps.settings.repo.cross_audit.max_diff_bytes;

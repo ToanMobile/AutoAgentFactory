@@ -16,12 +16,15 @@ use super::checklist::{self, ID_ASSERT, ID_GATE_CI, ID_HARDCODED, ID_SECRET, ID_
 use super::diff_hunks::{
     DiffHunks, evidence_in_diff, extract_citations, parse_diff_hunks_with_truncation,
 };
-use super::prompt::{neutralise, truncate_diff};
+use super::prompt::{MAX_DIFF_BYTES, neutralise, truncate_diff_with_limit};
 use super::scoring::{GOLDEN_IDS, MechanicalScoreReport, evaluate_score_gate};
 use super::verdict::strip_ansi_escapes;
 
 mod prompt;
-pub use prompt::{build_adjudicate_prompt, build_dual_review_prompt};
+pub use prompt::{
+    build_adjudicate_prompt, build_adjudicate_prompt_with_limit, build_dual_review_prompt,
+    build_dual_review_prompt_with_limit,
+};
 
 pub type ChecklistItem = checklist::Item;
 pub const PLAN_DRIFT_ID: &str = "PLAN-DRIFT";
@@ -249,6 +252,32 @@ pub fn parse_and_validate_dual_review(
     min_crit: u8,
     mechanical_score: u8,
 ) -> DualReviewerOutcome {
+    parse_and_validate_dual_review_with_limit(
+        raw,
+        checklist,
+        diff,
+        plan,
+        score_gate,
+        min_avg,
+        min_crit,
+        mechanical_score,
+        MAX_DIFF_BYTES,
+    )
+}
+
+/// Like [`parse_and_validate_dual_review`] with an explicit diff byte ceiling.
+#[allow(clippy::too_many_arguments)]
+pub fn parse_and_validate_dual_review_with_limit(
+    raw: &str,
+    checklist: &[ChecklistItem],
+    diff: &str,
+    plan: Option<&PlanContract>,
+    score_gate: bool,
+    min_avg: u8,
+    min_crit: u8,
+    mechanical_score: u8,
+    max_diff_bytes: usize,
+) -> DualReviewerOutcome {
     let run = || -> Result<DualReviewerOutcome, String> {
         if !checklist.iter().any(|it| it.blocking) {
             return Err("checklist has no blocking item".into());
@@ -309,7 +338,7 @@ pub fn parse_and_validate_dual_review(
                 });
             }
         }
-        let (vis_diff, trunc) = truncate_diff(diff);
+        let (vis_diff, trunc) = truncate_diff_with_limit(diff, max_diff_bytes);
         let hunks = parse_diff_hunks_with_truncation(vis_diff, trunc);
         let planned: BTreeSet<String> = plan
             .map(|p| {
