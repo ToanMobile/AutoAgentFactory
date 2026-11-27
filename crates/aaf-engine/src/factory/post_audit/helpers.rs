@@ -201,7 +201,7 @@ pub(crate) fn collect_rework_findings(
                 .iter()
                 .filter(|s| {
                     s.score >= cfg.min_criterion_score
-                        && s.score < 100
+                        && s.score < cfg.min_average_score
                         && !s.deduction_reason.trim().is_empty()
                 })
                 .collect()

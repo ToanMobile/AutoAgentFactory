@@ -449,6 +449,8 @@ fn audit_and_dual_prompts_enforce_diff_first_within_byte_caps() {
 
     let dual = build_dual_review_prompt(&task, diff, None, &checklist, true);
     assert!(dual.contains("Audit primarily from the supplied DIFF"));
+    assert!(dual.contains("not running tests yourself in read-only mode"));
+    assert!(dual.contains("deferred real-device/vehicle checks"));
     assert!(dual.len() <= 4_800, "dual prompt: {}", dual.len());
 
     let adj = build_adjudicate_prompt(&task, diff, None, &[sample_issue()]);
@@ -464,6 +466,7 @@ fn audit_and_dual_prompts_enforce_diff_first_within_byte_caps() {
     );
     assert!(single.contains("Audit primarily from the diff below"));
     assert!(single.contains("NEVER call Bash/shell commands"));
+    assert!(single.contains("not running tests yourself in read-only mode"));
     assert!(single.len() <= 4_500, "single prompt: {}", single.len());
 
     // Empty-prior repair must NOT instruct answering "yes" for every item.
