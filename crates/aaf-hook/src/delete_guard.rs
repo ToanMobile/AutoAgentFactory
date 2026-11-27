@@ -8,6 +8,7 @@ use crate::shell::Cmd;
 use crate::{Ctx, Denial, git_guard, paths};
 
 mod find;
+mod rewriters;
 mod writers;
 
 use find::{DELETERS, feeds_protected, find};
@@ -142,6 +143,9 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             })
         }
         "cp" | "install" | "rsync" => writers::check_copier(name, args, ctx),
+        "ln" => rewriters::check_ln(args, ctx),
+        "gzip" | "gunzip" | "bzip2" | "bunzip2" | "xz" | "unxz" | "lzma" | "unlzma" | "lzip"
+        | "compress" | "uncompress" | "zstd" => rewriters::check_compressor(name, args, ctx),
         "dd" => args.iter().find_map(|arg| {
             arg.strip_prefix("of=")
                 .and_then(|out| target(out, false, "dd", ctx))
