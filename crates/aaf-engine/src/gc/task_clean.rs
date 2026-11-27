@@ -436,7 +436,10 @@ pub(super) fn clean_task_artifacts_by_id(
         && has_branch
     {
         if !clean_opts.dry_run {
-            let del = git_raw(repo, &["update-ref", "-d", &branch_ref, verified_oid])?;
+            let del = git_raw(
+                repo,
+                &["update-ref", "-d", "--no-deref", &branch_ref, verified_oid],
+            )?;
             if !del.success() {
                 let still_exists =
                     git_raw(repo, &["rev-parse", "--verify", "--quiet", &branch_ref])
