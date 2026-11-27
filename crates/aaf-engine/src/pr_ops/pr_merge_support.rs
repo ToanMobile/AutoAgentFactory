@@ -2,8 +2,7 @@
 //! deadline utilities for [`super::pr_merge`].
 
 use std::fs::{self, File, TryLockError};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,13 +19,13 @@ use crate::git::warm_slot::{
 use crate::git::{GitError, check_branch_name, worktree};
 use crate::throttle::Progress;
 
+pub(super) use super::pr_temp_ref::TempRefGuard;
+
 /// Maximum wait duration (24 hours) for lock or CI polling to prevent overflow
 /// when computing `Instant` deadlines.
 pub(super) const MAX_WAIT_SECS: u64 = 86_400;
 /// How often a waiter on the per-repo merge lock reports progress.
 const MERGE_LOCK_PROGRESS_SECS: u64 = 15;
-
-static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Returns a bounded deadline that never overflows `Instant`.
 pub(super) fn bounded_deadline(timeout: Duration) -> Instant {
@@ -464,37 +463,6 @@ impl Drop for MergeLockGuard {
     }
 }
 
-/// Unique temporary ref (`refs/aaf-merge/pr-{num}-{pid}-{seq}`); always
-/// deleted on `Drop` so error paths never leak refs.
-pub(super) struct TempRefGuard {
-    repo_root: PathBuf,
-    ref_name: String,
-}
-
-impl TempRefGuard {
-    pub(super) fn new(repo_root: &Path, pr_number: u64) -> Self {
-        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let ref_name = format!("refs/aaf-merge/pr-{pr_number}-{}-{seq}", std::process::id());
-        Self {
-            repo_root: repo_root.to_path_buf(),
-            ref_name,
-        }
-    }
-
-    pub(super) fn as_str(&self) -> &str {
-        &self.ref_name
-    }
-}
-
-impl Drop for TempRefGuard {
-    fn drop(&mut self) {
-        let _ = git_raw(
-            &self.repo_root,
-            &["update-ref", "-d", "--no-deref", &self.ref_name],
-        );
-    }
-}
-
 pub(super) fn fetch_base(
     repo_root: &Path,
     remote: &str,
@@ -549,6 +517,9 @@ pub(super) fn fetch_base_and_pr(
 
     // Combine base + PR refspecs into a single network fetch; fall back to
     // separate fetches when `refs/pull/<n>/head` is missing or lagging.
+    // SEC-135: reject a pre-planted symref/symlink/hard-link at `tmp_ref`
+    // before fetching so git cannot follow it onto another branch.
+    crate::git::pseudo_ref_guard::ensure_plain_branch_ref(repo_root, tmp_ref.as_str())?;
     let (base_sha, mut fetched_head) = if git_raw(
         repo_root,
         &["fetch", "--quiet", "--", remote, &base_refspec, &pr_refspec],
@@ -560,6 +531,7 @@ pub(super) fn fetch_base_and_pr(
         (base_sha, head)
     } else {
         let base_sha = fetch_base(repo_root, remote, &pr.base_ref_name)?;
+        crate::git::pseudo_ref_guard::ensure_plain_branch_ref(repo_root, tmp_ref.as_str())?;
         let head =
             if git_raw(repo_root, &["fetch", "--quiet", "--", remote, &pr_refspec])?.success() {
                 git(repo_root, &["rev-parse", tmp_ref.as_str()]).ok()
@@ -579,6 +551,7 @@ pub(super) fn fetch_base_and_pr(
         && check_branch_name(repo_root, &pr.head_ref_name).is_ok()
     {
         let branch_refspec = format!("+refs/heads/{}:{}", pr.head_ref_name, tmp_ref.as_str());
+        crate::git::pseudo_ref_guard::ensure_plain_branch_ref(repo_root, tmp_ref.as_str())?;
         if git_raw(
             repo_root,
             &["fetch", "--quiet", "--", remote, &branch_refspec],
