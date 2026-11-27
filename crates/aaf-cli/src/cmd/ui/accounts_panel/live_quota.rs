@@ -18,10 +18,10 @@ use aaf_engine::executors::agy::AgyRunner;
 use aaf_engine::executors::registry::{find_descriptor, resolve_binary_with_home};
 use serde_json::{Value, json};
 
+use super::live_quota_parse::parse_grok_usage_json;
 #[cfg(test)]
 pub(crate) use super::live_quota_parse::parse_rfc3339_utc_ms;
 pub(crate) use super::live_quota_parse::{parse_agy_usage_output, parse_grok_pty_usage};
-use super::live_quota_parse::parse_grok_usage_json;
 use crate::cmd::ui::extras::read_regular_bounded;
 use crate::ctx::Ctx;
 
@@ -179,7 +179,8 @@ fn spawn_pipe_reader(
 }
 
 fn recv_pipe(rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>, wait: Duration) -> Vec<u8> {
-    rx.and_then(|r| r.recv_timeout(wait).ok()).unwrap_or_default()
+    rx.and_then(|r| r.recv_timeout(wait).ok())
+        .unwrap_or_default()
 }
 
 fn run_cmd_bounded(
@@ -283,9 +284,9 @@ fn probe_antigravity_quota(ctx: &Ctx) -> Value {
     };
     let args = ["-p=/usage", "--mode", "plan", "--output-format", "json"];
     let mut out_val = match run_cmd_bounded(ctx, &bin, &args, AGY_USAGE_TIMEOUT) {
-        Ok(out) => parse_agy_usage_output(&out, fetched_ms).unwrap_or_else(|| {
-            json!({ "live": false, "reason": "parse_failed", "fetchedAtMs": fetched_ms })
-        }),
+        Ok(out) => parse_agy_usage_output(&out, fetched_ms).unwrap_or_else(
+            || json!({ "live": false, "reason": "parse_failed", "fetchedAtMs": fetched_ms }),
+        ),
         Err(err) => {
             json!({ "live": false, "reason": "error", "error": err, "fetchedAtMs": fetched_ms })
         }
@@ -369,7 +370,9 @@ fn probe_and_store(ctx: &Ctx) -> Value {
     };
     let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
     let agy = if agy_raw["reason"].as_str() == Some("busy")
-        && let Some(prev) = map.get(&ctx.home).and_then(|e| e.payload.get("antigravity"))
+        && let Some(prev) = map
+            .get(&ctx.home)
+            .and_then(|e| e.payload.get("antigravity"))
         && prev["live"].as_bool() == Some(true)
     {
         prev.clone()
@@ -402,7 +405,10 @@ pub(super) fn fetch_provider_quotas(ctx: &Ctx, read_only: bool, force_refresh: b
     let (warm, stale_snapshot) = {
         let map = cache().lock().unwrap_or_else(|e| e.into_inner());
         match map.get(&ctx.home) {
-            Some(e) => (e.fetched_at.elapsed() < LIVE_QUOTA_TTL, Some(e.payload.clone())),
+            Some(e) => (
+                e.fetched_at.elapsed() < LIVE_QUOTA_TTL,
+                Some(e.payload.clone()),
+            ),
             None => (false, None),
         }
     };

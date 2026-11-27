@@ -142,7 +142,12 @@ fn merge_repo_assignments_deduplicates_and_scopes() {
     .unwrap();
     let discovered = vec![
         mk_profile("grok-1", ProviderKind::Grok, "grok", &repo_b),
-        mk_profile("antigravity-1", ProviderKind::Antigravity, "gemini", &repo_b),
+        mk_profile(
+            "antigravity-1",
+            ProviderKind::Antigravity,
+            "gemini",
+            &repo_b,
+        ),
     ];
     let overridden = merge_repo_assignments(None, Some(&repo_a), Some(&sw), &discovered);
     assert_eq!(overridden.len(), 1);
@@ -154,10 +159,30 @@ fn merge_repo_assignments_deduplicates_and_scopes() {
 fn sync_skips_stale_mismatch_expired_reset_and_uses_fallback_when_reset_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let db = Db::open(&tmp.path().join("aaf.db")).unwrap();
-    let p_stale = mk_profile("claude_code-s", ProviderKind::ClaudeCode, "acc_s", tmp.path());
-    let p_mis = mk_profile("claude_code-m", ProviderKind::ClaudeCode, "acc_m", tmp.path());
-    let p_exp = mk_profile("claude_code-e", ProviderKind::ClaudeCode, "acc_e", tmp.path());
-    let p_fb = mk_profile("claude_code-f", ProviderKind::ClaudeCode, "acc_f", tmp.path());
+    let p_stale = mk_profile(
+        "claude_code-s",
+        ProviderKind::ClaudeCode,
+        "acc_s",
+        tmp.path(),
+    );
+    let p_mis = mk_profile(
+        "claude_code-m",
+        ProviderKind::ClaudeCode,
+        "acc_m",
+        tmp.path(),
+    );
+    let p_exp = mk_profile(
+        "claude_code-e",
+        ProviderKind::ClaudeCode,
+        "acc_e",
+        tmp.path(),
+    );
+    let p_fb = mk_profile(
+        "claude_code-f",
+        ProviderKind::ClaudeCode,
+        "acc_f",
+        tmp.path(),
+    );
     for p in [&p_stale, &p_mis, &p_exp, &p_fb] {
         db.upsert_account(p).unwrap();
     }
@@ -272,13 +297,19 @@ fn parses_live_agy_usage_json_with_groups() {
     assert_eq!(parsed["remainingPct"].as_i64(), Some(82));
     assert_eq!(parsed["weeklyRemainingPct"].as_i64(), Some(84));
     assert_eq!(parsed["groups"].as_array().map(Vec::len), Some(2));
-    assert_eq!(parsed["groups"][1]["name"].as_str(), Some("Claude and GPT models"));
+    assert_eq!(
+        parsed["groups"][1]["name"].as_str(),
+        Some("Claude and GPT models")
+    );
     assert_eq!(parsed["groups"][1]["remainingPct"].as_i64(), Some(100));
 }
 
 #[test]
 fn rejects_epoch_zero_sentinel_timestamp() {
-    assert_eq!(live_quota::parse_rfc3339_utc_ms("1970-01-01T00:00:00Z"), None);
+    assert_eq!(
+        live_quota::parse_rfc3339_utc_ms("1970-01-01T00:00:00Z"),
+        None
+    );
     assert!(live_quota::parse_rfc3339_utc_ms("2026-11-27T03:07:12Z").unwrap() > 0);
 }
 
@@ -300,14 +331,21 @@ fn parses_live_grok_pty_usage_output() {
     // Missing `%` must NOT be treated as a percentage (prevents false 0% cooldown).
     assert!(live_quota::parse_grok_pty_usage("Weekly limit: 500\n", 1_700_000_000_000).is_none());
     // Decimal `%` supported and 99.6% used does not prematurely report 0% remaining.
-    let near_cap = live_quota::parse_grok_pty_usage("Weekly limit: 99.6%\n", 1_700_000_000_000).unwrap();
+    let near_cap =
+        live_quota::parse_grok_pty_usage("Weekly limit: 99.6%\n", 1_700_000_000_000).unwrap();
     assert_eq!(near_cap["weeklyRemainingPct"].as_i64(), Some(1));
 }
 
 #[test]
 fn rejects_negative_rfc3339_fields_and_negative_remaining_fraction() {
-    assert_eq!(live_quota::parse_rfc3339_utc_ms("2026-11-27T-5:-10:-20Z"), None);
-    assert_eq!(live_quota::parse_rfc3339_utc_ms("2026-11-27T03:07:12:99Z"), None);
+    assert_eq!(
+        live_quota::parse_rfc3339_utc_ms("2026-11-27T-5:-10:-20Z"),
+        None
+    );
+    assert_eq!(
+        live_quota::parse_rfc3339_utc_ms("2026-11-27T03:07:12:99Z"),
+        None
+    );
     let neg_frac = r#"{
         "command": { "data": { "groups": [{
             "name": "Gemini Models",
@@ -331,7 +369,12 @@ fn merge_repo_assignments_clears_stale_switcher_entry_when_local_file_unpinned()
             { "name": "repo-a", "path": repo_a.to_string_lossy(), "account": "finos_toan", "pinnedInFile": true }
         ]
     });
-    let discovered = vec![mk_profile("claude_code-1", ProviderKind::ClaudeCode, "finos_toan", &repo_a)];
+    let discovered = vec![mk_profile(
+        "claude_code-1",
+        ProviderKind::ClaudeCode,
+        "finos_toan",
+        &repo_a,
+    )];
     let merged = merge_repo_assignments(None, Some(&repo_a), Some(&sw), &discovered);
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0]["account"].as_str(), Some(""));
