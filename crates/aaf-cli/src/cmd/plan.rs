@@ -88,7 +88,7 @@ pub fn run(args: &PlanArgs, ctx: &Ctx) -> CmdResult {
         effective_exec
     };
 
-    if effective_exec.eq_ignore_ascii_case("claude")
+    if aaf_domain::pipeline::normalize_executor_id(effective_exec) == "claude"
         && let Err(problem) = hook_settings::check_worktree(&repo, &ctx.path_var, None)
     {
         return Ok(CmdOutput::policy("refused", problem.clone()).field("reason", json!(problem)));
@@ -140,6 +140,7 @@ pub fn run(args: &PlanArgs, ctx: &Ctx) -> CmdResult {
         timeout_secs,
         sandbox,
         json_schema: None,
+        max_turns: Some(16),
     };
     let outcome = runner.run(&request).map_err(|e| err("plan runner", e))?;
     if let (Some(pool), Some(g), Some(hit)) = (

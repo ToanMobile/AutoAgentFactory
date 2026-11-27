@@ -44,7 +44,7 @@ pub(crate) fn build_stage_run_config(
     base_run: &RunConfig,
     ctx: &Ctx,
 ) -> Result<RunConfig, String> {
-    let lower = effective_exec.to_ascii_lowercase();
+    let lower = aaf_domain::pipeline::normalize_executor_id(effective_exec);
     if lower == "claude" {
         return Ok(RunConfig {
             executor: "claude".to_string(),

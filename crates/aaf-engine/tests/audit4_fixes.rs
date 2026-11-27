@@ -222,6 +222,7 @@ fn symlinked_write_denied_targets_inside_writable_caches_stay_closed() {
                 ..SandboxPolicy::default()
             },
             json_schema: None,
+            max_turns: None,
         })
         .unwrap()
         .log_tail;

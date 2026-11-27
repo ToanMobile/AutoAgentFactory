@@ -19,7 +19,7 @@ use super::worker::{self, Next};
 use super::{Deps, unblock};
 use crate::git::TaskWorktree;
 use crate::plan_debate::prompt::{
-    build_author_prompt, build_challenger_prompt, build_plan_format_repair_prompt,
+    build_author_prompt, build_challenger_prompt, build_plan_format_repair_prompt_with_prior,
 };
 use crate::plan_debate::schema::{
     canonical_plan_hash, format_plan_approved_note, plan_contract_json_schema,
@@ -32,6 +32,11 @@ use crate::plan_debate::{MAX_CONSECUTIVE_TURN_FAILS, PLAN_DEBATE_STALLED_PREFIX}
 
 /// Prefix used when a converged plan awaits explicit human approval.
 pub const PLAN_APPROVAL_PREFIX: &str = "plan approval required:";
+const PLAN_AUTHOR_R1_MAX_TURNS: u32 = 22;
+const PLAN_AUTHOR_DELTA_MAX_TURNS: u32 = 12;
+const PLAN_CHALLENGER_R1_MAX_TURNS: u32 = 16;
+const PLAN_CHALLENGER_DELTA_MAX_TURNS: u32 = 10;
+const PLAN_REPAIR_WITH_PRIOR_MAX_TURNS: u32 = 8;
 const DEBATE_KINDS: &[EventKind] = &[
     EventKind::PlanDebateTurn,
     EventKind::PlanConverged,
@@ -182,10 +187,16 @@ fn run_plan_turn_in(
                 &steering,
                 &repo_ctx,
             );
+            let max_turns = if round >= 2 && snap.latest_plan.is_some() {
+                PLAN_AUTHOR_DELTA_MAX_TURNS
+            } else {
+                PLAN_AUTHOR_R1_MAX_TURNS
+            };
             let (run_id, (plan, hash)) = match run_and_parse(
                 &ctx,
                 &prompt,
                 plan_contract_json_schema(),
+                max_turns,
                 validate_and_normalize_plan,
             )? {
                 Parsed::Ok(id, val) => (id, val),
@@ -216,10 +227,16 @@ fn run_plan_turn_in(
                 &steering,
                 &repo_ctx,
             );
+            let max_turns = if round >= 2 {
+                PLAN_CHALLENGER_DELTA_MAX_TURNS
+            } else {
+                PLAN_CHALLENGER_R1_MAX_TURNS
+            };
             let (run_id, critique) = match run_and_parse(
                 &ctx,
                 &prompt,
                 plan_critique_json_schema(),
+                max_turns,
                 validate_plan_critique,
             )? {
                 Parsed::Ok(id, val) => (id, val),
@@ -234,12 +251,14 @@ fn run_and_parse<T>(
     ctx: &TurnCtx<'_>,
     base_prompt: &str,
     schema: &str,
+    initial_max_turns: u32,
     parse: fn(&str) -> Result<T, String>,
 ) -> PortResult<Parsed<T>> {
     let mut prompt = base_prompt.to_string();
     let mut active_schema = schema;
+    let mut max_turns = initial_max_turns;
     for attempt in 0..2u8 {
-        let (run_id, outcome) = execute_runner(ctx, prompt, active_schema)?;
+        let (run_id, outcome) = execute_runner(ctx, prompt, active_schema, max_turns)?;
         if let Some(next) = handle_limit_or_infra(ctx, &outcome)? {
             return Ok(Parsed::Exit(next));
         }
@@ -254,10 +273,21 @@ fn run_and_parse<T>(
                     && worker::ensure_budget(ctx.deps, &ctx.task.root_id)?.check()
                         == BudgetCheck::Ok =>
             {
-                if outcome.final_text.trim().is_empty() {
+                let prior_empty = outcome.final_text.trim().is_empty();
+                if prior_empty {
                     active_schema = "";
                 }
-                let repair = build_plan_format_repair_prompt(ctx.role, &err, "");
+                max_turns = if prior_empty {
+                    initial_max_turns
+                } else {
+                    PLAN_REPAIR_WITH_PRIOR_MAX_TURNS
+                };
+                let repair = build_plan_format_repair_prompt_with_prior(
+                    ctx.role,
+                    &err,
+                    &outcome.final_text,
+                    "",
+                );
                 prompt = format!("{base_prompt}\n\n{repair}");
             }
             Err(err) => return Ok(Parsed::Exit(record_failure(ctx, Some(&run_id), &err)?)),
@@ -367,6 +397,7 @@ fn execute_runner(
     ctx: &TurnCtx<'_>,
     prompt: String,
     schema: &str,
+    max_turns: u32,
 ) -> PortResult<(String, AgentOutcome)> {
     let mut run = worker::begin_run_with(
         ctx.deps,
@@ -380,7 +411,8 @@ fn execute_runner(
     )?;
     run.request.sandbox.read_only = true;
     run.request.prompt = prompt;
-    run.request.json_schema = Some(schema.to_string());
+    run.request.json_schema = (!schema.trim().is_empty()).then(|| schema.to_string());
+    run.request.max_turns = Some(max_turns);
     let outcome = match ctx.target.runner.run(&run.request) {
         Ok(o) => o,
         Err(err) => {

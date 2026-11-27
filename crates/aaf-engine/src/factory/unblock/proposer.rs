@@ -184,6 +184,7 @@ impl<'a> LazyProposer<'a> {
             self.accounts,
         )?;
         base.sandbox.read_only = true;
+        base.max_turns = Some(12);
         let proposer = AgentSubtaskProposer {
             runner: &recorder,
             budgets: &*self.deps.store as &dyn Store,

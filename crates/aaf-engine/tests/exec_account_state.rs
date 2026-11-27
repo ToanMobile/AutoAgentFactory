@@ -73,6 +73,7 @@ fn linked_session_state_is_writable_and_linked_settings_are_not() {
                 ..SandboxPolicy::default()
             },
             json_schema: None,
+            max_turns: None,
         })
         .unwrap();
 

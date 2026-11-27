@@ -414,6 +414,7 @@ fn proposer_ignores_harmless_extra_keys_and_recovers_via_format_repair() {
             timeout_secs: 60,
             sandbox: SandboxPolicy::default(),
             json_schema: None,
+            max_turns: None,
         },
     };
     let plans = proposer

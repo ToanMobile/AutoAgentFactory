@@ -43,6 +43,7 @@ fn request(prompt: &str, cwd: &str) -> AgentRequest {
         timeout_secs: 60,
         sandbox: SandboxPolicy::default(),
         json_schema: None,
+        max_turns: None,
     }
 }
 
@@ -582,15 +583,14 @@ fn read_only_command_uses_slim_flags_without_stripping_inspection_tools() {
         );
     }
     assert!(
-        !disallowed.contains("Agent"),
-        "Agent tool must stay enabled for large-diff audits: {disallowed}"
+        disallowed.contains("Agent") && disallowed.contains("Bash"),
+        "Agent and Bash must be disallowed on read-only runs: {disallowed}"
     );
     assert!(
         !args.contains(&"--tools".to_string()),
         "never strip read-only inspection tools via --tools: {args:?}"
     );
 
-    // Write runs must keep MCP inheritance and session persistence intact.
     let mut rw = request("implement feature", "/work");
     rw.sandbox.enabled = true;
     let rw_args = runner().command(&rw).unwrap().args;

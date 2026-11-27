@@ -245,12 +245,16 @@ fn scored_audit_sets_json_schema_and_retries_empty_auditor_response() {
     assert_eq!(world.state("t1"), TaskState::Review, "{summary:?}");
     let schemas = watcher.schemas.lock().unwrap();
     assert_eq!(schemas.len(), 2, "initial empty response + format repair");
-    for schema_opt in schemas.iter() {
-        let schema = schema_opt.as_deref().expect("json_schema must be set");
-        let parsed: serde_json::Value = serde_json::from_str(schema).expect("valid JSON schema");
-        assert_eq!(parsed["type"], "object");
-        assert!(parsed["properties"]["answers"].is_object());
-    }
+    let first = schemas[0]
+        .as_deref()
+        .expect("initial turn must set json_schema");
+    let parsed: serde_json::Value = serde_json::from_str(first).expect("valid JSON schema");
+    assert_eq!(parsed["type"], "object");
+    assert!(parsed["properties"]["answers"].is_object());
+    assert!(
+        schemas[1].is_none(),
+        "empty-prior repair must disable json_schema so CLI does not repeat empty output"
+    );
     let sample_input = crate::cross_audit::AuditInput {
         spec: super::fakes::spec(),
         diff: "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n".into(),

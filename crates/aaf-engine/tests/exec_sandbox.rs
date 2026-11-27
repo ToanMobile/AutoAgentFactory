@@ -335,6 +335,7 @@ mod real {
                     read_denied_paths: vec![dirs.denied.to_string_lossy().into_owned()],
                 },
                 json_schema: None,
+                max_turns: None,
             })
             .unwrap();
         let log = &outcome.log_tail;

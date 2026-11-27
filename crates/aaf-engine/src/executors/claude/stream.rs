@@ -79,10 +79,31 @@ pub struct StreamParser {
 struct ResultEvent {
     text: String,
     is_error: bool,
+    /// True when the CLI exited due to a local execution ceiling (e.g.
+    /// `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`)
+    /// without a structured API/HTTP error: must stay fail-closed (`is_error = true`)
+    /// but must never be misclassified as `LimitHit` or `InfraFailure`.
+    is_local_cap_error: bool,
     api_error_status: Option<i64>,
     infra: Option<InfraFailure>,
     tokens: (u64, u64),
     ctx: (u64, u64),
+}
+
+fn is_error_subtype(subtype: Option<&str>) -> bool {
+    subtype.is_some_and(|s| {
+        s.as_bytes()
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case(b"error_"))
+    })
+}
+
+fn is_local_cap_subtype(subtype: Option<&str>) -> bool {
+    subtype.is_some_and(|s| {
+        s.eq_ignore_ascii_case("error_max_turns")
+            || s.eq_ignore_ascii_case("error_max_budget_usd")
+            || s.eq_ignore_ascii_case("error_max_structured_output_retries")
+    })
 }
 
 impl StreamParser {
@@ -118,12 +139,25 @@ impl StreamParser {
                 }
                 let flagged =
                     event.get("is_api_error_message").and_then(Value::as_bool) == Some(true);
+                let has_error = event.get("error").is_some_and(|e| !e.is_null());
+                let is_synthetic = message.and_then(|m| m.get("model")).and_then(Value::as_str)
+                    == Some("<synthetic>");
+                let has_content = !text.is_empty()
+                    || message
+                        .and_then(|m| m.get("content"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|blocks| !blocks.is_empty());
                 let structured = structured_infra(&event, &text);
                 if structured.is_some() {
                     self.api_error = structured;
-                } else if event.get("error").is_some() || flagged {
+                } else if has_error || flagged {
                     self.api_error =
                         network_wording_infra(flagged, &text).or_else(|| auth_wording_infra(&text));
+                } else if !is_synthetic && has_content {
+                    // A subsequent clean non-synthetic assistant turn proves any
+                    // earlier transient API/rate-limit error recovered.
+                    self.api_error = None;
+                    self.rate_limit_error = None;
                 }
                 if let Some(usage) = message.and_then(|m| m.get("usage")) {
                     let id = message
@@ -162,25 +196,32 @@ impl StreamParser {
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
-                    || subtype == Some("error_max_structured_output_retries");
+                    || is_error_subtype(subtype);
+                let api_error_status = event
+                    .get("api_error_status")
+                    .or_else(|| event.get("status_code"))
+                    .and_then(Value::as_i64);
                 let api_err = is_error
                     && event.get("terminal_reason").and_then(Value::as_str) == Some("api_error");
                 let tokens = event.get("usage").map(usage_tokens).unwrap_or_default();
                 let ctx = event.get("usage").map(context_tokens).unwrap_or_default();
-                let infra = structured_infra(&event, raw_result)
+                let structured = structured_infra(&event, raw_result);
+                let is_local_cap_error = is_local_cap_subtype(subtype)
+                    && !api_err
+                    && api_error_status.is_none()
+                    && structured.is_none();
+                let infra = structured
                     .or_else(|| network_wording_infra(api_err, raw_result))
                     .or_else(|| {
-                        (is_error || tokens == (0, 0))
+                        (!is_local_cap_error && (is_error || tokens == (0, 0)))
                             .then(|| auth_wording_infra(raw_result))
                             .flatten()
                     });
                 self.result = Some(ResultEvent {
                     text,
                     is_error,
-                    api_error_status: event
-                        .get("api_error_status")
-                        .or_else(|| event.get("status_code"))
-                        .and_then(Value::as_i64),
+                    is_local_cap_error,
+                    api_error_status,
                     infra,
                     tokens,
                     ctx,
@@ -246,7 +287,11 @@ impl StreamParser {
         // A run that produced a successful result was served, whatever the
         // rate-limit telemetry said on the way (a window can report
         // `rejected` while paid overage still covers the request).
-        if self.result.as_ref().is_some_and(|r| !r.is_error) {
+        if self
+            .result
+            .as_ref()
+            .is_some_and(|r| !r.is_error || r.is_local_cap_error)
+        {
             return None;
         }
         let failed_text = self
@@ -282,6 +327,11 @@ impl StreamParser {
     /// was served in the end, or that hit a limit (handled as a limit), is none.
     fn infra(&self) -> Option<InfraFailure> {
         if self.limit_hit().is_some() {
+            return None;
+        }
+        if let Some(res) = &self.result
+            && res.is_local_cap_error
+        {
             return None;
         }
         if let Some(res) = &self.result

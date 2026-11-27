@@ -173,6 +173,7 @@ pub(super) fn request_with(
             &accounts.profiles()?,
         ),
         json_schema: None,
+        max_turns: None,
     })
 }
 

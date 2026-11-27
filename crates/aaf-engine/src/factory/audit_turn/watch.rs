@@ -4,8 +4,11 @@
 use std::sync::{Mutex, PoisonError};
 
 use aaf_domain::ports::{
-    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, LimitHit, PortResult,
+    AgentOutcome, AgentRequest, AgentRunner, InfraFailure, InfraKind, LimitHit, PortResult,
 };
+
+use crate::factory::scheduler::DEFAULT_RATE_LIMIT_COOLDOWN_SECS;
+use crate::factory::unblock;
 
 /// Passes a run on to the real runner and captures any infra failure, usage
 /// limit, failed log tail, and final text: wrappers like audit and subtask
@@ -111,5 +114,120 @@ impl AgentRunner for InfraWatch<'_> {
 
     fn reports_tokens(&self) -> bool {
         self.runner.reports_tokens()
+    }
+}
+
+fn has_status_code(lower: &str, code: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "http ",
+        "http/1.1 ",
+        "http/2 ",
+        "status ",
+        "status: ",
+        "status=",
+        "code ",
+        "code: ",
+        "code=",
+        "error ",
+        "error: ",
+    ];
+    PREFIXES
+        .iter()
+        .any(|p| lower.contains(&format!("{p}{code}")))
+}
+
+/// Reads a failed auditor log tail for a rate limit, a refused login, or a
+/// network failure. For runners with structured token parsers
+/// (`tokens_measured == true`, e.g. `ClaudeCodeRunner` / `AgyRunner`), skips
+/// JSON-object lines (already parsed by the runner) so `stream-json` telemetry
+/// or assistant prose on `error_max_turns` never triggers false cooldowns or
+/// auth halts, while plain-text stderr errors are still classified.
+pub(super) fn classify_auditor_log_tail(
+    tail: &str,
+    tokens_measured: bool,
+    now: i64,
+    infra: &mut Option<InfraFailure>,
+    limit_hit: &mut Option<LimitHit>,
+) {
+    let filtered: String;
+    let effective = if tokens_measured {
+        filtered = tail
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty()
+                    && !matches!(
+                        serde_json::from_str::<serde_json::Value>(trimmed),
+                        Ok(serde_json::Value::Object(_))
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if filtered.is_empty() {
+            return;
+        }
+        filtered.as_str()
+    } else {
+        tail
+    };
+    let lower = effective
+        .to_ascii_lowercase()
+        .replace("rate_limit_event", " ")
+        .replace("rate_limit_info", " ");
+    let raw = unblock::one_line(effective, 300);
+    let has_any = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    let quota_hit = has_status_code(&lower, "429")
+        || has_any(&[
+            "429 too many",
+            "too many requests",
+            "rate limit",
+            "rate_limit",
+            "quota",
+        ]);
+    let auth_hit = has_status_code(&lower, "401")
+        || has_status_code(&lower, "403")
+        || has_any(&[
+            "401 unauthorized",
+            "403 forbidden",
+            "unauthorized",
+            "invalid api key",
+            "invalid_api_key",
+            "authentication failed",
+        ]);
+    let net_hit = has_any(&[
+        "econnrefused",
+        "etimedout",
+        "econnreset",
+        "enotfound",
+        "eai_again",
+        "ehostunreach",
+        "enetunreach",
+        "connection refused",
+        "connection timed out",
+        "connection dropped",
+        "can't reach the api server",
+        "unable to connect to api",
+        "could not resolve host",
+        "no internet route",
+        "503 service unavailable",
+        "529 overloaded",
+    ]) || ["502", "503", "504", "529"]
+        .iter()
+        .any(|c| has_status_code(&lower, c));
+    if quota_hit {
+        *limit_hit = Some(LimitHit {
+            reset_at: Some(now.saturating_add(DEFAULT_RATE_LIMIT_COOLDOWN_SECS)),
+            raw,
+        });
+    } else if auth_hit {
+        *infra = Some(InfraFailure {
+            kind: InfraKind::Auth,
+            raw,
+        });
+    } else if net_hit {
+        *infra = Some(InfraFailure {
+            kind: InfraKind::Network,
+            raw,
+        });
     }
 }

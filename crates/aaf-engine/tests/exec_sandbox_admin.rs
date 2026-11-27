@@ -80,6 +80,7 @@ mod real {
                     ..SandboxPolicy::default()
                 },
                 json_schema: None,
+                max_turns: None,
             })
             .unwrap();
         assert!(!outcome.timed_out, "{}", outcome.log_tail);

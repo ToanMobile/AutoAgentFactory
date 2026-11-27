@@ -88,6 +88,7 @@ fn subdirectories_keep_the_right_side_of_the_rule() {
                 ..SandboxPolicy::default()
             },
             json_schema: None,
+            max_turns: None,
         };
         runner.run(&request).unwrap().log_tail
     };

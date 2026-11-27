@@ -288,7 +288,7 @@ impl CliStageDriver<'_> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| self.cfg.repo.run.model.trim());
 
-        if effective_exec.eq_ignore_ascii_case("claude") {
+        if aaf_domain::pipeline::normalize_executor_id(effective_exec) == "claude" {
             let hook_base = (work_dir != self.repo_root)
                 .then_some(self.base_sha.as_deref())
                 .flatten();
@@ -363,6 +363,7 @@ impl CliStageDriver<'_> {
             timeout_secs,
             sandbox,
             json_schema: None,
+            max_turns: read_only.then_some(20),
         };
         let outcome = match runner.run(&request) {
             Ok(o) => o,

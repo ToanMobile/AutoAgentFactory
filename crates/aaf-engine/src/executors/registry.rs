@@ -268,7 +268,19 @@ pub fn build_headless_argv_confined(
                     .map(String::from),
             );
             if read_only {
-                argv.extend(["--permission-mode", "plan"].into_iter().map(String::from));
+                argv.extend(
+                    [
+                        "--permission-mode",
+                        "plan",
+                        "--no-session-persistence",
+                        "--disable-slash-commands",
+                        "--disallowedTools",
+                        super::claude_flags::READ_ONLY_DISALLOWED_TOOLS,
+                        "--strict-mcp-config",
+                    ]
+                    .into_iter()
+                    .map(String::from),
+                );
             } else if sandboxed {
                 argv.extend(
                     ["--permission-mode", "bypassPermissions"]
