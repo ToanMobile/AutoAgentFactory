@@ -296,23 +296,33 @@ fn inspect_rmtree(
     })
 }
 
-fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
+fn strip_comment_lines(code: &str) -> String {
+    code.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with('#') && !t.starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn inspect_text(interp_kind: Interp, interp: &str, text: &str, ctx: &Ctx) -> Option<Denial> {
     // 0. The data directory, named anywhere in the script (a heredoc body
     // is not among the command's words that `data_dir_guard` reads), and
     // file writes into protected/git paths.
-    if let Some(d) = data_guard::check_text(interp, code, ctx) {
+    if let Some(d) = data_guard::check_text(interp, text, ctx) {
         return Some(d);
     }
-    if let Some(d) = writes::check_written(interp, code, ctx) {
+    if let Some(d) = writes::check_written(interp, text, ctx) {
         return Some(d);
     }
 
     // 1. Scoped recursive delete APIs (`shutil.rmtree`, `fs.rmSync`, `FileUtils.rm_rf`, ...).
-    let api_haystack = normalize_api_haystack(code, interp_kind == Interp::Php);
-    if let Some(d) = inspect_rmtree(interp_kind, interp, code, &api_haystack, ctx) {
+    let api_haystack = normalize_api_haystack(text, interp_kind == Interp::Php);
+    if let Some(d) = inspect_rmtree(interp_kind, interp, text, &api_haystack, ctx) {
         return Some(d);
     }
-    let literals = extract_literals(code);
+    let literals = extract_literals(text);
 
     // 2. Single-file delete/rename APIs.
     if has_any(&api_haystack, FILE_DELETE_APIS) {
@@ -330,7 +340,7 @@ fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> 
 
     // 3. Shell-execution APIs (exempting ONLY JS regex-literal `/.../.exec(`).
     let perl_ruby = matches!(interp_kind, Interp::Perl | Interp::Ruby);
-    if has_shell_exec_api(&api_haystack) || (perl_ruby && has_space_call(code, &["system", "exec"]))
+    if has_shell_exec_api(&api_haystack) || (perl_ruby && has_space_call(text, &["system", "exec"]))
     {
         if ctx.depth >= shell::MAX_DEPTH {
             return Some(deny(
@@ -339,10 +349,10 @@ fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> 
             ));
         }
         let mut candidates: Vec<String> = literals;
-        candidates.extend(extract_delimited_commands(code, '[', ']'));
-        candidates.extend(extract_delimited_commands(code, '(', ')'));
+        candidates.extend(extract_delimited_commands(text, '[', ']'));
+        candidates.extend(extract_delimited_commands(text, '(', ')'));
         if perl_ruby {
-            candidates.extend(extract_space_call_commands(code));
+            candidates.extend(extract_space_call_commands(text));
         }
         for snippet in &candidates {
             if let Some(d) = crate::bash(snippet, ctx.nested()) {
@@ -363,12 +373,21 @@ fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> 
         read_slices.extend(extract_api_arg_slices(&api_haystack, PHP_INCLUDE_KEYWORDS, true).0);
     }
     if perl_ruby {
-        read_slices.extend(extract_api_arg_slices(code, PERL_RUBY_SPACE_READ_APIS, true).0);
+        read_slices.extend(extract_api_arg_slices(text, PERL_RUBY_SPACE_READ_APIS, true).0);
     }
     read_slices.into_iter().find_map(|slice| {
         extract_literals(slice)
             .into_iter()
             .find_map(|lit| check_secret_read_literal(lit.trim(), interp, ctx))
+    })
+}
+
+fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
+    inspect_text(interp_kind, interp, code, ctx).or_else(|| {
+        let stripped = strip_comment_lines(code);
+        (stripped != code)
+            .then(|| inspect_text(interp_kind, interp, &stripped, ctx))
+            .flatten()
     })
 }
 
