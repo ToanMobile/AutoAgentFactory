@@ -128,6 +128,7 @@ pub(super) fn normalize_action(raw: &str) -> Option<&'static str> {
         "account_clear_all" | "account-clear-all" => Some("account_clear_all"),
         "cc_repo_assign" | "cc-repo-assign" => Some("cc_repo_assign"),
         "cc_repo_remove" | "cc-repo-remove" => Some("cc_repo_remove"),
+        "analyze_decisions" | "analyze-decisions" => Some("analyze_decisions"),
         _ => None,
     }
 }

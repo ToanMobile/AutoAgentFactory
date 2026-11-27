@@ -8,6 +8,7 @@ pub use aaf_domain::prompt_fence::{normalize_repo_path, strip_for_downstream};
 use super::PLAN_CONTRACT_HASH_TAG;
 
 const MAX_APPROVED_SUMMARY_CHARS: usize = 240;
+const MAX_OPEN_QUESTION_CHARS: usize = 1200;
 const SHA256_HEX_LEN: usize = 64;
 const MAX_JSON_SCAN_BYTES: usize = MAX_PLAN_CONTRACT_BYTES * 8;
 
@@ -81,7 +82,7 @@ pub fn plan_contract_json_schema() -> &'static str {
     },
     "open_questions": {
       "type": "array",
-      "description": "Only genuine human product/scope decisions written in natural plain language in the task's language (never code jargon or internal dev notes). Format each item: '<Plain question> | (1) <Option A> (Recommended) — <impact> | (2) <Option B> — <impact> | Hint: <item-specific recommendation & reason>' (use '(Khuyến nghị)' and 'Gợi ý:' when the task is in Vietnamese).",
+      "description": "Only genuine human product/scope decisions written in natural plain language in the task's language (never disk-verifiable facts or internal dev notes). Rank options strictly: Correctness & zero-regression > Full AC compliance > Clean architecture/scope > Speed. Every multi-option item MUST mark the single highest-quality option as (Recommended)/(Khuyến nghị) and end with a codebase-grounded Hint:/Gợi ý:. Format: '<Plain question> | (1) <Option A> — <impact> | (2) <Option B> (Recommended) — <impact> | Hint: <codebase-grounded quality rationale>'.",
       "items": { "type": "string" }
     }
   }
@@ -278,6 +279,25 @@ pub fn validate_and_normalize_plan(raw_json: &str) -> Result<(PlanContract, Stri
         test.test_path = normalize_repo_path(&test.test_path)
             .map_err(|e| format!("red_green_tests test_path {:?}: {e}", test.test_path))?;
     }
+    let mut cleaned_qs = Vec::with_capacity(plan.open_questions.len());
+    let mut seen_qs = std::collections::HashSet::new();
+    for raw_q in &plan.open_questions {
+        if raw_q
+            .chars()
+            .any(|c| c == '\0' || (c.is_control() && !matches!(c, '\n' | '\r' | '\t')))
+        {
+            return Err("open_questions contains forbidden control characters".to_string());
+        }
+        let q = raw_q.trim();
+        if q.is_empty() {
+            continue;
+        }
+        let capped: String = q.chars().take(MAX_OPEN_QUESTION_CHARS).collect();
+        if seen_qs.insert(capped.clone()) {
+            cleaned_qs.push(capped);
+        }
+    }
+    plan.open_questions = cleaned_qs;
     let canonical_json = serde_json::to_string(&plan)
         .map_err(|e| format!("failed to serialize normalized PlanContract: {e}"))?;
     if canonical_json.len() > MAX_PLAN_CONTRACT_BYTES {

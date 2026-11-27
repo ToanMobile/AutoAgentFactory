@@ -368,6 +368,9 @@ pub(super) fn dispatch_db_action(
         "account_clear_all" | "account-clear-all" => {
             super::accounts_panel::do_account_clear_all(db, ctx, config_base)
         }
+        "analyze_decisions" | "analyze-decisions" => {
+            super::decision_advice::trigger_analysis(db, ctx, task_id, note)
+        }
         other => Err(format!("invalid action: {other}")),
     }
 }

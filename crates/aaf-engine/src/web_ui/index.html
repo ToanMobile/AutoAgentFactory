@@ -182,10 +182,16 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
 .decision-item{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 11px;display:flex;flex-direction:column;gap:6px}
 .decision-q-head{font-weight:700;font-size:13px;color:var(--ink);overflow-wrap:anywhere}
 .decision-opts{display:flex;flex-direction:column;gap:5px}
-.decision-opt{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;line-height:1.45;cursor:pointer;padding:4px 6px;border-radius:6px;transition:background .1s}
+.decision-opt{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;line-height:1.45;cursor:pointer;padding:6px 8px;border-radius:7px;border:1px solid transparent;transition:background .1s,border-color .1s}
 .decision-opt:hover{background:var(--surface2)}
+.decision-opt:has(input[type="radio"]:checked){background:color-mix(in srgb,var(--ok) 8%,var(--surface2));border-color:color-mix(in srgb,var(--ok) 35%,var(--border))}
 .decision-opt input[type="radio"]{margin-top:3px;flex:none;accent-color:var(--accent)}
 .decision-rec{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;font-size:10.5px;font-weight:700;color:var(--ok);background:var(--ok-bg);margin-left:5px;vertical-align:middle}
+.decision-rec-ui{color:var(--warn);background:var(--warn-bg)}
+.decision-rec-warn{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:700;color:var(--warn);background:var(--warn-bg);margin-left:6px;vertical-align:middle}
+.decision-ai-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;padding:6px 9px;border-radius:7px;background:color-mix(in srgb,var(--ok) 8%,var(--surface));border:1px solid color-mix(in srgb,var(--ok) 28%,var(--border));color:var(--ink2)}
+.decision-ai-bar.pending{background:color-mix(in srgb,var(--info) 9%,var(--surface));border-color:color-mix(in srgb,var(--info) 30%,var(--border))}
+.decision-ai-bar.err{background:var(--err-bg);border-color:color-mix(in srgb,var(--err) 35%,var(--border));color:var(--err)}
 .decision-opt-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
 .decision-opt-title{font-weight:600;color:var(--ink)}
 .decision-opt-desc{font-size:12px;color:var(--muted);line-height:1.45}
@@ -1946,21 +1952,250 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     return { title: cleanBody, desc: "" };
   }
 
+  function capDecisionFirst(s) {
+    const t = String(s || "").trim();
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) : "";
+  }
+
+  function decisionShortKey(rawPrefix, fullText, idx) {
+    const p = String(rawPrefix || "").trim();
+    if (p && p.length <= 48 && !/[.?!]/.test(p)) return p;
+    const m = String(fullText || "").trim().match(/^([A-Z]{1,4}[-_]?\d{1,4}|PR\d+|AC-\d+)\b/);
+    return m ? `#${idx + 1} (${m[1]})` : `#${idx + 1}`;
+  }
+
+  function classifyDecisionKind(raw) {
+    const t = String(raw || "").toLowerCase();
+    if (/(?:cấp\s+quyền|quyền\s+đọc|cung\s+cấp\s+secret|supabase|api\s+key|access\s+token|credential|keychain|oauth|\bsecret\b)/i.test(t)) {
+      return "needs_access";
+    }
+    if (/(?:xe\s+thật|máy\s+thật|người\s+lái|đo\s+trên\s+xe|ihu629g|thiết\s+bị\s+thật|real\s+device|real\s+car|physical\s+device)/i.test(t)) {
+      return "needs_device";
+    }
+    if (/(?:blocker:|please\s+paste|paste\s+its\s+text|\bwhat\s+is\b|\bwhich\s+file\b|cung\s+cấp\s+thêm|dán\s+nội\s+dung|thiếu\s+mô\s+tả)/i.test(t)) {
+      return "needs_input";
+    }
+    if (/(?:do\s+host\s+làm|phải\s+do\s+host|host\s+handles|grep\s+marker|trên\s+base|xác\s+nhận\s+trên|verify\s+on\s+base|kiểm\s+tra\s+trên\s+main)/i.test(t)) {
+      return "verify_on_base";
+    }
+    if (/(?:ngoài\s+scope|out\s+of\s+scope|trùng\s+lane|chỉ\s+tích\s+ac[- ]|hay\s+hoãn|\bhay\b|\bor\b|\(1\)|phương\s+án)/i.test(t)) {
+      return "scope_choice";
+    }
+    return "unknown";
+  }
+
+  function inferRecommendedOption(fullText, options, hint) {
+    const existingIdx = options.findIndex((o) => o.recommended);
+    if (existingIdx >= 0) return { idx: existingIdx, reason: "explicit", source: "ai" };
+    if (hint) {
+      const refM = hint.match(/(?:\(|(?:option|phương án|pa|chọn)\s*)(\d+|[A-D])\b/i);
+      if (refM) {
+        const refNum = refM[1].toUpperCase();
+        const hi = options.findIndex((o) => String(o.num).toUpperCase() === refNum);
+        if (hi >= 0) return { idx: hi, reason: "hint_ref", source: "ai" };
+      }
+    }
+    const scopeRiskRe = /(?:ngoài\s+scope|out\s+of\s+scope|trùng\s+lane|xung\s+đột|conflict|breaking|rủi\s+ro\s+cao|high\s+risk)/i;
+    const safeDeferRe = /(?:hoãn|defer|tách\s+riêng|separate|giữ\s+(?:nguyên|đúng)\s+scope|keep\s+scope|chỉ\s+nối)/i;
+    if (scopeRiskRe.test(fullText)) {
+      const safeIdxs = options
+        .map((o, i) => (safeDeferRe.test(`${o.title} ${o.desc}`) ? i : -1))
+        .filter((i) => i >= 0);
+      if (safeIdxs.length === 1) return { idx: safeIdxs[0], reason: "safe_scope", source: "ui" };
+    }
+    // Quality-first cue ranking (never coin-flip by word order).
+    const qualityHighRe = /(?:đúng\s+theo|đúng\s+chuẩn|theo\s+word|sửa\s+đúng|sửa\s+triệt\s+để|giữ\s+đủ|đầy\s+đủ|giữ\s+kiểm\s+tra|keep\s+test|full\s+ac|\bfix\b)/i;
+    const qualityLowRe = /(?:kiểu\s+cũ|workaround|tạm\s+bỏ|bỏ\s+qua\s+test|skip\s+test|tắt\s+gate|chỉ\s+tích\s+ac[- ]|drop\s+ac)/i;
+    const scored = options.map((o, i) => {
+      const s = `${o.title} ${o.desc}`;
+      const score = (qualityHighRe.test(s) ? 2 : 0) - (qualityLowRe.test(s) ? 2 : 0);
+      return { i, score };
+    });
+    const maxScore = Math.max(...scored.map((x) => x.score));
+    const minScore = Math.min(...scored.map((x) => x.score));
+    if (maxScore > minScore) {
+      const winners = scored.filter((x) => x.score === maxScore);
+      if (winners.length === 1) return { idx: winners[0].i, reason: "quality_cue", source: "ui" };
+    }
+    return { idx: -1, reason: "ambiguous", source: "ui" };
+  }
+
+  function extractProseBinaryOptions(text) {
+    const qPos = text.lastIndexOf("?");
+    if (qPos < 0) return null;
+    const upToQ = text.slice(0, qPos).trim();
+    if (!upToQ) return null;
+    let start = 0;
+    const boundaryRe = /[.!;\n]\s+/g;
+    let bm;
+    while ((bm = boundaryRe.exec(upToQ)) !== null) {
+      start = bm.index + bm[0].length;
+    }
+    let clause = upToQ.slice(start).trim();
+    const leadRe = /^(?:nếu không|nếu chưa|ngược lại|vậy|thì|nên|có nên|bạn muốn|muốn|cần|chọn|giữa|otherwise|if not|if so|should we|do we|would you rather|whether to|choose between)\s*[,:]?\s*/i;
+    for (let i = 0; i < 3; i++) {
+      const next = clause.replace(leadRe, "").trim();
+      if (next === clause) break;
+      clause = next;
+    }
+    const sepRe = /[,\s]+(?:hay|hoặc|or)\s+/gi;
+    const seps = [];
+    let sm;
+    while ((sm = sepRe.exec(clause)) !== null) {
+      seps.push({ index: sm.index, len: sm[0].length });
+    }
+    if (seps.length !== 1) return null;
+    const left = clause.slice(0, seps[0].index).replace(/[,:\s]+$/, "").trim();
+    const right = clause.slice(seps[0].index + seps[0].len).replace(/^[,:\s]+/, "").trim();
+    if (left.length < 4 || left.length > 150 || right.length > 150) return null;
+    if (/^(?:không|chưa|not|no)$/i.test(right)) {
+      const yesTitle = tr("decision.optYes");
+      const noTitle = tr("decision.optNo");
+      return [
+        { num: "1", text: `${yesTitle}: ${capDecisionFirst(left)}`, title: yesTitle, desc: capDecisionFirst(left), shortLabel: `${yesTitle} — ${capDecisionFirst(left)}`.slice(0, 72), submitLabel: `${yesTitle}: ${capDecisionFirst(left)}`.slice(0, 120), recommended: false },
+        { num: "2", text: noTitle, title: noTitle, desc: "", shortLabel: noTitle.slice(0, 72), submitLabel: noTitle.slice(0, 120), recommended: false },
+      ];
+    }
+    if (right.length < 4) return null;
+    const interrogativeRe = /^(?:does|do|did|is|are|was|were|what|which|where|when|why|who|how)\b/i;
+    if (interrogativeRe.test(left) || interrogativeRe.test(right)) return null;
+    const t1 = capDecisionFirst(left);
+    const t2 = capDecisionFirst(right);
+    return [
+      { num: "1", text: t1, title: t1, desc: "", shortLabel: t1.slice(0, 72), submitLabel: t1.slice(0, 120), recommended: false },
+      { num: "2", text: t2, title: t2, desc: "", shortLabel: t2.slice(0, 72), submitLabel: t2.slice(0, 120), recommended: false },
+    ];
+  }
+
+  function buildFallbackDecision(text, explicitHint) {
+    const kind = classifyDecisionKind(text);
+    const followTitle = tr("decision.followHint");
+    const isGitSync = /(?:git\s+rebase|uncommitted\s+changes|merge\s+conflict|cannot\s+rebase)/i.test(text);
+    const isHostFlow = /(?:do\s+host\s+làm|phải\s+do\s+host|host\s+handles)/i.test(text);
+    const isVerifyBase = !isHostFlow && /(?:grep\s+marker|trên\s+base|xác\s+nhận\s+trên|verify\s+on\s+base|kiểm\s+tra\s+trên\s+main)/i.test(text);
+    const isAcShortcutQ = /(?:chỉ\s+tích\s+ac[- ]|chỉ\s+làm\s+một\s+phần|bỏ\s+qua\s+test|skip\s+test)/i.test(text);
+
+    // 1. Strict human-input kinds: NEVER pre-select a fake "Proceed".
+    if (kind === "needs_access") {
+      return {
+        kind,
+        source: "ui",
+        requiresHumanInput: true,
+        hint: explicitHint || tr("decision.hintAccessSecret"),
+        options: [],
+      };
+    }
+    if (kind === "needs_device") {
+      const deferTitle = tr("decision.optDeferDevice");
+      return {
+        kind,
+        source: "ui",
+        requiresHumanInput: true,
+        hint: explicitHint || tr("decision.hintPhysicalDevice"),
+        options: [
+          { num: "1", text: deferTitle, title: deferTitle, desc: tr("decision.optDeferDeviceDesc"), shortLabel: deferTitle.slice(0, 72), submitLabel: deferTitle.slice(0, 120), recommended: false },
+        ],
+      };
+    }
+    if (kind === "needs_input") {
+      return {
+        kind,
+        source: "ui",
+        requiresHumanInput: true,
+        hint: explicitHint || tr("decision.hintNeedInput"),
+        options: [],
+      };
+    }
+
+    // 2. AC shortcut questions: quality-first widen-only default (keep full scope).
+    if (isAcShortcutQ) {
+      const keepTitle = tr("decision.optKeepFullScope");
+      const cutTitle = tr("decision.optAllowShortcut");
+      const hint = explicitHint || tr("decision.hintDefaultPick", { num: "1", title: keepTitle });
+      return {
+        kind: "scope_choice",
+        source: explicitHint ? "ai" : "ui",
+        requiresHumanInput: false,
+        hint,
+        options: [
+          { num: "1", text: keepTitle, title: keepTitle, desc: tr("decision.optKeepFullScopeDesc"), shortLabel: keepTitle.slice(0, 72), submitLabel: keepTitle.slice(0, 120), recommended: true },
+          { num: "2", text: cutTitle, title: cutTitle, desc: tr("decision.optAllowShortcutDesc"), shortLabel: cutTitle.slice(0, 72), submitLabel: cutTitle.slice(0, 120), recommended: false },
+        ],
+      };
+    }
+
+    // 3. Safe operational / verification / git-sync defaults.
+    if (isGitSync || isHostFlow || isVerifyBase) {
+      let hint = explicitHint;
+      let altTitle = tr("decision.optPauseManual");
+      let altDesc = tr("decision.optPauseManualDesc");
+      if (isGitSync) {
+        if (!hint) hint = tr("decision.hintGitSync");
+      } else if (isHostFlow) {
+        if (!hint) hint = tr("decision.hintHostFlow");
+      } else {
+        if (!hint) hint = tr("decision.hintVerifyBase");
+        altTitle = tr("decision.optSkipCheck");
+        altDesc = tr("decision.optSkipCheckDesc");
+      }
+      const followSubmit = `${followTitle} — ${hint}`.slice(0, 140);
+      return {
+        kind: "verify_on_base",
+        source: explicitHint ? "ai" : "ui",
+        requiresHumanInput: false,
+        hint,
+        options: [
+          { num: "1", text: `${followTitle}: ${hint}`, title: followTitle, desc: hint, shortLabel: followTitle.slice(0, 72), submitLabel: followSubmit, recommended: true },
+          { num: "2", text: altTitle, title: altTitle, desc: altDesc, shortLabel: altTitle.slice(0, 72), submitLabel: altTitle.slice(0, 120), recommended: false },
+        ],
+      };
+    }
+
+    // 4. Explicit agent hint without numbered options => AI-backed single choice.
+    if (explicitHint) {
+      const followSubmit = `${followTitle} — ${explicitHint}`.slice(0, 140);
+      const deferTitle = tr("decision.optDeferItem");
+      return {
+        kind: "scope_choice",
+        source: "ai",
+        requiresHumanInput: false,
+        hint: explicitHint,
+        options: [
+          { num: "1", text: `${followTitle}: ${explicitHint}`, title: followTitle, desc: explicitHint, shortLabel: followTitle.slice(0, 72), submitLabel: followSubmit, recommended: true },
+          { num: "2", text: deferTitle, title: deferTitle, desc: tr("decision.optDeferItemDesc"), shortLabel: deferTitle.slice(0, 72), submitLabel: deferTitle.slice(0, 120), recommended: false },
+        ],
+      };
+    }
+
+    // 5. Unknown unstructured legacy item: honest non-preselected state + invite AI analysis.
+    return {
+      kind: "unknown",
+      source: "ui",
+      requiresHumanInput: true,
+      hint: tr("decision.hintUnknownChoice"),
+      options: [],
+    };
+  }
+
   function parseDecisionQuestion(raw, idx) {
     let text = String(raw || "").trim();
     let hint = "";
-    // Match trailing hint without swallowing subsequent `| (2)` options.
     const pipeHintRe = /\s*\|\s*(?:gợi ý|hint(?:\s*\/\s*gợi ý)?|khuyến nghị|recommendation|suggestion)\s*:\s*([^|]+)$/i;
-    const tailHintRe = /\s+(?:gợi ý|hint(?:\s*\/\s*gợi ý)?|khuyến nghị|recommendation|suggestion)\s*:\s*([^|]+)$/i;
+    const tailHintRe = /(?:^|[\s.;])\s*(?:gợi ý|hint(?:\s*\/\s*gợi ý)?|khuyến nghị|recommendation|suggestion)\s*:\s*([^|]+)$/i;
     const hm = text.match(pipeHintRe) || text.match(tailHintRe);
     if (hm) {
-      hint = hm[1].trim();
-      text = text.slice(0, hm.index).replace(/[\s|\-:]+$/, "").trim();
+      const stripped = text.slice(0, hm.index).replace(/[\s|\-:]+$/, "").trim();
+      if (stripped) {
+        hint = hm[1].trim();
+        text = stripped;
+      }
     }
+    const baseKind = classifyDecisionKind(text);
     const patterns = [
       /(?:^|[\s:;.\-|])\((\d+)\)\s+/g,
       /(?:^|[\s|])(?:option|phương án|pa)\s*(\d+)\s*[:)\-]\s+/gi,
       /(?:^|\s*\|\s*)([A-D])\)\s+/g,
+      /(?:^|\s*\|\s*|\n\s*)(\d+)\)\s+/g,
     ];
     let matches = [];
     for (const re of patterns) {
@@ -1990,64 +2225,184 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           .trim();
         const { title, desc } = splitOptionTitleDesc(cleanBody);
         const shortLabel = title.slice(0, 72) || cleanBody.slice(0, 60);
-        return { num: cur.num, text: cleanBody, title, desc, shortLabel, recommended };
+        return { num: cur.num, text: cleanBody, title, desc, shortLabel, submitLabel: shortLabel, recommended };
       });
-      return { idx, prefix: rawPrefix || `#${idx + 1}`, question: text, options, hint };
+      const recInfo = inferRecommendedOption(text, options, hint);
+      const isStrictInput = baseKind === "needs_access" || baseKind === "needs_device" || baseKind === "needs_input";
+      const recIdx = isStrictInput ? -1 : recInfo.idx;
+      options.forEach((o, i) => { o.recommended = recIdx >= 0 && i === recIdx; });
+      const recOpt = recIdx >= 0 ? options[recIdx] : null;
+      if (!hint) {
+        hint = recOpt
+          ? (recInfo.reason === "safe_scope"
+            ? tr("decision.hintSafeScope", { num: recOpt.num, title: recOpt.title })
+            : `(${recOpt.num}) ${recOpt.title}${recOpt.desc ? ` — ${recOpt.desc}` : ""}`)
+          : tr("decision.hintUnknownChoice");
+      }
+      return {
+        idx,
+        prefix: rawPrefix || `#${idx + 1}`,
+        shortKey: decisionShortKey(rawPrefix, text, idx),
+        heading: rawPrefix || text,
+        question: text,
+        kind: recOpt ? "scope_choice" : (isStrictInput ? baseKind : "unknown"),
+        source: recInfo.source,
+        requiresHumanInput: isStrictInput || !recOpt,
+        options,
+        hint,
+      };
     }
-    return { idx, prefix: `#${idx + 1}`, question: text, options: [], hint };
+    if (baseKind !== "needs_access" && baseKind !== "needs_device" && baseKind !== "needs_input") {
+      const binaryOpts = extractProseBinaryOptions(text);
+      if (binaryOpts && binaryOpts.length >= 2) {
+        const recInfo = inferRecommendedOption(text, binaryOpts, hint);
+        const recIdx = recInfo.idx;
+        binaryOpts.forEach((o, i) => { o.recommended = recIdx >= 0 && i === recIdx; });
+        const recOpt = recIdx >= 0 ? binaryOpts[recIdx] : null;
+        if (!hint) {
+          hint = recOpt
+            ? (recInfo.reason === "safe_scope"
+              ? tr("decision.hintSafeScope", { num: recOpt.num, title: recOpt.title })
+              : tr("decision.hintDefaultPick", { num: recOpt.num, title: recOpt.title }))
+            : tr("decision.hintUnknownChoice");
+        }
+        return {
+          idx,
+          prefix: `#${idx + 1}`,
+          shortKey: decisionShortKey("", text, idx),
+          heading: text,
+          question: text,
+          kind: recOpt ? "scope_choice" : "unknown",
+          source: recInfo.source,
+          requiresHumanInput: !recOpt,
+          options: binaryOpts,
+          hint,
+        };
+      }
+    }
+    const fb = buildFallbackDecision(text, hint);
+    return {
+      idx,
+      prefix: `#${idx + 1}`,
+      shortKey: decisionShortKey("", text, idx),
+      heading: text,
+      question: text,
+      kind: fb.kind,
+      source: fb.source,
+      requiresHumanInput: fb.requiresHumanInput,
+      options: fb.options,
+      hint: fb.hint,
+    };
   }
 
-  function renderDecisionSection(taskId, openQs, taskState, ro, scopeId) {
-    if (!Array.isArray(openQs) || !openQs.length) return "";
-    const parsed = openQs.map((q, idx) => parseDecisionQuestion(q, idx));
-    const hasAnyRec = parsed.some((item) => item.options.some((o) => o.recommended));
+  function buildParsedDecisions(openQs, advice) {
+    if (advice && advice.status === "ready" && Array.isArray(advice.items) && advice.items.length) {
+      return advice.items.map((it, idx) => {
+        const rawQ = (Array.isArray(openQs) && openQs[idx]) ? openQs[idx] : (it.question || "");
+        const requiresHumanInput = Boolean(it.requires_human_input);
+        const opts = Array.isArray(it.options)
+          ? it.options.map((o, oi) => {
+              const title = String(o.title || "").trim();
+              const desc = String(o.desc || "").trim();
+              const num = String(o.num || (oi + 1));
+              const shortLabel = title.slice(0, 72);
+              return {
+                num,
+                text: desc ? `${title} — ${desc}` : title,
+                title,
+                desc,
+                shortLabel,
+                submitLabel: shortLabel,
+                recommended: !requiresHumanInput && Boolean(o.recommended),
+              };
+            }).filter((o) => o.title)
+          : [];
+        return {
+          idx,
+          prefix: `#${idx + 1}`,
+          shortKey: decisionShortKey("", rawQ || it.question || "", idx),
+          heading: it.question || rawQ || `#${idx + 1}`,
+          question: rawQ || it.question || "",
+          kind: it.kind || "unknown",
+          source: "ai",
+          requiresHumanInput,
+          options: opts,
+          hint: String(it.hint || "").trim(),
+        };
+      });
+    }
+    return (Array.isArray(openQs) ? openQs : []).map((q, idx) => parseDecisionQuestion(q, idx));
+  }
+
+  function renderDecisionSection(taskId, openQs, taskState, ro, scopeId, advice) {
+    const parsed = buildParsedDecisions(openQs, advice);
+    if (!parsed.length) return "";
+    const hasAnyRec = parsed.some((item) => !item.requiresHumanInput && item.options.some((o) => o.recommended));
     const isBlocked = taskState === "blocked";
     const titleKey = isBlocked ? "decision.titleBlocked" : "decision.titleOpen";
+    const advStatus = (advice && advice.status) || "";
+    const isPendingAi = advStatus === "pending";
+    const isReadyAi = advStatus === "ready" && Array.isArray(advice.items) && advice.items.length > 0;
+    const aiBarHtml = isPendingAi
+      ? `<div class="decision-ai-bar pending"><span>⏳ ${esc(tr("decision.analyzingBanner"))}</span></div>`
+      : isReadyAi
+        ? `<div class="decision-ai-bar"><span>✨ ${esc(tr("decision.aiReadyBanner", { model: advice.model || "AI" }))}</span></div>`
+        : advStatus === "error" && advice.error
+          ? `<div class="decision-ai-bar err"><span>⚠️ ${esc(tr("decision.aiErrorBanner", { msg: advice.error }))}</span></div>`
+          : "";
     const itemsHtml = parsed.map((item) => {
       const name = `${scopeId}_q_${item.idx}`;
-      const recOpt = item.options.find((o) => o.recommended);
+      const isAi = item.source === "ai";
+      const recOpt = !item.requiresHumanInput ? item.options.find((o) => o.recommended) : null;
       const effectiveHint = item.hint
         || (recOpt ? `(${recOpt.num}) ${recOpt.title}${recOpt.desc ? ` — ${recOpt.desc}` : ""}` : "");
+      const hintLabel = isAi ? tr("decision.hintLabelAi") : tr("decision.hintLabelUi");
       const hintHtml = effectiveHint
-        ? `<div class="decision-hint">💡 <b>${esc(tr("decision.hintLabel"))}:</b> ${formatDecisionText(effectiveHint)}</div>`
+        ? `<div class="decision-hint">💡 <b>${esc(hintLabel)}:</b> ${formatDecisionText(effectiveHint)}</div>`
         : "";
-      if (item.options.length >= 2) {
-        const optsHtml = item.options.map((opt, oi) => `
-          <label class="decision-opt">
-            <input type="radio" name="${esc(name)}" value="${esc(opt.num)}" data-dec-idx="${item.idx}" data-dec-opt="${oi}" data-dec-rec="${opt.recommended ? "1" : "0"}" ${ro ? "disabled" : ""}>
-            <span class="decision-opt-body">
-              <span class="decision-opt-title"><strong>(${esc(opt.num)})</strong> ${formatDecisionText(opt.title)}${opt.recommended ? `<span class="decision-rec">${esc(tr("decision.recommendedBadge"))}</span>` : ""}</span>
-              ${opt.desc ? `<span class="decision-opt-desc">${formatDecisionText(opt.desc)}</span>` : ""}
-            </span>
-          </label>`).join("");
-        return `<div class="decision-item">
-          <div class="decision-q-head">${item.idx + 1}. ${formatDecisionText(item.prefix)}</div>
-          ${hintHtml}
-          <div class="decision-opts">
-            ${optsHtml}
-            <label class="decision-opt">
-              <input type="radio" name="${esc(name)}" value="custom" data-dec-idx="${item.idx}" data-dec-custom-radio="1" ${ro ? "disabled" : ""}>
-              <span style="flex:1;min-width:0"><span>${esc(tr("decision.customOption"))}</span>
-                <input type="text" class="decision-input" style="margin-top:4px" data-dec-custom-text="${item.idx}" placeholder="${esc(tr("decision.customPlaceholder"))}" ${ro ? "disabled" : ""}>
-              </span>
-            </label>
-          </div>
-        </div>`;
-      }
-      return `<div class="decision-item">
-        <div class="decision-q-head">${item.idx + 1}. ${formatDecisionText(item.question)}</div>
+      const recBadgeText = isAi ? tr("decision.recommendedBadgeAi") : tr("decision.recommendedBadgeUi");
+      const recBadgeCls = isAi ? "decision-rec" : "decision-rec decision-rec-ui";
+      const warnTag = item.requiresHumanInput
+        ? `<span class="decision-rec-warn">${esc(tr("decision.requiresInputBadge"))}</span>`
+        : "";
+      const optsHtml = item.options.map((opt, oi) => `
+        <label class="decision-opt">
+          <input type="radio" name="${esc(name)}" value="${esc(opt.num)}" data-dec-idx="${item.idx}" data-dec-opt="${oi}" data-dec-rec="${opt.recommended ? "1" : "0"}" ${opt.recommended ? "checked" : ""} ${ro ? "disabled" : ""}>
+          <span class="decision-opt-body">
+            <span class="decision-opt-title"><strong>(${esc(opt.num)})</strong> ${formatDecisionText(opt.title)}${opt.recommended ? `<span class="${recBadgeCls}">${esc(recBadgeText)}</span>` : ""}</span>
+            ${opt.desc ? `<span class="decision-opt-desc">${formatDecisionText(opt.desc)}</span>` : ""}
+          </span>
+        </label>`).join("");
+      const autoCheckCustom = item.requiresHumanInput && item.options.length === 0;
+      return `<div class="decision-item" data-dec-item="${item.idx}" data-dec-req-input="${item.requiresHumanInput ? "1" : "0"}">
+        <div class="decision-q-head">${item.idx + 1}. ${formatDecisionText(item.heading || item.question)}${warnTag}</div>
         ${hintHtml}
-        <input type="text" class="decision-input" data-dec-free="${item.idx}" placeholder="${esc(tr("decision.answerPlaceholder"))}" ${ro ? "disabled" : ""}>
+        <div class="decision-opts">
+          ${optsHtml}
+          <label class="decision-opt">
+            <input type="radio" name="${esc(name)}" value="custom" data-dec-idx="${item.idx}" data-dec-custom-radio="1" ${autoCheckCustom ? "checked" : ""} ${ro ? "disabled" : ""}>
+            <span style="flex:1;min-width:0"><span>${esc(tr("decision.customOption"))}</span>
+              <input type="text" class="decision-input" style="margin-top:4px" data-dec-custom-text="${item.idx}" placeholder="${esc(tr("decision.customPlaceholder"))}" ${ro ? "disabled" : ""}>
+            </span>
+          </label>
+        </div>
       </div>`;
     }).join("");
+    const analyzeBtnLabel = isPendingAi
+      ? tr("decision.analyzingBtn")
+      : (isReadyAi ? tr("decision.reanalyzeBtn") : tr("decision.analyzeBtn"));
     return `<div class="decision-box" data-decision-box="${esc(scopeId)}">
       <div class="decision-head">
         <div>
           <div class="decision-title">🧭 ${esc(tr(titleKey, { n: parsed.length }))}</div>
           <div class="muted" style="font-size:12px;margin-top:2px">${esc(tr("decision.subtitle"))}</div>
         </div>
-        ${hasAnyRec && !ro ? `<button type="button" class="btn-sm" data-dec-select-rec="1">${esc(tr("decision.selectRecommended"))}</button>` : ""}
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${!ro ? `<button type="button" class="btn-sm" data-dec-analyze="1" ${isPendingAi ? "disabled" : ""}>${esc(analyzeBtnLabel)}</button>` : ""}
+          ${hasAnyRec && !ro ? `<button type="button" class="btn-sm" data-dec-select-rec="1">${esc(tr("decision.selectRecommended"))}</button>` : ""}
+        </div>
       </div>
+      ${aiBarHtml}
       ${itemsHtml}
       ${!ro ? `<div class="decision-foot">
         <textarea rows="2" class="decision-input" data-dec-extra="1" placeholder="${esc(tr("decision.extraNotePlaceholder"))}"></textarea>
@@ -2058,11 +2413,62 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     </div>`;
   }
 
-  function bindDecisionSection(root, taskId, openQs, taskState, ro, scopeId) {
-    if (!root || ro || !Array.isArray(openQs) || !openQs.length) return;
+  let decisionPollTimer = null;
+  function scheduleDecisionAdvicePoll(taskId, scopeId) {
+    if (decisionPollTimer) { clearTimeout(decisionPollTimer); decisionPollTimer = null; }
+    decisionPollTimer = setTimeout(async () => {
+      decisionPollTimer = null;
+      const stillOpen = (scopeId === "revdec" && selectedReviewId === taskId && activeTab === "review")
+        || ((scopeId === "ovdec" || scopeId === "pldec") && $("drawerBg").classList.contains("open") && drawerTaskId === taskId);
+      if (!stillOpen) return;
+      try {
+        const d = await api("/api/task/" + encodeURIComponent(taskId));
+        const st = d && d.decision_advice && d.decision_advice.status;
+        if (scopeId === "revdec" && selectedReviewId === taskId && activeTab === "review") {
+          loadReviewDetail(taskId);
+        } else if ($("drawerBg").classList.contains("open") && drawerTaskId === taskId) {
+          drawerDetail = d;
+          renderDrawerTab();
+        }
+        if (st === "pending") scheduleDecisionAdvicePoll(taskId, scopeId);
+      } catch (_) {}
+    }, 2500);
+  }
+
+  function bindDecisionSection(root, taskId, openQs, taskState, ro, scopeId, advice) {
+    if (!root || ro) return;
     const box = root.querySelector(`[data-decision-box="${scopeId}"]`);
     if (!box) return;
-    const parsed = openQs.map((q, idx) => parseDecisionQuestion(q, idx));
+    const parsed = buildParsedDecisions(openQs, advice);
+    if (!parsed.length) return;
+    if (advice && advice.status === "pending") {
+      scheduleDecisionAdvicePoll(taskId, scopeId);
+    }
+    const analyzeBtn = box.querySelector("[data-dec-analyze]");
+    if (analyzeBtn) {
+      analyzeBtn.onclick = async () => {
+        if (analyzeBtn.disabled) return;
+        const isForce = Boolean(advice && advice.status === "ready");
+        analyzeBtn.disabled = true;
+        analyzeBtn.textContent = tr("decision.analyzingBtn");
+        try {
+          const res = await api("/api/action", {
+            method: "POST",
+            body: JSON.stringify({ action: "analyze_decisions", task_id: taskId, note: isForce ? "force" : "" }),
+          });
+          if (res && res.status === "ready") {
+            await refreshOpenContext();
+          } else {
+            await refreshOpenContext();
+            scheduleDecisionAdvicePoll(taskId, scopeId);
+          }
+        } catch (e) {
+          toast(tr("toast.error", { msg: e.message }));
+          analyzeBtn.disabled = false;
+          analyzeBtn.textContent = tr(isForce ? "decision.reanalyzeBtn" : "decision.analyzeBtn");
+        }
+      };
+    }
     const recBtn = box.querySelector("[data-dec-select-rec]");
     if (recBtn) {
       recBtn.onclick = () => {
@@ -2084,20 +2490,33 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         if (submitBtn.disabled) return;
         const parts = [];
         for (const item of parsed) {
-          if (item.options.length >= 2) {
-            const checked = box.querySelector(`input[type="radio"][name="${scopeId}_q_${item.idx}"]:checked`);
-            if (!checked) continue;
-            if (checked.value === "custom") {
-              const txt = ((box.querySelector(`[data-dec-custom-text="${item.idx}"]`) || {}).value || "").trim();
-              if (txt) parts.push(`${item.prefix}: ${txt}`);
-            } else {
-              const oi = Number(checked.dataset.decOpt);
-              const opt = item.options[oi];
-              if (opt) parts.push(`${item.prefix}: (${opt.num}) ${opt.shortLabel}`);
+          const checked = box.querySelector(`input[type="radio"][name="${scopeId}_q_${item.idx}"]:checked`);
+          const key = item.shortKey || item.prefix || `#${item.idx + 1}`;
+          if (!checked) {
+            if (item.requiresHumanInput) {
+              toast(tr("decision.inputRequired", { n: item.idx + 1 }));
+              const customEl = box.querySelector(`[data-dec-custom-text="${item.idx}"]`);
+              if (customEl) customEl.focus();
+              return;
             }
+            continue;
+          }
+          if (checked.value === "custom") {
+            const customEl = box.querySelector(`[data-dec-custom-text="${item.idx}"]`);
+            const txt = ((customEl && customEl.value) || "").trim();
+            if (!txt) {
+              toast(tr(item.requiresHumanInput ? "decision.inputRequired" : "decision.customEmpty", { n: item.idx + 1 }));
+              if (customEl) customEl.focus();
+              return;
+            }
+            parts.push(`${key}: ${txt}`);
           } else {
-            const txt = ((box.querySelector(`[data-dec-free="${item.idx}"]`) || {}).value || "").trim();
-            if (txt) parts.push(`#${item.idx + 1}: ${txt}`);
+            const oi = Number(checked.dataset.decOpt);
+            const opt = item.options[oi];
+            if (opt) {
+              const srcTag = item.source === "ui" ? " [ui]" : "";
+              parts.push(`${key}: (${opt.num}) ${opt.submitLabel || opt.shortLabel}${srcTag}`);
+            }
           }
         }
         const extra = ((box.querySelector("[data-dec-extra]") || {}).value || "").trim();
@@ -2174,6 +2593,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       const { steer, sys } = splitDrawerNotes(notes);
       const planShort = plan.summary || (plan.contract && plan.contract.summary) || "";
       const openQs = (plan.contract && Array.isArray(plan.contract.open_questions)) ? plan.contract.open_questions : [];
+      const decisionItems = openQs.length ? openQs : (t.state === "blocked" && blkText ? [blkText] : []);
+      const advice = d.decision_advice || null;
       const revRuns = runs.slice().reverse();
       const recentRuns = revRuns.slice(0, 2);
       const olderRuns = revRuns.slice(2);
@@ -2189,7 +2610,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         </div>
         <div style="font-weight:700;font-size:16px;word-break:break-word">${esc(t.title)}</div>
         ${blkText ? `<div class="blocked-callout"><strong>${esc(tr("drawer.blockedPrefix"))}</strong> ${esc(blkText)}</div>` : ""}
-        ${openQs.length && (t.state === "blocked" || plan.needs_approval) ? renderDecisionSection(taskId, openQs, t.state, ro, "ovdec") : ""}
+        ${decisionItems.length && (t.state === "blocked" || plan.needs_approval) ? renderDecisionSection(taskId, decisionItems, t.state, ro, "ovdec", advice) : ""}
         ${plan.needs_approval ? `<div class="plan-callout"><strong>${esc(tr("drawer.planWaiting"))}</strong> ${esc(planShort || tr("drawer.planWaitingFallback"))}</div>` : ""}
         ${plan.available && !plan.needs_approval ? `<div class="kv-section" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="min-width:0;font-size:13px"><strong style="margin-right:6px">${esc(tr("drawer.planSummary"))}:</strong><span class="muted">${esc(planShort)}</span></div><button type="button" class="btn-sm" id="drawerOpenPlanBtn" style="flex:none">${esc(tr("drawer.openPlan"))}</button></div>` : ""}
         <div class="kv-section"><div class="kv-title">${esc(tr("drawer.pipeline"))}</div><div id="drawerPipeBox" class="muted">${esc(tr("drawer.loadingPipeline"))}</div></div>
@@ -2220,8 +2641,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         </div>
         ${ro ? `<div class="muted" style="font-size:12px">${esc(roHint())}</div>` : ""}`;
       bindExpandableBoxes($("drawerBody"));
-      if (openQs.length && (t.state === "blocked" || plan.needs_approval)) {
-        bindDecisionSection($("drawerBody"), taskId, openQs, t.state, ro, "ovdec");
+      if (decisionItems.length && (t.state === "blocked" || plan.needs_approval)) {
+        bindDecisionSection($("drawerBody"), taskId, decisionItems, t.state, ro, "ovdec", advice);
       }
       if ($("drawerOpenPlanBtn")) $("drawerOpenPlanBtn").onclick = () => switchDrawerTab("plan");
       $("drawerBody").querySelectorAll("[data-run]").forEach((b) => {
@@ -2363,7 +2784,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
           </div>
           <div style="font-size:13.5px;line-height:1.5">${esc(summaryText || cleanedBody || "")}</div>
         </div>
-        ${openQs.length ? renderDecisionSection(taskId, openQs, t.state, ro, "pldec") : ""}
+        ${openQs.length ? renderDecisionSection(taskId, openQs, t.state, ro, "pldec", d.decision_advice || null) : ""}
         ${files.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.filesToChange", { n: files.length }))}</div>${files.map((f) => `<div style="margin-bottom:5px;font-size:13px;line-height:1.45"><span class="mono" style="font-weight:600">${esc(f.path || "")}</span>${f.responsibility ? ` — ${esc(f.responsibility)}` : ""}</div>`).join("")}</div>` : ""}
         ${tests.length ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.tests", { n: tests.length }))}</div>${tests.map((rt) => `<div style="margin-bottom:4px;font-size:13px">• <span class="mono">${esc(rt.test_path || rt.ac_ref || "test")}</span></div>`).join("")}</div>` : ""}
         ${showNoteBody ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.planDetails"))}</div>${renderCompactPlanBody(cleanedBody)}</div>` : ""}
@@ -2377,7 +2798,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         ${plan.needs_approval ? `<div class="action-bar"><button class="btn-ok" id="planTabApproveBtn" ${ro ? `disabled title="${esc(roHint())}"` : ""}>${esc(tr("drawer.approvePlanReady"))}</button></div>` : ""}`;
       bindExpandableBoxes($("drawerBody"));
       if (openQs.length) {
-        bindDecisionSection($("drawerBody"), taskId, openQs, t.state, ro, "pldec");
+        bindDecisionSection($("drawerBody"), taskId, openQs, t.state, ro, "pldec", d.decision_advice || null);
       }
       if ($("planTabApproveBtn")) {
         $("planTabApproveBtn").onclick = () => runQuickAction("approve_plan", taskId, $("planTabApproveBtn"), true);
@@ -2519,6 +2940,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     );
     const blkText = formatBlockedText(fullTask.blocked_reason) || (task && task.blocked_detail) || "";
     const st = (ho && ho.state) || fullTask.state || (task && task.state) || "";
+    const revDecisionItems = openQs.length ? openQs : (st === "blocked" && blkText ? [blkText] : []);
+    const revAdvice = (td && td.decision_advice) || null;
     const scores = (ho && ho.scores) || [];
     const locked = (pv && pv.locked_changes) || [];
     const lockFp = (pv && pv.lock_fp) || "";
@@ -2543,7 +2966,7 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
         </div>
       </div>
       ${st === "blocked" && blkText ? `<div class="blocked-callout" style="margin-top:10px"><strong>${esc(tr("drawer.blockedPrefix"))}</strong> ${esc(blkText)}</div>` : ""}
-      ${openQs.length ? `<div style="margin-top:10px">${renderDecisionSection(taskId, openQs, st, ro, "revdec")}</div>` : ""}
+      ${revDecisionItems.length ? `<div style="margin-top:10px">${renderDecisionSection(taskId, revDecisionItems, st, ro, "revdec", revAdvice)}</div>` : ""}
       ${st === "blocked" && specText ? `<div class="kv-section"><div class="kv-title">${esc(tr("drawer.spec"))}</div>${renderCompactSpec(specText)}</div>` : ""}
       ${ho ? `
         <div class="score-grid">
@@ -2578,8 +3001,8 @@ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
       ${locked.length > 0 && approveHint ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(approveHint)}</div>` : ""}`;
 
     bindExpandableBoxes(box);
-    if (openQs.length) {
-      bindDecisionSection(box, taskId, openQs, st, ro, "revdec");
+    if (revDecisionItems.length) {
+      bindDecisionSection(box, taskId, revDecisionItems, st, ro, "revdec", revAdvice);
     }
     $("revOpenPlan").onclick = () => openTaskDrawer(taskId, "plan");
     $("revOpenDiff").onclick = () => openTaskDrawer(taskId, "diff");

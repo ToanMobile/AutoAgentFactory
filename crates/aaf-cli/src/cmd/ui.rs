@@ -4,6 +4,7 @@
 
 pub(crate) mod accounts_panel;
 mod actions;
+mod decision_advice;
 mod diff_parse;
 mod extras;
 mod proof_stop;
@@ -442,9 +443,11 @@ impl UiBackend for CliUiBackend {
         let db = self.require_db_ro()?;
         let task = db.get_task(task_id).map_err(s_err)?;
         let plan = extras::plan_detail_json(&db, &task);
+        let decision_advice = decision_advice::read_for_task(&self.ctx, &task, &plan);
         Ok(json!({
             "task": task,
             "plan": plan,
+            "decision_advice": decision_advice,
             "deps": db.deps_of(task_id).map_err(s_err)?,
             "runs": db.runs_for_task(task_id).map_err(s_err)?,
             "events": db.events_for_task(task_id, DETAIL_EVENTS_LIMIT).map_err(s_err)?,

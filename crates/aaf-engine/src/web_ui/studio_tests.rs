@@ -147,3 +147,35 @@ fn studio_routes_are_get_only() {
     }
     handle.join();
 }
+
+#[test]
+fn decision_ui_provides_hints_and_default_recommended_selection() {
+    let (handle, _) = start();
+    let addr = handle.addr();
+    let resp = get(addr, "/", false);
+    assert_eq!(resp.status, 200);
+    for tok in [
+        "classifyDecisionKind",
+        "extractProseBinaryOptions",
+        "buildFallbackDecision",
+        "inferRecommendedOption",
+        "buildParsedDecisions",
+        "analyze_decisions",
+        "${opt.recommended ? \"checked\" : \"\"}",
+        ".decision-opt:has(input[type=\"radio\"]:checked)",
+    ] {
+        assert!(resp.body.contains(tok), "missing decision UI token {tok}");
+    }
+    for key in [
+        "decision.recommendedBadgeAi",
+        "decision.recommendedBadgeUi",
+        "decision.requiresInputBadge",
+        "decision.analyzeBtn",
+        "decision.optKeepFullScope",
+        "decision.inputRequired",
+        "decision.customEmpty",
+    ] {
+        assert!(super::pwa::I18N_UI_JS.contains(key), "missing i18n {key}");
+    }
+    handle.join();
+}

@@ -128,13 +128,22 @@ pub fn build_author_prompt(
             concrete codebase evidence.\n\
          4. Keep `summary` concise and `tier_assessment` strictly one of `\"S\"`, `\"M\"`, `\"L\"`.\n\
          5. Only populate `open_questions` when a genuine product, UX, or scope choice requires a \
-            human decision — NEVER dump internal reminders, git SHAs, commit logistics, or grep \
-            TODOs into `open_questions`. Write EVERY item in plain, natural language for a \
-            non-coding reader in the task's language (no raw code/class/symbol jargon). Each item \
-            MUST include concrete plain-language options AND a specific, tailored `Hint:` (use \
-            `Gợi ý:` and `(Khuyến nghị)` when writing in Vietnamese) explaining the exact tradeoff \
-            for THAT specific item:\n\
-            `<Short plain question> | (1) <Plain option A> (Recommended) — <clear impact> | (2) <Plain option B> — <clear impact> | Hint: <1 item-specific sentence explaining why (1) is preferred or when to pick (2)>`."
+            human decision — NEVER ask anything verifiable from files, git history, config, or \
+            tests on disk, and NEVER dump internal dev reminders (git SHAs, commit logistics, \
+            pre-commit notes, or grep TODOs) into `open_questions`. Write EVERY item in plain, \
+            natural language for a non-coding reader in the task's language. Follow this strict \
+            Quality-First Decision Rubric:\n\
+            - Rank options strictly by: (a) Correctness & zero regression > (b) Full AC & spec \
+              compliance > (c) Clean architecture & scope hygiene > (d) Speed/convenience.\n\
+            - NEVER recommend a shortcut (dropping an AC, weakening tests/gates, or keeping a \
+              broken legacy behavior) unless concrete codebase/file evidence proves doing \
+              otherwise causes a regression or cross-PR conflict — and cite that exact file path \
+              in `Hint:` / `Gợi ý:`.\n\
+            - Include at least 2 concrete options `(1)` and `(2)`, mark the single highest-quality \
+              option as `(Recommended)` (use `(Khuyến nghị)` in Vietnamese — need not be option 1; \
+              the UI pre-selects it by default), AND end with a codebase-grounded `Hint:` (use \
+              `Gợi ý:` in Vietnamese):\n\
+            `<Short plain question> | (1) <Plain option A> — <clear impact> | (2) <Plain option B> (Recommended) — <clear impact> | Hint: <1 codebase-grounded sentence citing why the recommended option wins on quality and when to pick the alternative>`."
     );
 
     append_task_spec(&mut out, task);
@@ -221,7 +230,12 @@ pub fn build_challenger_prompt(
             `P1` (material gap/test/invariant defect), or `P2` (advisory). Every `location` MUST \
             cite a repo-relative `path` or `path:line` that exists on the clean base tree OR \
             matches a path in `PlanContract.files_to_change`.\n\
-         4. Set `verdict` to `\"CONVERGED\"` ONLY when every required checklist item passes, \
+         4. Audit `plan.open_questions` whenever non-empty: raise a `P1` issue if any item is \
+            answerable by reading disk/git/tests, dumps internal dev reminders (SHAs, grep TODOs, \
+            commit logistics), or recommends a quality-degrading shortcut (dropping AC, weakening \
+            tests/gates) without concrete file evidence; raise a `P2` issue if a multi-option \
+            item omits `(Recommended)`/`(Khuyến nghị)` or omits a concrete `Hint:`/`Gợi ý:`.\n\
+         5. Set `verdict` to `\"CONVERGED\"` ONLY when every required checklist item passes, \
             zero prior P0/P1 issues are upheld/omitted, and zero new P0/P1 issues remain; \
             otherwise set `verdict` to `\"REVISE\"`.",
         required_ids.join(", ")
