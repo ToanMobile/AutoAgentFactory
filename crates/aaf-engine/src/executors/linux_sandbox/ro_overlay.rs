@@ -28,6 +28,17 @@ fn contains_canon(set: &BTreeSet<String>, target_canon: &Path) -> bool {
             .any(|entry| canonical_or_self(Path::new(entry)) == target_canon)
 }
 
+/// RFC-126: create a missing `logs` dir (non-recursive, without following
+/// symlinks) so `--ro-bind` always mounts; fail closed on error.
+fn ensure_logs_dir(logs: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(logs) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(logs)
+            .map_err(|err| format!("RFC-126: failed to create {}: {err}", logs.display())),
+        Err(err) => Err(format!("RFC-126: failed to stat {}: {err}", logs.display())),
+    }
+}
+
 impl<'a> RoOverlay<'a> {
     pub(super) fn new(
         argv: &'a mut Vec<String>,
@@ -147,6 +158,11 @@ impl<'a> RoOverlay<'a> {
             for rel in ["refs/heads/develop", "refs/heads/release", "refs/remotes"] {
                 self.protect_existing(&git_dir.join(rel))?;
             }
+            // RFC-126: lock common reflog tree for linked worktrees; create
+            // missing `logs` so `--ro-bind` always mounts.
+            let logs = git_dir.join("logs");
+            ensure_logs_dir(&logs)?;
+            self.protect_existing(&logs)?;
         }
         let worktrees = git_dir.join("worktrees");
         if worktrees.is_dir() {
@@ -162,6 +178,12 @@ impl<'a> RoOverlay<'a> {
                     push_flag_path(self.argv, self.bound_rw, "--bind", &child)?;
                     for rel in ["hooks", "config", "config.worktree", "commondir", "gitdir"] {
                         self.protect_existing(&child.join(rel))?;
+                    }
+                    if !is_primary_checkout {
+                        // RFC-126: lock every worktree's reflog dir too.
+                        let logs = child.join("logs");
+                        ensure_logs_dir(&logs)?;
+                        self.protect_existing(&logs)?;
                     }
                 }
             }
