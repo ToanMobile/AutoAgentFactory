@@ -21,12 +21,16 @@ use crate::gate::{GateError, head_lock};
 pub use checklist::{Item, build_checklist};
 pub use diff_hunks::{
     Citation, DiffHunks, PathSpans, Span, evidence_in_diff, extract_citations,
-    has_file_line_reference, parse_diff_hunks, parse_diff_hunks_with_truncation,
+    find_verified_citation, has_file_line_reference, parse_diff_hunks,
+    parse_diff_hunks_with_truncation,
 };
 pub use dual_verdict::{
-    AdjudicationResult, ChecklistItem, DualReviewerOutcome, FINDINGS_BEGIN, FINDINGS_END,
-    PLAN_DRIFT_ID, adjudicate_json_schema, build_adjudicate_prompt, build_dual_checklist,
-    build_dual_review_prompt, dual_review_json_schema, evaluate_adjudication,
+    AdjudicationResult, ChecklistItem, DUAL_CHECKLIST_VERSION, DualReviewerOutcome, FINDINGS_BEGIN,
+    FINDINGS_END, PLAN_DRIFT_ID, PLAN_OMISSION_ID, PLAN_SCOPE_ID, PlanConformance,
+    SCOPE_HARD_PREFIX, UnplannedFile, adjudicate_json_schema, analyze_plan_conformance,
+    build_adjudicate_prompt, build_dual_checklist, build_dual_review_prompt,
+    build_dual_review_prompt_with_conformance, deterministic_scope_violations,
+    dual_review_json_schema, evaluate_adjudication, format_conformance_summary,
     parse_and_validate_dual_review,
 };
 pub use prompt::{build_prompt, build_scored_prompt};

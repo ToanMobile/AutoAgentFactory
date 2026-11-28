@@ -151,7 +151,7 @@ fn has_nonzero_tests_ran(output: &str) -> bool {
 
 /// Anchored test-runner failure summaries proving `>= 1` test actually executed
 /// and failed (cannot be forged by inline comments or compiler diagnostics).
-fn has_anchored_runner_failure(output: &str) -> bool {
+pub(super) fn has_anchored_runner_failure(output: &str) -> bool {
     for line in output.lines() {
         if is_diagnostic_source_line(line) {
             continue;

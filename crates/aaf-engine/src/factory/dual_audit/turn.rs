@@ -18,9 +18,11 @@ use super::{
 };
 use crate::cross_audit::AUDIT_EXECUTOR;
 use crate::cross_audit::dual_verdict::{
-    DualReviewerOutcome, adjudicate_json_schema, build_adjudicate_prompt_with_limit,
-    build_dual_checklist, build_dual_review_prompt_with_limit, dual_review_json_schema,
-    evaluate_adjudication, names_dual_blocker, parse_and_validate_dual_review_with_limit,
+    ChecklistItem, DualReviewerOutcome, adjudicate_json_schema, analyze_plan_conformance,
+    build_adjudicate_prompt_with_limit, build_dual_checklist,
+    build_dual_review_prompt_with_conformance, can_use_compact_format_repair,
+    dual_review_json_schema, evaluate_adjudication, names_dual_blocker,
+    parse_and_validate_dual_review_with_limit,
 };
 use crate::cross_audit::prompt::{
     PRIOR_BEGIN, PRIOR_END, clip_repair_prior, neutralise, summarize_diff_for_audit,
@@ -39,10 +41,41 @@ use crate::unblocker::QuotaRoute;
 const AUTH_QUARANTINE_SECS: i64 = 3600;
 const DUAL_REVIEW_MAX_TURNS: u32 = 16;
 const DUAL_REPAIR_MAX_TURNS: u32 = 8;
+const DUAL_COMPACT_REPAIR_MAX_TURNS: u32 = 3;
 const DUAL_ADJUDICATE_MAX_TURNS: u32 = 12;
 const DUAL_REPAIR_PRIOR_CHARS: usize = 12_000;
 const BEHAVIORAL_RED_NOTE: &str = "Oracle behavioral_red_unproven: verify that the new module's \
      tests contain non-vacuous behavioral assertions exercising real production logic and edge cases";
+
+fn build_compact_format_repair_prompt(
+    checklist: &[ChecklistItem],
+    score_gate: bool,
+    schema: &str,
+    reason: &str,
+    clipped: &str,
+) -> String {
+    let ids = checklist
+        .iter()
+        .map(|it| it.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let score_hint = if score_gate {
+        " Include all 7 golden scores G1..G7 (integer 0..=100; any score <100 requires non-empty `deduction_reason`)."
+    } else {
+        ""
+    };
+    format!(
+        "READ-ONLY JSON FORMAT REPAIR ONLY. Do NOT call any tools (no Read/Grep/Glob/Bash) and \
+         do NOT change your substantive findings or downgrade any prior blocking finding to PASS. \
+         Re-emit your previous reply as ONE strict JSON object matching the schema below.\n\
+         Required checklist ids (answer each exactly once with \"yes\" or \"no\"): {ids}.{score_hint}\n\
+         Schema:\n{schema}\n\
+         {PRIOR_BEGIN}\n\
+         Parse error: {}\n{}\n{PRIOR_END}\n",
+        neutralise(reason),
+        neutralise(clipped)
+    )
+}
 
 fn with_clean_tree<T>(
     deps: &Deps,
@@ -285,13 +318,22 @@ pub(crate) fn run_reviewer_turn(
         spec.acceptance.push(BEHAVIORAL_RED_NOTE.to_string());
     }
     let checklist = build_dual_checklist(&spec, deps.settings.mobile, plan.is_some());
-    let base_prompt = build_dual_review_prompt_with_limit(
+    let conformance = plan.as_ref().map(|p| {
+        analyze_plan_conformance(
+            &diff,
+            p,
+            &task.scope_paths,
+            &deps.settings.repo.gate.head_lock_globs,
+        )
+    });
+    let base_prompt = build_dual_review_prompt_with_conformance(
         &task,
         &diff,
         plan.as_ref(),
         &checklist,
         cfg.score_gate,
         cfg.max_diff_bytes,
+        conformance.as_ref(),
     );
     let schema = dual_review_json_schema(cfg.score_gate);
     let (parsed, last_run_id) = match with_clean_tree(deps, |tree| {
@@ -351,27 +393,54 @@ pub(crate) fn run_reviewer_turn(
                 && worker::ensure_budget(deps, &task.root_id)?.check() == BudgetCheck::Ok
             {
                 let prior_empty = out.final_text.trim().is_empty();
-                if prior_empty {
-                    active_schema.clear();
-                    max_turns = DUAL_REVIEW_MAX_TURNS;
-                } else {
-                    max_turns = DUAL_REPAIR_MAX_TURNS;
-                }
-                if names_dual_blocker(&out.final_text, &checklist)
-                    || reason.contains("citation verification")
-                {
+                let is_citation_err =
+                    reason.starts_with("all reported blocking issues failed citation verification");
+                if names_dual_blocker(&out.final_text, &checklist) || is_citation_err {
                     saw_named_blocker = true;
                     prior_inconclusive = reason.clone();
                 }
                 let clipped = clip_repair_prior(&out.final_text, DUAL_REPAIR_PRIOR_CHARS);
-                prompt = format!(
-                    "{base_prompt}\n\nYour previous reply failed validation. Fix the JSON/citation \
-                     error directly using the supplied DIFF without re-scanning the repository, \
-                     and reply with ONE strict JSON object matching the schema.\n{PRIOR_BEGIN}\n\
-                     Parse error: {}\n{}\n{PRIOR_END}\n",
-                    neutralise(reason),
-                    neutralise(&clipped)
-                );
+                let is_pure_json_syntax_err = (reason
+                    .starts_with("no valid dual-review JSON object found")
+                    || reason.starts_with("dual-review has multiple JSON objects"))
+                    && (!saw_named_blocker || names_dual_blocker(&clipped, &checklist))
+                    && can_use_compact_format_repair(&clipped, &checklist, cfg.score_gate);
+                if prior_empty {
+                    active_schema.clear();
+                    max_turns = DUAL_REVIEW_MAX_TURNS;
+                    prompt = format!(
+                        "{base_prompt}\n\nYour previous reply was empty. Re-check the supplied \
+                         DIFF and reply with ONE strict JSON object matching the schema.\n\
+                         {PRIOR_BEGIN}\nParse error: {}\n{PRIOR_END}\n",
+                        neutralise(reason)
+                    );
+                } else if is_pure_json_syntax_err {
+                    max_turns = DUAL_COMPACT_REPAIR_MAX_TURNS;
+                    prompt = build_compact_format_repair_prompt(
+                        &checklist,
+                        cfg.score_gate,
+                        &active_schema,
+                        reason,
+                        &clipped,
+                    );
+                } else {
+                    max_turns = DUAL_REPAIR_MAX_TURNS;
+                    let extra = if is_citation_err {
+                        " Put ONLY the exact repo-relative `path:line` inside `location` (wrap \
+                         paths containing commas or spaces in backticks) and put explanations in \
+                         `description`."
+                    } else {
+                        ""
+                    };
+                    prompt = format!(
+                        "{base_prompt}\n\nYour previous reply failed validation. Fix the \
+                         JSON/checklist/citation error directly using the supplied DIFF without \
+                         re-scanning the repository.{extra} Reply with ONE strict JSON object \
+                         matching the schema.\n{PRIOR_BEGIN}\nParse error: {}\n{}\n{PRIOR_END}\n",
+                        neutralise(reason),
+                        neutralise(&clipped)
+                    );
+                }
             } else {
                 break;
             }

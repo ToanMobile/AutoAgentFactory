@@ -2,32 +2,46 @@
 //! Parallel Dual-Review (`docs/PLAN_DUAL_FRONTIER.md` §D.4).
 
 use std::collections::{BTreeSet, HashMap};
-use std::{fs, path::Path};
 
 use aaf_domain::gate::GoldenScore;
-use aaf_domain::pipeline::{
-    AdjudicateDecision, AdjudicateVerdict, IssueSeverity, PlanContract, ReviewIssue,
-};
+use aaf_domain::pipeline::{IssueSeverity, PlanContract, ReviewIssue};
 use aaf_domain::prompt_fence::normalize_repo_path;
 use aaf_domain::task::ImmutableSpec;
 use serde::{Deserialize, de::DeserializeOwned};
 
 use super::checklist::{self, ID_ASSERT, ID_GATE_CI, ID_HARDCODED, ID_SECRET, ID_STUB};
 use super::diff_hunks::{
-    DiffHunks, evidence_in_diff, extract_citations, parse_diff_hunks_with_truncation,
+    Citation, evidence_in_diff, extract_citations, find_verified_citation,
+    parse_diff_hunks_with_truncation,
 };
 use super::prompt::{MAX_DIFF_BYTES, neutralise, truncate_diff_with_limit};
 use super::scoring::{GOLDEN_IDS, MechanicalScoreReport, evaluate_score_gate};
 use super::verdict::strip_ansi_escapes;
 
+mod adjudicate;
+pub mod conformance;
+mod conformance_rules;
 mod prompt;
+mod repair_check;
+pub use adjudicate::evaluate_adjudication;
+pub use conformance::{
+    CONFORMANCE_BEGIN, CONFORMANCE_END, PlanConformance, UnplannedFile, analyze_plan_conformance,
+    deterministic_scope_violations, format_conformance_summary,
+};
 pub use prompt::{
     build_adjudicate_prompt, build_adjudicate_prompt_with_limit, build_dual_review_prompt,
-    build_dual_review_prompt_with_limit,
+    build_dual_review_prompt_with_conformance, build_dual_review_prompt_with_limit,
 };
+pub use repair_check::{can_use_compact_format_repair, names_dual_blocker};
 
 pub type ChecklistItem = checklist::Item;
+/// Legacy id kept for backward compatibility (omission rules still accept it).
 pub const PLAN_DRIFT_ID: &str = "PLAN-DRIFT";
+pub const PLAN_OMISSION_ID: &str = "PLAN-OMISSION";
+pub const PLAN_SCOPE_ID: &str = "PLAN-SCOPE";
+pub const SCOPE_HARD_PREFIX: &str = "SCOPE-HARD-";
+/// Version hashed into `config_hash` for `dual_review` so checklist/policy changes invalidate cached partials.
+pub const DUAL_CHECKLIST_VERSION: u8 = 2;
 pub const FINDINGS_BEGIN: &str = "<<<AAF_UNTRUSTED_FINDINGS_BEGIN>>>";
 pub const FINDINGS_END: &str = "<<<AAF_UNTRUSTED_FINDINGS_END>>>";
 
@@ -75,12 +89,6 @@ struct RawAnswer {
     evidence: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawAdjudicate {
-    verdicts: Vec<AdjudicateVerdict>,
-}
-
 /// Strict inline JSON Schema for a Blind Dual-Review response.
 pub fn dual_review_json_schema(score_gate: bool) -> String {
     let req = if score_gate {
@@ -103,7 +111,7 @@ pub fn adjudicate_json_schema() -> &'static str {
     r#"{"type":"object","additionalProperties":false,"required":["verdicts"],"properties":{"verdicts":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["issue_id","decision","evidence","reason"],"properties":{"issue_id":{"type":"string","minLength":1},"decision":{"type":"string","enum":["CONCUR","REBUT"]},"evidence":{"type":"string"},"reason":{"type":"string"}}}}}}"#
 }
 
-/// Builds the Dual-Review checklist, appending [`PLAN_DRIFT_ID`] when `has_plan`.
+/// Builds the Dual-Review checklist, appending [`PLAN_OMISSION_ID`] and [`PLAN_SCOPE_ID`] when `has_plan`.
 pub fn build_dual_checklist(
     spec: &ImmutableSpec,
     mobile: bool,
@@ -112,9 +120,18 @@ pub fn build_dual_checklist(
     let mut items = checklist::build_checklist(spec, mobile);
     if has_plan {
         items.push(ChecklistItem {
-            id: PLAN_DRIFT_ID.into(),
+            id: PLAN_OMISSION_ID.into(),
             question: "Does the implementation omit any required file, invariant, or RED->GREEN \
-                       test from the converged PlanContract, or introduce out-of-scope drift?"
+                       test from the converged PlanContract?"
+                .into(),
+            blocking: true,
+        });
+        items.push(ChecklistItem {
+            id: PLAN_SCOPE_ID.into(),
+            question: "Does any UNPLANNED changed file introduce behavior unrelated to the \
+                       spec/plan, or touch auth, permission, sandbox, crypto, or network code \
+                       not named in the PlanContract? Helpers, test seams, tests, and docs \
+                       directly serving a planned responsibility are NOT drift."
                 .into(),
             blocking: true,
         });
@@ -122,7 +139,7 @@ pub fn build_dual_checklist(
     items
 }
 
-fn extract_json<T: DeserializeOwned>(text: &str, label: &str) -> Result<T, String> {
+pub(super) fn extract_json<T: DeserializeOwned>(text: &str, label: &str) -> Result<T, String> {
     if text.len() > 512 * 1024 {
         return Err(format!("{label} exceeds scan limit"));
     }
@@ -155,7 +172,7 @@ fn extract_json<T: DeserializeOwned>(text: &str, label: &str) -> Result<T, Strin
     found.ok_or_else(|| format!("no valid {label} JSON object found"))
 }
 
-fn parse_scores(raw: Vec<GoldenScore>) -> Result<Vec<GoldenScore>, String> {
+pub(super) fn parse_scores(raw: Vec<GoldenScore>) -> Result<Vec<GoldenScore>, String> {
     let mut slots: [Option<GoldenScore>; 7] = std::array::from_fn(|_| None);
     for e in raw {
         let idx = GOLDEN_IDS
@@ -189,30 +206,19 @@ fn checklist_sev(id: &str) -> IssueSeverity {
     }
 }
 
-/// Returns `true` if `raw` parses as a dual-review JSON object containing any
-/// blocking checklist `"yes"` answer or any `P0`/`P1` issue.
-pub fn names_dual_blocker(raw: &str, checklist: &[ChecklistItem]) -> bool {
-    let Ok(parsed) = extract_json::<DualReviewRaw>(raw, "dual-review") else {
-        return false;
-    };
-    let has_yes = parsed.answers.iter().any(|a| {
-        a.answer.trim().eq_ignore_ascii_case("yes")
-            && checklist
-                .iter()
-                .any(|it| it.blocking && it.id.eq_ignore_ascii_case(&a.id))
-    });
-    has_yes
-        || parsed
-            .issues
-            .iter()
-            .any(|i| matches!(i.severity, IssueSeverity::P0 | IssueSeverity::P1))
-}
-
 fn is_omission(id: &str, cat: &str) -> bool {
     [id, cat].iter().any(|s| {
         let u = s.trim().to_ascii_uppercase();
-        u == PLAN_DRIFT_ID || u == ID_STUB || u.starts_with("AC-")
+        u == PLAN_DRIFT_ID || u == PLAN_OMISSION_ID || u == ID_STUB || u.starts_with("AC-")
     })
+}
+
+fn format_citation(c: &Citation) -> String {
+    if c.end > c.start {
+        format!("{}:{}-{}", c.path, c.start, c.end)
+    } else {
+        format!("{}:{}", c.path, c.start)
+    }
 }
 
 fn find_omission(
@@ -371,18 +377,26 @@ pub fn parse_and_validate_dual_review_with_limit(
         let mut rejected_locations: Vec<String> = Vec::new();
         let mut path_hints: BTreeSet<String> = BTreeSet::new();
         for mut iss in blocking {
+            // Prevent reviewer-emitted issues from spoofing engine-reserved non-rebuttable IDs.
+            if iss
+                .id
+                .trim()
+                .to_ascii_uppercase()
+                .starts_with(SCOPE_HARD_PREFIX)
+            {
+                iss.id = format!("REV-{}", iss.id.trim());
+            }
             let linked = yes_ev
                 .get(&iss.id.to_ascii_uppercase())
                 .or_else(|| yes_ev.get(&iss.category.to_ascii_uppercase()))
                 .map_or("", String::as_str);
-            if evidence_in_diff(&iss.location, &hunks) {
+            if let Some(c) = find_verified_citation(&iss.location, &hunks) {
+                iss.location = format_citation(&c);
                 valid.push(iss);
-            } else if !linked.is_empty() && evidence_in_diff(linked, &hunks) {
-                if let Some(c) = extract_citations(linked).into_iter().find(|c| {
-                    evidence_in_diff(&format!("`{}:{}-{}`", c.path, c.start, c.end), &hunks)
-                }) {
-                    iss.location = format!("{}:{}", c.path, c.start);
-                }
+            } else if !linked.is_empty()
+                && let Some(c) = find_verified_citation(linked, &hunks)
+            {
+                iss.location = format_citation(&c);
                 valid.push(iss);
             } else if plan.is_some() && is_omission(&iss.id, &iss.category) {
                 let hit = find_omission(&iss.location, &planned, &dp)
@@ -472,97 +486,4 @@ pub fn parse_and_validate_dual_review_with_limit(
         }
     };
     run().unwrap_or_else(|reason| DualReviewerOutcome::Inconclusive { reason })
-}
-
-fn verify_rebut_citation(evidence: &str, hunks: &DiffHunks, repo_root: &Path) -> bool {
-    if evidence_in_diff(evidence, hunks) {
-        return true;
-    }
-    let Ok(root) = fs::canonicalize(repo_root) else {
-        return false;
-    };
-    extract_citations(evidence).iter().any(|c| {
-        let p = c.path.as_str();
-        [
-            Some(p),
-            p.strip_prefix("./"),
-            p.strip_prefix("a/"),
-            p.strip_prefix("b/"),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|cand| {
-            let Ok(norm) = normalize_repo_path(cand) else {
-                return false;
-            };
-            let Ok(file) = fs::canonicalize(repo_root.join(norm)) else {
-                return false;
-            };
-            file.starts_with(&root)
-                && file.is_file()
-                && fs::read_to_string(file).is_ok_and(|s| {
-                    c.start >= 1 && c.end >= c.start && (c.end as usize) <= s.lines().count()
-                })
-        })
-    })
-}
-
-/// Evaluates one Cross-Adjudication turn (fail-closed `CONCUR`, conservative `P0`).
-pub fn evaluate_adjudication(
-    raw: &str,
-    original_issues: &[ReviewIssue],
-    diff: &str,
-    repo_root: &Path,
-) -> AdjudicationResult {
-    let parsed: RawAdjudicate = match extract_json(raw, "adjudication") {
-        Ok(v) => v,
-        Err(e) => {
-            return AdjudicationResult {
-                surviving_issues: original_issues.to_vec(),
-                dropped_p1_issues: vec![],
-                upheld_reasons: vec![format!("adjudication invalid (fail-closed CONCUR): {e}")],
-            };
-        }
-    };
-    let hunks = parse_diff_hunks_with_truncation(diff, false);
-    let mut by_id: HashMap<&str, Option<&AdjudicateVerdict>> = HashMap::new();
-    for v in &parsed.verdicts {
-        by_id
-            .entry(v.issue_id.as_str())
-            .and_modify(|s| *s = None)
-            .or_insert(Some(v));
-    }
-    let (mut surviving, mut dropped, mut upheld) = (vec![], vec![], vec![]);
-    for iss in original_issues {
-        let v = by_id.get(iss.id.as_str()).and_then(|x| *x);
-        let rebut = v.is_some_and(|x| x.decision == AdjudicateDecision::Rebut);
-        if iss.severity != IssueSeverity::P0
-            && rebut
-            && let Some(x) = v
-            && verify_rebut_citation(&x.evidence, &hunks, repo_root)
-        {
-            dropped.push((
-                iss.clone(),
-                format!("REBUT ({}): {}", x.evidence.trim(), x.reason.trim()),
-            ));
-            continue;
-        }
-        surviving.push(iss.clone());
-        let why = match (iss.severity, v) {
-            (IssueSeverity::P0, Some(x)) if rebut => {
-                format!("P0 kept despite REBUT ({})", x.reason.trim())
-            }
-            (IssueSeverity::P0, Some(x)) => format!("P0 CONCUR ({})", x.reason.trim()),
-            (IssueSeverity::P0, None) => "P0 kept (missing/duplicate verdict)".into(),
-            (_, Some(x)) if rebut => format!("REBUT citation {:?} unverified (CONCUR)", x.evidence),
-            (_, Some(x)) => format!("CONCUR ({})", x.reason.trim()),
-            (_, None) => "missing/duplicate verdict (CONCUR)".into(),
-        };
-        upheld.push(format!("{}: {why}", iss.id));
-    }
-    AdjudicationResult {
-        surviving_issues: surviving,
-        dropped_p1_issues: dropped,
-        upheld_reasons: upheld,
-    }
 }

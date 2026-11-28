@@ -13,6 +13,7 @@ AAF_BUILD_SRC="${AAF_BUILD_SRC:-$HOME/.cache/aaf-update/src}"
 AAF_BUILD_TARGET="${AAF_BUILD_TARGET:-$HOME/.cache/aaf-update/target}"
 LOCAL_BUILD=0
 DO_PULL=0
+FORCE_UI_RESTART="${AAF_FORCE_UI_RESTART:-0}"
 BUMP_PART=""
 RELEASE_PART=""
 CHECK_REPOS=()
@@ -43,6 +44,7 @@ Options:
   --check-repos <p1> [p2...]   Run read-only `aaf doctor` on listed repos
   --sync-skills <p1> [p2...]   Run `aaf skills sync` on listed repos
   --sync-hooks <p1> [p2...]    Run `aaf init --hook-host all` on listed repos
+  --force-restart-ui           Restart Cockpit UI service even if active workers are running
   -h, --help                   Show this help
 EOF
 }
@@ -105,6 +107,11 @@ while [[ $# -gt 0 ]]; do
     --sync-hooks)
       mode="hooks"
       shift
+      ;;
+    --force-restart-ui)
+      FORCE_UI_RESTART=1
+      shift
+      mode=""
       ;;
     -h|--help)
       usage
@@ -332,58 +339,99 @@ echo "==> Machine check (aaf executors list):"
 "$AAF_BIN" executors list
 
 if [[ "$(uname -s)" == "Darwin" && -z "${AAF_RUN_ID:-}" && "${AAF_SKIP_UI_SERVICE:-0}" != "1" ]]; then
-  ui_help="$("$AAF_BIN" ui --help 2>&1 || true)"
-  if [[ "$ui_help" == *"--install-service"* ]]; then
-    install_flags=()
-    service_env=()
-    plist_file="$HOME/Library/LaunchAgents/com.autoagentfactory.ui.plist"
-    if [[ "${AAF_UI_ALLOW_ACTIONS:-0}" == "1" ]] || { [[ -f "$plist_file" ]] && grep -q -- '--allow-actions' "$plist_file" 2>/dev/null; }; then
-      install_flags+=(--allow-actions)
-    fi
-    if [[ -f "$plist_file" ]]; then
-      for env_key in AAF_WORKTREE_DIR AAF_DATA_DIR AAF_CONFIG_DIR AAF_SEED_CACHE JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT GRADLE_USER_HOME; do
-        if [[ -z "${!env_key:-}" ]]; then
-          if saved_val="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:${env_key}" "$plist_file" 2>/dev/null)" && [[ -n "$saved_val" ]]; then
-            service_env+=("${env_key}=${saved_val}")
-          fi
-        fi
-      done
-    fi
-    echo "==> Restarting AAF Cockpit service (com.autoagentfactory.ui ${install_flags[*]:-read-only})..."
-    aaf_db_path="${AAF_DATA_DIR:-$HOME/.local/share/autofactory}/aaf.db"
-    if [[ -f "$aaf_db_path" ]] && command -v python3 >/dev/null 2>&1; then
-      running_summary="$(python3 - "$aaf_db_path" <<'PY' 2>/dev/null || true
-import sqlite3, sys
-c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-rows = list(c.execute("SELECT task_id FROM runs WHERE status='running' ORDER BY started_at ASC"))
+  plist_file="$HOME/Library/LaunchAgents/com.autoagentfactory.ui.plist"
+  effective_data_dir="${AAF_DATA_DIR:-}"
+  if [[ -z "$effective_data_dir" && -f "$plist_file" ]]; then
+    effective_data_dir="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:AAF_DATA_DIR" "$plist_file" 2>/dev/null || true)"
+  fi
+  aaf_db_path="${effective_data_dir:-$HOME/.local/share/autofactory}/aaf.db"
+  running_summary=""
+  running_check_failed=0
+  if [[ -f "$aaf_db_path" ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      running_check_failed=1
+    else
+      set +e
+      running_summary="$(python3 - "$aaf_db_path" <<'PY' 2>/dev/null
+import os, pathlib, sqlite3, subprocess, sys, time
+uri = pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro"
+c = sqlite3.connect(uri, uri=True, timeout=5.0)
+uid = str(os.getuid())
+aaf_run_alive = subprocess.run(
+    ["pgrep", "-u", uid, "-f", r"(^|/)aaf([[:space:]]+[^[:space:]]+)*[[:space:]]+run([[:space:]]|$)"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+).returncode == 0
+rows = list(c.execute("SELECT task_id, started_at FROM runs WHERE status='running' ORDER BY started_at ASC"))
 if rows:
-    print(f"{len(rows)} ({', '.join(r[0] for r in rows[:6])})")
+    now = int(time.time())
+    # Treat rows as active if started within 2h OR an `aaf run` process is alive
+    # (prevents ancient stale rows from suppressing UI restarts forever).
+    active = [r[0] for r in rows if aaf_run_alive or (r[1] is not None and (now - int(r[1])) < 7200)]
+    if active:
+        print(f"{len(active)} ({', '.join(active[:6])})")
+elif aaf_run_alive:
+    # A live `aaf run` process may be between LLM turns (e.g. inside `aaf gate` or merge).
+    active_tasks = [r[0] for r in c.execute("SELECT id FROM tasks WHERE state IN ('running','gating') ORDER BY updated_at DESC")]
+    if active_tasks:
+        print(f"{len(active_tasks)} gating/active ({', '.join(active_tasks[:6])})")
+    else:
+        print("live aaf run process")
 PY
 )"
-      if [[ -n "$running_summary" ]]; then
-        echo "    [WARN] Active running worker(s): ${running_summary} — restarting UI will interrupt them (set AAF_SKIP_UI_SERVICE=1 to keep workers running)." >&2
+      py_rc=$?
+      set -e
+      if [[ "$py_rc" -ne 0 ]]; then
+        running_check_failed=1
       fi
     fi
-    if ! env ${service_env[@]+"${service_env[@]}"} "$AAF_BIN" ui --install-service ${install_flags[@]+"${install_flags[@]}"} >/dev/null; then
-      echo "    [WARN] aaf ui --install-service failed (e.g. non-GUI session); skipping UI service restart." >&2
-    else
-      ui_ok=0
-      for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if curl -fsS --max-time 1 "http://127.0.0.1:4317/api/health" >/dev/null 2>&1; then
-          ui_ok=1
-          break
-        fi
-        sleep 0.3
-      done
-      if [[ "$ui_ok" -eq 1 ]]; then
-        echo "    AAF Cockpit service: UP on http://127.0.0.1:4317 (${install_flags[*]:-read-only}) — Health: http://127.0.0.1:4317/health"
+  fi
+  if [[ "$running_check_failed" -eq 1 && "$FORCE_UI_RESTART" != "1" ]]; then
+    echo "==> [WARN] Could not verify active workers in ${aaf_db_path} — binaries updated, skipping Cockpit UI restart to avoid interrupting live runs (pass --force-restart-ui or AAF_FORCE_UI_RESTART=1 to restart anyway)." >&2
+  elif [[ -n "$running_summary" && "$FORCE_UI_RESTART" != "1" ]]; then
+    echo "==> Active running worker(s): ${running_summary} — binaries updated, skipping Cockpit UI restart to avoid killing in-flight runs (pass --force-restart-ui or AAF_FORCE_UI_RESTART=1 to restart anyway)."
+  else
+    if [[ -n "$running_summary" ]]; then
+      echo "    [WARN] Active running worker(s): ${running_summary} — proceeding with forced UI restart (--force-restart-ui)." >&2
+    fi
+    ui_help="$("$AAF_BIN" ui --help 2>&1 || true)"
+    if [[ "$ui_help" == *"--install-service"* ]]; then
+      install_flags=()
+      service_env=()
+      if [[ "${AAF_UI_ALLOW_ACTIONS:-0}" == "1" ]] || { [[ -f "$plist_file" ]] && grep -q -- '--allow-actions' "$plist_file" 2>/dev/null; }; then
+        install_flags+=(--allow-actions)
+      fi
+      if [[ -f "$plist_file" ]]; then
+        for env_key in AAF_WORKTREE_DIR AAF_DATA_DIR AAF_CONFIG_DIR AAF_SEED_CACHE JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT GRADLE_USER_HOME; do
+          if [[ -z "${!env_key:-}" ]]; then
+            if saved_val="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:${env_key}" "$plist_file" 2>/dev/null)" && [[ -n "$saved_val" ]]; then
+              service_env+=("${env_key}=${saved_val}")
+            fi
+          fi
+        done
+      fi
+      echo "==> Restarting AAF Cockpit service (com.autoagentfactory.ui ${install_flags[*]:-read-only})..."
+      if ! env ${service_env[@]+"${service_env[@]}"} "$AAF_BIN" ui --install-service ${install_flags[@]+"${install_flags[@]}"} >/dev/null; then
+        echo "    [WARN] aaf ui --install-service failed (e.g. non-GUI session); skipping UI service restart." >&2
       else
-        echo "    [WARN] AAF Cockpit service restarted, but http://127.0.0.1:4317/api/health not ready yet (check ~/Library/Logs/aaf-ui.log)" >&2
+        ui_ok=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          if curl -fsS --max-time 1 "http://127.0.0.1:4317/api/health" >/dev/null 2>&1; then
+            ui_ok=1
+            break
+          fi
+          sleep 0.3
+        done
+        if [[ "$ui_ok" -eq 1 ]]; then
+          echo "    AAF Cockpit service: UP on http://127.0.0.1:4317 (${install_flags[*]:-read-only}) — Health: http://127.0.0.1:4317/health"
+        else
+          echo "    [WARN] AAF Cockpit service restarted, but http://127.0.0.1:4317/api/health not ready yet (check ~/Library/Logs/aaf-ui.log)" >&2
+        fi
       fi
+    elif [[ -f "$plist_file" ]]; then
+      echo "==> Restarting existing launchd service com.autoagentfactory.ui..."
+      /bin/launchctl kickstart -k "gui/$(id -u)/com.autoagentfactory.ui" || true
     fi
-  elif [[ -f "$HOME/Library/LaunchAgents/com.autoagentfactory.ui.plist" ]]; then
-    echo "==> Restarting existing launchd service com.autoagentfactory.ui..."
-    /bin/launchctl kickstart -k "gui/$(id -u)/com.autoagentfactory.ui" || true
   fi
 fi
 

@@ -36,6 +36,7 @@ pub(super) struct ControlContext<'a> {
     pub base_sha: &'a str,
     pub oracle_mode: OracleMode,
     pub compile_red_policy: OracleCompileRedPolicy,
+    pub skip_flake_rerun: bool,
     pub changes: &'a [Change],
     pub inline_rust_tests: &'a BTreeSet<String>,
     pub heavy: &'a HeavyContext<'a>,
@@ -47,26 +48,31 @@ pub(super) struct ControlContext<'a> {
 /// Runs the rerun + base-control verification after the initial reverted run
 /// classified as [`OracleOutcome::Proven`].
 pub(super) fn verify_proven(ctx: &ControlContext<'_>) -> Result<OracleVerdict, GateError> {
-    // 1. Re-run the reverted tree with the exact same job and environment.
-    let (rerun, _mode) = ctx
-        .heavy
-        .throttle
-        .run_heavy_confined_with_env_and_removals(
-            ctx.heavy.data_dir,
-            ctx.heavy.clock,
-            ctx.job,
-            ctx.extra_env,
-            ctx.env_remove,
-        )
-        .map_err(super::runner::map_throttle_err)?;
-    let rerun_out = String::from_utf8_lossy(&rerun.output);
-    let rerun_outcome = classify(rerun.exit_code, rerun.timed_out, &rerun_out);
-    if let Some(inconclusive) = map_rerun_non_proven(rerun_outcome) {
-        return Ok(map_outcome(
-            ctx.oracle_mode,
-            ctx.compile_red_policy,
-            inconclusive,
-        ));
+    // 1. Re-run the reverted tree with the exact same job and environment to
+    //    detect flaky failures. In `OracleMode::Warn`, skip this redundant pass
+    //    when the initial failure already emitted an anchored runner summary
+    //    (the pure-base control pass below still proves anti-vacuity).
+    if !ctx.skip_flake_rerun {
+        let (rerun, _mode) = ctx
+            .heavy
+            .throttle
+            .run_heavy_confined_with_env_and_removals(
+                ctx.heavy.data_dir,
+                ctx.heavy.clock,
+                ctx.job,
+                ctx.extra_env,
+                ctx.env_remove,
+            )
+            .map_err(super::runner::map_throttle_err)?;
+        let rerun_out = String::from_utf8_lossy(&rerun.output);
+        let rerun_outcome = classify(rerun.exit_code, rerun.timed_out, &rerun_out);
+        if let Some(inconclusive) = map_rerun_non_proven(rerun_outcome) {
+            return Ok(map_outcome(
+                ctx.oracle_mode,
+                ctx.compile_red_policy,
+                inconclusive,
+            ));
+        }
     }
 
     // 2. Revert test-side changes (and inline Rust tests) back to `base_sha`.

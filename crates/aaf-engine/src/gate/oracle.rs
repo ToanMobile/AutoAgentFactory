@@ -17,7 +17,7 @@ use aaf_domain::gate::{ChangeKind, GateMode, GateStatus};
 use aaf_domain::oracle_config::OracleCompileRedPolicy;
 
 use super::changes::{AddedLines, Change};
-use super::oracle_classify::{OracleOutcome, classify};
+use super::oracle_classify::{OracleOutcome, classify, has_anchored_runner_failure};
 use super::oracle_control::{ControlContext, verify_proven};
 use super::oracle_worktree::{
     ScratchWorktree, inline_cfg_test_spans, overlay_live_changes, revert_prod_files,
@@ -492,12 +492,15 @@ pub(crate) fn evaluate_with_options(
     let output = String::from_utf8_lossy(&run.output);
     let initial = classify(run.exit_code, run.timed_out, &output);
     if initial == OracleOutcome::Proven {
+        let skip_flake_rerun =
+            oracle_mode == OracleMode::Warn && has_anchored_runner_failure(&output);
         return verify_proven(&ControlContext {
             repo_root,
             scratch_path: scratch.path(),
             base_sha,
             oracle_mode,
             compile_red_policy: cfg.gate.oracle_compile_red_policy,
+            skip_flake_rerun,
             changes,
             inline_rust_tests: &inline_rust_tests,
             heavy,

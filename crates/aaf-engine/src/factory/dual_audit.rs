@@ -21,10 +21,10 @@ pub use matrix::{
 pub(crate) use turn::{run_adjudicate_turn, run_reviewer_turn};
 
 use super::audit_backend::audit_rejection_signal;
-use super::post_audit;
 use super::worker::{GateJob, Next};
-use super::{Deps, unblock};
+use super::{Deps, plan_job, post_audit, unblock};
 use crate::cross_audit::compute_mechanical_score;
+use crate::cross_audit::dual_verdict::{analyze_plan_conformance, deterministic_scope_violations};
 use crate::git::TaskWorktree;
 
 /// Coordinator state tracking blind parallel sibling turns for one `Gating` task (R3-CONC-1).
@@ -218,7 +218,44 @@ fn is_deterministic_quorum_inconclusive(reason: &str) -> bool {
         || reason.starts_with("dual review consensus requires >= 2 distinct")
 }
 
-/// Aggregates all completed partials via [`decide_dual_matrix`], emitting 1 `CrossAudit` per round.
+fn is_deterministic_audit_inconclusive(reason: &str, partials: &[PartialAuditRecord]) -> bool {
+    if is_deterministic_quorum_inconclusive(reason) {
+        return true;
+    }
+    let is_det_body = |body: &str| {
+        body.starts_with("repair turn attempted to downgrade")
+            || body.starts_with("all reported blocking issues failed citation verification")
+    };
+    let inc: Vec<&PartialAuditRecord> = partials
+        .iter()
+        .filter(|p| is_inconclusive_partial(p))
+        .collect();
+    !inc.is_empty()
+        && inc
+            .iter()
+            .all(|p| is_det_body(partial_verdict_body(&p.verdict)))
+}
+
+fn hard_plan_scope_violations(
+    deps: &Deps,
+    task: &Task,
+    job: &GateJob,
+) -> PortResult<Vec<ReviewIssue>> {
+    let Some((plan, _)) = plan_job::latest_converged_plan(deps, &task.id)? else {
+        return Ok(Vec::new());
+    };
+    let raw_diff = deps.git.diff(&job.worktree)?;
+    let conf = analyze_plan_conformance(
+        &raw_diff,
+        &plan,
+        &task.scope_paths,
+        &deps.settings.repo.gate.head_lock_globs,
+    );
+    Ok(deterministic_scope_violations(&conf))
+}
+
+/// Aggregates all completed partials via [`decide_dual_matrix`], enforcing
+/// deterministic hard scope violations and emitting 1 `CrossAudit` per round.
 pub(crate) fn finalize_dual_review(
     deps: &Deps,
     job: &GateJob,
@@ -228,6 +265,7 @@ pub(crate) fn finalize_dual_review(
     let task = deps.store.get_task(&job.task_id)?;
     let cfg = &deps.settings.repo.cross_audit;
     let mech = dual_mech_score(deps, job, receipt);
+    let hard_violations = hard_plan_scope_violations(deps, &task, job)?;
     match decide_dual_matrix(
         partials,
         cfg,
@@ -238,24 +276,86 @@ pub(crate) fn finalize_dual_review(
         deps.now(),
     ) {
         DualMatrixDecision::ConsensusPass { record } => {
+            if !hard_violations.is_empty() {
+                let summary = matrix::summarize_issues(
+                    &hard_violations,
+                    "deterministic hard scope violation",
+                );
+                let next = emit_fail_and_rework(
+                    deps,
+                    &task,
+                    job,
+                    receipt,
+                    mech,
+                    false,
+                    &hard_violations,
+                    &summary,
+                )?;
+                return Ok(DualFinalizeResult::Done(next));
+            }
             let next = sign_and_emit_pass(deps, &task.id, job, receipt, &record)?;
             Ok(DualFinalizeResult::Done(next))
         }
         DualMatrixDecision::NeedsAdjudication {
             pass_reviewer_id,
-            findings,
+            mut findings,
             partials,
-        } => Ok(DualFinalizeResult::NeedsAdjudication {
-            pass_reviewer_id,
-            findings,
-            partials,
-        }),
-        DualMatrixDecision::Rework { findings, summary } => {
-            let next =
-                emit_fail_and_rework(deps, &task, job, receipt, mech, false, &findings, &summary)?;
+        } => {
+            if !hard_violations.is_empty() {
+                findings.extend(hard_violations);
+                let summary =
+                    matrix::summarize_issues(&findings, "deterministic hard scope violation");
+                let next = emit_fail_and_rework(
+                    deps, &task, job, receipt, mech, false, &findings, &summary,
+                )?;
+                return Ok(DualFinalizeResult::Done(next));
+            }
+            Ok(DualFinalizeResult::NeedsAdjudication {
+                pass_reviewer_id,
+                findings,
+                partials,
+            })
+        }
+        DualMatrixDecision::Rework {
+            mut findings,
+            summary,
+        } => {
+            let final_summary = if hard_violations.is_empty() {
+                summary
+            } else {
+                findings.extend(hard_violations);
+                matrix::summarize_issues(&findings, "dual-review blocking finding")
+            };
+            let next = emit_fail_and_rework(
+                deps,
+                &task,
+                job,
+                receipt,
+                mech,
+                false,
+                &findings,
+                &final_summary,
+            )?;
             Ok(DualFinalizeResult::Done(next))
         }
         DualMatrixDecision::Inconclusive { reason } => {
+            if !hard_violations.is_empty() {
+                let summary = matrix::summarize_issues(
+                    &hard_violations,
+                    "deterministic hard scope violation",
+                );
+                let next = emit_fail_and_rework(
+                    deps,
+                    &task,
+                    job,
+                    receipt,
+                    mech,
+                    false,
+                    &hard_violations,
+                    &summary,
+                )?;
+                return Ok(DualFinalizeResult::Done(next));
+            }
             let verdict = format!("inconclusive: {reason}");
             deps.emit(
                 EventKind::CrossAudit,
@@ -266,7 +366,7 @@ pub(crate) fn finalize_dual_review(
                     "tree_fp": receipt.tree_fp, "config_hash": receipt.config_hash,
                 }),
             )?;
-            if is_deterministic_quorum_inconclusive(&reason) {
+            if is_deterministic_audit_inconclusive(&reason, partials) {
                 unblock::block_untried(deps, &task.id, &verdict)?;
                 return Ok(DualFinalizeResult::Done(Next::Blocked));
             }

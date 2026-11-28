@@ -45,6 +45,17 @@ impl PathSpans {
                 || self.new_spans.iter().any(|s| s.contains_range(start, end))
                 || self.old_spans.iter().any(|s| s.contains_range(start, end)))
     }
+
+    /// Earliest touched 1-based line number for this path (defaults to `1` for hunkless files).
+    pub fn first_line(&self) -> u32 {
+        self.new_spans
+            .iter()
+            .map(|s| s.start)
+            .min()
+            .or_else(|| self.old_spans.iter().map(|s| s.start).min())
+            .unwrap_or(1)
+            .max(1)
+    }
 }
 
 /// Map of normalised diff paths to their touched spans.
@@ -60,7 +71,10 @@ pub struct Citation {
 
 /// Decodes a git C-quoted path (`"..."` with `\ooo` octal & control escapes).
 fn unquote_git_path(quoted: &str) -> String {
-    let inner = quoted.trim_matches('"');
+    let inner = quoted
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(quoted);
     let mut bytes = Vec::with_capacity(inner.len());
     let mut iter = inner.bytes().peekable();
     while let Some(b) = iter.next() {
@@ -216,7 +230,7 @@ pub fn parse_diff_hunks_with_truncation(diff: &str, truncated: bool) -> DiffHunk
     let (mut git_paths, mut old_path, mut new_path) = (Vec::new(), None, None);
     let (mut had_hunk, mut explicit_hunkless) = (false, false);
     let (mut old_rem, mut new_rem) = (0u32, 0u32);
-    let cut = truncated || diff.contains(TRUNCATION_MARKER);
+    let mut cut = truncated;
 
     for raw_line in diff.lines() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
@@ -242,6 +256,10 @@ pub fn parse_diff_hunks_with_truncation(diff: &str, truncated: bool) -> DiffHunk
             new_rem = 0;
         }
 
+        if line == TRUNCATION_MARKER {
+            cut = true;
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("diff --git ") {
             flush_hunkless(&mut map, &git_paths, had_hunk, explicit_hunkless);
             git_paths = parse_git_diff_header(rest);
@@ -415,10 +433,43 @@ pub fn has_file_line_reference(evidence: &str) -> bool {
     !extract_citations(evidence).is_empty()
 }
 
-/// Returns `true` when `evidence` cites at least one `file:line` anchored inside `hunks`.
-pub fn evidence_in_diff(evidence: &str, hunks: &DiffHunks) -> bool {
-    extract_citations(evidence).iter().any(|c| {
-        [
+fn parse_anchored_span_suffix(rest: &str) -> Option<(u32, u32)> {
+    let after_sep = rest.strip_prefix("#L").or_else(|| rest.strip_prefix(':'))?;
+    let end = after_sep
+        .find(|c: char| {
+            c.is_whitespace() || matches!(c, '`' | '"' | '\'' | ')' | ']' | '>' | ',' | ';')
+        })
+        .unwrap_or(after_sep.len());
+    let mut spec = after_sep[..end].trim_end_matches(['.', ':']);
+    if let Some((head, col)) = spec.rsplit_once(':')
+        && !col.is_empty()
+        && col.bytes().all(|b| b.is_ascii_digit())
+        && parse_line_span(head).is_some()
+    {
+        spec = head;
+    }
+    parse_line_span(spec)
+}
+
+fn has_valid_left_boundary(text: &str, pos: usize) -> bool {
+    if pos == 0 {
+        return true;
+    }
+    text[..pos]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | '[' | '<'))
+}
+
+/// Returns the first `file:line` citation in `evidence` that is anchored inside `hunks`.
+///
+/// Tries standard token extraction first, then falls back to scanning trusted
+/// diff paths (longest-first) so unquoted repo paths containing commas or spaces
+/// (e.g. `plan/Audit,Review.md:21 records ...`) still verify without ever
+/// matching bare filenames, substring paths, or lines outside diff hunks.
+pub fn find_verified_citation(evidence: &str, hunks: &DiffHunks) -> Option<Citation> {
+    for c in extract_citations(evidence) {
+        for key in [
             Some(c.path.as_str()),
             c.path.strip_prefix("./"),
             c.path.strip_prefix("a/"),
@@ -426,10 +477,63 @@ pub fn evidence_in_diff(evidence: &str, hunks: &DiffHunks) -> bool {
         ]
         .into_iter()
         .flatten()
-        .any(|key| {
-            hunks
+        {
+            if hunks
                 .get(key)
                 .is_some_and(|s| s.contains_range(c.start, c.end))
-        })
-    })
+            {
+                return Some(Citation {
+                    path: key.to_string(),
+                    start: c.start,
+                    end: c.end,
+                });
+            }
+        }
+    }
+    if hunks.is_empty() || evidence.trim().is_empty() {
+        return None;
+    }
+    let normalized = evidence.replace('\\', "/");
+    let mut keys: Vec<&String> = hunks.keys().collect();
+    keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    for key in keys {
+        let Some(spans) = hunks.get(key) else {
+            continue;
+        };
+        for prefix in ["", "./", "a/", "b/"] {
+            let needle = if prefix.is_empty() {
+                std::borrow::Cow::Borrowed(key.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!("{prefix}{key}"))
+            };
+            for (pos, _) in normalized.match_indices(needle.as_ref()) {
+                if !has_valid_left_boundary(&normalized, pos) {
+                    continue;
+                }
+                let mut rest = &normalized[pos + needle.len()..];
+                if pos > 0 {
+                    let prev = normalized.as_bytes()[pos - 1];
+                    if matches!(prev, b'`' | b'"' | b'\'') && rest.as_bytes().first() == Some(&prev)
+                    {
+                        rest = &rest[1..];
+                    }
+                }
+                if let Some((start, end)) = parse_anchored_span_suffix(rest)
+                    && spans.contains_range(start, end)
+                {
+                    return Some(Citation {
+                        path: key.clone(),
+                        start,
+                        end,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns `true` when `evidence` cites at least one `file:line` anchored inside `hunks`.
+pub fn evidence_in_diff(evidence: &str, hunks: &DiffHunks) -> bool {
+    find_verified_citation(evidence, hunks).is_some()
 }

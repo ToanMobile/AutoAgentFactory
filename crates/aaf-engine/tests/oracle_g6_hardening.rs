@@ -414,3 +414,43 @@ fn skip_reasons_are_recorded_without_changing_status() {
         "note: oracle skipped (no test_scoped/test_full command configured)",
     );
 }
+
+#[test]
+fn warn_mode_skips_flake_rerun_on_anchored_failure_but_keeps_unanchored_rerun() {
+    let run_case = |failure_echo: &str| -> usize {
+        let log_dir = TempDir::new().unwrap();
+        let cwd_log = fs::canonicalize(log_dir.path()).unwrap().join("cwds.txt");
+        let preamble = format!("pwd -P >> '{}'", cwd_log.display());
+        let repo = init_oracle_repo("warn", &preamble);
+        let data = TempDir::new().unwrap();
+
+        fs::write(repo.path().join("src/app.sh"), "#!/bin/sh\necho 42\n").unwrap();
+        fs::write(
+            repo.path().join("tests/test_fix.sh"),
+            format!(
+                "#!/bin/sh\nval=$(sh src/app.sh)\nif [ \"$val\" != \"42\" ]; then\n  echo \"{failure_echo}\"\n  exit 1\nfi\necho \"PASS: got 42\"\n"
+            ),
+        )
+        .unwrap();
+
+        let receipt = run_gate(repo.path(), data.path());
+        assert_eq!(receipt.status, GateStatus::Clear, "{:?}", receipt.reasons);
+        assert!(has_reason(&receipt, "oracle: red_green=proven"));
+        let repo_canon = fs::canonicalize(repo.path()).unwrap();
+        let log = fs::read_to_string(&cwd_log).unwrap();
+        log.lines()
+            .filter(|line| Path::new(line) != repo_canon)
+            .count()
+    };
+
+    assert_eq!(
+        run_case("test result: FAILED. 0 passed; 1 failed"),
+        2,
+        "Warn mode with anchored runner summary must skip redundant flake rerun (initial + control = 2)"
+    );
+    assert_eq!(
+        run_case("FAIL: generic unanchored message"),
+        3,
+        "Warn mode with unanchored generic failure must keep flake rerun (3)"
+    );
+}

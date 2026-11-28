@@ -47,8 +47,9 @@ pub fn build_prompt(task: &Task, branch: &str) -> String {
          change; commit your work on this branch when it is complete; do not push, do not \
          merge, do not edit the task description. Existing tests and build configuration are \
          locked: change them only when the task requires it. For bug fixes, grep callers first \
-         and fix the root cause in shared code. Run targeted tests while iterating, then run \
-         the repo's verification suite once before committing.\n\
+         and fix the root cause in shared code. Run targeted tests while iterating and before \
+         committing; the automated gate runs the full repository verification suite after you \
+         commit.\n\
          You run unattended; nobody answers questions. When the safety hook denies a command, \
          follow its fix (use the Write/Edit tools for file content, simpler or split commands \
          — e.g. run a heredoc that writes a file as its own command, then git commands \

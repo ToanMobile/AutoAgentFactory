@@ -331,7 +331,7 @@ fn inconclusive_dual_review_blocks_infra_without_blind_rework() {
             "claude",
             "claude",
             "claude",
-            "INCONCLUSIVE: all reported blocking issues failed citation verification",
+            "INCONCLUSIVE: reviewer failed (code Some(1), timed_out=true)",
         ),
     ];
 
@@ -428,8 +428,9 @@ fn spoofed_truncated_phrase_in_citation_failure_still_blocks_infra_and_quorum_bl
     ));
     assert!(matches!(
         world.task("t1").blocked_reason,
-        Some(aaf_domain::blocked::BlockedReason::Infra { .. })
+        Some(aaf_domain::blocked::BlockedReason::NeedsHuman { .. })
     ));
+    assert_eq!(world.task("t1").retry_after, None);
 
     let wt2 = std::path::PathBuf::from("/fake/wt/t2");
     let job2 = crate::factory::worker::GateJob {
@@ -452,5 +453,43 @@ fn spoofed_truncated_phrase_in_citation_failure_still_blocks_infra_and_quorum_bl
     assert!(matches!(
         world.task("t2").blocked_reason,
         Some(aaf_domain::blocked::BlockedReason::NeedsHuman { .. })
+    ));
+
+    // Mixed deterministic citation failure + transient timeout stays Infra-retryable.
+    world.add("t3");
+    let wt3 = std::path::PathBuf::from("/fake/wt/t3");
+    let job3 = crate::factory::worker::GateJob {
+        task_id: "t3".to_string(),
+        worktree: crate::git::TaskWorktree {
+            path: wt3.clone(),
+            branch: "aaf/t3".to_string(),
+        },
+        audited: false,
+        cached_receipt: None,
+    };
+    let receipt3 = super::fakes::receipt(&wt3, aaf_domain::gate::GateStatus::Clear, vec![]);
+    let mixed = vec![
+        dual_partial(
+            "antigravity",
+            "antigravity",
+            "gemini",
+            "INCONCLUSIVE: reviewer failed (code Some(1), timed_out=true)",
+        ),
+        dual_partial(
+            "claude",
+            "claude",
+            "claude",
+            "INCONCLUSIVE: all reported blocking issues failed citation verification",
+        ),
+    ];
+    let out3 =
+        crate::factory::dual_audit::finalize_dual_review(&deps, &job3, &receipt3, &mixed).unwrap();
+    assert!(matches!(
+        out3,
+        crate::factory::dual_audit::DualFinalizeResult::Done(crate::factory::worker::Next::Blocked)
+    ));
+    assert!(matches!(
+        world.task("t3").blocked_reason,
+        Some(aaf_domain::blocked::BlockedReason::Infra { .. })
     ));
 }

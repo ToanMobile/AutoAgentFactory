@@ -461,7 +461,7 @@ fn is_comment_line(path: &str, text: &str) -> bool {
         || ((trimmed.starts_with("-- ") || trimmed == "--") && is_dash_comment_file(path))
 }
 
-fn is_doc_path(path: &str) -> bool {
+pub fn is_doc_path(path: &str) -> bool {
     let name = file_name(path);
     name.rsplit_once('.')
         .is_some_and(|(stem, ext)| match ext.to_ascii_lowercase().as_str() {

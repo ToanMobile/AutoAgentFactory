@@ -13,9 +13,9 @@ use aaf_domain::pipeline::{
 };
 use aaf_domain::task::{ImmutableSpec, Priority, Task};
 use aaf_engine::cross_audit::dual_verdict::{
-    DualReviewerOutcome, FINDINGS_BEGIN, FINDINGS_END, PLAN_DRIFT_ID, adjudicate_json_schema,
-    build_adjudicate_prompt, build_dual_checklist, build_dual_review_prompt,
-    dual_review_json_schema, evaluate_adjudication, names_dual_blocker,
+    DualReviewerOutcome, FINDINGS_BEGIN, FINDINGS_END, PLAN_OMISSION_ID, PLAN_SCOPE_ID,
+    adjudicate_json_schema, build_adjudicate_prompt, build_dual_checklist,
+    build_dual_review_prompt, dual_review_json_schema, evaluate_adjudication, names_dual_blocker,
     parse_and_validate_dual_review,
 };
 use aaf_engine::cross_audit::prompt::{
@@ -129,12 +129,18 @@ fn schemas_are_valid_strict_json_and_checklist_appends_plan_drift() {
     assert!(
         !build_dual_checklist(&spec, false, false)
             .iter()
-            .any(|i| i.id == PLAN_DRIFT_ID)
+            .any(|i| i.id == PLAN_OMISSION_ID || i.id == PLAN_SCOPE_ID)
     );
     let with = build_dual_checklist(&spec, false, true);
     assert!(
         with.iter()
-            .find(|i| i.id == PLAN_DRIFT_ID)
+            .find(|i| i.id == PLAN_OMISSION_ID)
+            .unwrap()
+            .blocking
+    );
+    assert!(
+        with.iter()
+            .find(|i| i.id == PLAN_SCOPE_ID)
             .unwrap()
             .blocking
     );
@@ -146,7 +152,7 @@ fn plan_drift_omission_normalizes_to_line_one_and_passes_rework_filter() {
     let checklist = build_dual_checklist(&task.spec, false, true);
     let mut answers = all_no_answers(true);
     for a in &mut answers {
-        if a["id"] == PLAN_DRIFT_ID {
+        if a["id"] == PLAN_OMISSION_ID {
             a["answer"] = json!("yes");
             a["evidence"] = json!("src/beta.rs");
         }
@@ -154,7 +160,7 @@ fn plan_drift_omission_normalizes_to_line_one_and_passes_rework_filter() {
     let payload = json!({
         "answers": answers,
         "issues": [
-            mk_issue("DRIFT-1", IssueSeverity::P1, "PLAN-DRIFT", "./src/beta.rs"),
+            mk_issue("DRIFT-1", IssueSeverity::P1, PLAN_OMISSION_ID, "./src/beta.rs"),
             mk_issue("DRIFT-2", IssueSeverity::P1, "AC-1", "tests/beta_test.rs")
         ],
         "scores": scores_all(96)

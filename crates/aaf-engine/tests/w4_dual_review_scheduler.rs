@@ -221,12 +221,19 @@ fn scores(score: u8, why: &str) -> Value {
 }
 fn answers(yes: &[(&str, &str)]) -> Value {
     let base = "TEST-BRANCH HARDCODED SECRET ASSERT GATE-CI STUB AC-1".split(' ');
-    let has_p = yes.iter().any(|(k, _)| *k == "PLAN-DRIFT");
+    let has_p = yes
+        .iter()
+        .any(|(k, _)| *k == "PLAN-OMISSION" || *k == "PLAN-SCOPE");
     let map = |id| {
         let ev = yes.iter().find(|(k, _)| *k == id).map(|(_, e)| *e);
         json!({"id": id, "answer": if ev.is_some() { "yes" } else { "no" }, "evidence": ev.unwrap_or("")})
     };
-    base.chain(has_p.then_some("PLAN-DRIFT")).map(map).collect()
+    let extra: &[&str] = if has_p {
+        &["PLAN-OMISSION", "PLAN-SCOPE"]
+    } else {
+        &[]
+    };
+    base.chain(extra.iter().copied()).map(map).collect()
 }
 fn dual(yes: &[(&str, &str)], issues: Value, score: u8, why: &str) -> String {
     json!({"answers": answers(yes), "issues": issues, "scores": scores(score, why)}).to_string()
@@ -538,8 +545,13 @@ fn dual_review_plan_drift_omission_flows_to_implementer_rework() {
     let ev = FactoryEvent::new(EventKind::PlanConverged, body.to_string(), 900).for_task("t-drift");
     w.db.emit(&ev).unwrap();
     w.imp.push("implemented without new_module");
-    let iss = issue("DRIFT-1", "P1", "PLAN-DRIFT", "src/new_module.rs");
-    let reply = dual(&[("PLAN-DRIFT", "src/new_module.rs")], iss, 96, "missing");
+    let iss = issue("DRIFT-1", "P1", "PLAN-OMISSION", "src/new_module.rs");
+    let reply = dual(
+        &[("PLAN-OMISSION", "src/new_module.rs")],
+        iss,
+        96,
+        "missing",
+    );
     w.rev_a.push(&reply);
     w.rev_b.push(&reply);
     w.assert_rework("t-drift", &w.run_once(None), "src/new_module.rs:1");

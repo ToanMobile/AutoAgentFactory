@@ -42,6 +42,7 @@ pub fn config_hash(cfg: &RepoConfig) -> String {
         hasher.update([
             u8::from(cfg.cross_audit.dual_review),
             u8::from(cfg.cross_audit.cross_adjudicate),
+            crate::cross_audit::dual_verdict::DUAL_CHECKLIST_VERSION,
         ]);
         let mut canonical: Vec<(&str, &str, &str, String, &str, &str)> = cfg
             .cross_audit

@@ -495,7 +495,7 @@ pub fn added_lines(
 /// at any parent directory of a locked config (e.g. `ln -s helper .cargo` or
 /// `ln -s helper .github/workflows`) is locked even though git reports the
 /// symlink entry itself rather than files beneath it.
-pub(super) fn symlink_dir_prefixes(non_test_globs: &[String]) -> Vec<String> {
+pub(crate) fn symlink_dir_prefixes(non_test_globs: &[String]) -> Vec<String> {
     let mut prefixes = Vec::new();
     for glob in non_test_globs {
         let parts: Vec<&str> = glob.split('/').collect();
