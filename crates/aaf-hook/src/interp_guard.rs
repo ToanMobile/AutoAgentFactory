@@ -8,9 +8,12 @@ use std::path::Path;
 use crate::shell::{self, Cmd};
 use crate::{Ctx, Denial, data_guard, delete_guard, git_files, paths, secret_guard};
 
+mod comments;
 mod parse;
 mod scope;
 mod writes;
+
+use comments::{strip_comment_lines, strip_comments_quote_aware, strip_trailing_comments};
 
 use parse::{
     Interp, PerlSwitches, classify_interpreter, extract_delimited_commands, extract_literals,
@@ -296,16 +299,6 @@ fn inspect_rmtree(
     })
 }
 
-fn strip_comment_lines(code: &str) -> String {
-    code.lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            !t.starts_with('#') && !t.starts_with("//")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn inspect_text(interp_kind: Interp, interp: &str, text: &str, ctx: &Ctx) -> Option<Denial> {
     // 0. The data directory, named anywhere in the script (a heredoc body
     // is not among the command's words that `data_dir_guard` reads), and
@@ -383,12 +376,32 @@ fn inspect_text(interp_kind: Interp, interp: &str, text: &str, ctx: &Ctx) -> Opt
 }
 
 fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
-    inspect_text(interp_kind, interp, code, ctx).or_else(|| {
-        let stripped = strip_comment_lines(code);
-        (stripped != code)
-            .then(|| inspect_text(interp_kind, interp, &stripped, ctx))
-            .flatten()
-    })
+    if let Some(d) = inspect_text(interp_kind, interp, code, ctx) {
+        return Some(d);
+    }
+    let stripped = strip_comment_lines(code, interp_kind);
+    if stripped != code
+        && let Some(d) = inspect_text(interp_kind, interp, &stripped, ctx)
+    {
+        return Some(d);
+    }
+    // SEC-113: additive quote-aware comment stripping pass so unmatched quotes
+    // inside inline/block/PHP-closed comments cannot hide following code while
+    // keeping `#` and `//` inside string literals intact.
+    let no_comments = strip_comments_quote_aware(code, interp_kind);
+    if no_comments != code
+        && no_comments != stripped
+        && let Some(d) = inspect_text(interp_kind, interp, &no_comments, ctx)
+    {
+        return Some(d);
+    }
+    // SEC-113 (F14): additive naive trailing-comment fallback when a literal
+    // `/*` (e.g. inside a JS regex `/a\/*/`) misleads the block-comment scan.
+    let no_trailing = strip_trailing_comments(code, interp_kind);
+    if no_trailing != code && no_trailing != stripped && no_trailing != no_comments {
+        return inspect_text(interp_kind, interp, &no_trailing, ctx);
+    }
+    None
 }
 
 /// True when `code` mentions any shell-exec, recursive-delete, file-delete, or

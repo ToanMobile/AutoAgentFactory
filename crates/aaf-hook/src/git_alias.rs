@@ -238,6 +238,7 @@ fn expansion(
         return cwd::eval_script(&script, shell_ctx, |cmd, cur| {
             let mut with_extra = cmd.clone();
             with_extra.words.extend(extra.iter().cloned());
+            with_extra.refresh_name();
             judge(cmd, cur).or_else(|| judge(&with_extra, cur).filter(|_| !extra.is_empty()))
         })
         .map(refused);
@@ -250,9 +251,6 @@ fn expansion(
     words.extend(globals.iter().cloned());
     words.extend(plain.words.iter().cloned());
     words.extend(extra.iter().cloned());
-    let cmd = Cmd {
-        words,
-        ..Cmd::default()
-    };
+    let cmd = Cmd::from_words(words);
     judge(&cmd, &git_ctx).map(refused)
 }

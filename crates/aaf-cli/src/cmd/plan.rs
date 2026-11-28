@@ -4,13 +4,16 @@
 
 use std::path::Path;
 
+use aaf_domain::config::RunConfig;
 use aaf_domain::event::{EventKind, FactoryEvent};
 use aaf_domain::ports::{AgentRequest, Clock, EventSink, PortError, TaskStore};
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 use aaf_engine::executors;
 use aaf_engine::factory::AccountPool;
 use aaf_engine::factory::adapters::provider_for;
+use aaf_engine::factory::audit_cmd_is_claude;
 use aaf_engine::factory::prompt::{PLAN_APPROVED_PREFIX, sandbox_policy_for};
+use aaf_engine::factory::stage_router::writer_requires_hook;
 use aaf_engine::hook_settings;
 use aaf_engine::plan_mode::build_plan_prompt;
 use serde_json::json;
@@ -18,7 +21,9 @@ use serde_json::json;
 use super::board::store::{err, open_db, refuse_inside_agent_run, repo_root};
 use super::sop::exec_support::{
     acquire_stage_account, build_exec_env, build_stage_run_config, host_sandbox_available,
+    stage_uses_custom_cmd,
 };
+use crate::cmd::run::run_executor_is_claude;
 use crate::ctx::{Ctx, SystemClock};
 use crate::output::{CmdError, CmdOutput, CmdResult, notice};
 
@@ -88,9 +93,29 @@ pub fn run(args: &PlanArgs, ctx: &Ctx) -> CmdResult {
         effective_exec
     };
 
-    if aaf_domain::pipeline::normalize_executor_id(effective_exec) == "claude"
-        && let Err(problem) = hook_settings::check_worktree(&repo, &ctx.path_var, None)
+    let uses_custom = stage_uses_custom_cmd(effective_exec, &cfg.repo.run);
+    let custom_cmd = if uses_custom {
+        cfg.repo.run.executor_cmd.join(" ")
+    } else {
+        String::new()
+    };
+    let uses_custom_claude = uses_custom
+        && (audit_cmd_is_claude(&custom_cmd)
+            || run_executor_is_claude(&RunConfig {
+                executor: "custom".to_string(),
+                executor_cmd: cfg.repo.run.executor_cmd.clone(),
+                ..RunConfig::default()
+            }));
+    let hook_check = if aaf_domain::pipeline::normalize_executor_id(effective_exec) == "claude"
+        || uses_custom_claude
     {
+        hook_settings::check_worktree(&repo, &ctx.path_var, None)
+    } else if writer_requires_hook(effective_exec, &custom_cmd) {
+        hook_settings::check_worktree_for_executor(&repo, &ctx.path_var, None, effective_exec)
+    } else {
+        Ok(())
+    };
+    if let Err(problem) = hook_check {
         return Ok(CmdOutput::policy("refused", problem.clone()).field("reason", json!(problem)));
     }
 

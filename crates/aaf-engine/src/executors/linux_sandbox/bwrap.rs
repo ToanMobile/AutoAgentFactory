@@ -126,12 +126,13 @@ pub fn build_bwrap_args(
     }
 
     // 3. Read-only overlays for sensitive files/dirs inside writable subtrees.
+    let worktree_path = paths.worktree.as_deref().map(Path::new);
     for git_dir in &paths.git_dirs {
         let gd = Path::new(git_dir);
         let is_primary = worktree_canon
             .as_ref()
             .is_some_and(|wt| canonical_or_self(&wt.join(".git")) == canonical_or_self(gd));
-        ro.protect_git_dir(gd, is_primary)?;
+        ro.protect_git_dir(gd, worktree_path, is_primary)?;
     }
     if let Some(worktree) = &paths.worktree {
         let wt = Path::new(worktree);
