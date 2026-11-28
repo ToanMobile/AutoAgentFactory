@@ -68,7 +68,7 @@ pub(super) fn cdpath(script: &shell::Script) -> Search {
             .iter()
             .take_while(|arg| arg.starts_with('-') && *arg != "--")
             .any(|arg| arg.contains('f'));
-        let unset = cmd.name() == "unset"
+        let unset = cmd.words.first().map(String::as_str) == Some("unset")
             && !names_function
             && cmd.args().iter().any(|arg| arg == "CDPATH");
         if !(unset || cmd.sets_var("CDPATH") || cmd.sets_var("cdpath")) {

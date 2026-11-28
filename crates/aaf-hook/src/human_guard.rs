@@ -12,7 +12,7 @@
 //!   `aaf plan`, `aaf gc`, `aaf skills sync`, `aaf sop run|init`, and
 //!   `aaf board add|ready|split|dep|import-issues|sync-github|rework`.
 
-use crate::shell::{Cmd, basename};
+use crate::shell::{Cmd, fold_name};
 use crate::{Ctx, Denial, paths};
 
 mod cargo;
@@ -113,7 +113,7 @@ pub fn names_action_in(tokens: &[&str], in_factory_run: bool) -> bool {
         .copied()
         .filter(|t| !t.is_empty() && !t.starts_with('-'))
         .collect();
-    if !non_flags.iter().any(|token| basename(token) == "aaf") {
+    if !non_flags.iter().any(|token| fold_name(token) == "aaf") {
         return false;
     }
     // Tier-A action words: always refused alongside `aaf`.
@@ -123,7 +123,7 @@ pub fn names_action_in(tokens: &[&str], in_factory_run: bool) -> bool {
     // Tier-A subcommand pairs and dynamic subcommands: always refused.
     let has_tier_a_pair = non_flags.windows(2).any(|pair| {
         let (first, second) = (pair[0], pair[1]);
-        (basename(first) == "aaf"
+        (fold_name(first) == "aaf"
             && (matches!(
                 second,
                 "approve" | "cockpit" | "telegram" | "ui" | "update" | "upgrade" | "merge"
@@ -148,12 +148,12 @@ pub fn names_action_in(tokens: &[&str], in_factory_run: bool) -> bool {
     // Tier-A flag escalations on Tier-B commands: always refused.
     let has_pair = |a: &str, b: &str| {
         non_flags.windows(2).any(|pair| {
-            let first = if a == "aaf" {
-                basename(pair[0])
+            let matches_first = if a == "aaf" {
+                fold_name(pair[0]) == a
             } else {
-                pair[0]
+                pair[0] == a
             };
-            first == a && pair[1] == b
+            matches_first && pair[1] == b
         })
     };
     let tier_a_flag = (has_pair("aaf", "run")
@@ -183,7 +183,7 @@ pub fn names_action_in(tokens: &[&str], in_factory_run: bool) -> bool {
     // Tier-B subcommand pairs: refused only inside factory worker runs.
     non_flags.windows(2).any(|pair| {
         let (first, second) = (pair[0], pair[1]);
-        (basename(first) == "aaf" && matches!(second, "run" | "init" | "plan" | "gc"))
+        (fold_name(first) == "aaf" && matches!(second, "run" | "init" | "plan" | "gc"))
             || (first == "sop" && matches!(second, "run" | "init"))
             || (first == "skills" && second == "sync")
             || (first == "board"
@@ -237,7 +237,7 @@ fn hides_the_run(cmd: &Cmd) -> Option<&'static str> {
 /// The human action a launcher is asked to run, found in its words as text.
 fn launched_action(cmd: &Cmd, in_factory_run: bool) -> Option<&'static str> {
     let argv = || cmd.wrapped.iter().chain(&cmd.words);
-    if !argv().any(|word| LAUNCHERS.contains(&basename(word))) {
+    if !argv().any(|word| LAUNCHERS.contains(&fold_name(word).as_str())) {
         return None;
     }
     let text = argv().map(String::as_str).collect::<Vec<_>>().join(" ");

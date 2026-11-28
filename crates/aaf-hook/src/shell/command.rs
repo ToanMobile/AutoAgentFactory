@@ -11,7 +11,8 @@ use super::stdin::{
     stdin_scripts,
 };
 use super::{
-    Cmd, DATA_CONSUMERS, Lexer, MAX_DEPTH, RESERVED, Redirect, SHELLS, Script, Tok, basename, lex,
+    Cmd, DATA_CONSUMERS, Lexer, MAX_DEPTH, RESERVED, Redirect, SHELLS, Script, Tok, basename,
+    fold_name, lex,
 };
 
 pub const DECLARERS: &[&str] = &["export", "declare", "typeset", "readonly", "local"];
@@ -296,9 +297,9 @@ impl Lexer<'_, '_> {
                                 self.out.in_slot_bin = Some(first.to_string());
                             }
                         }
-                        Some(first) if basename(first) == "xargs" => xargs = true,
+                        Some(first) if fold_name(first) == "xargs" => xargs = true,
                         // The external `time -o <file>` writes its report there.
-                        Some(first) if matches!(basename(first), "time" | "gtime") => {
+                        Some(first) if matches!(fold_name(first).as_str(), "time" | "gtime") => {
                             redirects.extend(time_output(&words[1..skip]));
                         }
                         _ => {}
@@ -335,11 +336,12 @@ impl Lexer<'_, '_> {
                 None => break,
             }
         }
-        let name = words
+        let exact_name = words
             .first()
             .filter(|tok| !tok.dynamic)
             .map(|tok| basename(&tok.text).to_string())
             .unwrap_or_default();
+        let name = exact_name.to_ascii_lowercase();
         if SHELLS.contains(&name.as_str()) {
             match shell_input(&words) {
                 ShellInput::Command(script) => {
@@ -393,11 +395,15 @@ impl Lexer<'_, '_> {
             arg_cat_heredoc.push(tok.cat_heredoc);
             text_words.push(tok.text);
         }
+        let folded_name = text_words
+            .first()
+            .map_or_else(String::new, |w| fold_name(w));
         self.out.cmds.push(Cmd {
             assigns,
             dynamic_name,
             arg_dynamic,
             arg_cat_heredoc,
+            folded_name,
             words: text_words,
             redirects,
             heredocs: Vec::new(),
@@ -413,7 +419,7 @@ impl Lexer<'_, '_> {
         self.out.in_slot = outer_slot;
         self.out.in_slot_bin = outer_slot_bin;
         self.out.env_cleared = outer_cleared;
-        name
+        exact_name
     }
 
     /// Number of leading words that only wrap the real command, or an `env -S`
@@ -427,7 +433,8 @@ impl Lexer<'_, '_> {
         feeder: Option<&Cmd>,
     ) -> Option<Wrapper> {
         let first = words.first().filter(|tok| !tok.dynamic)?;
-        let name = basename(&first.text);
+        let folded = fold_name(&first.text);
+        let name = folded.as_str();
         if name == "aaf" {
             return slot_payload(words).map(Wrapper::Strip);
         }

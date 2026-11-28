@@ -50,6 +50,8 @@ pub struct Redirect {
 pub struct Cmd {
     pub assigns: Vec<(String, String)>,
     pub words: Vec<String>,
+    /// ASCII-lowercased basename of `words[0]`, computed at parse time.
+    pub(crate) folded_name: String,
     /// The command word contains an expansion or glob: it could be anything.
     pub dynamic_name: bool,
     /// Per-word dynamic flag parallel to `words` (`true` on `$VAR`, `$(…)`, backtick, or unquoted glob).
@@ -85,9 +87,25 @@ pub struct Cmd {
 }
 
 impl Cmd {
-    /// Command name without its directory (`/usr/bin/git` is `git`).
+    /// Command name without its directory, ASCII-lowercased (`/BIN/RM` is `rm`).
     pub fn name(&self) -> &str {
-        self.words.first().map_or("", |w| basename(w))
+        &self.folded_name
+    }
+
+    pub(crate) fn from_words(words: Vec<String>) -> Cmd {
+        let mut cmd = Cmd {
+            words,
+            ..Cmd::default()
+        };
+        cmd.refresh_name();
+        cmd
+    }
+
+    pub(crate) fn refresh_name(&mut self) {
+        self.folded_name = self
+            .words
+            .first()
+            .map_or_else(String::new, |w| fold_name(w));
     }
 
     pub fn args(&self) -> &[String] {
@@ -157,6 +175,10 @@ impl Script {
 
 pub fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+pub(crate) fn fold_name(word: &str) -> String {
+    basename(word).to_ascii_lowercase()
 }
 
 pub fn parse(src: &str) -> Script {
