@@ -19,6 +19,7 @@ Outside `AAF_RUN_ID` (interactive chat session or operator terminal):
 1. **Execute Tier-B Orchestration Directly**:
    - When the user asks to run or manage tasks with AAF, **directly execute** Tier-B orchestration commands instead of asking the user to copy-paste them:
      - Queue & plan: `aaf board add`, `aaf board list`, `aaf board trace <task_id>`, `aaf board dep add|rm|list`, `aaf board graph`, `aaf plan "<goal>" [--file ...]`, `aaf status`, `aaf watch`.
+     - Adopt a PR you opened from this chat: `aaf board adopt <N> [--author-executor <name>]`. Then do **not** merge it yourself (`gh pr merge` and `aaf merge` are not yours to run): the adopt lane gates it, has two reviewers of different providers pass it, and merges it while `aaf run --auto` is running. To keep a PR out of the factory, leave it a **draft**. If the lane cancels it (`aaf board show <task_id>` gives the code and reason), fix the PR, push to the same branch, and run `aaf board adopt <N>` again.
      - Run tasks: `aaf run`, `aaf run --detach`, `aaf run "<goal>"` (do not pass privilege-escalating flags such as `--unsandboxed`, `--dangerously-bypass-permissions`, `--land auto`, or `--auto-merge`).
      - Verify & sync local skills: `aaf doctor`, `aaf skills sync [--host claude|agents|agent|all]`.
 2. **Hand Off Tier-A Human Sign-Offs**:

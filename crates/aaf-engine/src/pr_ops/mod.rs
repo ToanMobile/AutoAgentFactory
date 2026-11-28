@@ -3,6 +3,8 @@
 //! Sits above `git`, `gate`, `proof`, `config`, `db`, and `throttle` so the
 //! lower-level `git` module remains cycle-free.
 
+pub mod adopt_intake;
+pub mod adopt_pin;
 pub mod pr_cleanup;
 mod pr_cleanup_db;
 pub mod pr_merge;

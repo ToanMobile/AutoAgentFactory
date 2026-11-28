@@ -197,6 +197,7 @@ Scan the `--qr` code from your Mac, tap **Share → Add to Home Screen** on iPho
 | Run the signed gate myself | `aaf gate` |
 | See metrics, Factory Score & lessons | `aaf report --since 168` · `aaf report --lessons` · `aaf status` |
 | Steer or rework a task | `aaf board steer <id> --note "…"` · `aaf board rework <id>` |
+| Hand a PR opened from chat to the factory | `aaf board adopt <N>` |
 | Unblock a task | `aaf board unblock <id>` |
 | Approve a head-locked change | `aaf approve --reviewer <name>` |
 | Run a heavy build politely | `aaf slot -- ./gradlew test` |

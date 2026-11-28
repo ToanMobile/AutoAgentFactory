@@ -1,6 +1,8 @@
 //! `aaf board add|list|show|unblock|unfreeze|rework|cancel|split|dep|graph|approve-plan`
 //! (docs/PLAN.md C.10): the task board in the SQLite store, used through the port traits.
 
+mod adopt;
+mod adopt_view;
 mod approve_plan;
 mod cancel;
 mod dag;
@@ -41,6 +43,9 @@ pub struct BoardArgs {
 pub enum BoardCommand {
     /// Add a Ready task for the repository of the current directory.
     Add(AddArgs),
+    /// Hand an open pull request to the factory's adopt lane (it runs under `aaf run --auto`).
+    #[command(long_about = adopt::LONG_ABOUT)]
+    Adopt(adopt::AdoptArgs),
     /// List tasks, most urgent first.
     List(ListArgs),
     /// Show one task with its dependencies, runs and latest events.
@@ -141,6 +146,7 @@ pub struct ListArgs {
 pub fn run(args: &BoardArgs, ctx: &Ctx) -> CmdResult {
     match &args.command {
         BoardCommand::Add(add_args) => add(add_args, ctx),
+        BoardCommand::Adopt(adopt_args) => adopt::run(adopt_args, ctx),
         BoardCommand::List(list_args) => list(list_args, ctx),
         BoardCommand::Show { id } => show(id, ctx),
         BoardCommand::Ready(ready_args) => ready(ready_args, ctx),
@@ -301,22 +307,32 @@ fn list(args: &ListArgs, ctx: &Ctx) -> CmdResult {
     } else {
         Some(repo_root(ctx)?.to_string_lossy().into_owned())
     };
-    let (tasks, frozen) = match open_db_read_only(ctx)? {
-        Some(db) => (
-            db.list_tasks(repo.as_deref(), state).map_err(port)?,
-            is_frozen(&db).map_err(port)?,
-        ),
-        None => (Vec::new(), false),
+    let (tasks, frozen, mut adopted) = match open_db_read_only(ctx)? {
+        Some(db) => {
+            let tasks = db.list_tasks(repo.as_deref(), state).map_err(port)?;
+            let adopted = adopt_view::for_tasks(&db, &tasks)?;
+            (tasks, is_frozen(&db).map_err(port)?, adopted)
+        }
+        None => (Vec::new(), false, Default::default()),
     };
 
-    let mut text: Vec<String> = tasks.iter().map(task_line).collect();
+    let mut text = Vec::with_capacity(tasks.len());
+    let mut rows = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        text.push(task_line(task));
+        let mut row = task_json(task)?;
+        if let Some(info) = adopted.remove(&task.id) {
+            text.push(info.short);
+            row["adopt"] = info.json;
+        }
+        rows.push(row);
+    }
     if text.is_empty() {
         text.push("no tasks".to_string());
     }
     if frozen {
         text.push("factory is FROZEN: aaf board unfreeze".to_string());
     }
-    let rows = tasks.iter().map(task_json).collect::<Result<Vec<_>, _>>()?;
     Ok(CmdOutput::ok("ok", text.join("\n"))
         .field("count", json!(rows.len()))
         .field("tasks", Value::Array(rows))
@@ -383,6 +399,10 @@ fn show(id: &str, ctx: &Ctx) -> CmdResult {
             run.tokens_out
         ));
     }
+    let adopt = adopt_view::for_tasks(&db, std::slice::from_ref(&task))?.remove(&task.id);
+    if let Some(info) = &adopt {
+        text.extend(info.detail.iter().cloned());
+    }
     for event in &events {
         text.push(format!(
             "  event {}",
@@ -394,6 +414,7 @@ fn show(id: &str, ctx: &Ctx) -> CmdResult {
     let budget = serde_json::to_value(&budget).map_err(|e| err("budget", e))?;
     Ok(CmdOutput::ok("ok", text.join("\n"))
         .field("task", task_json(&task)?)
+        .field("adopt", adopt.map_or(Value::Null, |info| info.json))
         .field("deps", Value::Array(deps))
         .field("runs", runs)
         .field("budget", budget)
@@ -548,43 +569,4 @@ fn unfreeze_factory(ctx: &Ctx) -> CmdResult {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_only_list_and_show_do_not_create_db() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("data");
-        let ctx = Ctx {
-            cwd: tmp.path().to_path_buf(),
-            home: tmp.path().join("home"),
-            data_dir: data_dir.clone(),
-            config_dir: tmp.path().join("config"),
-            worktrees_dir: tmp.path().join("worktrees"),
-            path_var: std::ffi::OsString::new(),
-            run_id: None,
-            stdin_is_tty: false,
-            aaf_env: Vec::new(),
-        };
-
-        let listed = list(
-            &ListArgs {
-                state: None,
-                all: true,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(listed.status, "ok");
-        assert!(!data_dir.join("aaf.db").exists());
-
-        let err = show("t-missing", &ctx).unwrap_err();
-        assert!(
-            err.message.to_ascii_lowercase().contains("not found"),
-            "{}",
-            err.message
-        );
-        assert!(!data_dir.join("aaf.db").exists());
-    }
-}
+mod tests;

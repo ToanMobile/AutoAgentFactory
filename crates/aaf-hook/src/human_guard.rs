@@ -10,7 +10,7 @@
 //! - **Tier-B (refused inside a factory run `in_factory_run == true`, allowed
 //!   interactively when free of Tier-A flags)**: `aaf run`, `aaf init`,
 //!   `aaf plan`, `aaf gc`, `aaf skills sync`, `aaf sop run|init`, and
-//!   `aaf board add|ready|split|dep|import-issues|sync-github|rework`.
+//!   `aaf board add|ready|split|dep|import-issues|sync-github|rework|adopt`.
 
 use crate::shell::{Cmd, fold_name};
 use crate::{Ctx, Denial, paths};
@@ -189,7 +189,14 @@ pub fn names_action_in(tokens: &[&str], in_factory_run: bool) -> bool {
             || (first == "board"
                 && matches!(
                     second,
-                    "add" | "ready" | "rework" | "import-issues" | "sync-github" | "split" | "dep"
+                    "add"
+                        | "ready"
+                        | "rework"
+                        | "adopt"
+                        | "import-issues"
+                        | "sync-github"
+                        | "split"
+                        | "dep"
                 ))
     })
 }
@@ -459,6 +466,7 @@ fn action(args: &[String], certain: bool, in_factory_run: bool) -> Option<&'stat
                 }
                 "ready" => in_factory_run.then_some("board ready"),
                 "rework" => in_factory_run.then_some("board rework"),
+                "adopt" => in_factory_run.then_some("board adopt"),
                 "import-issues" => in_factory_run.then_some("board import-issues"),
                 "sync-github" => in_factory_run.then_some("board sync-github"),
                 "split" => in_factory_run.then_some("board split"),

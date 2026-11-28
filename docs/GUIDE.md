@@ -604,6 +604,7 @@ How `[cross_audit]` merges:
 | **`v3`** `aaf board split <ID>` | Split a Ready or Backlog root task into 2–4 subtasks with disjoint owned paths | `--max <2..4>` (default 4), `--dry-run`, `--unsandboxed` |
 | **`v3`** `aaf board import-issues` | Import open GitHub issues written by allow-listed logins | `--label <L>`, `--dry-run` |
 | **`v3`** `aaf board sync-github` | Map board states to Projects v2 Status columns or `status:*` labels | `--dry-run` |
+| `aaf board adopt <N>` | Hand an open PR from a chat session to the adopt lane (gate, two reviewers, merge at the pinned head; runs only under `aaf run --auto`; refused inside an agent run) | `--author-executor <name>` |
 | **`v3`** `aaf status` | Read-only overview: task counts, blocked reasons, runs, tokens (and estimated USD for `billing = "api"` Claude accounts), accounts, throttle | `--all` |
 | **`v3`** `aaf watch` | Live read-only terminal dashboard | `--repo <path>`, `--all`, `--interval <SECS>` (default 2), `--once` |
 | **`v3`** `aaf plan "<goal>"` | Build a read-only planning prompt (no agent is launched) | `--file <path>` (repeatable), `--dry-run` |
@@ -709,6 +710,7 @@ aaf board list --state blocked --all # every repo
 aaf board show t-1a2b3c4d            # dependencies, runs, latest events, blocked reason, notes
 aaf board unblock t-1a2b3c4d         # human only: Blocked -> Ready with a fresh budget
 aaf board unfreeze                   # human only
+aaf board adopt 42                   # hand open PR #42 to the adopt lane (see "Adopting a PR opened from chat")
 ```
 
 ### `aaf accounts`
@@ -1104,6 +1106,37 @@ aaf board sync-github
   - With `[github] project_number` set, it edits the `Status` field of a GitHub Projects v2 board through `gh project …`.
   - Without it, it falls back to `status:<Column>` labels on the issues.
 - `gh` is resolved once, outside the repository, so a `gh` binary committed into the repo is never run.
+
+**Adopting a PR opened from chat.** A chat session (you with an AI assistant, outside any `aaf run`) often ends by opening a pull request. `aaf board adopt <N>` hands that PR to the factory instead of merging it by hand:
+
+```sh
+aaf board adopt 42                            # from the main checkout or any linked worktree
+aaf board adopt 42 --author-executor codex    # note what wrote it (logged only; it does not pick the reviewers)
+aaf board show <task id>                      # PR, pinned head, phase, retries, or why it was cancelled
+```
+
+- **What it does.** The command checks the PR, then pins its head commit to the branch `aaf/<task id>` with a worktree on it, creates a task in the new `adopting` state, and posts a `🤖 aaf-bot:` comment on the PR. Inside `aaf run --auto` the adopt lane then walks three phases on that exact head: `verify` (the gate on the PR merged onto the latest base, with no reused receipts), `review` (exactly two reviewers of different providers, both must pass), and `merge` (`gh pr merge` with `--match-head-commit`). A pushed commit that moves the head cancels the adoption.
+- **What it checks first (nothing is created when one fails).** The PR is open, not a draft, from a branch of this repository (not a fork), aimed at the repository's base branch (which needs a remote). The head is not `aaf`, not `aaf/*` in any case, and not a protected branch. The author is in `[safety] owner_github_allowlist` (tier 1; empty means nobody). The head `gh` reports is the one the remote serves, it is in the local object store, and merging it changes the base tree.
+- **Where it runs.** Only under `aaf run --auto`. `aaf run --once` and the default drain skip `adopting` tasks. An agent inside a run cannot call it (Tier-B hook rule); a chat session can.
+- **Keeping a PR out.** Leave it a draft. A draft is refused at adopt time and cancelled if it turns into a draft later.
+- **When the lane cancels.** The task becomes `cancelled`, the code and reason are stored (shown by `aaf board show`) and posted on the PR. Fix the PR, push to it, and run `aaf board adopt <N>` again; a cancelled or finished adoption never blocks a new one, a running one does (`already_adopting`). A temporary condition (CI still running, the merge lock, GitHub errors) is retried with a backoff from 1 to 30 minutes, 12 times, then cancelled as `retry_exhausted`.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `needs_human_head_lock` | The PR changes something only a person approves: `.autofactory/**`, CI workflows or actions, agent hook settings, a file named in `[commands]`, a submodule, a nested repository or a symlink. | Review and merge it yourself. |
+| `lock_changed` | The PR and the base both changed a head-locked file, or the locked files moved after review. | Rebase the PR on the latest base, push, adopt again. |
+| `needs_human_reviewers` | Fewer than two reviewers of different providers are installed and configured. | Configure a second provider (`[[cross_audit.reviewers]]`), adopt again. |
+| `review_failed` | A reviewer failed the PR or reported a P0/P1. | Fix the findings, push, adopt again. |
+| `gate_blocked` | The gate on the merged tree blocks the PR. | Fix what the reasons say, push, adopt again. |
+| `head_changed` | The PR head, `aaf/<id>` or its worktree is no longer the adopted commit. | Adopt the PR again to pin the new head. |
+| `merged_unpinned` | The PR was merged at a commit other than the adopted one. | Check what landed. |
+| `pr_not_open`, `pr_is_draft` | The PR was closed, or became a draft. | Reopen or mark it ready, adopt again. |
+| `ci_failed` | The PR's checks failed. | Fix them, push, adopt again. |
+| `merge_conflict` | The PR conflicts with the base. | Resolve it, push, adopt again. |
+| `retry_exhausted` | A temporary condition did not clear in 12 tries. | Look at the last retry in `board show`, adopt again. |
+| `cancelled_by_user` | Someone ran `aaf board cancel`. | Nothing; adopt again if you want it back. |
+
+- **Limits.** Adopting needs CI that reports at least one check (a PR with no check is not a pass), a base branch with a remote, and `aaf run --auto` running. When the PR and the base both change a head-locked file, the PR has to be rebased first (`lock_changed`). The files listed under `needs_human_head_lock` always wait for a person; the lane never approves them.
 
 **Rework (`v3`).** `aaf board rework <id> --reason "…"` sends a task in Review back to Gating, so the gate runs again on its existing branch. With `--rerun`, the task goes back to Ready and the next `aaf run` starts an agent. The reason is added as a `rework:` note, and the unblock ladder starts again from that point.
 

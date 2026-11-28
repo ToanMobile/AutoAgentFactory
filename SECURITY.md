@@ -38,7 +38,7 @@ Cách hook tách lệnh, chung cho mọi guard (`crates/aaf-hook/src/shell.rs`, 
 - Script của `sh`/`bash`/`zsh -c` là từ đầu tiên không phải tuỳ chọn, ở bất kỳ vị trí nào của `-c` (`sh -c -- '…'`, `bash -c -x '…'`, `bash -o pipefail -c '…'`, `zsh -c +o nomatch '…'`); `-o`/`+o`/`-O`/`+O` và `--rcfile`/`--init-file` nhận một giá trị, `-` và `--` kết thúc phần tuỳ chọn.
 - Shell đọc script từ stdin (`-s`, `-`, hoặc không có toán hạng) được tách script đó dưới wrapper của nó: thân heredoc (thân heredoc vốn đã được xét như lệnh, mục 4; nay mang theo môi trường bị xoá của lệnh đọc nó: `env -i sh <<EOF … aaf run`), here-string `<<<` (`bash <<< 'aaf approve'`), và chuỗi `echo`/`printf` đưa qua pipe (`echo 'aaf run' | env -i sh`, `printf 'aaf approve\n' | sh`). Stdin mà nội dung không nằm trên dòng lệnh (`cat x | sh`, `sh < x`, `{ echo …; } | sh`) vẫn không được thấy, như `bash build.sh` (mục 3).
 
-Ngoài hook, CLI tự từ chối (exit 2): `aaf approve` khi stdin không phải TTY hoặc có `AAF_RUN_ID`; `aaf init`, `aaf run`, `aaf proof record`, `aaf skills sync`, `aaf board unblock|unfreeze|rework|split|import-issues|sync-github` khi có `AAF_RUN_ID`.
+Ngoài hook, CLI tự từ chối (exit 2): `aaf approve` khi stdin không phải TTY hoặc có `AAF_RUN_ID`; `aaf init`, `aaf run`, `aaf proof record`, `aaf skills sync`, `aaf board unblock|unfreeze|rework|adopt|split|import-issues|sync-github` khi có `AAF_RUN_ID`.
 
 ## 3. Lỗ hổng đã biết của hook
 

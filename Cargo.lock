@@ -10,6 +10,7 @@ dependencies = [
  "aaf-engine",
  "aaf-fp",
  "clap",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
