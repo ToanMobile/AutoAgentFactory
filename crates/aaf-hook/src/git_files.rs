@@ -244,7 +244,14 @@ fn reads_only(cmd: &Cmd) -> bool {
             .iter()
             .any(|arg| FIND_ACTS.contains(&arg.as_str())),
         // `export GIT_DIR=…/.git` names a path and writes nothing.
-        _ => READERS.contains(&name) || SHELLS.contains(&name) || DECLARERS.contains(&name),
+        _ => {
+            READERS.contains(&name)
+                || SHELLS.contains(&name)
+                || cmd
+                    .words
+                    .first()
+                    .is_some_and(|w| DECLARERS.contains(&w.as_str()))
+        }
     }
 }
 

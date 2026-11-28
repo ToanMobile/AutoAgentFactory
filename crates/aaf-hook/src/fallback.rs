@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::shell::basename;
+use crate::shell::fold_name;
 use crate::{
     Ctx, Denial, data_guard, delete_guard, git_files, git_guard, git_persist, heavy_guard,
     human_guard, interp_guard, paths, store_guard,
@@ -28,7 +28,7 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
         .split(|c: char| c.is_whitespace() || ";|&()<>\"'`{},\\".contains(c))
         .filter(|t| !t.is_empty())
         .collect();
-    let has = |name: &str| tokens.iter().any(|t| basename(t) == name);
+    let has = |name: &str| tokens.iter().any(|t| fold_name(t) == name);
     let cluster_has = |flag: char| {
         tokens
             .iter()
@@ -114,7 +114,7 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
     {
         return Some("mixes a delete/move with a protected file name");
     }
-    if let Some(rm_idx) = tokens.iter().position(|t| basename(t) == "rm")
+    if let Some(rm_idx) = tokens.iter().position(|t| fold_name(t) == "rm")
         && (tokens.contains(&"--recursive") || cluster_has('r') || cluster_has('R'))
         && tokens[rm_idx + 1..].iter().any(|t| {
             !t.starts_with('-')
@@ -142,7 +142,7 @@ fn line_reason(line: &str, ctx: &Ctx) -> Option<&'static str> {
     }
     if tokens
         .iter()
-        .any(|t| interp_guard::is_interpreter(basename(t)))
+        .any(|t| interp_guard::is_interpreter(&fold_name(t)))
         && interp_guard::has_dangerous_api(line)
     {
         return Some("runs an inline interpreter script with a dangerous API");

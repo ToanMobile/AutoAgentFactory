@@ -8,7 +8,7 @@ use super::decode::{
     base64_ignores_garbage, base64_is_decode, decode_base64, decode_escapes, expand_printf,
 };
 use super::scan::read_heredoc_body;
-use super::{Cmd, HeredocBody, Lexer, MAX_DEPTH, Redirect, SHELLS, Script, Tok, basename, lex};
+use super::{Cmd, HeredocBody, Lexer, MAX_DEPTH, Redirect, SHELLS, Script, Tok, fold_name, lex};
 
 /// Where a shell (`sh`, `bash`, `zsh`, …) takes the script it runs from.
 pub(super) enum ShellInput<'a> {
@@ -170,16 +170,17 @@ pub(super) fn split_assign(tok: &Tok) -> Option<(String, String)> {
 /// True when wrapper words clear or reset the environment (`env -i`, `env -`,
 /// `exec -c`, `sudo`, `doas`).
 pub(super) fn clears_env(words: &[String]) -> bool {
-    let mut tool = "";
+    let mut tool = String::new();
     words.iter().any(|word| {
         if !word.starts_with('-') || word == "-" {
-            if matches!(basename(word), "env" | "exec" | "sudo" | "doas") {
-                tool = basename(word);
+            let base = fold_name(word);
+            if matches!(base.as_str(), "env" | "exec" | "sudo" | "doas") {
+                tool = base;
             }
-            return matches!(tool, "sudo" | "doas") || (tool == "env" && word == "-");
+            return matches!(tool.as_str(), "sudo" | "doas") || (tool == "env" && word == "-");
         }
         let cluster = !word.starts_with("--");
-        match tool {
+        match tool.as_str() {
             "env" => {
                 word == "--ignore-environment"
                     || (cluster && {
