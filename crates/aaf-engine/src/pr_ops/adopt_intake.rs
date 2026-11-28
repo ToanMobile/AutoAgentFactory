@@ -289,7 +289,7 @@ mod tests {
             base_ref_name: "main".into(),
             url: "https://github.com/org/repo/pull/7".into(),
             author: Some(PrAuthor {
-                login: "Alex".into(),
+                login: "Octodev".into(),
             }),
             ..PrInfo::default()
         }
@@ -303,7 +303,7 @@ mod tests {
     }
 
     fn allow() -> Vec<String> {
-        vec![" alex ".to_string()]
+        vec![" octodev ".to_string()]
     }
 
     fn code(pr: &PrInfo, base: &BaseRef, allow: &[String]) -> Option<&'static str> {
@@ -390,10 +390,10 @@ mod tests {
 
     #[test]
     fn the_allowlist_is_trimmed_and_case_insensitive_and_blank_never_matches() {
-        assert!(login_is_trusted("ALEX", &allow()));
-        assert!(login_is_trusted(" alex", &allow()));
+        assert!(login_is_trusted("OCTODEV", &allow()));
+        assert!(login_is_trusted(" octodev", &allow()));
         assert!(!login_is_trusted("", &["".to_string()]));
-        assert!(!login_is_trusted("alex", &["  ".to_string()]));
+        assert!(!login_is_trusted("octodev", &["  ".to_string()]));
         assert!(!login_is_trusted("alexx", &allow()));
     }
 

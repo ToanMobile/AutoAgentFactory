@@ -72,7 +72,7 @@ impl View {
             base_name: "main",
             draft: false,
             fork: false,
-            author: Some("alex"),
+            author: Some("octodev"),
         }
     }
 
@@ -141,7 +141,7 @@ impl Fixture {
 
     /// A repository whose base has no remote.
     pub fn without_remote() -> Fixture {
-        Fixture::build("\"alex\"", false)
+        Fixture::build("\"octodev\"", false)
     }
 
     fn build(allowlist: &str, with_remote: bool) -> Fixture {

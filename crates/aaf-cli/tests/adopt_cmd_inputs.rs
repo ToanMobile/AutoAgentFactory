@@ -24,7 +24,7 @@ fn refused_with(fx: &Fixture, number: u64, reason: &str) {
 
 #[test]
 fn a_closed_or_merged_pr_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     for state in ["CLOSED", "MERGED"] {
         let mut view = View::open(7, &head, "feat/chat");
@@ -36,7 +36,7 @@ fn a_closed_or_merged_pr_is_refused() {
 
 #[test]
 fn a_draft_pr_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     let mut view = View::open(7, &head, "feat/chat");
     view.draft = true;
@@ -46,7 +46,7 @@ fn a_draft_pr_is_refused() {
 
 #[test]
 fn a_fork_pr_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     let mut view = View::open(7, &head, "feat/chat");
     view.fork = true;
@@ -56,7 +56,7 @@ fn a_fork_pr_is_refused() {
 
 #[test]
 fn a_pr_aimed_at_another_base_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     let mut view = View::open(7, &head, "feat/chat");
     view.base_name = "develop";
@@ -74,7 +74,7 @@ fn a_base_without_a_remote_is_refused() {
 
 #[test]
 fn a_head_in_the_factory_namespace_is_refused_in_any_case() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("work/chat", 7);
     for name in ["aaf/t-1234abcd", "AAF/t-1234abcd", "Aaf/x", "aaf", "AAF"] {
         fx.show_pr(&View::open(7, &head, name));
@@ -84,7 +84,7 @@ fn a_head_in_the_factory_namespace_is_refused_in_any_case() {
 
 #[test]
 fn a_protected_head_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     for name in ["main", "release/1.0", "public-site"] {
         fx.show_pr(&View::open(7, &head, name));
@@ -94,7 +94,7 @@ fn a_protected_head_is_refused() {
 
 #[test]
 fn a_pr_without_an_author_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     let mut view = View::open(7, &head, "feat/chat");
     view.author = None;
@@ -104,7 +104,7 @@ fn a_pr_without_an_author_is_refused() {
 
 #[test]
 fn an_author_outside_the_allowlist_is_refused() {
-    let fx = Fixture::new("\"alex\", \"sam\"");
+    let fx = Fixture::new("\"octodev\", \"sam\"");
     let head = fx.chat_pr("feat/chat", 7);
     let mut view = View::open(7, &head, "feat/chat");
     view.author = Some("mallory");
@@ -129,7 +129,7 @@ fn an_empty_or_blank_allowlist_refuses_before_gh_is_asked() {
 
 #[test]
 fn an_allowlisted_author_matches_whatever_the_case() {
-    let fx = Fixture::new("\" ALEX \"");
+    let fx = Fixture::new("\" OCTODEV \"");
     let head = fx.chat_pr("feat/chat", 7);
     fx.show_pr(&View::open(7, &head, "feat/chat"));
     let run = fx.adopt(7);
@@ -139,7 +139,7 @@ fn an_allowlisted_author_matches_whatever_the_case() {
 
 #[test]
 fn a_pr_that_merges_to_nothing_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.self_cancelling_pr("feat/noop", 7);
     // Not an ancestor of main, and main is not an ancestor of it either:
     // only the tree comparison sees that it adds nothing.
@@ -149,7 +149,7 @@ fn a_pr_that_merges_to_nothing_is_refused() {
 
 #[test]
 fn a_head_that_is_already_in_the_base_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = support::git(&fx.repo, &["rev-parse", "HEAD"]);
     support::git(&fx.bare, &["update-ref", "refs/pull/7/head", &head]);
     fx.show_pr(&View::open(7, &head, "feat/chat"));
@@ -158,7 +158,7 @@ fn a_head_that_is_already_in_the_base_is_refused() {
 
 #[test]
 fn a_head_oid_gh_names_but_the_remote_does_not_serve_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let served = fx.chat_pr("feat/chat", 7);
     // `gh` names a commit that is in the local object store, so a check that
     // trusts "it exists here" would pass; the remote serves another one.
@@ -170,7 +170,7 @@ fn a_head_oid_gh_names_but_the_remote_does_not_serve_is_refused() {
 
 #[test]
 fn a_head_oid_that_is_not_a_commit_id_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     fx.chat_pr("feat/chat", 7);
     fx.show_pr(&View::open(7, "abc123", "feat/chat"));
     refused_with(&fx, 7, "head_oid_invalid");
@@ -178,7 +178,7 @@ fn a_head_oid_that_is_not_a_commit_id_is_refused() {
 
 #[test]
 fn a_pr_number_gh_does_not_confirm_is_refused() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     fx.show_pr(&View::open(8, &head, "feat/chat"));
     refused_with(&fx, 7, "pr_mismatch");
@@ -186,7 +186,7 @@ fn a_pr_number_gh_does_not_confirm_is_refused() {
 
 #[test]
 fn a_bad_author_executor_is_an_error_before_anything_happens() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = fx.chat_pr("feat/chat", 7);
     fx.show_pr(&View::open(7, &head, "feat/chat"));
     let run = fx.run_in(

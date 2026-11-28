@@ -234,11 +234,11 @@ mod tests {
 
     #[test]
     fn author_and_body_are_read() {
-        let pr = parse(r#","author":{"login":"alex"},"body":"hello""#);
+        let pr = parse(r#","author":{"login":"octodev"},"body":"hello""#);
         assert_eq!(
             pr.author,
             Some(PrAuthor {
-                login: "alex".to_string()
+                login: "octodev".to_string()
             })
         );
         assert_eq!(pr.body, "hello");

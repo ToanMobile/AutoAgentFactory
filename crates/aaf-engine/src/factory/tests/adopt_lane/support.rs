@@ -212,9 +212,23 @@ impl Lab {
     }
 
     pub fn with(kind: Pr, cfg: Cfg) -> Lab {
+        Lab::build(kind, cfg, true)
+    }
+
+    /// The same repository, remote and PR branch, but nothing adopted yet: no
+    /// `aaf/<id>` ref, no adopt worktree, no task. The end-to-end tests make
+    /// those with the code `aaf board adopt` runs.
+    pub fn unadopted(kind: Pr) -> Lab {
+        Lab::build(kind, Cfg::default(), false)
+    }
+
+    fn build(kind: Pr, cfg: Cfg, adopt: bool) -> Lab {
         let (bare, dirs) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-        let work = dirs.path().join("work");
-        let (data, worktrees) = (dirs.path().join("data"), dirs.path().join("worktrees"));
+        // Canonical, as the root `aaf run` and `aaf board adopt` work with
+        // (`/var` is a symlink on macOS).
+        let base_dir = fs::canonicalize(dirs.path()).unwrap();
+        let work = base_dir.join("work");
+        let (data, worktrees) = (base_dir.join("data"), base_dir.join("worktrees"));
         fs::create_dir_all(&data).unwrap();
         git(bare.path(), &["init", "--bare", "-b", "main"]);
         fs::create_dir_all(work.join(".autofactory")).unwrap();
@@ -232,7 +246,7 @@ impl Lab {
             &work,
             &["remote", "add", "origin", bare.path().to_str().unwrap()],
         );
-        let log = dirs.path().join("log");
+        let log = base_dir.join("log");
         let config = CONFIG
             .replace("{TEST}", &cfg.test)
             .replace("{LOG}", &log.to_string_lossy())
@@ -263,23 +277,25 @@ impl Lab {
         git(&work, &["push", "-u", "origin", branch]);
         git(&work, &["checkout", "main"]);
 
-        // What `aaf board adopt` leaves: the pin as a ref, and its worktree.
-        git(
-            &work,
-            &["update-ref", &format!("refs/heads/aaf/{ID}"), &head],
-        );
-        let wt = crate::git::worktree::worktree_path(&work, &worktrees, ID).unwrap();
-        fs::create_dir_all(wt.parent().unwrap()).unwrap();
-        git(
-            &work,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                wt.to_str().unwrap(),
-                &format!("aaf/{ID}"),
-            ],
-        );
+        if adopt {
+            // What `aaf board adopt` leaves: the pin as a ref, and its worktree.
+            git(
+                &work,
+                &["update-ref", &format!("refs/heads/aaf/{ID}"), &head],
+            );
+            let wt = crate::git::worktree::worktree_path(&work, &worktrees, ID).unwrap();
+            fs::create_dir_all(wt.parent().unwrap()).unwrap();
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    wt.to_str().unwrap(),
+                    &format!("aaf/{ID}"),
+                ],
+            );
+        }
 
         let world = World::new();
         let gh = Arc::new(LaneGh::new(&head, branch));
@@ -307,7 +323,9 @@ impl Lab {
         for runner in &lab.runners {
             lab.script_pass(&runner.fake);
         }
-        lab.add_adopting();
+        if adopt {
+            lab.add_adopting();
+        }
         lab
     }
 

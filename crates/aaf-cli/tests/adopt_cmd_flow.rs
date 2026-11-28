@@ -79,13 +79,13 @@ fn assert_pinned(fx: &Fixture, run: &Run, head: &str, number: u64) -> String {
         format!("https://github.com/org/repo/pull/{number}")
     );
     assert_eq!(pin.base_ref, "main");
-    assert_eq!(pin.author_login, "alex");
+    assert_eq!(pin.author_login, "octodev");
     id
 }
 
 #[test]
 fn adopting_from_the_main_checkout_pins_the_head_and_posts_the_bot_comment() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let run = fx.adopt(7);
     let id = assert_pinned(&fx, &run, &head, 7);
@@ -114,7 +114,7 @@ fn adopting_from_the_main_checkout_pins_the_head_and_posts_the_bot_comment() {
 
 #[test]
 fn adopting_from_a_linked_worktree_uses_the_main_checkout() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let linked = fx.root.join("linked");
     git(
@@ -142,7 +142,7 @@ fn adopting_from_a_linked_worktree_uses_the_main_checkout() {
 #[test]
 fn no_hook_runs_while_the_pr_head_is_checked_out() {
     use std::os::unix::fs::PermissionsExt;
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let marker = fx.root.join("hook-ran");
     // A repository that keeps its hooks in the tree (`.githooks`), so the PR's
     // checkout has them too.
@@ -167,7 +167,7 @@ fn no_hook_runs_while_the_pr_head_is_checked_out() {
 
 #[test]
 fn author_executor_is_recorded_and_nothing_else_changes() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let run = fx.run_in(
         &fx.repo,
@@ -183,7 +183,7 @@ fn author_executor_is_recorded_and_nothing_else_changes() {
 
 #[test]
 fn a_comment_that_fails_does_not_fail_the_adoption() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     fx.comment_fails();
     let run = fx.adopt(7);
@@ -198,7 +198,7 @@ fn a_comment_that_fails_does_not_fail_the_adoption() {
 
 #[test]
 fn a_second_adoption_of_the_same_pr_is_refused_and_leaves_no_ref_or_worktree() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let first = fx.adopt(7);
     let id = assert_pinned(&fx, &first, &head, 7);
@@ -225,7 +225,7 @@ fn a_second_adoption_of_the_same_pr_is_refused_and_leaves_no_ref_or_worktree() {
 
 #[test]
 fn a_pr_can_be_adopted_again_after_it_was_cancelled_or_done() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let first = assert_pinned(&fx, &fx.adopt(7), &head, 7);
 
@@ -253,7 +253,7 @@ fn a_pr_can_be_adopted_again_after_it_was_cancelled_or_done() {
 
 #[test]
 fn two_prs_are_two_adoptions() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head7 = ready(&fx, "feat/one", 7);
     let a = assert_pinned(&fx, &fx.adopt(7), &head7, 7);
     let head8 = ready(&fx, "feat/two", 8);
@@ -264,7 +264,7 @@ fn two_prs_are_two_adoptions() {
 
 #[test]
 fn a_store_that_refuses_the_insert_leaves_no_task_no_ref_and_no_worktree() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     ready(&fx, "feat/chat", 7);
     drop(fx.db());
     // The task row goes in first; the second event then fails: the whole
@@ -297,7 +297,7 @@ fn a_store_that_refuses_the_insert_leaves_no_task_no_ref_and_no_worktree() {
 
 #[test]
 fn an_agent_run_may_not_adopt_and_gh_is_never_called() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     ready(&fx, "feat/chat", 7);
     let run = fx.run_in(&fx.repo, &["board", "adopt", "7"], Some("run-1"));
     assert_ne!(run.code, 0);
@@ -334,7 +334,7 @@ fn add_events(fx: &Fixture, id: &str) {
 
 #[test]
 fn board_show_and_list_describe_an_adopting_task() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let id = assert_pinned(&fx, &fx.adopt(7), &head, 7);
     add_events(&fx, &id);
@@ -376,7 +376,7 @@ fn board_show_and_list_describe_an_adopting_task() {
 
 #[test]
 fn board_show_gives_the_code_and_reason_of_a_cancelled_adoption() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let id = assert_pinned(&fx, &fx.adopt(7), &head, 7);
     fx.lane_cancels(&id, "head_changed", "the PR moved on");
@@ -399,7 +399,7 @@ fn board_show_gives_the_code_and_reason_of_a_cancelled_adoption() {
 
 #[test]
 fn a_user_cancel_shows_as_cancelled_by_user() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let head = ready(&fx, "feat/chat", 7);
     let id = assert_pinned(&fx, &fx.adopt(7), &head, 7);
     let cancel = fx.board(&["cancel", &id, "--reason", "not now"]);
@@ -411,7 +411,7 @@ fn a_user_cancel_shows_as_cancelled_by_user() {
 
 #[test]
 fn an_ordinary_task_shows_no_adoption() {
-    let fx = Fixture::new("\"alex\"");
+    let fx = Fixture::new("\"octodev\"");
     let added = fx.board(&["add", "--title", "plain", "--spec", "s", "--accept", "a"]);
     let id = added.json["task"]["id"].as_str().unwrap().to_string();
     let show = fx.board(&["show", &id]);

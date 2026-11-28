@@ -1139,6 +1139,8 @@ aaf board show <task id>                      # PR, pinned head, phase, retries,
 
 - **Limits.** Adopting needs CI that reports at least one check (a PR with no check is not a pass), a base branch with a remote, and `aaf run --auto` running. When the PR and the base both change a head-locked file, the PR has to be rebased first (`lock_changed`). The files listed under `needs_human_head_lock` always wait for a person; the lane never approves them.
 
+**Rollout.** The new `adopting` task state is unknown to older `aaf` binaries: they read an `adopting` row as corrupt. The task database is shared by every repository on the machine, so one adopted PR is visible to every `aaf` process, not only those of its own repository. Before the first `aaf board adopt`, update `aaf` and `aaf-hook` everywhere and restart every running `aaf run --auto`, every `aaf ui --service` and any other long-running `aaf` process, so that no process still on an older binary meets an `adopting` row. Start `aaf run --auto` from the main checkout of the repository: an adopted task is stored under the main work tree, so a runner started inside a linked worktree does not see it (adopting from any worktree is fine).
+
 **Known limits of adopting.**
 
 - The gate runs the PR's own code. A PR that changes a file the configured commands use indirectly (for example `package.json` scripts behind `npm test`, a Makefile, `build.rs`) is not forced to a human; the two reviewers must catch it. This is the same trust model as factory tasks. Paths named literally in `[commands]` are always human-only.
