@@ -1,6 +1,6 @@
 //! macOS host-side OAuth refresh execution under minimal Seatbelt + file locks.
 
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
@@ -8,13 +8,13 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::seatbelt::{build_host_sandbox_cmd, lookup_env, validate_host_bin};
 use super::{ExecEnv, claude_keychain_service, parse_claude_oauth_expiry_ms, sha256_prefix_hex};
-use crate::executors::sandbox;
 use crate::process::run_with_timeout;
 
 /// Refresh Claude OAuth proactively when the Keychain access token expires
-/// within 5 minutes (matching Claude CLI's own refresh window).
-const CLAUDE_REFRESH_LEAD_MS: i64 = 5 * 60 * 1000;
+/// within 10 minutes.
+const CLAUDE_REFRESH_LEAD_MS: i64 = 10 * 60 * 1000;
 
 /// Minimum remaining lifetime required after a host refresh to treat it as valid.
 const CLAUDE_REFRESH_MIN_VALID_MS: i64 = 60 * 1000;
@@ -23,31 +23,21 @@ const CLAUDE_REFRESH_MIN_VALID_MS: i64 = 60 * 1000;
 /// across processes (Google OAuth access tokens expire every 60 minutes).
 const AGY_REFRESH_INTERVAL_SECS: i64 = 40 * 60;
 
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// Backoff after a failed preflight attempt so outages / revoked tokens never
+/// stall every worker run.
+const FAILED_ATTEMPT_BACKOFF_SECS: i64 = 5 * 60;
+
+/// Shorter backoff on reactive refresh after a failed host attempt so N
+/// concurrent workers never stampede on a revoked token or outage.
+const REACTIVE_ERR_BACKOFF_SECS: i64 = 60;
+
+/// Maximum wait time when acquiring the reactive cross-process refresh lock.
+const REACTIVE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
 const SECURITY_BIN: &str = "/usr/bin/security";
 const SECURITY_TIMEOUT: Duration = Duration::from_secs(5);
 const CLAUDE_REFRESH_TIMEOUT: Duration = Duration::from_secs(25);
 const AGY_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
-const HOST_ENV_KEYS: [&str; 18] = [
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "TERM",
-    "LANG",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-    "no_proxy",
-    "NODE_EXTRA_CA_CERTS",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "XDG_CONFIG_HOME",
-];
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -83,11 +73,20 @@ impl Drop for EmptyTempDir {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Stamp {
+    Ok(i64),
+    Err(i64),
+}
+
 struct CrossProcessLock(File);
 
 impl CrossProcessLock {
-    fn acquire(env: &ExecEnv, name: &str) -> Option<Self> {
+    fn open_file(env: &ExecEnv, name: &str) -> Option<File> {
+        use std::os::unix::fs::MetadataExt as _;
+
         let dir = host_state_dir(env, "oauth-refresh")?;
+        let dir_uid = fs::symlink_metadata(&dir).ok()?.uid();
         let path = dir.join(name);
         if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             return None;
@@ -100,40 +99,84 @@ impl CrossProcessLock {
             .mode(0o600)
             .open(&path)
             .ok()?;
-        file.lock().ok()?;
-        Some(Self(file))
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.uid() != dir_uid {
+            return None;
+        }
+        Some(file)
     }
 
-    fn read_stamp(&mut self) -> Option<i64> {
+    fn acquire_with_timeout(env: &ExecEnv, name: &str, timeout: Duration) -> Option<Self> {
+        let file = Self::open_file(env, name)?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Some(Self(file)),
+                Err(TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(TryLockError::Error(_)) => return None,
+            }
+        }
+    }
+
+    fn try_acquire(env: &ExecEnv, name: &str) -> Option<Self> {
+        let file = Self::open_file(env, name)?;
+        match file.try_lock() {
+            Ok(()) => Some(Self(file)),
+            Err(TryLockError::WouldBlock | TryLockError::Error(_)) => None,
+        }
+    }
+
+    fn read_stamp(&mut self) -> Option<Stamp> {
         self.0.seek(SeekFrom::Start(0)).ok()?;
         let mut s = String::new();
         std::io::Read::by_ref(&mut self.0)
             .take(64)
             .read_to_string(&mut s)
             .ok()?;
-        s.trim().parse::<i64>().ok()
+        let trimmed = s.trim();
+        if let Some(rest) = trimmed.strip_prefix("ok:") {
+            rest.parse::<i64>().ok().map(Stamp::Ok)
+        } else if let Some(rest) = trimmed.strip_prefix("err:") {
+            rest.parse::<i64>().ok().map(Stamp::Err)
+        } else {
+            trimmed.parse::<i64>().ok().map(Stamp::Ok)
+        }
     }
 
-    fn write_stamp(&mut self, ts: i64) {
+    fn write_stamp(&mut self, stamp: Stamp) {
+        let line = match stamp {
+            Stamp::Ok(ts) => format!("ok:{ts}"),
+            Stamp::Err(ts) => format!("err:{ts}"),
+        };
         if self.0.set_len(0).is_ok() && self.0.seek(SeekFrom::Start(0)).is_ok() {
-            let _ = writeln!(self.0, "{ts}");
+            let _ = writeln!(self.0, "{line}");
             let _ = self.0.flush();
         }
     }
 }
 
 fn host_state_dir(env: &ExecEnv, subdir: &str) -> Option<PathBuf> {
-    let root = env
+    let root: PathBuf = env
         .data_dir
         .as_deref()
         .filter(|d| !d.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+        .map(|d| Path::new(d).components().collect())?;
+    if fs::symlink_metadata(&root).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
+    }
     let dir = root.join(subdir);
     if fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
         return None;
     }
     aaf_fp::fs_private::create_dir(&dir).ok()?;
+    if fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
+    }
     Some(dir)
 }
 
@@ -161,69 +204,12 @@ fn matches_real_host_home(env: &ExecEnv) -> Option<PathBuf> {
     (c_env == c_proc).then_some(c_env)
 }
 
-fn validate_host_bin(bin: &str, env: &ExecEnv, task_cwd: &str) -> bool {
-    let path = Path::new(bin);
-    if !path.is_absolute() || !path.is_file() {
-        return false;
-    }
-    let Ok(canon) = fs::canonicalize(path) else {
-        return false;
-    };
-    if !task_cwd.is_empty()
-        && let Ok(c_cwd) = fs::canonicalize(task_cwd)
-        && canon.starts_with(&c_cwd)
-    {
-        return false;
-    }
-    for tmp in &env.temp_dirs {
-        if let Ok(c_tmp) = fs::canonicalize(tmp)
-            && canon.starts_with(&c_tmp)
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn sbpl_quote(path: &Path) -> Option<String> {
-    let canon = sandbox::canonical(&path.to_string_lossy()).ok()?;
-    let s = canon.to_str()?;
-    if s.contains(['"', '\\', '\n', '\r', '\0']) {
-        return None;
-    }
-    Some(format!("\"{s}\""))
-}
-
-pub(super) fn build_seatbelt_profile(
-    empty_cwd: &Path,
-    keychain_dir: &Path,
-    data_dir: Option<&Path>,
-    ssh_dir: Option<&Path>,
-    task_cwd: Option<&Path>,
-) -> Option<String> {
-    let cwd_q = sbpl_quote(empty_cwd)?;
-    let kc_q = sbpl_quote(keychain_dir)?;
-    let mut p = format!(
-        "(version 1)\n(allow default)\n(deny file-write*)\n\
-         (allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") \
-         (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") \
-         (regex #\"^/dev/fd/[0-9]+$\"))\n\
-         (allow file-write* (subpath {cwd_q}))\n\
-         (allow file-write* (subpath {kc_q}))\n"
-    );
-    for denied in [data_dir, ssh_dir, task_cwd].into_iter().flatten() {
-        if let Some(q) = sbpl_quote(denied) {
-            p.push_str(&format!("(deny file-read* file-write* (subpath {q}))\n"));
-        }
-    }
-    Some(p)
-}
-
 fn zeroize_bytes(bytes: &mut [u8]) {
     for b in bytes.iter_mut() {
         *b = 0;
     }
     std::sync::atomic::compiler_fence(Ordering::SeqCst);
+    std::hint::black_box(bytes);
 }
 
 fn keychain_account_name(env: &ExecEnv) -> Option<String> {
@@ -268,50 +254,23 @@ fn read_claude_expiry_ms(env: &ExecEnv, service: &str) -> Option<(i64, bool)> {
     query(None)
 }
 
-fn lookup_env(env: &ExecEnv, key: &str) -> Option<String> {
-    if let Some((_, val)) = env.parent_env.iter().rev().find(|(k, _)| k == key) {
-        return Some(val.clone());
+/// Reads ONLY the metadata modification timestamp (`mdat`) of the Antigravity
+/// Keychain item (`svce="gemini"`, `acct="antigravity"`) without `-w` (no secret
+/// bytes are ever read).
+fn read_agy_keychain_mdat() -> Option<String> {
+    let mut cmd = Command::new(SECURITY_BIN);
+    cmd.args(["find-generic-password", "-s", "gemini", "-a", "antigravity"]);
+    let fin = run_with_timeout(cmd, SECURITY_TIMEOUT, true).ok()?;
+    if !fin.status.is_some_and(|st| st.success()) {
+        return None;
     }
-    if env.parent_env.is_empty() {
-        return std::env::var(key).ok();
-    }
-    None
-}
-
-fn apply_clean_host_env(cmd: &mut Command, env: &ExecEnv, empty_cwd: &Path, home: &Path) {
-    cmd.env_clear();
-    for key in HOST_ENV_KEYS {
-        if let Some(val) = lookup_env(env, key) {
-            cmd.env(key, val);
-        }
-    }
-    cmd.env("HOME", home);
-    cmd.env("TMPDIR", empty_cwd);
-}
-
-fn build_host_sandbox_cmd(
-    bin: &str,
-    args: &[&str],
-    env: &ExecEnv,
-    home: &Path,
-    task_cwd: &str,
-    empty_cwd: &Path,
-) -> Option<Command> {
-    let kc_dir = home.join("Library/Keychains");
-    let ssh_dir = home.join(".ssh");
-    let data_dir = env
-        .data_dir
-        .as_deref()
-        .filter(|d| !d.trim().is_empty())
-        .map(Path::new);
-    let task_path = (!task_cwd.trim().is_empty()).then(|| Path::new(task_cwd));
-    let profile = build_seatbelt_profile(empty_cwd, &kc_dir, data_dir, Some(&ssh_dir), task_path)?;
-    let mut cmd = Command::new(SANDBOX_EXEC);
-    apply_clean_host_env(&mut cmd, env, empty_cwd, home);
-    cmd.current_dir(empty_cwd)
-        .args(["-p", &profile, "--", bin])
-        .args(args);
-    Some(cmd)
+    let text = String::from_utf8_lossy(&fin.stdout);
+    let mdat = text
+        .lines()
+        .find(|line| line.contains("\"mdat\""))
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| "present".to_string());
+    Some(mdat)
 }
 
 fn run_claude_host_ping(
@@ -321,12 +280,16 @@ fn run_claude_host_ping(
     task_cwd: &str,
     config_dir: Option<&str>,
 ) -> bool {
-    if !validate_host_bin(claude_bin, env, task_cwd) {
+    if !validate_host_bin(claude_bin, env, home, task_cwd, config_dir) {
         return false;
     }
     let Some(tmp) = EmptyTempDir::new(env) else {
         return false;
     };
+    let cfg_path = config_dir
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"));
     let Some(mut cmd) = build_host_sandbox_cmd(
         claude_bin,
         &[
@@ -340,6 +303,8 @@ fn run_claude_host_ping(
             "--strict-mcp-config",
             "--setting-sources",
             "",
+            "--settings",
+            r#"{"disableAllHooks":true}"#,
             "--disable-slash-commands",
             "--permission-mode",
             "plan",
@@ -350,6 +315,7 @@ fn run_claude_host_ping(
         home,
         task_cwd,
         tmp.path(),
+        Some(&cfg_path),
     ) else {
         return false;
     };
@@ -380,14 +346,29 @@ pub(super) fn preflight_claude_impl(
         return Some(expires_at);
     }
     let lock_name = format!("claude-{}.lock", sha256_prefix_hex(&service, 8));
-    let _lock = CrossProcessLock::acquire(env, &lock_name)?;
-    if let Some((exp, true)) = read_claude_expiry_ms(env, &service) {
-        if exp > now_ms().saturating_add(CLAUDE_REFRESH_LEAD_MS) {
-            return Some(exp);
-        }
-        let _ = run_claude_host_ping(claude_bin, env, &home, task_cwd, config_dir);
+    let Some(mut lock) = CrossProcessLock::try_acquire(env, &lock_name) else {
+        return Some(expires_at);
+    };
+    if let Some(Stamp::Err(ts)) = lock.read_stamp()
+        && now_secs().saturating_sub(ts) < FAILED_ATTEMPT_BACKOFF_SECS
+    {
+        return Some(expires_at);
     }
-    read_claude_expiry_ms(env, &service).map(|(exp, _)| exp)
+    let before = read_claude_expiry_ms(env, &service).map(|(e, _)| e);
+    if before.is_some_and(|e| e > now_ms().saturating_add(CLAUDE_REFRESH_LEAD_MS)) {
+        return before;
+    }
+    let _ = run_claude_host_ping(claude_bin, env, &home, task_cwd, config_dir);
+    let after = read_claude_expiry_ms(env, &service).map(|(e, _)| e);
+    let refreshed = after.is_some_and(|e| {
+        e > now_ms().saturating_add(CLAUDE_REFRESH_MIN_VALID_MS) && before.is_none_or(|b| e > b)
+    });
+    lock.write_stamp(if refreshed {
+        Stamp::Ok(now_secs())
+    } else {
+        Stamp::Err(now_secs())
+    });
+    after
 }
 
 pub(super) fn refresh_claude_now_impl(
@@ -402,11 +383,12 @@ pub(super) fn refresh_claude_now_impl(
     };
     let service = claude_keychain_service(config_dir);
     let lock_name = format!("claude-{}.lock", sha256_prefix_hex(&service, 8));
-    let Some(_lock) = CrossProcessLock::acquire(env, &lock_name) else {
+    let Some(mut lock) =
+        CrossProcessLock::acquire_with_timeout(env, &lock_name, REACTIVE_LOCK_TIMEOUT)
+    else {
         return false;
     };
     let current = read_claude_expiry_ms(env, &service);
-    let min_valid = now_ms().saturating_add(CLAUDE_REFRESH_MIN_VALID_MS);
     let lead_cut = now_ms().saturating_add(CLAUDE_REFRESH_LEAD_MS);
     if let Some((exp, _)) = current
         && exp > lead_cut
@@ -414,14 +396,28 @@ pub(super) fn refresh_claude_now_impl(
         // Only treat as recovered if a peer strictly advanced expiry since pre-run.
         return pre_run_expiry_ms.is_some_and(|before| exp > before);
     }
-    if !run_claude_host_ping(claude_bin, env, &home, task_cwd, config_dir) {
+    if let Some(Stamp::Err(ts)) = lock.read_stamp()
+        && now_secs().saturating_sub(ts) < REACTIVE_ERR_BACKOFF_SECS
+    {
         return false;
     }
-    read_claude_expiry_ms(env, &service)
-        .is_some_and(|(exp, _)| exp > min_valid && pre_run_expiry_ms.is_none_or(|b| exp > b))
+    let baseline = pre_run_expiry_ms.or_else(|| current.map(|(e, _)| e));
+    // Re-read Keychain regardless of ping exit code: Claude may have saved the
+    // refreshed token before a subsequent inference call failed.
+    let _ = run_claude_host_ping(claude_bin, env, &home, task_cwd, config_dir);
+    let min_valid = now_ms().saturating_add(CLAUDE_REFRESH_MIN_VALID_MS);
+    let refreshed = read_claude_expiry_ms(env, &service).is_some_and(|(after, _)| {
+        after > min_valid && baseline.map_or(current.is_none(), |b| after > b)
+    });
+    lock.write_stamp(if refreshed {
+        Stamp::Ok(now_secs())
+    } else {
+        Stamp::Err(now_secs())
+    });
+    refreshed
 }
 
-fn is_real_agy_keychain_env(env: &ExecEnv) -> Option<PathBuf> {
+fn is_real_agy_keychain_env(env: &ExecEnv) -> Option<(PathBuf, String)> {
     let home = matches_real_host_home(env)?;
     if !home
         .join(".gemini/antigravity-cli/installation_id")
@@ -429,24 +425,19 @@ fn is_real_agy_keychain_env(env: &ExecEnv) -> Option<PathBuf> {
     {
         return None;
     }
-    // Metadata-only Keychain presence check (no `-w` secret read).
-    let mut cmd = Command::new(SECURITY_BIN);
-    cmd.args(["find-generic-password", "-s", "gemini", "-a", "antigravity"]);
-    let ok = run_with_timeout(cmd, SECURITY_TIMEOUT, false)
-        .ok()
-        .is_some_and(|fin| fin.status.is_some_and(|st| st.success()));
-    ok.then_some(home)
+    let mdat = read_agy_keychain_mdat()?;
+    Some((home, mdat))
 }
 
 fn run_agy_models_host(agy_bin: &str, env: &ExecEnv, home: &Path, task_cwd: &str) -> bool {
-    if !validate_host_bin(agy_bin, env, task_cwd) {
+    if !validate_host_bin(agy_bin, env, home, task_cwd, None) {
         return false;
     }
     let Some(tmp) = EmptyTempDir::new(env) else {
         return false;
     };
     let Some(mut cmd) =
-        build_host_sandbox_cmd(agy_bin, &["models"], env, home, task_cwd, tmp.path())
+        build_host_sandbox_cmd(agy_bin, &["models"], env, home, task_cwd, tmp.path(), None)
     else {
         return false;
     };
@@ -456,35 +447,58 @@ fn run_agy_models_host(agy_bin: &str, env: &ExecEnv, home: &Path, task_cwd: &str
         .is_some_and(|fin| fin.status.is_some_and(|st| st.success()))
 }
 
-pub(super) fn preflight_agy_impl(agy_bin: &str, env: &ExecEnv, task_cwd: &str) {
-    let Some(mut lock) = CrossProcessLock::acquire(env, "agy.lock") else {
-        return;
+pub(super) fn preflight_agy_impl(agy_bin: &str, env: &ExecEnv, task_cwd: &str) -> Option<String> {
+    let (home, mdat) = is_real_agy_keychain_env(env)?;
+    let Some(mut lock) = CrossProcessLock::try_acquire(env, "agy.lock") else {
+        return Some(mdat);
     };
     let now = now_secs();
-    if lock
-        .read_stamp()
-        .is_some_and(|ts| now.saturating_sub(ts) < AGY_REFRESH_INTERVAL_SECS)
-    {
-        return;
+    match lock.read_stamp() {
+        Some(Stamp::Ok(ts)) if now.saturating_sub(ts) < AGY_REFRESH_INTERVAL_SECS => {
+            return Some(mdat);
+        }
+        Some(Stamp::Err(ts)) if now.saturating_sub(ts) < FAILED_ATTEMPT_BACKOFF_SECS => {
+            return Some(mdat);
+        }
+        _ => {}
     }
-    let Some(home) = is_real_agy_keychain_env(env) else {
-        return;
-    };
     if run_agy_models_host(agy_bin, env, &home, task_cwd) {
-        lock.write_stamp(now_secs());
+        lock.write_stamp(Stamp::Ok(now_secs()));
+    } else {
+        lock.write_stamp(Stamp::Err(now_secs()));
     }
+    read_agy_keychain_mdat().or(Some(mdat))
 }
 
-pub(super) fn refresh_agy_now_impl(agy_bin: &str, env: &ExecEnv, task_cwd: &str) -> bool {
-    let Some(mut lock) = CrossProcessLock::acquire(env, "agy.lock") else {
+pub(super) fn refresh_agy_now_impl(
+    agy_bin: &str,
+    env: &ExecEnv,
+    task_cwd: &str,
+    pre_run_mdat: Option<&str>,
+) -> bool {
+    let Some(mut lock) =
+        CrossProcessLock::acquire_with_timeout(env, "agy.lock", REACTIVE_LOCK_TIMEOUT)
+    else {
         return false;
     };
-    let Some(home) = is_real_agy_keychain_env(env) else {
+    let Some((home, before_mdat)) = is_real_agy_keychain_env(env) else {
         return false;
     };
-    if run_agy_models_host(agy_bin, env, &home, task_cwd) {
-        lock.write_stamp(now_secs());
+    if pre_run_mdat.is_some_and(|pre| pre != before_mdat) {
         return true;
     }
-    false
+    if let Some(Stamp::Err(ts)) = lock.read_stamp()
+        && now_secs().saturating_sub(ts) < REACTIVE_ERR_BACKOFF_SECS
+    {
+        return false;
+    }
+    let ok = run_agy_models_host(agy_bin, env, &home, task_cwd);
+    let after_mdat = read_agy_keychain_mdat();
+    let changed = ok && after_mdat.as_deref().is_some_and(|a| a != before_mdat);
+    lock.write_stamp(if ok {
+        Stamp::Ok(now_secs())
+    } else {
+        Stamp::Err(now_secs())
+    });
+    changed
 }

@@ -16,7 +16,6 @@ use aaf_engine::executors::{self, ExecEnv};
 use aaf_engine::factory::adapters::{
     RealGate, RouterPool, SystemClock, WebhookNotifier, provider_for,
 };
-use aaf_engine::factory::audit_backend::{resolve_auto_audit_executor, same_audit_provider};
 use aaf_engine::factory::stage_router::writer_requires_hook;
 use aaf_engine::factory::{Deps, RealGit, SelectingPool, Settings, resolve_base};
 use aaf_engine::hook_settings;
@@ -153,13 +152,9 @@ pub(super) fn build_deps(
     let profile = config::effective_profile(&cfg.repo, repo);
     // Which account a job may take follows `accounts.selection`; `repo` is
     // the path `tasks.repo_root` holds, so the run history finds it.
-    let resolved_audit_exec = resolve_auto_audit_executor(
-        &cfg.repo.run.executor,
-        &cfg.repo.cross_audit.executor,
-        &ctx.path_var,
-        &ctx.home,
-    );
-    let mut selecting = SelectingPool::new(
+    // Always attach live cross-repo gating audit reserve so every repository
+    // sharing the machine account pool cooperates under `_reserve.lock`.
+    let selecting = SelectingPool::new(
         RouterPool {
             accounts: Arc::new(db.clone()),
             runs: Arc::new(db.clone()),
@@ -171,23 +166,13 @@ pub(super) fn build_deps(
         cfg.global.accounts.selection,
         repo,
         Arc::new(db.clone()),
-    );
-    let needs_audit_reserve = same_audit_provider(&cfg.repo.run.executor, &resolved_audit_exec)
-        || (cfg.repo.cross_audit.dual_review
-            && cfg
-                .repo
-                .cross_audit
-                .reviewers
-                .iter()
-                .any(|r| same_audit_provider(&cfg.repo.run.executor, &r.executor)));
-    if needs_audit_reserve {
-        let reserve_db = db.clone();
-        selecting = selecting.with_audit_reserve(Arc::new(move || {
-            reserve_db
-                .list_tasks(None, Some(TaskState::Gating))
-                .is_ok_and(|tasks| !tasks.is_empty())
-        }));
-    }
+    )
+    .with_gating_audit_reserve(super::audit_reserve::gating_authors_provider(
+        ctx,
+        repo,
+        cfg,
+        db.clone(),
+    ));
     let pool = Arc::new(selecting);
 
     let deps = Deps {

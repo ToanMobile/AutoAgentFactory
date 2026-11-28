@@ -99,6 +99,8 @@ pub(super) fn classify_text_failure(
         "504 gateway timeout",
         "gateway timeout",
         "tls handshake",
+        "backend returned an empty conversation id",
+        "database was initialized by another opener",
     ];
     let lower = text.to_ascii_lowercase();
     let raw: String = text.chars().take(RAW_LIMIT_CHARS).collect();

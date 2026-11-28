@@ -106,10 +106,29 @@ impl<'a> Router<'a> {
         &self,
         allow: &dyn Fn(&AccountProfile) -> bool,
     ) -> Result<Option<(AccountProfile, Lease)>, AccountsError> {
+        self.next_where_keeping_one_for_auditors(allow, &[])
+    }
+
+    /// Author-aware variant of [`Router::next_where_keeping_one`].
+    ///
+    /// Each entry in `excluded_auditors` is the author account id (if any) of a
+    /// currently `Gating` task that cannot self-audit (`same_account = false`).
+    /// When `excluded_auditors` is non-empty, `Purpose::Work` will not lease a
+    /// candidate if doing so would drop ANY gating task from `>= 1` eligible
+    /// free non-author auditor down to `0`, and instead continues to the next
+    /// candidate (for example leasing the gating task's own author account while
+    /// leaving a non-author account free for audit).
+    pub fn next_where_keeping_one_for_auditors(
+        &self,
+        allow: &dyn Fn(&AccountProfile) -> bool,
+        excluded_auditors: &[Option<String>],
+    ) -> Result<Option<(AccountProfile, Lease)>, AccountsError> {
         let now = self.clock.now();
+        let all_accounts = self.accounts.list_accounts()?;
+        let solo = all_accounts.len() == 1;
         let mut ready_ids = Vec::new();
         let mut candidates = Vec::new();
-        for state in self.accounts.list_accounts()? {
+        for state in all_accounts {
             if state.in_cooldown(now) || !Path::new(&state.profile.config_dir).is_dir() {
                 continue;
             }
@@ -138,16 +157,50 @@ impl<'a> Router<'a> {
         // so two repos starting simultaneously cannot both claim the last two
         // slots while each observing the other's slot as still free.
         let _reserve_guard = Lease::acquire_blocking(&self.leases_dir, "_reserve")?;
+        let mut unique_excl: Vec<Option<&str>> = Vec::new();
+        for excl in excluded_auditors {
+            let entry = excl.as_deref();
+            if !unique_excl.contains(&entry) {
+                unique_excl.push(entry);
+            }
+        }
+        let has_eligible_slot = |excl: Option<&str>| -> bool {
+            ready_ids.iter().any(|id| {
+                (solo || excl != Some(id.as_str()))
+                    && !Lease::all_slots_leased_ro(
+                        &self.leases_dir,
+                        id,
+                        self.max_concurrent_per_account,
+                    )
+            })
+        };
+        let had_eligible_before: Vec<bool> = unique_excl
+            .iter()
+            .map(|&excl| has_eligible_slot(excl))
+            .collect();
         for (_, profile) in candidates {
             if let Some(lease) = self.acquire_slot(&profile.id)? {
-                let has_spare = ready_ids
-                    .iter()
-                    .any(|id| matches!(self.acquire_slot(id), Ok(Some(_))));
-                if has_spare {
+                let keeps_reserve = if unique_excl.is_empty() {
+                    ready_ids.iter().any(|id| {
+                        !Lease::all_slots_leased_ro(
+                            &self.leases_dir,
+                            id,
+                            self.max_concurrent_per_account,
+                        )
+                    })
+                } else {
+                    unique_excl
+                        .iter()
+                        .zip(&had_eligible_before)
+                        .all(|(&excl, &had)| !had || has_eligible_slot(excl))
+                };
+                if keeps_reserve {
                     return Ok(Some((profile, lease)));
                 }
                 drop(lease);
-                return Ok(None);
+                if unique_excl.is_empty() {
+                    return Ok(None);
+                }
             }
         }
         Ok(None)
@@ -281,5 +334,90 @@ mod tests {
             );
             drop((g1, g2, audit));
         }
+    }
+
+    #[test]
+    fn next_where_keeping_one_for_auditors_protects_last_non_author_slot() {
+        let dir = tempdir().unwrap();
+        let db = Db::open(&dir.path().join("aaf.db")).unwrap();
+        for id in ["claude-toan", "claude-max", "claude-lua"] {
+            let cfg = dir.path().join(format!("cfg-{id}"));
+            fs::create_dir_all(&cfg).unwrap();
+            db.upsert_account(&AccountProfile {
+                id: id.to_string(),
+                provider: ProviderKind::ClaudeCode,
+                config_dir: cfg.to_string_lossy().into_owned(),
+                name: id.to_string(),
+            })
+            .unwrap();
+        }
+        let clock = FixedClock(10_000);
+        let router = Router::new(&db, &db, &clock, dir.path().join("leases"), 1);
+        let _hold_max = router
+            .next_where(&|p| p.id == "claude-max")
+            .unwrap()
+            .unwrap();
+        let excl = vec![Some("claude-lua".to_string())];
+
+        // Refuses taking `claude-toan` (the sole free non-author auditor for `claude-lua`).
+        assert!(
+            router
+                .next_where_keeping_one_for_auditors(&|p| p.id == "claude-toan", &excl)
+                .unwrap()
+                .is_none()
+        );
+        // Taking any candidate selects `claude-lua`, leaving `claude-toan` free for audit.
+        let (picked, _lease) = router
+            .next_where_keeping_one_for_auditors(&|_| true, &excl)
+            .unwrap()
+            .expect("should lease author account claude-lua");
+        assert_eq!(picked.id, "claude-lua");
+        drop(_lease);
+
+        // Two gating tasks with distinct authors `[lua, toan]` reserve BOTH free slots.
+        let both = vec![
+            Some("claude-lua".to_string()),
+            Some("claude-toan".to_string()),
+        ];
+        assert!(
+            router
+                .next_where_keeping_one_for_auditors(&|_| true, &both)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn next_where_keeping_one_for_auditors_reserves_slot_on_solo_account_with_two_slots() {
+        let dir = tempdir().unwrap();
+        let db = Db::open(&dir.path().join("aaf.db")).unwrap();
+        let cfg = dir.path().join("cfg-solo");
+        fs::create_dir_all(&cfg).unwrap();
+        db.upsert_account(&AccountProfile {
+            id: "claude-solo".to_string(),
+            provider: ProviderKind::ClaudeCode,
+            config_dir: cfg.to_string_lossy().into_owned(),
+            name: "solo".to_string(),
+        })
+        .unwrap();
+        let clock = FixedClock(10_000);
+        let router = Router::new(&db, &db, &clock, dir.path().join("leases"), 2);
+        let excl = vec![Some("claude-solo".to_string())];
+
+        // First coding job takes slot 0, leaving slot 1 free for solo fallback audit.
+        let (first, _lease1) = router
+            .next_where_keeping_one_for_auditors(&|_| true, &excl)
+            .unwrap()
+            .expect("slot 0 should be granted when slot 1 remains free");
+        assert_eq!(first.id, "claude-solo");
+
+        // Second coding job MUST yield so slot 1 stays free for the gating task's audit.
+        assert!(
+            router
+                .next_where_keeping_one_for_auditors(&|_| true, &excl)
+                .unwrap()
+                .is_none(),
+            "solo account with 2 slots must keep 1 slot free for gating fallback audit"
+        );
     }
 }

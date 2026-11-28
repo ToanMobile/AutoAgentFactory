@@ -10,7 +10,7 @@ use aaf_domain::task::{Task, TaskState};
 use serde_json::json;
 
 use super::schedule_order::{MAX_TRANSIENT_RETRIES, transient_backoff_secs};
-use super::scheduler::{DEFAULT_RATE_LIMIT_COOLDOWN_SECS, Scheduler};
+use super::scheduler::{CostGate, DEFAULT_RATE_LIMIT_COOLDOWN_SECS, Scheduler};
 use super::stage_router::ProviderKey;
 use super::worker::Job;
 use super::{Deps, Mode, finish, unblock};
@@ -368,21 +368,48 @@ impl<'a> Scheduler<'a> {
         hint_until: i64,
         hint_attempt: u32,
         detail: String,
+        oauth_refreshed: bool,
     ) -> PortResult<()> {
         let state = self.deps.store.get_task(&task_id)?.state;
         self.requeue_if_ready(task_id.clone(), state);
-        if matches!(self.mode, Mode::Once | Mode::Drain) {
-            let oauth_recovered =
-                detail.contains(crate::executors::macos_oauth_refresh::OAUTH_REFRESHED_MARKER);
-            let tries = self
-                .state
-                .transient_retries
-                .entry(task_id.clone())
-                .or_default();
-            if oauth_recovered && *tries == 0 {
+        if oauth_refreshed {
+            // Separate counter from network outage retries so a healed OAuth token
+            // neither steals network budget nor gets blocked by an earlier blip.
+            let tries = self.state.oauth_retries.entry(task_id.clone()).or_default();
+            if *tries == 0 {
                 *tries = 1;
+                let can_dispatch = !self.is_stopping()
+                    && self.summary.halted.is_none()
+                    && !super::is_frozen(&*self.deps.store)?
+                    && self.cost_gate()? == CostGate::Allow;
+                if can_dispatch {
+                    if state == TaskState::Gating {
+                        self.queue_gating_task(task_id)?;
+                    } else if self.mode == Mode::Once {
+                        self.state.started.remove(&task_id);
+                    }
+                }
                 return Ok(());
             }
+            if matches!(self.mode, Mode::Once | Mode::Drain) {
+                self.record_halt(&task_id, detail);
+                return Ok(());
+            }
+            *tries = tries.saturating_add(1);
+            let tries = *tries;
+            let wait = if tries <= MAX_TRANSIENT_RETRIES + 1 {
+                i64::try_from(transient_backoff_secs(tries - 1)).unwrap_or(60)
+            } else {
+                outage_wait_secs(tries - 1)
+            };
+            let deadline = hint_until.max(self.deps.now() + wait);
+            self.state.task_wait_until.insert(task_id.clone(), deadline);
+            if tries == MAX_TRANSIENT_RETRIES + 2 {
+                self.notify_outage(&task_id, tries, wait, &detail)?;
+            }
+            return Ok(());
+        }
+        if matches!(self.mode, Mode::Once | Mode::Drain) {
             self.record_halt(&task_id, detail);
             return Ok(());
         }

@@ -182,6 +182,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     // links: replacing one would point the closed path somewhere else.
     let mut chain_links = BTreeSet::new();
     let mut write_denied_canon = BTreeSet::new();
+    let mut write_denied_prefixes_canon: Vec<PathBuf> = Vec::new();
     for raw in &extra.write_denied {
         let entry = canonical_entry(raw)?;
         let resolved = canonical(raw)?;
@@ -196,6 +197,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     }
     for raw in &extra.write_denied_prefix {
         let entry = canonical_entry(raw)?;
+        write_denied_prefixes_canon.push(entry.clone());
         let starts = sbpl_regex(&format!("^{}", regex_escape(path_str(&entry)?)))?;
         profile.push_str(&format!("(deny file-write* (regex {starts}))\n"));
         chain_links.extend(links_to(raw)?);
@@ -254,7 +256,7 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     closed.extend(worktree.iter().map(|worktree| worktree.join(".git")));
     let listed = extra.write_denied.iter().chain(&extra.write_denied_prefix);
     closed.extend(listed.map(PathBuf::from));
-    closed.extend(symlink_targets);
+    closed.extend(symlink_targets.iter().cloned());
     let mut on_path = BTreeSet::new();
     for raw in &extra.path_dirs {
         let dir = Path::new(raw);
@@ -300,21 +302,47 @@ pub fn seatbelt_profile(policy: &SandboxPolicy, extra: &SandboxPaths) -> PortRes
     for path in &closed {
         guarded.extend(entries_to(path)?.into_iter().filter(|entry| opened(entry)));
     }
+    // Guard every pre-existing writable root itself (e.g. `~/.gemini/antigravity/tmp`,
+    // `~/.claude/projects`, `~/.claude/history.jsonl`) so a confined process can never
+    // unlink/replace a writable root with a symlink pointing to `$HOME` or `~/.ssh`
+    // for the next run or concurrent worker to canonicalize and open.
+    for root in &writable {
+        if std::fs::symlink_metadata(root).is_ok() {
+            guarded.insert(root.clone());
+        }
+    }
     for entry in &guarded {
         let sbpl_entry = sbpl_string(entry)?;
         profile.push_str(&format!("(deny file-write* (literal {sbpl_entry}))\n"));
         // Preserve POSIX `access(dir, W_OK)` / JVM `File.canWrite()` on existing
-        // guarded ancestor directories (e.g. worktree root, `~/.gradle`) while
-        // keeping unlink/rename/create/chmod/xattr/owner denied. Never open
-        // missing paths, symlinks, `.git`, denied subtrees, or PATH dirs.
-        let is_real_dir = std::fs::symlink_metadata(entry).is_ok_and(|m| m.file_type().is_dir());
+        // guarded directories and data-only writes ONLY on explicit writable
+        // regular files (e.g. `~/.claude/history.jsonl`), while keeping
+        // unlink/rename/create/chmod/xattr/owner denied. Never open missing
+        // paths, symlinks, `.git`, denied subtrees/prefixes/targets, submodules,
+        // or PATH dirs.
+        let meta = std::fs::symlink_metadata(entry).ok();
+        let is_real_dir = meta.as_ref().is_some_and(|m| m.file_type().is_dir());
+        let is_explicit_writable_file = meta.as_ref().is_some_and(|m| m.file_type().is_file())
+            && writable.iter().any(|w| w == entry);
+        let entry_str = entry.to_str();
+        let matches_denied_prefix = write_denied_prefixes_canon.iter().any(|p| {
+            entry.starts_with(p)
+                || entry_str
+                    .zip(p.to_str())
+                    .is_some_and(|(e, pref)| e.starts_with(pref))
+        });
         let is_closed_target = dot_git_path.as_deref() == Some(entry.as_path())
             || write_denied_canon.iter().any(|d| entry.starts_with(d))
+            || matches_denied_prefix
+            || symlink_targets.iter().any(|t| entry.starts_with(t))
             || on_path.contains(entry)
             || denied.iter().any(|d| entry.starts_with(d))
             || worktrees_roots.iter().any(|r| entry == r)
-            || git_dirs.iter().any(|g| entry.starts_with(g));
-        if is_real_dir && !is_closed_target {
+            || git_dirs
+                .iter()
+                .chain(&submodules)
+                .any(|g| entry.starts_with(g));
+        if (is_real_dir || is_explicit_writable_file) && !is_closed_target {
             profile.push_str(&format!("(allow file-write-data (literal {sbpl_entry}))\n"));
         }
     }

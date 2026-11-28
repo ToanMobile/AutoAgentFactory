@@ -167,7 +167,19 @@ pub fn run(args: &PlanArgs, ctx: &Ctx) -> CmdResult {
         json_schema: None,
         max_turns: Some(16),
     };
-    let outcome = runner.run(&request).map_err(|e| err("plan runner", e))?;
+    let mut outcome = runner.run(&request).map_err(|e| err("plan runner", e))?;
+    if outcome
+        .infra
+        .as_ref()
+        .is_some_and(|i| i.kind == aaf_domain::ports::InfraKind::OAuthRefreshed)
+    {
+        let (first_in, first_out) = (outcome.tokens_in, outcome.tokens_out);
+        let mut retry_req = request.clone();
+        retry_req.run_id = format!("{}-oauth-retry", request.run_id);
+        outcome = runner.run(&retry_req).map_err(|e| err("plan runner", e))?;
+        outcome.tokens_in = outcome.tokens_in.saturating_add(first_in);
+        outcome.tokens_out = outcome.tokens_out.saturating_add(first_out);
+    }
     if let (Some(pool), Some(g), Some(hit)) = (
         pool_opt.as_ref(),
         grant.as_ref(),

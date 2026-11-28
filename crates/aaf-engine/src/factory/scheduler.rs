@@ -33,7 +33,7 @@ use super::sweep;
 pub use super::sweep::recover;
 use super::worker::{self, GateJob, Job, Outcome, PreGateAudit};
 use super::{Deps, Mode, RunSummary, is_frozen};
-use cost_guard::CostGate;
+pub(super) use cost_guard::CostGate;
 use dispatch::WorkerLane;
 use outcome::gate_loop;
 
@@ -150,6 +150,7 @@ pub(super) struct LoopState {
     pub(super) restarts: HashMap<(String, ProviderKey), usize>,
     gate_retries: HashMap<String, u32>,
     pub(super) transient_retries: HashMap<String, u32>,
+    pub(super) oauth_retries: HashMap<String, u32>,
     pub(super) default_wait_until: HashMap<ProviderKey, i64>,
     pub(super) task_wait_until: HashMap<String, i64>,
     pub(super) last_review_sweep: Option<Instant>,
@@ -164,6 +165,11 @@ pub(super) struct LoopState {
 impl LoopState {
     pub(super) fn total_active(&self) -> usize {
         self.coding_active + self.aux_active
+    }
+
+    pub(super) fn clear_retry_counters(&mut self, task_id: &str) {
+        self.transient_retries.remove(task_id);
+        self.oauth_retries.remove(task_id);
     }
 }
 

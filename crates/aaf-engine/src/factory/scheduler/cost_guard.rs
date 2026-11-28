@@ -17,7 +17,7 @@ const HOUR_SECS: i64 = 3600;
 const DAY_SECS: i64 = 86_400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CostGate {
+pub(in crate::factory) enum CostGate {
     Allow,
     Paused,
     Frozen,
@@ -36,7 +36,7 @@ impl Scheduler<'_> {
     /// Returns [`CostGate::Allow`] without querying the store when
     /// `daily_token_cap == 0`. Results are cached in `LoopState` for 30 s and
     /// invalidated whenever a worker finishes.
-    pub(super) fn cost_gate(&mut self) -> PortResult<CostGate> {
+    pub(in crate::factory) fn cost_gate(&mut self) -> PortResult<CostGate> {
         let cfg = self.deps.settings.repo.unblocker.cost_guard;
         if cfg.daily_token_cap == 0 {
             return Ok(CostGate::Allow);

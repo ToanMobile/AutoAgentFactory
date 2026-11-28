@@ -86,6 +86,14 @@ impl QueueRunner {
         );
         self.0.lock().unwrap().0.push_back(o);
     }
+    fn push_oauth_refreshed(&self, raw: &str) {
+        let mut o = out(1, raw, None);
+        o.infra = Some(aaf_domain::ports::InfraFailure {
+            kind: aaf_domain::ports::InfraKind::OAuthRefreshed,
+            raw: raw.into(),
+        });
+        self.0.lock().unwrap().0.push_back(o);
+    }
     fn arm(&self, gate: SyncGate) {
         self.0.lock().unwrap().2 = Some(gate);
     }
@@ -536,4 +544,33 @@ fn dual_review_plan_drift_omission_flows_to_implementer_rework() {
     w.rev_b.push(&reply);
     w.assert_rework("t-drift", &w.run_once(None), "src/new_module.rs:1");
     assert!(w.events("t-drift", &[EventKind::DetectorHit]).is_empty());
+}
+
+#[test]
+fn dual_review_adjudicate_repeated_oauth_refreshed_halts_instead_of_looping() {
+    let w = World::new(false, "t-adj-loop", TaskState::Gating);
+    // Sibling A finds a P1 bug (with passing scores >= 95); Sibling B passes -> triggers AdjudicateTurn on rev_b.
+    let iss = issue("ADJ-1", "P1", "correctness", "src/lib.rs:1");
+    w.rev_a.push(dual(&[], iss, 96, "bug"));
+    w.rev_b.push(pass_dual(97, "looks clean"));
+    // AdjudicateTurn hits OAuthRefreshed twice in a row (attempt 1 retries once,
+    // attempt 2 MUST halt rather than having `missing.is_empty()` wipe the counter).
+    w.rev_b.push_oauth_refreshed("oauth refreshed #1");
+    w.rev_b.push_oauth_refreshed("oauth refreshed #2");
+
+    let sum = w.run_once(None);
+    assert!(
+        sum.halted.is_some(),
+        "repeated AdjudicateTurn OAuthRefreshed must halt after 1 retry, got: {sum:?}"
+    );
+    assert_eq!(
+        w.rev_a.reqs().len(),
+        1,
+        "cached rev_a partial must not re-run"
+    );
+    assert_eq!(
+        w.rev_b.reqs().len(),
+        3,
+        "rev_b should run 1 blind turn + 2 adjudicate attempts (initial + 1 retry)"
+    );
 }

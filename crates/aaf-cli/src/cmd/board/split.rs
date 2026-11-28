@@ -297,19 +297,39 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         .unwrap_or(MAX_SPLIT_SUBTASKS)
         .clamp(2, MAX_SPLIT_SUBTASKS);
 
-    let watch = SplitInfraWatch::new(&*runner);
-    let split_res = propose_and_apply_split(
-        &watch,
-        &db,
-        &task,
-        &base_request,
-        &cfg.repo.unblocker,
-        max_subtasks,
-        now,
-        args.dry_run,
-    );
+    let mut split_res;
+    let mut limit_hit;
+    let mut attempt = 0u8;
+    loop {
+        let mut req = base_request.clone();
+        if attempt > 0 {
+            req.run_id = format!("{}-oauth-retry", base_request.run_id);
+        }
+        let watch = SplitInfraWatch::new(&*runner);
+        split_res = propose_and_apply_split(
+            &watch,
+            &db,
+            &task,
+            &req,
+            &cfg.repo.unblocker,
+            max_subtasks,
+            now,
+            args.dry_run,
+        );
+        let (infra, hit) = watch.take();
+        limit_hit = hit;
+        if attempt == 0
+            && limit_hit.is_none()
+            && infra
+                .as_ref()
+                .is_some_and(|i| i.kind == aaf_domain::ports::InfraKind::OAuthRefreshed)
+        {
+            attempt = 1;
+            continue;
+        }
+        break;
+    }
     drop(clean);
-    let (_, limit_hit) = watch.take();
     if let (Some(account), Some(hit)) = (grant.account_id(), limit_hit.as_ref()) {
         let _ = pool.report_limit(account, hit);
     }
@@ -411,19 +431,43 @@ pub(crate) fn run_auto_split_with_stop(
             json_schema: None,
             max_turns: None,
         };
-        let watch = SplitInfraWatch::new(&*deps.runner);
-        let result = propose_and_apply_split(
-            &watch,
-            &*deps.store,
-            &task,
-            &base_request,
-            &deps.settings.repo.unblocker,
-            MAX_SPLIT_SUBTASKS,
-            now,
-            false,
-        );
+        let mut result;
+        let mut infra;
+        let mut limit_hit;
+        let mut attempt = 0u8;
+        loop {
+            let mut req = base_request.clone();
+            if attempt > 0 {
+                req.run_id = format!("{}-oauth-retry", base_request.run_id);
+            }
+            let watch = SplitInfraWatch::new(&*deps.runner);
+            result = propose_and_apply_split(
+                &watch,
+                &*deps.store,
+                &task,
+                &req,
+                &deps.settings.repo.unblocker,
+                MAX_SPLIT_SUBTASKS,
+                now,
+                false,
+            );
+            let taken = watch.take();
+            infra = taken.0;
+            limit_hit = taken.1;
+            if attempt == 0
+                && !should_stop()
+                && !is_frozen(&*deps.store).map_err(|e| err("store", e))?
+                && limit_hit.is_none()
+                && infra
+                    .as_ref()
+                    .is_some_and(|i| i.kind == aaf_domain::ports::InfraKind::OAuthRefreshed)
+            {
+                attempt = 1;
+                continue;
+            }
+            break;
+        }
         drop(clean);
-        let (infra, limit_hit) = watch.take();
         if let Some(hit) = limit_hit {
             if let Some(account) = grant.account_id() {
                 deps.accounts

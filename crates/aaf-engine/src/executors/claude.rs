@@ -5,9 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use aaf_domain::account::ProviderKind;
-use aaf_domain::ports::{
-    AgentOutcome, AgentRequest, AgentRunner, InfraKind, PortError, PortResult,
-};
+use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
 
 use super::macos_oauth_refresh;
 use super::pty::CommandSpec;
@@ -110,21 +108,41 @@ fn closed_entries(config_dir: &str) -> Vec<String> {
         .collect()
 }
 
-/// The account's config dir plus where its session state really lives.
+/// Resolves writable session-state symlink targets under `config_dir`.
 ///
-/// A profile directory often links these entries into one shared
-/// `~/.claude`. The sandbox matches resolved paths, so with only the profile
-/// directory open the transcript of a run was silently never written (seen
-/// with a real account). Only the session-state entries are followed:
-/// `settings.json`, `hooks`, `skills` and the like stay closed when they are
-/// links to a shared place, because the user's own sessions obey them.
-fn account_state_paths(config_dir: &str) -> Vec<String> {
+/// A profile directory often links `SESSION_STATE` entries (`projects`,
+/// `history.jsonl`, …) into the user's shared `~/.claude`. To prevent a
+/// compromised sandboxed run from planting a symlink (e.g. `projects ->
+/// ~/Library/Keychains`, `~/.ssh`, or `~/Desktop/projects`, or chaining
+/// `<config_dir>/todos -> ~/.claude/todos -> ~/Library/Keychains`), a symlink
+/// at `<config_dir>/<name>` is followed **strictly** when:
+/// 1. `<home>/.claude` canonicalizes cleanly to `shared_canon`,
+/// 2. `shared_canon/<name>` exists and is **not itself a symlink**, and
+/// 3. `canonicalize(<config_dir>/<name>) == shared_canon/<name>`.
+fn account_state_paths(config_dir: &str, env: &ExecEnv) -> Vec<String> {
     let mut paths = vec![config_dir.to_string()];
+    let Some(home) = env.home.as_deref().filter(|h| !h.trim().is_empty()) else {
+        return paths;
+    };
+    let Ok(shared_canon) = fs::canonicalize(Path::new(home).join(".claude")) else {
+        return paths;
+    };
     for name in SESSION_STATE {
         let entry = Path::new(config_dir).join(name);
         let is_link = fs::symlink_metadata(&entry).is_ok_and(|m| m.file_type().is_symlink());
-        // A dangling link has no place to write to; the run goes without it.
-        if is_link && let Ok(target) = fs::canonicalize(&entry) {
+        if !is_link {
+            continue;
+        }
+        let expected = shared_canon.join(name);
+        let expected_is_real =
+            fs::symlink_metadata(&expected).is_ok_and(|m| !m.file_type().is_symlink());
+        if !expected_is_real {
+            continue;
+        }
+        let Ok(target) = fs::canonicalize(&entry) else {
+            continue;
+        };
+        if target == expected {
             paths.push(target.to_string_lossy().into_owned());
         }
     }
@@ -152,19 +170,13 @@ impl AgentRunner for ClaudeCodeRunner {
 
         let (mut outcome, mut meta) = self.run_once(request, &spec, &log)?;
         let non_json_tail = macos_oauth_refresh::non_json_lines(&outcome.log_tail);
-        let auth_or_none = outcome
-            .infra
-            .as_ref()
-            .is_none_or(|i| i.kind == InfraKind::Auth);
         let keychain_err = outcome.exit_code != Some(0)
             && !outcome.timed_out
             && outcome.limit_hit.is_none()
-            && auth_or_none
-            && (outcome
-                .infra
-                .as_ref()
-                .is_some_and(|i| macos_oauth_refresh::is_claude_keychain_save_error(&i.raw))
-                || macos_oauth_refresh::is_claude_keychain_save_error(&non_json_tail));
+            && macos_oauth_refresh::is_claude_auth_retryable(
+                outcome.infra.as_ref(),
+                &non_json_tail,
+            );
         if keychain_err
             && macos_oauth_refresh::refresh_claude_now(
                 &self.bin,
@@ -215,15 +227,25 @@ impl ClaudeCodeRunner {
         // the default location when no account was assigned.
         let account = match (&request.account, &self.env.home) {
             (Some(account), _) => AccountPaths {
-                writable: account_state_paths(&account.config_dir),
+                writable: account_state_paths(&account.config_dir, &self.env),
                 write_denied: closed_entries(&account.config_dir),
                 writable_regex: Vec::new(),
             },
-            (None, Some(home)) => AccountPaths {
-                writable: vec![format!("{home}/.claude"), format!("{home}/.claude.json")],
-                write_denied: closed_entries(&format!("{home}/.claude")),
-                writable_regex: Vec::new(),
-            },
+            (None, Some(home)) => {
+                let mut writable = Vec::with_capacity(2);
+                for candidate in [format!("{home}/.claude"), format!("{home}/.claude.json")] {
+                    if !std::fs::symlink_metadata(&candidate)
+                        .is_ok_and(|m| m.file_type().is_symlink())
+                    {
+                        writable.push(candidate);
+                    }
+                }
+                AccountPaths {
+                    writable,
+                    write_denied: closed_entries(&format!("{home}/.claude")),
+                    writable_regex: Vec::new(),
+                }
+            }
             (None, None) => AccountPaths::default(),
         };
         let state = Arc::new(Mutex::new((

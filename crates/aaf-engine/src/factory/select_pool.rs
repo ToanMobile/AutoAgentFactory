@@ -14,21 +14,21 @@ use super::ports::{AccountPool, Grant, Purpose};
 use crate::accounts::selection::{self, Binding, BindingSource, RunHistory};
 use crate::unblocker::QuotaRoute;
 
+type GatingAuthorsFn = Arc<dyn Fn(ProviderKind) -> Vec<Option<String>> + Send + Sync>;
+
 /// The pool of one `aaf run`: one repository, one provider.
 pub struct SelectingPool {
     inner: RouterPool,
     selection: AccountSelection,
     repo_root: PathBuf,
     history: Arc<dyn RunHistory>,
-    /// Pinned mode, repository without history: the account its first job
-    /// got. The run that job records comes later, on another thread, and a
-    /// second job started in between must not be given a second account.
+    /// Pinned mode, repository without history: the account its first job got.
     first_use: Mutex<Option<String>>,
-    /// Optional Finish-First predicate: when `true` and `Purpose::Work` asks
-    /// for a slot, keep at least one other ready slot free for `Purpose::Audit`.
+    /// Finish-First predicate: keep one ready slot free for `Purpose::Audit`.
     audit_reserve: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    /// When `true` (used for single-account read-only providers like Antigravity),
-    /// `Purpose::Work` yields even the sole slot whenever `audit_reserve` fires.
+    /// Author-aware Finish-First probe returning author ids of `Gating` tasks.
+    gating_authors: Option<GatingAuthorsFn>,
+    /// For single-account auxiliary providers, yield even the sole slot.
     reserve_strict: bool,
 }
 
@@ -63,51 +63,72 @@ impl SelectingPool {
             history,
             first_use: Mutex::new(None),
             audit_reserve: None,
+            gating_authors: None,
             reserve_strict: false,
         }
     }
 
-    /// Enables Finish-First reservation: whenever `should_reserve()` returns
-    /// `true`, `Purpose::Work` leaves at least one other ready slot unleased
-    /// so same-provider `Purpose::Audit` jobs finish without starvation.
+    /// Finish-First reservation: keep at least one ready slot free for `Purpose::Audit`.
     pub fn with_audit_reserve(
         mut self,
         should_reserve: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         self.audit_reserve = Some(should_reserve);
+        self.gating_authors = None;
         self.reserve_strict = false;
         self
     }
 
-    /// Strict Finish-First reservation for single-account auxiliary providers
-    /// (e.g. Antigravity shared between `plan` challenger and `Gating` audit):
-    /// yields even the sole slot to `Purpose::Audit` while `should_reserve()` is true.
+    /// Author-aware Finish-First reservation: keeps at least one eligible
+    /// non-author slot free for every currently `Gating` task.
+    pub fn with_gating_audit_reserve(mut self, authors: GatingAuthorsFn) -> Self {
+        self.gating_authors = Some(authors);
+        self.audit_reserve = None;
+        self.reserve_strict = false;
+        self
+    }
+
+    /// Strict Finish-First reservation for single-account auxiliary providers.
     pub fn with_strict_audit_reserve(
         mut self,
         should_reserve: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         self.audit_reserve = Some(should_reserve);
+        self.gating_authors = None;
         self.reserve_strict = true;
         self
     }
 
-    fn should_reserve_for_audit(&self, purpose: Purpose) -> bool {
-        purpose == Purpose::Work && self.audit_reserve.as_ref().is_some_and(|pred| pred())
+    fn gating_exclusions(
+        &self,
+        provider: ProviderKind,
+        purpose: Purpose,
+    ) -> Option<Vec<Option<String>>> {
+        if purpose != Purpose::Work {
+            return None;
+        }
+        if let Some(f) = &self.gating_authors {
+            let list = f(provider);
+            return (!list.is_empty()).then_some(list);
+        }
+        self.audit_reserve
+            .as_ref()
+            .is_some_and(|pred| pred())
+            .then(Vec::new)
     }
 
     fn acquire_work_where(
         &self,
-        reserve_one: bool,
+        reserve: Option<&[Option<String>]>,
         allow: &dyn Fn(&AccountProfile) -> bool,
     ) -> PortResult<Option<Grant>> {
-        if reserve_one && self.reserve_strict {
+        let Some(excl) = reserve else {
+            return self.inner.acquire_where(allow);
+        };
+        if self.reserve_strict {
             return Ok(None);
         }
-        if reserve_one {
-            self.inner.acquire_where_reserving_one(allow)
-        } else {
-            self.inner.acquire_where(allow)
-        }
+        self.inner.acquire_where_reserving_for_auditors(allow, excl)
     }
 
     /// Accounts of the provider whose config dir still exists: a binding to
@@ -153,18 +174,22 @@ impl SelectingPool {
             }))
     }
 
-    fn pinned(&self, provider: ProviderKind, reserve_one: bool) -> PortResult<Option<Grant>> {
+    fn pinned(
+        &self,
+        provider: ProviderKind,
+        reserve: Option<&[Option<String>]>,
+    ) -> PortResult<Option<Grant>> {
         let Some(bound) = self.resolve(provider, &self.usable()?)? else {
             // No settings entry and no history: the least-used free account
             // becomes the binding.
-            let grant = self.acquire_work_where(reserve_one, &|_| true)?;
+            let grant = self.acquire_work_where(reserve, &|_| true)?;
             if let Some(id) = grant.as_ref().and_then(Grant::account_id) {
                 self.remember(id);
             }
             return Ok(grant);
         };
         // That account or nothing: busy or cooling down means wait.
-        self.acquire_work_where(reserve_one, &|p| p.id == bound.account.id)
+        self.acquire_work_where(reserve, &|p| p.id == bound.account.id)
     }
 
     fn acquire_for_audit(
@@ -195,7 +220,7 @@ impl SelectingPool {
         provider: ProviderKind,
         task_id: &str,
         purpose: Purpose,
-        reserve_one: bool,
+        reserve: Option<&[Option<String>]>,
     ) -> PortResult<Option<Grant>> {
         if purpose == Purpose::Audit {
             return self.acquire_for_audit(provider, task_id);
@@ -218,12 +243,12 @@ impl SelectingPool {
             .into_iter()
             .flatten()
         {
-            if let Some(grant) = self.acquire_work_where(reserve_one, &|p| p.id == preferred)? {
+            if let Some(grant) = self.acquire_work_where(reserve, &|p| p.id == preferred)? {
                 return Ok(Some(grant));
             }
         }
         // Limited or busy: move on; the run recorded there makes it stick.
-        self.acquire_work_where(reserve_one, &|_| true)
+        self.acquire_work_where(reserve, &|_| true)
     }
 
     /// What the repository is bound to right now, without leasing anything.
@@ -267,14 +292,15 @@ impl AccountPool for SelectingPool {
         let Some(provider) = self.inner.provider else {
             return self.inner.acquire();
         };
-        let reserve_one = self.should_reserve_for_audit(purpose);
+        let reserve_owned = self.gating_exclusions(provider, purpose);
+        let reserve = reserve_owned.as_deref();
         match self.selection {
             AccountSelection::LeastUsed if purpose == Purpose::Audit => {
                 self.acquire_for_audit(provider, task_id)
             }
-            AccountSelection::LeastUsed => self.acquire_work_where(reserve_one, &|_| true),
-            AccountSelection::Pinned => self.pinned(provider, reserve_one),
-            AccountSelection::Sticky => self.sticky(provider, task_id, purpose, reserve_one),
+            AccountSelection::LeastUsed => self.acquire_work_where(reserve, &|_| true),
+            AccountSelection::Pinned => self.pinned(provider, reserve),
+            AccountSelection::Sticky => self.sticky(provider, task_id, purpose, reserve),
         }
     }
 
@@ -455,52 +481,38 @@ mod tests {
 
         let dir_a = root.join("home/.claude-a");
         fs::create_dir_all(&dir_a).unwrap();
-        db.upsert_account(&AccountProfile {
-            id: "claude-a".to_string(),
+        let prof = |id: &str, name: &str, dir: &std::path::Path| AccountProfile {
+            id: id.into(),
             provider: ProviderKind::ClaudeCode,
-            config_dir: dir_a.to_string_lossy().into_owned(),
-            name: "a".to_string(),
-        })
-        .unwrap();
+            config_dir: dir.to_string_lossy().into_owned(),
+            name: name.into(),
+        };
+        db.upsert_account(&prof("claude-a", "a", &dir_a)).unwrap();
 
         let store = Arc::new(db.clone());
         let clock = Arc::new(TestClock(AtomicI64::new(1_000)));
         let make_pool = || {
-            SelectingPool::new(
-                RouterPool {
-                    accounts: store.clone(),
-                    runs: store.clone(),
-                    clock: clock.clone(),
-                    leases_dir: root.join("leases"),
-                    max_concurrent_per_account: 1,
-                    provider: Some(ProviderKind::ClaudeCode),
-                },
-                AccountSelection::Sticky,
-                &repo,
-                store.clone(),
-            )
+            let rp = RouterPool {
+                accounts: store.clone(),
+                runs: store.clone(),
+                clock: clock.clone(),
+                leases_dir: root.join("leases"),
+                max_concurrent_per_account: 1,
+                provider: Some(ProviderKind::ClaudeCode),
+            };
+            SelectingPool::new(rp, AccountSelection::Sticky, &repo, store.clone())
         };
 
-        // Single-account pool keeps solo-dev fallback to author account.
-        let single_pool = make_pool();
-        let solo_grant = single_pool
+        let solo_grant = make_pool()
             .acquire_for("t1", Purpose::Audit)
             .unwrap()
-            .expect("single-account pool must fall back");
+            .unwrap();
         assert_eq!(solo_grant.account_id(), Some("claude-a"));
         drop(solo_grant);
 
-        // Multi-account pool: when non-author account is busy/cooling down,
-        // Purpose::Audit returns None instead of leasing author's account.
         let dir_b = root.join("home/.claude-b");
         fs::create_dir_all(&dir_b).unwrap();
-        db.upsert_account(&AccountProfile {
-            id: "claude-b".to_string(),
-            provider: ProviderKind::ClaudeCode,
-            config_dir: dir_b.to_string_lossy().into_owned(),
-            name: "b".to_string(),
-        })
-        .unwrap();
+        db.upsert_account(&prof("claude-b", "b", &dir_b)).unwrap();
         db.set_cooldown("claude-b", Some(9_000)).unwrap();
 
         let multi_pool = make_pool();
@@ -508,16 +520,14 @@ mod tests {
             multi_pool
                 .acquire_for("t1", Purpose::Audit)
                 .unwrap()
-                .is_none(),
-            "multi-account pool must wait instead of leasing author account"
+                .is_none()
         );
 
-        // Once claude-b recovers, audit acquires claude-b.
         db.set_cooldown("claude-b", None).unwrap();
         let ind_grant = multi_pool
             .acquire_for("t1", Purpose::Audit)
             .unwrap()
-            .expect("independent account should be leased");
+            .unwrap();
         assert_eq!(ind_grant.account_id(), Some("claude-b"));
     }
 
@@ -533,54 +543,44 @@ mod tests {
         for (id, name) in [("claude-a", "a"), ("claude-b", "b")] {
             let cfg = root.join(format!("home/.{id}"));
             fs::create_dir_all(&cfg).unwrap();
-            db.upsert_account(&AccountProfile {
+            let p = AccountProfile {
                 id: id.into(),
                 provider: ProviderKind::ClaudeCode,
                 config_dir: cfg.to_string_lossy().into_owned(),
                 name: name.into(),
-            })
-            .unwrap();
+            };
+            db.upsert_account(&p).unwrap();
         }
         let store = Arc::new(db.clone());
-        let clock = Arc::new(TestClock(AtomicI64::new(1_000)));
         let gating_pending = Arc::new(AtomicBool::new(true));
         let flag = gating_pending.clone();
-        let pool = SelectingPool::new(
-            RouterPool {
-                accounts: store.clone(),
-                runs: store.clone(),
-                clock,
-                leases_dir: root.join("leases"),
-                max_concurrent_per_account: 1,
-                provider: Some(ProviderKind::ClaudeCode),
-            },
-            AccountSelection::Sticky,
-            &repo,
-            store,
-        )
-        .with_audit_reserve(Arc::new(move || flag.load(Ordering::Relaxed)));
+        let rp = RouterPool {
+            accounts: store.clone(),
+            runs: store.clone(),
+            clock: Arc::new(TestClock(AtomicI64::new(1_000))),
+            leases_dir: root.join("leases"),
+            max_concurrent_per_account: 1,
+            provider: Some(ProviderKind::ClaudeCode),
+        };
+        let pool = SelectingPool::new(rp, AccountSelection::Sticky, &repo, store)
+            .with_audit_reserve(Arc::new(move || flag.load(Ordering::Relaxed)));
 
-        // First coding work acquires one account because another ready slot stays free.
         let g1 = pool.acquire_for("t-work-1", Purpose::Work).unwrap();
         assert!(g1.is_some());
-        // Second coding work defers so PostAudit keeps the last free slot.
         assert!(
             pool.acquire_for("t-work-2", Purpose::Work)
                 .unwrap()
                 .is_none()
         );
-        // PostAudit immediately takes the reserved slot!
         let g_audit = pool.acquire_for("t-gate-1", Purpose::Audit).unwrap();
         assert!(g_audit.is_some());
         drop(g_audit);
 
-        // Once gating finishes, coding work can use 100% of slots.
         gating_pending.store(false, Ordering::Relaxed);
         let g2 = pool.acquire_for("t-work-2", Purpose::Work).unwrap();
         assert!(g2.is_some());
         drop((g1, g2));
 
-        // Solo ready account (other in cooldown): reserve must never deadlock Work.
         gating_pending.store(true, Ordering::Relaxed);
         db.set_cooldown("claude-b", Some(9_000)).unwrap();
         let solo = pool.acquire_for("t-work-3", Purpose::Work).unwrap();

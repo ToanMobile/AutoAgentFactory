@@ -8,8 +8,7 @@ use std::sync::Arc;
 use aaf_domain::account::ProviderKind;
 use aaf_domain::config::{CrossAuditConfig, RunConfig};
 use aaf_domain::pipeline::{ReviewerConfig, StageModelConfig, is_known_real_reviewer};
-use aaf_domain::ports::{AgentRunner, TaskStore};
-use aaf_domain::task::TaskState;
+use aaf_domain::ports::AgentRunner;
 use aaf_engine::config::EffectiveConfig;
 use aaf_engine::db::Db;
 use aaf_engine::executors::{self, ExecEnv, agy::AgyRunner};
@@ -112,16 +111,22 @@ pub(super) fn build_pool_for_provider(
         provider,
     };
     let mut selecting = SelectingPool::new(rp, acc.selection, repo, db_arc);
-    let reserve_db = db.clone();
-    let has_gating = Arc::new(move || {
-        reserve_db
-            .list_tasks(None, Some(TaskState::Gating))
-            .is_ok_and(|tasks| !tasks.is_empty())
-    });
     selecting = if is_agy && strict_audit_reserve {
+        let has_gating = super::audit_reserve::has_live_gating_for_provider(
+            ctx,
+            repo,
+            cfg,
+            db.clone(),
+            ProviderKind::Antigravity,
+        );
         selecting.with_strict_audit_reserve(has_gating)
     } else {
-        selecting.with_audit_reserve(has_gating)
+        selecting.with_gating_audit_reserve(super::audit_reserve::gating_authors_provider(
+            ctx,
+            repo,
+            cfg,
+            db.clone(),
+        ))
     };
     let pool: Arc<dyn AccountPool> = Arc::new(selecting);
     if is_agy {
@@ -194,9 +199,10 @@ pub(super) fn build_stage_router(
         };
         let r = build_stage_runner((eff, c, m, e), &run.env_pass, exec_env.clone(), ro)?;
         let key = ProviderKey::from_executor(eff);
+        let strict = super::audit_reserve::is_auxiliary_auditor(ctx, cfg, &key);
         let p = pools
             .entry(key.clone())
-            .or_insert_with(|| build_pool_for_provider(ctx, repo, cfg, db, &key, ro));
+            .or_insert_with(|| build_pool_for_provider(ctx, repo, cfg, db, &key, strict));
         let target = if ro {
             StageTarget::new(eff, c, m, e, r, Arc::clone(p))
         } else {
@@ -332,6 +338,15 @@ mod tests {
         gating.state = TaskState::Gating;
         db.insert_task(&gating).unwrap();
 
+        let locks_dir = dir.path().join("locks");
+        std::fs::create_dir_all(&locks_dir).unwrap();
+        let repo_a_lock = std::fs::File::create(locks_dir.join(format!(
+            "{}.run.lock",
+            aaf_fp::repo_id(Path::new("/tmp/repo-a"))
+        )))
+        .unwrap();
+        repo_a_lock.lock().unwrap();
+
         let ctx = Ctx {
             cwd: dir.path().to_path_buf(),
             home: dir.path().to_path_buf(),
@@ -428,5 +443,135 @@ mod tests {
                 .is_some(),
             "primary Antigravity writer pool must not stall on unrelated Gating tasks"
         );
+    }
+
+    #[test]
+    fn gating_audit_reserve_steers_work_to_author_account_so_non_author_audits() {
+        use aaf_domain::ports::RunStore;
+        use aaf_domain::run::{RunRecord, RunStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("aaf.db")).unwrap();
+        for (id, name) in [
+            ("claude-toan", "toan"),
+            ("claude-max", "max"),
+            ("claude-lua", "lua"),
+        ] {
+            let cfg_dir = dir.path().join(format!("cfg-{id}"));
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            let p = AccountProfile {
+                id: id.into(),
+                provider: ProviderKind::ClaudeCode,
+                config_dir: cfg_dir.to_string_lossy().into_owned(),
+                name: name.into(),
+            };
+            db.upsert_account(&p).unwrap();
+        }
+        let seed_run =
+            |tid: &str, repo: &str, rid: &str, acct: &str, state: TaskState, now: i64| {
+                let mut t = Task::new_root(
+                    tid,
+                    repo,
+                    tid,
+                    ImmutableSpec {
+                        description: String::new(),
+                        acceptance: Vec::new(),
+                    },
+                    Priority::P1,
+                    now,
+                );
+                t.state = state;
+                db.insert_task(&t).unwrap();
+                let rec = RunRecord {
+                    id: rid.into(),
+                    task_id: tid.into(),
+                    account_id: Some(acct.into()),
+                    executor: "claude".into(),
+                    worktree_path: "/tmp/wt".into(),
+                    branch: "aaf/t".into(),
+                    status: RunStatus::Succeeded,
+                    exit_code: Some(0),
+                    tokens_in: 10,
+                    tokens_out: 5,
+                    started_at: now + 1,
+                    ended_at: Some(now + 2),
+                };
+                db.insert_run(&rec).unwrap();
+            };
+        // Repo A has a Gating task authored by `claude-lua`; Repo B is sticky to `claude-toan`.
+        seed_run(
+            "t-gate-lua",
+            "/tmp/repo-a",
+            "r-a",
+            "claude-lua",
+            TaskState::Gating,
+            1_000,
+        );
+        seed_run(
+            "t-repo-b-prev",
+            "/tmp/repo-b",
+            "r-b",
+            "claude-toan",
+            TaskState::Done,
+            1_004,
+        );
+
+        let locks_dir = dir.path().join("locks");
+        std::fs::create_dir_all(&locks_dir).unwrap();
+        let repo_a_lock = std::fs::File::create(locks_dir.join(format!(
+            "{}.run.lock",
+            aaf_fp::repo_id(Path::new("/tmp/repo-a"))
+        )))
+        .unwrap();
+        repo_a_lock.lock().unwrap();
+
+        let mut global = GlobalConfig::default();
+        global.accounts.selection = aaf_domain::config::AccountSelection::Sticky;
+        let cfg = EffectiveConfig {
+            global,
+            repo: RepoConfig::default(),
+            sources: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let ctx = Ctx {
+            cwd: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+            worktrees_dir: dir.path().join("wt"),
+            config_dir: dir.path().to_path_buf(),
+            path_var: std::ffi::OsString::new(),
+            run_id: None,
+            stdin_is_tty: false,
+            aaf_env: Vec::new(),
+        };
+        let key = ProviderKey::from_executor("claude");
+        let pool_a =
+            build_pool_for_provider(&ctx, Path::new("/tmp/repo-a"), &cfg, &db, &key, false);
+        let pool_b =
+            build_pool_for_provider(&ctx, Path::new("/tmp/repo-b"), &cfg, &db, &key, false);
+        let rp = RouterPool {
+            accounts: Arc::new(db.clone()),
+            runs: Arc::new(db.clone()),
+            clock: Arc::new(SystemClock),
+            leases_dir: dir.path().join("leases"),
+            max_concurrent_per_account: 1,
+            provider: Some(ProviderKind::ClaudeCode),
+        };
+        let _hold_max = rp
+            .acquire_where(&|p| p.id == "claude-max")
+            .unwrap()
+            .unwrap();
+
+        let work_b = pool_b
+            .acquire_for("t-repo-b-new", Purpose::Work)
+            .unwrap()
+            .expect("work must take claude-lua so claude-toan stays free for audit");
+        assert_eq!(work_b.account_id(), Some("claude-lua"));
+
+        let audit_a = pool_a
+            .acquire_for("t-gate-lua", Purpose::Audit)
+            .unwrap()
+            .expect("gating audit must immediately acquire non-author claude-toan");
+        assert_eq!(audit_a.account_id(), Some("claude-toan"));
     }
 }

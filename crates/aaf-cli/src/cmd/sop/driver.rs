@@ -395,7 +395,7 @@ impl CliStageDriver<'_> {
             json_schema: None,
             max_turns: read_only.then_some(20),
         };
-        let outcome = match runner.run(&request) {
+        let mut outcome = match runner.run(&request) {
             Ok(o) => o,
             Err(e) => {
                 return StageOutcome::Failed {
@@ -403,6 +403,27 @@ impl CliStageDriver<'_> {
                 };
             }
         };
+        if outcome
+            .infra
+            .as_ref()
+            .is_some_and(|i| i.kind == aaf_domain::ports::InfraKind::OAuthRefreshed)
+        {
+            let (first_in, first_out) = (outcome.tokens_in, outcome.tokens_out);
+            let mut retry_req = request.clone();
+            retry_req.run_id = format!("{}-oauth-retry", request.run_id);
+            outcome = match runner.run(&retry_req) {
+                Ok(mut o) => {
+                    o.tokens_in = o.tokens_in.saturating_add(first_in);
+                    o.tokens_out = o.tokens_out.saturating_add(first_out);
+                    o
+                }
+                Err(e) => {
+                    return StageOutcome::Failed {
+                        reason: format!("agent stage '{}' execution error: {e}", stage.id),
+                    };
+                }
+            };
+        }
         if let (Some(pool), Some(g), Some(hit)) = (
             pool_opt.as_ref(),
             grant.as_ref(),

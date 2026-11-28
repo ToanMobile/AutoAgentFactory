@@ -94,6 +94,49 @@ fn push_unique(list: &mut Vec<String>, item: String) {
     }
 }
 
+fn clean_path(raw: &str) -> PathBuf {
+    Path::new(raw).components().collect()
+}
+
+/// True if any path component of `rel` under `base` is currently a symlink.
+/// Prevents a 2-run Seatbelt escape where Run 1 creates a symlink at a missing
+/// build-cache path (e.g. `~/.konan -> $HOME`) and Run 2 canonicalizes it open.
+fn has_symlink_component(base: &Path, rel: &Path) -> bool {
+    let mut cur = base.to_path_buf();
+    for comp in rel.components() {
+        cur.push(comp);
+        if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Rejects symlinked cache leaves (even with a trailing `/` that would make
+/// POSIX `lstat` follow the link) and intermediate symlinks planted under
+/// `$HOME` or any writable temp dir.
+fn has_unsafe_cache_symlink(raw: &str, home: Option<&str>, temp_dirs: &[String]) -> bool {
+    let clean = clean_path(raw);
+    if std::fs::symlink_metadata(&clean).is_ok_and(|m| m.file_type().is_symlink()) {
+        return true;
+    }
+    for anchor_raw in home.into_iter().chain(temp_dirs.iter().map(String::as_str)) {
+        let anchor = clean_path(anchor_raw);
+        if let Ok(rel) = clean.strip_prefix(&anchor)
+            && has_symlink_component(&anchor, rel)
+        {
+            return true;
+        }
+        if let Ok(canon_anchor) = std::fs::canonicalize(&anchor)
+            && let Ok(rel) = clean.strip_prefix(&canon_anchor)
+            && has_symlink_component(&canon_anchor, rel)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub(super) fn build_sandbox_paths(
     request: &AgentRequest,
     env: &ExecEnv,
@@ -130,18 +173,33 @@ pub(super) fn build_sandbox_paths(
     );
     let mut writable = env.temp_dirs.clone();
     if !read_only {
-        if let Some(home) = &env.home {
-            writable.extend(BUILD_CACHE_DIRS.iter().map(|dir| format!("{home}/{dir}")));
+        let home_ref = env.home.as_deref();
+        if let Some(home) = home_ref {
+            let home_clean = clean_path(home);
+            for dir in BUILD_CACHE_DIRS {
+                if !has_symlink_component(&home_clean, Path::new(dir)) {
+                    writable.push(format!("{}/{dir}", home.trim_end_matches('/')));
+                }
+            }
         }
         for cache in extra_caches {
-            push_unique(&mut writable, cache.clone());
+            if !has_unsafe_cache_symlink(cache, home_ref, &env.temp_dirs) {
+                push_unique(&mut writable, cache.clone());
+            }
         }
-        writable.extend(env.sdk_dirs.iter().cloned());
+        writable.extend(
+            env.sdk_dirs
+                .iter()
+                .filter(|p| !has_unsafe_cache_symlink(p, home_ref, &env.temp_dirs))
+                .cloned(),
+        );
         for custom in [&cargo_home, &rustup_home, &gradle_user_home]
             .into_iter()
             .flatten()
         {
-            push_unique(&mut writable, custom.clone());
+            if !has_unsafe_cache_symlink(custom, home_ref, &env.temp_dirs) {
+                push_unique(&mut writable, custom.clone());
+            }
         }
     }
     writable.extend(account.writable);

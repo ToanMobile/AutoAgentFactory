@@ -151,19 +151,8 @@ pub(super) fn classify_auditor_log_tail(
 ) {
     let filtered: String;
     let effective = if tokens_measured {
-        filtered = tail
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                !trimmed.is_empty()
-                    && !matches!(
-                        serde_json::from_str::<serde_json::Value>(trimmed),
-                        Ok(serde_json::Value::Object(_))
-                    )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if filtered.is_empty() {
+        filtered = crate::executors::agy::strip_ansi_and_json_object(tail);
+        if filtered.trim().is_empty() {
             return;
         }
         filtered.as_str()

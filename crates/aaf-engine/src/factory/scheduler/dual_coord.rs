@@ -255,7 +255,7 @@ impl Scheduler<'_> {
         };
         // R3-CONC-1: 0-missing-partials crash recovery aggregates immediately.
         if missing.is_empty() {
-            return self.finish_dual_review(job, receipt, plan_hash, existing_partials);
+            return self.finish_dual_review(job, receipt, plan_hash, existing_partials, false);
         }
         let coord = DualReviewCoord {
             in_flight: missing.len(),
@@ -347,11 +347,13 @@ impl Scheduler<'_> {
                 until,
                 attempt,
                 detail,
+                oauth_refreshed,
             } => Some(DeferredSiblingOutcome::RetryAfter {
                 until,
                 attempt,
                 detail,
                 provider,
+                oauth_refreshed,
             }),
             Next::Wait { until } => Some(DeferredSiblingOutcome::Wait { until, provider }),
             Next::Switch => match self
@@ -432,7 +434,7 @@ impl Scheduler<'_> {
                 partials.push(synthetic_inconclusive_partial(&coord, rev, now));
             }
         }
-        self.finish_dual_review(coord.job, coord.receipt, coord.plan_hash, partials)
+        self.finish_dual_review(coord.job, coord.receipt, coord.plan_hash, partials, true)
     }
 
     fn apply_deferred_sibling_outcome(
@@ -451,7 +453,7 @@ impl Scheduler<'_> {
                 }
             }
             DeferredSiblingOutcome::Blocked => {
-                self.state.transient_retries.remove(&task_id);
+                self.state.clear_retry_counters(&task_id);
                 self.push_blocked_unique(task_id);
             }
             DeferredSiblingOutcome::RetryAfter {
@@ -459,9 +461,16 @@ impl Scheduler<'_> {
                 attempt,
                 detail,
                 provider,
+                oauth_refreshed,
             } => {
-                let res =
-                    self.handle_retry_after(task_id.clone(), provider, until, attempt, detail);
+                let res = self.handle_retry_after(
+                    task_id.clone(),
+                    provider,
+                    until,
+                    attempt,
+                    detail,
+                    oauth_refreshed,
+                );
                 self.try_dual(&task_id, res);
             }
             DeferredSiblingOutcome::Wait { until, provider } => {
@@ -480,6 +489,7 @@ impl Scheduler<'_> {
         receipt: Box<Receipt>,
         plan_hash: String,
         partials: Vec<PartialAuditRecord>,
+        made_progress: bool,
     ) -> PortResult<()> {
         let task_id = job.task_id.clone();
         let Some(result) = self.try_dual(
@@ -490,7 +500,7 @@ impl Scheduler<'_> {
         };
         match result {
             DualFinalizeResult::Done(Next::Gate(gate_job)) => {
-                self.state.transient_retries.remove(&task_id);
+                self.state.clear_retry_counters(&task_id);
                 if let Err(err) = self.queue_gate(gate_job) {
                     self.block_dual_infra(&task_id, &err.to_string());
                 }
@@ -498,12 +508,12 @@ impl Scheduler<'_> {
             DualFinalizeResult::Done(Next::Ready) => {
                 self.clear_gating(&task_id);
                 self.clear_restarts_for_task(&task_id);
-                self.state.transient_retries.remove(&task_id);
+                self.state.clear_retry_counters(&task_id);
                 self.summary.requeued.push(task_id);
             }
             DualFinalizeResult::Done(Next::Blocked) => {
                 self.clear_gating(&task_id);
-                self.state.transient_retries.remove(&task_id);
+                self.state.clear_retry_counters(&task_id);
                 self.push_blocked_unique(task_id);
             }
             DualFinalizeResult::Done(Next::Unblock {
@@ -511,6 +521,7 @@ impl Scheduler<'_> {
                 worktree,
                 signal,
             }) => {
+                self.state.clear_retry_counters(&uid);
                 self.state.jobs.push_front(Job::Unblock {
                     job: GateJob {
                         task_id: uid,
@@ -533,6 +544,12 @@ impl Scheduler<'_> {
                 findings,
                 partials,
             } => {
+                // Only reset retry counters after sibling reviewers actually
+                // made progress in this round; never wipe counters on the
+                // `missing.is_empty()` re-entry path after `AdjudicateTurn` failed.
+                if made_progress {
+                    self.state.clear_retry_counters(&task_id);
+                }
                 if !self.check_dual_budget(&task_id) {
                     return Ok(());
                 }

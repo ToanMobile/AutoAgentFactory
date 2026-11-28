@@ -449,11 +449,12 @@ pub(super) fn primary_infra_next(
 ) -> Next {
     let (what, fix) = worker::infra_words(grant, infra);
     let detail = worker::halt_message(task_id, what, infra, &fix);
-    if infra.kind == InfraKind::Network {
+    if matches!(infra.kind, InfraKind::Network | InfraKind::OAuthRefreshed) {
         Next::RetryAfter {
             until: deps.now(),
             attempt: 1,
             detail,
+            oauth_refreshed: infra.kind == InfraKind::OAuthRefreshed,
         }
     } else {
         Next::Halt(detail)

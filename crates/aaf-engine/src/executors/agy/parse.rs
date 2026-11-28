@@ -57,11 +57,18 @@ pub fn parse_agy_output(stdout: &str, expect_structured: bool) -> AgyParsed {
             || s.eq_ignore_ascii_case("error_max_budget_usd")
             || s.eq_ignore_ascii_case("error_max_structured_output_retries")
     });
+    let has_non_empty_error = obj.get("error").is_some_and(|e| match e {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(s) => !s.trim().is_empty(),
+        _ => true,
+    });
+    let (status, msg) = extract_error_details(&obj, &response_text);
     let is_error = obj
         .get("is_error")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || obj.get("error").is_some_and(|e| !e.is_null())
+        || has_non_empty_error
+        || matches!(status, Some(400..=599))
         || obj
             .get("status")
             .and_then(Value::as_str)
@@ -71,9 +78,7 @@ pub fn parse_agy_output(stdout: &str, expect_structured: bool) -> AgyParsed {
                 .get(..6)
                 .is_some_and(|p| p.eq_ignore_ascii_case(b"error_"))
         });
-    let (status, msg) = extract_error_details(&obj, &response_text);
-    let is_local_cap_error =
-        is_local_cap && status.is_none() && obj.get("error").is_none_or(Value::is_null);
+    let is_local_cap_error = is_local_cap && status.is_none() && !has_non_empty_error;
     let (limit_hit, infra) = if is_error && !is_local_cap_error {
         classify_text_failure(status, &msg)
     } else {
@@ -179,29 +184,110 @@ pub(super) fn strip_ansi(input: &str) -> String {
     out
 }
 
+fn is_payload_json_object(map: &Map<String, Value>) -> bool {
+    const PAYLOAD_KEYS: &[&str] = &[
+        "response",
+        "result",
+        "text",
+        "structured_output",
+        "usage",
+        "stats",
+        "type",
+        "message",
+    ];
+    PAYLOAD_KEYS.iter().any(|k| map.contains_key(*k))
+}
+
+fn is_agy_envelope_object(map: &Map<String, Value>) -> bool {
+    const ENVELOPE_KEYS: &[&str] = &[
+        "response",
+        "result",
+        "text",
+        "structured_output",
+        "usage",
+        "stats",
+        "status",
+        "status_code",
+        "error",
+        "is_error",
+        "subtype",
+    ];
+    ENVELOPE_KEYS.iter().any(|k| map.contains_key(*k))
+}
+
+/// Strips ANSI sequences and removes the byte spans of top-level payload JSON
+/// objects (including pretty-printed multi-line JSON), leaving raw non-JSON
+/// stderr / CLI wrapper lines and standalone HTTP error JSON fragments intact
+/// so agent `"response"` prose never leaks into auth or failure classifiers.
+pub(crate) fn strip_ansi_and_json_object(raw: &str) -> String {
+    let cleaned = strip_ansi(raw);
+    let spans: Vec<_> = extract_json_object_spans(&cleaned)
+        .into_iter()
+        .filter(|(map, _, _)| {
+            let is_pure_http_err = !map.contains_key("response")
+                && !map.contains_key("result")
+                && !map.contains_key("text")
+                && !map.contains_key("structured_output")
+                && !map.contains_key("usage")
+                && !map.contains_key("stats")
+                && !map.contains_key("type")
+                && (map.contains_key("status")
+                    || map.contains_key("status_code")
+                    || map.contains_key("error"));
+            !is_pure_http_err && is_payload_json_object(map)
+        })
+        .collect();
+    if spans.is_empty() {
+        return cleaned;
+    }
+    let mut out = String::with_capacity(cleaned.len());
+    let mut cursor = 0usize;
+    for (_, start, end) in spans {
+        if start > cursor {
+            if !out.is_empty() && !out.ends_with('\n') && !cleaned[cursor..start].starts_with('\n')
+            {
+                out.push('\n');
+            }
+            out.push_str(&cleaned[cursor..start]);
+        }
+        cursor = end;
+    }
+    if cursor < cleaned.len() {
+        if !out.is_empty() && !out.ends_with('\n') && !cleaned[cursor..].starts_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&cleaned[cursor..]);
+    }
+    out
+}
+
 fn extract_json_object(cleaned: &str) -> Option<Map<String, Value>> {
+    let spans = extract_json_object_spans(cleaned);
+    spans
+        .iter()
+        .rev()
+        .find(|(map, _, _)| is_agy_envelope_object(map))
+        .or_else(|| spans.last())
+        .map(|(map, _, _)| map.clone())
+}
+
+fn extract_json_object_spans(cleaned: &str) -> Vec<(Map<String, Value>, usize, usize)> {
+    let lead = cleaned.len() - cleaned.trim_start().len();
     let trimmed = cleaned.trim();
     if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(trimmed) {
-        return Some(map);
+        return vec![(map, lead, lead + trimmed.len())];
     }
-    for line in trimmed.lines().rev().map(str::trim) {
-        if line.starts_with('{')
-            && line.ends_with('}')
-            && let Ok(Value::Object(map)) = serde_json::from_str::<Value>(line)
-        {
-            return Some(map);
-        }
-    }
-    let (mut last, mut skip_until) = (None, 0usize);
-    for (idx, ch) in trimmed.char_indices() {
+    let (mut spans, mut skip_until) = (Vec::new(), 0usize);
+    for (idx, ch) in cleaned.char_indices() {
         if idx < skip_until || ch != '{' {
             continue;
         }
-        let mut stream = serde_json::Deserializer::from_str(&trimmed[idx..]).into_iter::<Value>();
+        let mut stream = serde_json::Deserializer::from_str(&cleaned[idx..]).into_iter::<Value>();
         if let Some(Ok(Value::Object(map))) = stream.next() {
-            skip_until = idx.saturating_add(stream.byte_offset());
-            last = Some(map);
+            let end = idx.saturating_add(stream.byte_offset());
+            skip_until = end;
+            spans.push((map, idx, end));
         }
     }
-    last
+    spans
 }

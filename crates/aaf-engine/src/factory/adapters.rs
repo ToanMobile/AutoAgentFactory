@@ -407,12 +407,22 @@ impl RouterPool {
         &self,
         allow: &dyn Fn(&AccountProfile) -> bool,
     ) -> PortResult<Option<Grant>> {
+        self.acquire_where_reserving_for_auditors(allow, &[])
+    }
+
+    /// Author-aware reservation: preserves at least one free non-author slot
+    /// for every currently `Gating` task listed in `excluded_auditors`.
+    pub fn acquire_where_reserving_for_auditors(
+        &self,
+        allow: &dyn Fn(&AccountProfile) -> bool,
+        excluded_auditors: &[Option<String>],
+    ) -> PortResult<Option<Grant>> {
         if self.provider_accounts()?.is_empty() {
             return Ok(Some(Grant::new(None, None)));
         }
         self.with_router(|router| {
             let next = router
-                .next_where_keeping_one(allow)
+                .next_where_keeping_one_for_auditors(allow, excluded_auditors)
                 .map_err(|e| PortError::Io(e.to_string()))?;
             Ok(next.map(|(profile, lease)| Grant::new(Some(profile), Some(Box::new(lease)))))
         })

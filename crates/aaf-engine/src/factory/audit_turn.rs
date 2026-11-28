@@ -296,6 +296,13 @@ pub(super) fn infra_words(grant: &Grant, infra: &InfraFailure) -> (&'static str,
             "the provider could not be reached (network)",
             "fix the network, proxy or DNS".to_string(),
         ),
+        InfraKind::OAuthRefreshed => (
+            "OAuth token expired mid-run and was refreshed on the host",
+            format!(
+                "verify macOS Keychain login for account {} if this repeats",
+                grant.account_id().unwrap_or("default")
+            ),
+        ),
     }
 }
 
@@ -331,11 +338,12 @@ pub(super) fn halt_on_infra_with(
     if infra.kind == InfraKind::Auth && switch_after_auth(deps, task_id, grant, accounts, infra)? {
         return Ok(Next::Switch);
     }
-    if infra.kind == InfraKind::Network {
+    if matches!(infra.kind, InfraKind::Network | InfraKind::OAuthRefreshed) {
         return Ok(Next::RetryAfter {
             until: deps.now(),
             attempt: 1,
             detail,
+            oauth_refreshed: infra.kind == InfraKind::OAuthRefreshed,
         });
     }
     Ok(Next::Halt(detail))

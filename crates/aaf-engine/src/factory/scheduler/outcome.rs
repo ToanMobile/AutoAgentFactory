@@ -110,7 +110,7 @@ impl Scheduler<'_> {
         let stopping = self.is_stopping();
         match outcome.next {
             Next::Gate(job) => {
-                self.state.transient_retries.remove(&outcome.task_id);
+                self.state.clear_retry_counters(&outcome.task_id);
                 if stopping {
                     self.clear_gating(&outcome.task_id);
                 } else {
@@ -118,7 +118,7 @@ impl Scheduler<'_> {
                 }
             }
             Next::GateAudited(job, pre) => {
-                self.state.transient_retries.remove(&outcome.task_id);
+                self.state.clear_retry_counters(&outcome.task_id);
                 if stopping {
                     self.clear_gating(&outcome.task_id);
                 } else {
@@ -131,6 +131,7 @@ impl Scheduler<'_> {
                 worktree,
                 signal,
             } => {
+                self.state.clear_retry_counters(&task_id);
                 if stopping {
                     self.clear_gating(&task_id);
                 } else {
@@ -147,7 +148,7 @@ impl Scheduler<'_> {
                 }
             }
             Next::Ready => {
-                self.state.transient_retries.remove(&outcome.task_id);
+                self.state.clear_retry_counters(&outcome.task_id);
                 self.summary.requeued.push(outcome.task_id);
             }
             Next::Switch => {
@@ -183,16 +184,22 @@ impl Scheduler<'_> {
                 until,
                 attempt,
                 detail,
-            } => {
-                self.handle_retry_after(outcome.task_id, outcome.provider, until, attempt, detail)?
-            }
+                oauth_refreshed,
+            } => self.handle_retry_after(
+                outcome.task_id,
+                outcome.provider,
+                until,
+                attempt,
+                detail,
+                oauth_refreshed,
+            )?,
             Next::Halt(why) => {
                 let state = self.deps.store.get_task(&outcome.task_id)?.state;
                 self.record_halt(&outcome.task_id, why);
                 self.requeue_if_ready(outcome.task_id, state);
             }
             Next::Blocked => {
-                self.state.transient_retries.remove(&outcome.task_id);
+                self.state.clear_retry_counters(&outcome.task_id);
                 self.summary.blocked.push(outcome.task_id);
             }
             Next::DualReviewPartial { .. } => {}
@@ -210,7 +217,7 @@ impl Scheduler<'_> {
         match resolution {
             Ok(Resolution::Settled(state)) => {
                 self.clear_gating(&job.task_id);
-                self.state.transient_retries.remove(&job.task_id);
+                self.state.clear_retry_counters(&job.task_id);
                 match state {
                     TaskState::Done => self.summary.done.push(job.task_id),
                     TaskState::Review => self.summary.review.push(job.task_id),

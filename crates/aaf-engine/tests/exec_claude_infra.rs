@@ -216,3 +216,190 @@ fn a_run_that_succeeds_has_no_infra_failure() {
     assert!(outcome.succeeded());
     assert_eq!(outcome.infra, None);
 }
+
+#[test]
+fn multi_result_monitor_run_with_trailing_empty_result_preserves_cumulative_tokens() {
+    use aaf_engine::executors::claude::parse_stream;
+
+    // Reproduces Claude Code 2.1.x `Monitor` wakeups: multiple per-segment
+    // `result` events, followed by a trailing `result` without `usage`, plus
+    // an unfinished assistant turn before timeout.
+    let stream = [
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": "msg_1",
+                "content": [{"type": "text", "text": "waiting on gradle"}],
+                "usage": {"input_tokens": 1000, "cache_creation_input_tokens": 2000, "cache_read_input_tokens": 5000, "output_tokens": 300}
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "seg1",
+            "usage": {"input_tokens": 1100, "cache_creation_input_tokens": 2100, "cache_read_input_tokens": 5500, "output_tokens": 400}
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": "msg_2",
+                "content": [{"type": "text", "text": "monitor wakeup"}],
+                "usage": {"input_tokens": 500, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 4000, "output_tokens": 80}
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "seg2",
+            "usage": {"input_tokens": 500, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 4000, "output_tokens": 80}
+        })
+        .to_string(),
+        // Trailing `result` with no `usage` field must NOT zero prior totals.
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": ""
+        })
+        .to_string(),
+        // Unfinished turn before timeout is added on top of settled segments.
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": "msg_3",
+                "content": [{"type": "text", "text": "still running"}],
+                "usage": {"input_tokens": 200, "cache_creation_input_tokens": 50, "cache_read_input_tokens": 1000, "output_tokens": 25}
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+
+    let summary = parse_stream(&stream);
+    assert!(summary.saw_result);
+    assert!(!summary.is_error);
+    assert_eq!(summary.final_text, "seg2");
+    assert_eq!(summary.infra, None);
+    assert_eq!(summary.limit_hit, None);
+    assert_eq!(summary.tokens_in, (1100 + 2100) + (500 + 100) + (200 + 50));
+    assert_eq!(summary.tokens_out, 400 + 80 + 25);
+    assert_eq!(summary.cache_read_tokens, 5500 + 4000 + 1000);
+    assert_eq!(summary.peak_context_tokens, 1000 + 2000 + 5000);
+}
+
+#[test]
+fn multi_result_preserves_prior_error_and_avoids_false_auth_and_classifies_errors_array() {
+    use aaf_domain::ports::InfraKind;
+    use aaf_engine::executors::claude::parse_stream;
+
+    // 1. Prior API error must NOT be erased by a trailing empty pointer result.
+    let err_then_empty = [
+        serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "api_error_status": 500,
+            "result": "API Error: 500 Internal Server Error"
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": ""
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let s1 = parse_stream(&err_then_empty);
+    assert!(s1.is_error);
+    assert_eq!(s1.infra.as_ref().map(|i| i.kind), Some(InfraKind::Network));
+    assert!(s1.final_text.contains("500"));
+
+    // 2. Multi-result run with billed tokens in segment 1 and OAuth prose in a
+    // usage-less segment 2 must NOT false-positive as InfraKind::Auth.
+    let oauth_prose_after_work = [
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "seg1",
+            "usage": {"input_tokens": 10_000, "output_tokens": 500}
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "Fixed handling of 'Failed to refresh OAuth token: can't save to the Keychain'"
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let s2 = parse_stream(&oauth_prose_after_work);
+    assert!(!s2.is_error);
+    assert_eq!(s2.infra, None);
+    assert!(s2.final_text.contains("Keychain"));
+
+    // 3. `error_during_execution` with empty `result` and network error in `errors[]`
+    // classifies as InfraKind::Network instead of unclassified stuck.
+    let errors_arr = serde_json::json!({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "result": "",
+        "errors": ["API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"]
+    })
+    .to_string();
+    let s3 = parse_stream(&errors_arr);
+    assert!(s3.is_error);
+    assert_eq!(s3.infra.as_ref().map(|i| i.kind), Some(InfraKind::Network));
+
+    // 4. Segment 1 cache_read preserved when result #1 omits cache_read,
+    // synthetic zero-context assistant doesn't shadow result_peak_ctx, and
+    // late replay of settled msg_1 does not double-count.
+    let edge_usage = [
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"id": "msg_0", "model": "<synthetic>", "content": [], "usage": {"input_tokens": 0, "output_tokens": 0}}
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"id": "msg_1", "content": [], "usage": {"input_tokens": 100, "cache_read_input_tokens": 5000, "output_tokens": 20}}
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "r1",
+            "usage": {"input_tokens": 100, "cache_read_input_tokens": 0, "output_tokens": 20}
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"id": "msg_1", "content": [], "usage": {"input_tokens": 100, "cache_read_input_tokens": 5000, "output_tokens": 20}}
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "r2",
+            "usage": {"input_tokens": 200, "cache_read_input_tokens": 4000, "output_tokens": 30}
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let s4 = parse_stream(&edge_usage);
+    assert_eq!(s4.tokens_in, 300);
+    assert_eq!(s4.tokens_out, 50);
+    assert_eq!(s4.cache_read_tokens, 9000);
+    assert_eq!(s4.peak_context_tokens, 5100);
+}

@@ -12,7 +12,8 @@ use aaf_domain::config::RunConfig;
 use aaf_domain::ports::{AgentRequest, AgentRunner, InfraKind, PortError, SandboxPolicy};
 use aaf_domain::task::{ImmutableSpec, Priority, Task};
 use aaf_engine::executors::agy::{
-    AGY_RUNTIME_WRITABLE_SUBDIRS, AgyRunner, GEMINI_CONFIG_CLOSED, closed_entries, parse_agy_output,
+    AGY_READ_ONLY_SETTINGS, AGY_RUNTIME_WRITABLE_SUBDIRS, AgyRunner, GEMINI_CONFIG_CLOSED,
+    closed_entries, parse_agy_output,
 };
 use aaf_engine::executors::claude::{ClaudeCodeRunner, parse_stream};
 use aaf_engine::executors::generic::{self, GenericRunner};
@@ -86,7 +87,7 @@ fn agy_command_three_way_mode_flags_and_validation() {
     let runner = AgyRunner::new("/usr/local/bin/agy", ExecEnv::default())
         .with_model_and_effort("test-model", "HIGH");
 
-    // 1. read_only -> --mode plan (no skip-permissions)
+    // 1. read_only -> --mode plan --settings <read-only allow/deny> (NEVER skip-permissions)
     let mut req = base_request(
         tmp.path(),
         SandboxPolicy {
@@ -97,23 +98,23 @@ fn agy_command_three_way_mode_flags_and_validation() {
     );
     req.json_schema = Some(r#"{"type":"object"}"#.to_string());
     let plan_spec = runner.command(&req).unwrap();
-    assert_eq!(
-        plan_spec.args,
-        vec![
-            "--output-format",
-            "json",
-            "--disable-slash-commands",
-            "--mode",
-            "plan",
-            "--model",
-            "test-model",
-            "--effort",
-            "high",
-            "--json-schema",
-            r#"{"type":"object"}"#,
-            "-p=inspect plan",
-        ]
-    );
+    let expected = [
+        "--output-format",
+        "json",
+        "--disable-slash-commands",
+        "--mode",
+        "plan",
+        "--settings",
+        AGY_READ_ONLY_SETTINGS,
+        "--model",
+        "test-model",
+        "--effort",
+        "high",
+        "--json-schema",
+        r#"{"type":"object"}"#,
+        "-p=inspect plan",
+    ];
+    assert_eq!(plan_spec.args, expected);
     let has_skip = |args: &[String]| args.iter().any(|a| a == "--dangerously-skip-permissions");
     assert!(!has_skip(&plan_spec.args));
 

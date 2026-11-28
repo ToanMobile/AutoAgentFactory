@@ -4,14 +4,15 @@
 //! Flags and JSON output shape were verified against `agy` v1.5.15.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aaf_domain::account::ProviderKind;
-use aaf_domain::ports::{AgentOutcome, AgentRequest, AgentRunner, PortError, PortResult};
+use aaf_domain::ports::{
+    AgentOutcome, AgentRequest, AgentRunner, InfraKind, PortError, PortResult,
+};
 
 use super::macos_oauth_refresh;
 use super::pty::{CommandSpec, GENERIC_TAIL_BYTES};
-#[cfg(not(target_os = "linux"))]
 use super::sandbox;
 use super::{AccountPaths, ExecEnv, find_on_path, open_stream_log, run_confined_with_tail};
 
@@ -19,8 +20,14 @@ const RAW_LIMIT_CHARS: usize = 500;
 mod classify;
 mod parse;
 use classify::classify_text_failure;
-use parse::strip_ansi;
+pub(crate) use parse::strip_ansi_and_json_object;
 pub use parse::{AgyParsed, parse_agy_output};
+
+/// Session-only `agy --settings` policy for read-only runs: allows `read_file(*)`
+/// without prompting in headless print mode while explicitly denying shell
+/// commands, file writes, MCP tools, and outbound URL reads (no
+/// `--dangerously-skip-permissions` required).
+pub const AGY_READ_ONLY_SETTINGS: &str = r#"{"permissions":{"allow":["read_file(*)"],"deny":["command(*)","write_file(*)","mcp(*)","read_url(*)"]}}"#;
 
 /// Safe upper bound on a single argv element on Linux (`MAX_ARG_STRLEN` = 128 KiB).
 pub const LINUX_MAX_PROMPT_BYTES: usize = 100_000;
@@ -119,6 +126,44 @@ fn validate_effort(value: &str) -> PortResult<String> {
     Ok(lower)
 }
 
+fn verified_runtime_subdir(
+    root: &Path,
+    root_canon: &Path,
+    rel: &str,
+    create: bool,
+) -> PortResult<PathBuf> {
+    let mut cur = root.to_path_buf();
+    for comp in Path::new(rel).components() {
+        cur.push(comp);
+        if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(PortError::Invalid(format!(
+                "agy runtime dir must not be a symlink: {}",
+                cur.display()
+            )));
+        }
+    }
+    if create {
+        std::fs::create_dir_all(&cur).map_err(|err| {
+            PortError::Io(format!("create agy runtime dir {}: {err}", cur.display()))
+        })?;
+        let canon = std::fs::canonicalize(&cur).map_err(|err| {
+            PortError::Io(format!(
+                "canonicalize agy runtime dir {}: {err}",
+                cur.display()
+            ))
+        })?;
+        let expected = root_canon.join(rel);
+        if canon != expected {
+            return Err(PortError::Invalid(format!(
+                "agy runtime dir escaped gemini root: {} -> {}",
+                cur.display(),
+                canon.display()
+            )));
+        }
+    }
+    Ok(cur)
+}
+
 fn validate_account(request: &AgentRequest) -> PortResult<()> {
     if let Some(acc) = &request.account
         && acc.provider != ProviderKind::Antigravity
@@ -173,7 +218,11 @@ impl AgyRunner {
             "--disable-slash-commands".to_string(),
         ];
         if request.sandbox.read_only {
-            args.extend(["--mode", "plan"].map(String::from));
+            // Allow `read_file(*)` in headless print mode via session-only
+            // `--settings` while explicitly denying `command(*)`, `write_file(*)`,
+            // `mcp(*)`, and `read_url(*)` — never pass `--dangerously-skip-permissions`
+            // in read-only mode.
+            args.extend(["--mode", "plan", "--settings", AGY_READ_ONLY_SETTINGS].map(String::from));
         } else if request.sandbox.enabled {
             args.extend(["--mode", "auto", "--dangerously-skip-permissions"].map(String::from));
         } else {
@@ -223,49 +272,85 @@ impl AgyRunner {
             return Ok(AccountPaths::default());
         };
         let root_str = root.to_string_lossy().into_owned();
+        let root_canon = sandbox::canonical(&root_str)?;
         let ag_dir = root.join("antigravity");
-        let mut writable = Vec::with_capacity(AGY_RUNTIME_WRITABLE_SUBDIRS.len() + 4);
+        let mut writable = Vec::with_capacity(AGY_RUNTIME_WRITABLE_SUBDIRS.len() + 8);
         for rel in AGY_RUNTIME_WRITABLE_SUBDIRS {
-            let dir = root.join(rel);
-            if request.sandbox.enabled {
-                std::fs::create_dir_all(&dir).map_err(|err| {
-                    PortError::Io(format!("create agy runtime dir {}: {err}", dir.display()))
-                })?;
-            }
+            let dir = verified_runtime_subdir(&root, &root_canon, rel, request.sandbox.enabled)?;
             writable.push(dir.to_string_lossy().into_owned());
         }
         #[cfg(target_os = "linux")]
         let writable_regex = {
-            const DB_FILES: [&str; 4] = [
+            const AG_DB_FILES: [&str; 4] = [
                 "conversation_summaries.db",
                 "conversation_summaries.db-wal",
                 "conversation_summaries.db-shm",
                 "conversation_summaries.db-journal",
             ];
-            if request.sandbox.enabled {
-                std::fs::create_dir_all(&ag_dir).map_err(|err| {
-                    PortError::Io(format!("create agy dir {}: {err}", ag_dir.display()))
-                })?;
-                let db_path = ag_dir.join(DB_FILES[0]);
-                match std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&db_path)
+            const CLI_STATE_FILES: [&str; 7] = [
+                "conversation_summaries.db",
+                "conversation_summaries.db-wal",
+                "conversation_summaries.db-shm",
+                "conversation_summaries.db-journal",
+                "cli.log",
+                "jetski_state.pbtxt",
+                "last_check.timestamp",
+            ];
+            let cli_dir = root.join("antigravity-cli");
+            for (parent, rel_parent, seed_file, files) in [
+                (
+                    &ag_dir,
+                    "antigravity",
+                    Some(AG_DB_FILES[0]),
+                    AG_DB_FILES.as_slice(),
+                ),
+                (
+                    &cli_dir,
+                    "antigravity-cli",
+                    Some(CLI_STATE_FILES[0]),
+                    CLI_STATE_FILES.as_slice(),
+                ),
+            ] {
+                let _ = verified_runtime_subdir(
+                    &root,
+                    &root_canon,
+                    rel_parent,
+                    request.sandbox.enabled,
+                )?;
+                if request.sandbox.enabled
+                    && let Some(seed) = seed_file
                 {
-                    Ok(_) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(err) => {
-                        return Err(PortError::Io(format!(
-                            "create agy db file {}: {err}",
-                            db_path.display()
+                    let seed_path = parent.join(seed);
+                    if std::fs::symlink_metadata(&seed_path)
+                        .is_ok_and(|m| m.file_type().is_symlink())
+                    {
+                        return Err(PortError::Invalid(format!(
+                            "agy runtime file must not be a symlink: {}",
+                            seed_path.display()
                         )));
                     }
+                    match std::fs::OpenOptions::new()
+                        .create_new(true)
+                        .write(true)
+                        .open(&seed_path)
+                    {
+                        Ok(_) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(err) => {
+                            return Err(PortError::Io(format!(
+                                "create agy runtime file {}: {err}",
+                                seed_path.display()
+                            )));
+                        }
+                    }
                 }
-            }
-            for name in DB_FILES {
-                let path = ag_dir.join(name);
-                if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
-                    writable.push(path.to_string_lossy().into_owned());
+                for name in files {
+                    let path = parent.join(name);
+                    if std::fs::symlink_metadata(&path)
+                        .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
+                    {
+                        writable.push(path.to_string_lossy().into_owned());
+                    }
                 }
             }
             Vec::new()
@@ -277,10 +362,12 @@ impl AgyRunner {
             let canon_ag_str = canon_ag.to_str().ok_or_else(|| {
                 PortError::Invalid(format!("gemini path is not UTF-8: {}", canon_ag.display()))
             })?;
-            let cli_dir = root.join("antigravity-cli");
-            if request.sandbox.enabled {
-                let _ = std::fs::create_dir_all(&cli_dir);
-            }
+            let cli_dir = verified_runtime_subdir(
+                &root,
+                &root_canon,
+                "antigravity-cli",
+                request.sandbox.enabled,
+            )?;
             let cli_str = cli_dir.to_string_lossy();
             let canon_cli = sandbox::canonical(&cli_str)?;
             let canon_cli_str = canon_cli.to_str().ok_or_else(|| {
@@ -312,19 +399,34 @@ impl AgentRunner for AgyRunner {
     fn run(&self, request: &AgentRequest) -> PortResult<AgentOutcome> {
         let spec = self.command(request)?;
         // Refresh Antigravity OAuth on the host every 40m before entering Seatbelt.
-        macos_oauth_refresh::preflight_agy(&self.bin, &self.env, request);
+        let pre_run_mdat = macos_oauth_refresh::preflight_agy(&self.bin, &self.env, request);
         let mut log = open_stream_log(&self.env, request);
         log.write_start("antigravity", self.model.as_deref());
 
+        let started = std::time::Instant::now();
         let mut outcome = self.run_once(request, &spec)?;
-        let non_json_tail = macos_oauth_refresh::non_json_lines(&outcome.log_tail);
+        let elapsed = started.elapsed();
+        let non_json_tail = strip_ansi_and_json_object(&outcome.log_tail);
+        let auth_or_none = outcome
+            .infra
+            .as_ref()
+            .is_none_or(|i| i.kind == InfraKind::Auth);
         if outcome.exit_code != Some(0)
             && !outcome.timed_out
             && outcome.limit_hit.is_none()
+            && auth_or_none
             && macos_oauth_refresh::is_agy_auth_retryable(outcome.infra.as_ref(), &non_json_tail)
-            && macos_oauth_refresh::refresh_agy_now(&self.bin, &self.env, request)
+            && macos_oauth_refresh::refresh_agy_now(
+                &self.bin,
+                &self.env,
+                request,
+                pre_run_mdat.as_deref(),
+            )
         {
-            if outcome.tokens_in == 0 && outcome.tokens_out == 0 {
+            let safe_to_rerun = outcome.tokens_in == 0
+                && outcome.tokens_out == 0
+                && (request.sandbox.read_only || elapsed < std::time::Duration::from_secs(20));
+            if safe_to_rerun {
                 log.write_event(
                     "retry",
                     Some("antigravity"),
@@ -369,22 +471,25 @@ impl AgyRunner {
             GENERIC_TAIL_BYTES,
         )?;
         let mut parsed = parse_agy_output(&out.tail, expect_structured);
-        let should_scan_tail = !parsed.is_local_cap_error
-            && (!parsed.usage_present || parsed.is_error || parsed.final_text.is_empty());
-        if out.exit_code != Some(0)
-            && parsed.limit_hit.is_none()
-            && parsed.infra.is_none()
-            && should_scan_tail
-        {
-            let (limit, infra) = classify_text_failure(None, &strip_ansi(&out.tail));
-            parsed.limit_hit = limit;
-            parsed.infra = infra;
-        }
         let exit_code = if parsed.is_error && out.exit_code == Some(0) {
             Some(1)
         } else {
             out.exit_code
         };
+        let should_scan_tail = !parsed.is_local_cap_error
+            && (!parsed.usage_present || parsed.is_error || parsed.final_text.is_empty());
+        if exit_code != Some(0)
+            && parsed.limit_hit.is_none()
+            && parsed.infra.is_none()
+            && should_scan_tail
+        {
+            let non_json = strip_ansi_and_json_object(&out.tail);
+            if !non_json.trim().is_empty() {
+                let (limit, infra) = classify_text_failure(None, &non_json);
+                parsed.limit_hit = limit;
+                parsed.infra = infra;
+            }
+        }
         Ok(AgentOutcome {
             exit_code,
             timed_out: out.timed_out,

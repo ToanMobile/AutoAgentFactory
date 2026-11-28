@@ -25,7 +25,8 @@ fn linked_session_state_is_writable_and_linked_settings_are_not() {
     }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    let (shared, account, worktree) = (root.join("shared"), root.join("acct"), root.join("wt"));
+    let home = root.join("home");
+    let (shared, account, worktree) = (home.join(".claude"), root.join("acct"), root.join("wt"));
     for d in [
         shared.join("projects"),
         shared.join("hooks"),

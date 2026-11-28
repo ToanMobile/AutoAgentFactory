@@ -1,10 +1,17 @@
 //! Incremental parser and context-occupancy telemetry for Claude Code
 //! `--output-format stream-json` transcripts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use aaf_domain::ports::{InfraFailure, InfraKind, LimitHit};
 use serde_json::Value;
+
+#[path = "stream_classify.rs"]
+mod classify;
+use classify::{
+    context_tokens, is_limit_wording, message_text, network_wording_infra, reset_from_text,
+    structured_infra, usage_tokens,
+};
 
 pub(super) const RAW_LIMIT_CHARS: usize = 500;
 
@@ -61,8 +68,29 @@ pub struct StreamParser {
     /// Billed usage per assistant message id. One message is streamed as several
     /// events repeating the same usage, so the last one per id wins.
     assistant_usage: HashMap<String, (u64, u64)>,
+    /// Billed usage of assistant messages not yet rolled into a non-zero
+    /// `result` event; cleared whenever a `result` event reports billed tokens.
+    unaccounted_assistant_usage: HashMap<String, (u64, u64)>,
     /// Context occupancy `(turn_ctx, cache_read)` per assistant message id.
     assistant_ctx: HashMap<String, (u64, u64)>,
+    /// `cache_read` of assistant messages not yet rolled into a `result` event
+    /// carrying `cache_read > 0`.
+    unaccounted_cache_read: HashMap<String, u64>,
+    /// Assistant message ids already settled into `result_tokens_sum`, so late
+    /// or replayed chunks for the same id are never double-counted.
+    settled_assistant_ids: HashSet<String>,
+    /// Assistant message ids whose `cache_read` was already settled into
+    /// `result_cache_read_sum`.
+    settled_cache_read_ids: HashSet<String>,
+    /// Cumulative billed `(tokens_in, tokens_out)` across all `result` events.
+    /// Claude Code 2.1.x with `Monitor` emits one per-segment `result` per
+    /// wakeup (and sometimes a trailing `result` without `usage`), so summing
+    /// prevents later segments or empty results from wiping prior token spend.
+    result_tokens_sum: (u64, u64),
+    /// Cumulative `cache_read_input_tokens` across `result` events that report it.
+    result_cache_read_sum: u64,
+    /// Peak context occupancy reported directly by any `result` event.
+    result_peak_ctx: u64,
     observed_model: Option<String>,
     last_assistant_text: String,
     result: Option<ResultEvent>,
@@ -78,6 +106,9 @@ pub struct StreamParser {
 #[derive(Debug)]
 struct ResultEvent {
     text: String,
+    /// Combined `result` + `errors[]` text used for `limit_hit()` and infra
+    /// classification when `errors[]` carries details not present in `result`.
+    error_text: String,
     is_error: bool,
     /// True when the CLI exited due to a local execution ceiling (e.g.
     /// `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`)
@@ -87,7 +118,6 @@ struct ResultEvent {
     api_error_status: Option<i64>,
     infra: Option<InfraFailure>,
     tokens: (u64, u64),
-    ctx: (u64, u64),
 }
 
 fn is_error_subtype(subtype: Option<&str>) -> bool {
@@ -165,8 +195,16 @@ impl StreamParser {
                         .and_then(Value::as_str)
                         .map(str::to_string)
                         .unwrap_or_else(|| format!("#{}", self.assistant_usage.len()));
-                    self.assistant_usage.insert(id.clone(), usage_tokens(usage));
-                    self.assistant_ctx.insert(id, context_tokens(usage));
+                    let tok = usage_tokens(usage);
+                    let ctx = context_tokens(usage);
+                    self.assistant_usage.insert(id.clone(), tok);
+                    self.assistant_ctx.insert(id.clone(), ctx);
+                    if !self.settled_assistant_ids.contains(&id) {
+                        self.unaccounted_assistant_usage.insert(id.clone(), tok);
+                    }
+                    if !self.settled_cache_read_ids.contains(&id) {
+                        self.unaccounted_cache_read.insert(id, ctx.1);
+                    }
                 }
                 if !text.is_empty() {
                     self.last_assistant_text = text;
@@ -186,46 +224,101 @@ impl StreamParser {
                     .get("result")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let text = event
-                    .get("structured_output")
-                    .filter(|v| !v.is_null())
-                    .and_then(|v| serde_json::to_string(v).ok())
-                    .unwrap_or_else(|| raw_result.to_string());
+                let errors_joined = event
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_default();
                 let subtype = event.get("subtype").and_then(Value::as_str);
                 let is_error = event
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
                     || is_error_subtype(subtype);
+                let combined_error;
+                let error_text = if !raw_result.is_empty() && is_error && !errors_joined.is_empty()
+                {
+                    combined_error = format!("{raw_result}; {errors_joined}");
+                    combined_error.as_str()
+                } else if !raw_result.is_empty() {
+                    raw_result
+                } else {
+                    errors_joined.as_str()
+                };
+                let text = event
+                    .get("structured_output")
+                    .filter(|v| !v.is_null())
+                    .and_then(|v| serde_json::to_string(v).ok())
+                    .unwrap_or_else(|| {
+                        if raw_result.is_empty() && is_error {
+                            errors_joined.clone()
+                        } else {
+                            raw_result.to_string()
+                        }
+                    });
                 let api_error_status = event
                     .get("api_error_status")
                     .or_else(|| event.get("status_code"))
                     .and_then(Value::as_i64);
                 let api_err = is_error
-                    && event.get("terminal_reason").and_then(Value::as_str) == Some("api_error");
+                    && (event.get("terminal_reason").and_then(Value::as_str) == Some("api_error")
+                        || (subtype == Some("error_during_execution") && !error_text.is_empty()));
                 let tokens = event.get("usage").map(usage_tokens).unwrap_or_default();
                 let ctx = event.get("usage").map(context_tokens).unwrap_or_default();
-                let structured = structured_infra(&event, raw_result);
+                if tokens.0 > 0 || tokens.1 > 0 {
+                    self.result_tokens_sum.0 = self.result_tokens_sum.0.saturating_add(tokens.0);
+                    self.result_tokens_sum.1 = self.result_tokens_sum.1.saturating_add(tokens.1);
+                    self.settled_assistant_ids
+                        .extend(self.unaccounted_assistant_usage.drain().map(|(k, _)| k));
+                    if ctx.1 > 0 {
+                        self.result_cache_read_sum =
+                            self.result_cache_read_sum.saturating_add(ctx.1);
+                        self.settled_cache_read_ids
+                            .extend(self.unaccounted_cache_read.drain().map(|(k, _)| k));
+                    } else {
+                        let mut seg_cr = 0u64;
+                        for (id, cr) in self.unaccounted_cache_read.drain() {
+                            seg_cr = seg_cr.saturating_add(cr);
+                            self.settled_cache_read_ids.insert(id);
+                        }
+                        self.result_cache_read_sum =
+                            self.result_cache_read_sum.saturating_add(seg_cr);
+                    }
+                } else if ctx.1 > 0 {
+                    self.result_cache_read_sum = self.result_cache_read_sum.saturating_add(ctx.1);
+                    self.settled_cache_read_ids
+                        .extend(self.unaccounted_cache_read.drain().map(|(k, _)| k));
+                }
+                self.result_peak_ctx = self.result_peak_ctx.max(ctx.0);
+                let run_zero_tokens = self.run_has_zero_tokens();
+                let structured = structured_infra(&event, error_text);
                 let is_local_cap_error = is_local_cap_subtype(subtype)
                     && !api_err
                     && api_error_status.is_none()
                     && structured.is_none();
                 let infra = structured
-                    .or_else(|| network_wording_infra(api_err, raw_result))
+                    .or_else(|| network_wording_infra(api_err, error_text))
                     .or_else(|| {
-                        (!is_local_cap_error && (is_error || tokens == (0, 0)))
-                            .then(|| auth_wording_infra(raw_result))
+                        (!is_local_cap_error && (is_error || run_zero_tokens))
+                            .then(|| auth_wording_infra(error_text))
                             .flatten()
                     });
-                self.result = Some(ResultEvent {
+                let incoming = ResultEvent {
                     text,
+                    error_text: error_text.to_string(),
                     is_error,
                     is_local_cap_error,
                     api_error_status,
                     infra,
                     tokens,
-                    ctx,
-                });
+                };
+                self.merge_result(incoming);
             }
             Some("rate_limit_event") => {
                 let info = event.get("rate_limit_info");
@@ -240,34 +333,33 @@ impl StreamParser {
     }
 
     pub fn summary(&self) -> StreamSummary {
-        // The result event carries the totals of the whole run. Without one
-        // (timeout, crash) the per-message numbers are all there is.
-        let (tokens_in, tokens_out) = match &self.result {
-            Some(result) => result.tokens,
-            None => self
-                .assistant_usage
-                .values()
-                .fold((0u64, 0u64), |acc, usage| {
-                    (acc.0.saturating_add(usage.0), acc.1.saturating_add(usage.1))
-                }),
-        };
+        // Each non-zero `result` event settles its segment and clears
+        // `unaccounted_assistant_usage`; adding any remaining assistant usage
+        // preserves totals across multi-result `Monitor` runs, trailing empty
+        // `result` events, and mid-turn timeouts/crashes.
+        let (unacc_in, unacc_out) = self
+            .unaccounted_assistant_usage
+            .values()
+            .fold((0u64, 0u64), |acc, usage| {
+                (acc.0.saturating_add(usage.0), acc.1.saturating_add(usage.1))
+            });
+        let tokens_in = self.result_tokens_sum.0.saturating_add(unacc_in);
+        let tokens_out = self.result_tokens_sum.1.saturating_add(unacc_out);
         let peak_context_tokens = self
             .assistant_ctx
             .values()
             .map(|&(turn_ctx, _)| turn_ctx)
             .max()
-            .unwrap_or_else(|| self.result.as_ref().map_or(0, |r| r.ctx.0));
-        let assistant_cache_read = self
-            .assistant_ctx
+            .filter(|&v| v > 0)
+            .unwrap_or(self.result_peak_ctx);
+        let unacc_cache_read = self
+            .unaccounted_cache_read
             .values()
-            .fold(0u64, |acc, &(_, cr)| acc.saturating_add(cr));
-        let cache_read_tokens = match &self.result {
-            Some(result) if result.ctx.1 > 0 => result.ctx.1,
-            _ => assistant_cache_read,
-        };
+            .fold(0u64, |acc, &cr| acc.saturating_add(cr));
+        let cache_read_tokens = self.result_cache_read_sum.saturating_add(unacc_cache_read);
         let final_text = match &self.result {
-            Some(result) => result.text.clone(),
-            None => self.last_assistant_text.clone(),
+            Some(result) if !result.text.is_empty() => result.text.clone(),
+            _ => self.last_assistant_text.clone(),
         };
         StreamSummary {
             final_text,
@@ -297,7 +389,13 @@ impl StreamParser {
         let failed_text = self
             .result
             .as_ref()
-            .map(|r| r.text.as_str())
+            .map(|r| {
+                if !r.error_text.is_empty() {
+                    r.error_text.as_str()
+                } else {
+                    r.text.as_str()
+                }
+            })
             .unwrap_or(&self.last_assistant_text);
         let message = if let Some(text) = &self.rate_limit_error {
             text.clone()
@@ -338,8 +436,8 @@ impl StreamParser {
             && !res.is_error
         {
             // Claude CLI can emit subtype="success" (is_error=false) with 0/0
-            // tokens when OAuth Keychain refresh fails before reaching the API.
-            if res.tokens == (0, 0)
+            // run-wide tokens when OAuth Keychain refresh fails before reaching the API.
+            if self.run_has_zero_tokens()
                 && res
                     .infra
                     .as_ref()
@@ -355,104 +453,77 @@ impl StreamParser {
         if let Some(res) = &self.result {
             return res.infra.clone();
         }
-        let zero_tokens = self
-            .assistant_usage
-            .values()
-            .all(|&(tok_in, tok_out)| tok_in == 0 && tok_out == 0);
+        let zero_tokens = self.run_has_zero_tokens();
         zero_tokens
             .then(|| auth_wording_infra(&self.last_assistant_text))
             .flatten()
     }
-}
 
-/// Values of structured error fields that mean the provider refused the
-/// account itself (permanent until fixed; never retried).
-const ACCOUNT_ERRORS: [&str; 7] = [
-    "authentication_failed",
-    "authentication_error",
-    "oauth_org_not_allowed",
-    "account_on_hold",
-    "verification_required",
-    "billing_error",
-    "cloud_credential_error",
-];
-
-/// Structured error codes for transient provider/server failures (mapped to
-/// [`InfraKind::Network`] so `Mode::Auto` can back off and retry).
-const TRANSIENT_SERVER_ERRORS: [&str; 3] = ["server_error", "overloaded", "overloaded_error"];
-
-/// How Claude Code 2.1.330 words a request that never reached the API
-/// (read from the binary's connection-error messages; never observed
-/// live). Matched only in a message the CLI flags as its own API error,
-/// never in the agent's words.
-#[rustfmt::skip]
-const NETWORK_WORDING: [&str; 13] = [
-    "unable to connect to api", "can't reach the api server", "no internet route",
-    "a firewall or proxy may be blocking it", "couldn't connect through your proxy",
-    "connection dropped", "enotfound", "eai_again", "etimedout", "econnrefused",
-    "econnreset", "enetunreach", "ehostunreach",
-];
-
-fn structured_infra(
-    event: &serde_json::Map<String, Value>,
-    fallback_text: &str,
-) -> Option<InfraFailure> {
-    let error_val = event.get("error");
-    let error_obj = error_val.and_then(Value::as_object);
-    fn str_field<'a>(o: Option<&'a serde_json::Map<String, Value>>, k: &str) -> Option<&'a str> {
-        o.and_then(|m| m.get(k)).and_then(Value::as_str)
+    fn run_has_zero_tokens(&self) -> bool {
+        self.result_tokens_sum == (0, 0)
+            && self
+                .assistant_usage
+                .values()
+                .all(|&(tok_in, tok_out)| tok_in == 0 && tok_out == 0)
     }
-    let error_status = error_obj
-        .and_then(|o| o.get("status").or_else(|| o.get("status_code")))
-        .and_then(Value::as_i64);
-    let status = event
-        .get("api_error_status")
-        .or_else(|| event.get("status_code"))
-        .and_then(Value::as_i64)
-        .or(error_status);
-    let codes = [
-        error_val.and_then(Value::as_str),
-        str_field(error_obj, "type"),
-        event.get("subtype").and_then(Value::as_str),
-    ];
-    let has_code = |list: &[&str]| {
-        codes
-            .iter()
-            .flatten()
-            .any(|c| list.iter().any(|known| known.eq_ignore_ascii_case(c)))
-    };
-    let kind = if has_code(&ACCOUNT_ERRORS) || matches!(status, Some(401 | 403)) {
-        InfraKind::Auth
-    } else if has_code(&TRANSIENT_SERVER_ERRORS) || matches!(status, Some(500..=599)) {
-        InfraKind::Network
-    } else {
-        return None;
-    };
-    let detail = [fallback_text, str_field(error_obj, "message").unwrap_or("")]
-        .into_iter()
-        .chain(codes.into_iter().flatten())
-        .find(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| status.map(|s| format!("HTTP {s}")))
-        .unwrap_or_default();
-    Some(InfraFailure {
-        kind,
-        raw: detail.chars().take(RAW_LIMIT_CHARS).collect(),
-    })
+
+    fn merge_result(&mut self, incoming: ResultEvent) {
+        let is_empty_pointer = !incoming.is_error
+            && incoming.text.is_empty()
+            && incoming.tokens == (0, 0)
+            && incoming.infra.is_none()
+            && incoming.api_error_status.is_none();
+        if self.result.is_some() && is_empty_pointer {
+            return;
+        }
+        let merged = match self.result.take() {
+            None => incoming,
+            Some(prev) => {
+                let did_work = incoming.tokens != (0, 0) || !incoming.text.is_empty();
+                let is_error = incoming.is_error || (prev.is_error && !did_work);
+                let is_local_cap_error = if incoming.is_error {
+                    incoming.is_local_cap_error
+                } else if prev.is_error && !did_work {
+                    prev.is_local_cap_error
+                } else {
+                    false
+                };
+                ResultEvent {
+                    text: if !incoming.text.is_empty() {
+                        incoming.text
+                    } else {
+                        prev.text
+                    },
+                    error_text: if !incoming.error_text.is_empty() {
+                        incoming.error_text
+                    } else {
+                        prev.error_text
+                    },
+                    is_error,
+                    is_local_cap_error,
+                    api_error_status: is_error
+                        .then(|| incoming.api_error_status.or(prev.api_error_status))
+                        .flatten(),
+                    infra: if is_error {
+                        incoming.infra.or(prev.infra)
+                    } else {
+                        incoming.infra
+                    },
+                    tokens: (
+                        prev.tokens.0.saturating_add(incoming.tokens.0),
+                        prev.tokens.1.saturating_add(incoming.tokens.1),
+                    ),
+                }
+            }
+        };
+        self.result = Some(merged);
+    }
 }
 
 /// Wording Claude Code CLI emits when OAuth token refresh or macOS Keychain
 /// persistence fails (delegated to `claude_flags`).
 pub(super) fn auth_wording_infra(text: &str) -> Option<InfraFailure> {
     super::super::claude_flags::auth_wording_infra(text, RAW_LIMIT_CHARS)
-}
-
-fn network_wording_infra(flagged: bool, text: &str) -> Option<InfraFailure> {
-    let lower = text.to_lowercase();
-    (flagged && NETWORK_WORDING.iter().any(|words| lower.contains(words))).then(|| InfraFailure {
-        kind: InfraKind::Network,
-        raw: text.chars().take(RAW_LIMIT_CHARS).collect(),
-    })
 }
 
 /// Parses a whole transcript.
@@ -462,59 +533,4 @@ pub fn parse_stream(text: &str) -> StreamSummary {
         parser.feed_line(line);
     }
     parser.summary()
-}
-
-/// `(input + cache creation, output)` of a `usage` object.
-fn usage_tokens(usage: &Value) -> (u64, u64) {
-    let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
-    (
-        field("input_tokens").saturating_add(field("cache_creation_input_tokens")),
-        field("output_tokens"),
-    )
-}
-
-/// `(turn_context_tokens, cache_read_input_tokens)` of a `usage` object.
-fn context_tokens(usage: &Value) -> (u64, u64) {
-    let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
-    let cache_read = field("cache_read_input_tokens");
-    let turn_ctx = field("input_tokens")
-        .saturating_add(field("cache_creation_input_tokens"))
-        .saturating_add(cache_read);
-    (turn_ctx, cache_read)
-}
-
-fn message_text(message: &Value) -> String {
-    message
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
-}
-
-/// Wording Claude Code 2.1.330 uses for exhausted usage (read from the
-/// binary's message table; never observed live).
-fn is_limit_wording(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("usage limit reached")
-        || lower.contains("out of usage credits")
-        || (lower.contains("hit your") && lower.contains("limit"))
-}
-
-/// Older releases appended the reset time as `...|<unix seconds>`.
-fn reset_from_text(text: &str) -> Option<i64> {
-    let (_, tail) = text.rsplit_once('|')?;
-    let digits: String = tail
-        .trim()
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    // Ten digits: a plausible Unix time in seconds, not some other number.
-    (digits.len() == 10).then(|| digits.parse().ok()).flatten()
 }

@@ -29,6 +29,7 @@ pub enum DeferredSiblingOutcome {
         attempt: u32,
         detail: String,
         provider: ProviderKey,
+        oauth_refreshed: bool,
     },
     Wait {
         until: Option<i64>,
@@ -192,7 +193,9 @@ pub fn dual_audit_satisfies_policy(record: &PostGateAuditRecord, cfg: &CrossAudi
 }
 
 /// Merges two sibling deferred outcomes enforcing strict precedence:
-/// `Halt > Blocked > RetryAfter > Wait > Switch` (R3-CONC-1 & R3-PROTO-3).
+/// `Halt > Blocked > RetryAfter(network) > Wait > Switch > RetryAfter(oauth_refreshed)`
+/// (R3-CONC-1 & R3-PROTO-3). A healed OAuth refresh must never mask a real
+/// blocker (`Wait`, `Switch`, `RetryAfter(network)`, `Blocked`, `Halt`) on its sibling.
 pub fn merge_deferred_outcome(
     current: Option<DeferredSiblingOutcome>,
     incoming: DeferredSiblingOutcome,
@@ -200,9 +203,16 @@ pub fn merge_deferred_outcome(
     let rank = |o: &DeferredSiblingOutcome| match o {
         DeferredSiblingOutcome::Halt(_) => 5u8,
         DeferredSiblingOutcome::Blocked => 4,
-        DeferredSiblingOutcome::RetryAfter { .. } => 3,
+        DeferredSiblingOutcome::RetryAfter {
+            oauth_refreshed: false,
+            ..
+        } => 3,
         DeferredSiblingOutcome::Wait { .. } => 2,
         DeferredSiblingOutcome::Switch { .. } => 1,
+        DeferredSiblingOutcome::RetryAfter {
+            oauth_refreshed: true,
+            ..
+        } => 0,
     };
     let Some(curr) = current else {
         return incoming;
@@ -217,28 +227,29 @@ pub fn merge_deferred_outcome(
                     attempt: a1,
                     detail: d1,
                     provider: p1,
+                    oauth_refreshed: o1,
                 },
                 DeferredSiblingOutcome::RetryAfter {
                     until: u2,
                     attempt: a2,
                     detail: d2,
                     provider: p2,
+                    oauth_refreshed: o2,
                 },
             ) => {
-                if u2 > u1 {
-                    DeferredSiblingOutcome::RetryAfter {
-                        until: u2,
-                        attempt: a1.max(a2),
-                        detail: d2,
-                        provider: p2,
-                    }
-                } else {
-                    DeferredSiblingOutcome::RetryAfter {
-                        until: u1,
-                        attempt: a1.max(a2),
-                        detail: d1,
-                        provider: p1,
-                    }
+                let oauth_refreshed = o1 && o2;
+                let pick_incoming = match (o1, o2) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    _ => u2 > u1,
+                };
+                let (detail, provider) = if pick_incoming { (d2, p2) } else { (d1, p1) };
+                DeferredSiblingOutcome::RetryAfter {
+                    until: u1.max(u2),
+                    attempt: a1.max(a2),
+                    detail,
+                    provider,
+                    oauth_refreshed,
                 }
             }
             (

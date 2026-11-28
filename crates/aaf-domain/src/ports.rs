@@ -259,6 +259,10 @@ pub enum InfraKind {
     Auth,
     /// The provider could not be reached (DNS, connection, proxy).
     Network,
+    /// A sandboxed run hit a mid-run OAuth Keychain write denial, and the host
+    /// verified a fresh OAuth token was saved afterward; safe to retry once
+    /// without quarantining the account or halting `Mode::Drain`.
+    OAuthRefreshed,
 }
 
 /// A run that failed for a reason of the machine or the account, not of the

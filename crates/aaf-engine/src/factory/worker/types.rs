@@ -105,6 +105,7 @@ pub(crate) enum Next {
         until: i64,
         attempt: u32,
         detail: String,
+        oauth_refreshed: bool,
     },
     Halt(String),
     Unblock {

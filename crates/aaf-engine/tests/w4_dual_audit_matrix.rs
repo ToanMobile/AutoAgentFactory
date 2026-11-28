@@ -334,6 +334,13 @@ fn decide_dual_matrix_covers_all_six_branches() {
 fn merge_deferred_outcome_enforces_strict_precedence() {
     let p_a = ProviderKey::from_executor("antigravity");
     let p_c = ProviderKey::from_executor("claude");
+    let oauth = DeferredSiblingOutcome::RetryAfter {
+        until: 999,
+        attempt: 1,
+        detail: "claude OAuth refreshed".into(),
+        provider: p_c.clone(),
+        oauth_refreshed: true,
+    };
     let sw = DeferredSiblingOutcome::Switch {
         provider: p_a.clone(),
     };
@@ -346,11 +353,13 @@ fn merge_deferred_outcome_enforces_strict_precedence() {
         attempt: 1,
         detail: "net".into(),
         provider: p_c.clone(),
+        oauth_refreshed: false,
     };
     let blocked = DeferredSiblingOutcome::Blocked;
     let halt = DeferredSiblingOutcome::Halt("auth refused".into());
 
-    let chain = [&sw, &wait, &retry, &blocked, &halt];
+    // Strict precedence: OAuthRefreshed < Switch < Wait < RetryAfter(net) < Blocked < Halt.
+    let chain = [&oauth, &sw, &wait, &retry, &blocked, &halt];
     for i in 0..chain.len() {
         for j in (i + 1)..chain.len() {
             assert_eq!(
@@ -369,11 +378,55 @@ fn merge_deferred_outcome_enforces_strict_precedence() {
         until: 300,
         attempt: 2,
         detail: "net2".into(),
-        provider: p_a,
+        provider: p_a.clone(),
+        oauth_refreshed: false,
     };
     assert_eq!(
         merge_deferred_outcome(Some(retry), retry_later.clone()),
         retry_later
+    );
+
+    // When BOTH siblings are OAuthRefreshed, merged outcome remains oauth_refreshed: true.
+    let oauth_agy = DeferredSiblingOutcome::RetryAfter {
+        until: 1005,
+        attempt: 1,
+        detail: "agy OAuth refreshed".into(),
+        provider: p_a.clone(),
+        oauth_refreshed: true,
+    };
+    let both_oauth = merge_deferred_outcome(Some(oauth), oauth_agy);
+    assert!(matches!(
+        both_oauth,
+        DeferredSiblingOutcome::RetryAfter {
+            oauth_refreshed: true,
+            until: 1005,
+            ..
+        }
+    ));
+
+    // When one sibling is OAuthRefreshed (even with a later timestamp) and the
+    // other is a real network error, blame the non-OAuth failing provider.
+    let retry_net_early = DeferredSiblingOutcome::RetryAfter {
+        until: 1000,
+        attempt: 1,
+        detail: "antigravity connection reset".into(),
+        provider: p_a.clone(),
+        oauth_refreshed: false,
+    };
+    let retry_oauth_late = DeferredSiblingOutcome::RetryAfter {
+        until: 1005,
+        attempt: 1,
+        detail: "claude OAuth refreshed".into(),
+        provider: p_c.clone(),
+        oauth_refreshed: true,
+    };
+    assert_eq!(
+        merge_deferred_outcome(Some(retry_net_early.clone()), retry_oauth_late.clone()),
+        retry_net_early
+    );
+    assert_eq!(
+        merge_deferred_outcome(Some(retry_oauth_late), retry_net_early.clone()),
+        retry_net_early
     );
 
     let wait_none = DeferredSiblingOutcome::Wait {
