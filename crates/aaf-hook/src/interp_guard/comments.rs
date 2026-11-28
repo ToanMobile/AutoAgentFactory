@@ -3,14 +3,41 @@
 use super::parse::Interp;
 
 /// Line terminators recognized across supported interpreters (POSIX `\n`,
-/// Python/JS/Ruby `\r`, ECMAScript U+2028/U+2029).
+/// Python/JS/PHP `\r`, ECMAScript U+2028/U+2029).
 const LINE_BREAKS: [char; 4] = ['\n', '\r', '\u{2028}', '\u{2029}'];
 
-pub(super) fn strip_comment_lines(code: &str) -> String {
-    code.split(LINE_BREAKS)
+/// True when `ch` terminates a `#`/`//` line comment in `interp_kind`.
+fn ends_comment(interp_kind: Interp, ch: char) -> bool {
+    match interp_kind {
+        Interp::Python | Interp::Php => matches!(ch, '\n' | '\r'),
+        Interp::Ruby | Interp::Perl => ch == '\n',
+        Interp::Node => LINE_BREAKS.contains(&ch),
+    }
+}
+
+pub(super) fn strip_comment_lines(code: &str, interp_kind: Interp) -> String {
+    code.split(|ch| ends_comment(interp_kind, ch))
         .filter(|l| {
             let t = l.trim_start();
             !t.starts_with('#') && !t.starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Naively strips inline trailing `#` (except `#!` shebang lines) and `//`
+/// comments per line without tracking quotes, using `interp_kind`'s comment
+/// terminators (SEC-113).
+pub(super) fn strip_trailing_comments(code: &str, interp_kind: Interp) -> String {
+    code.split(|ch| ends_comment(interp_kind, ch))
+        .map(|line| {
+            let hash = (!line.starts_with("#!")).then(|| line.find('#')).flatten();
+            let slash = line.find("//");
+            match (hash, slash) {
+                (Some(h), Some(s)) => &line[..h.min(s)],
+                (Some(i), None) | (None, Some(i)) => &line[..i],
+                (None, None) => line,
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -126,7 +153,7 @@ pub(super) fn strip_comments_quote_aware(code: &str, interp_kind: Interp) -> Str
                     out.push(' ');
                     break;
                 }
-                if LINE_BREAKS.contains(&ch) {
+                if ends_comment(interp_kind, ch) {
                     break;
                 }
                 i += ch.len_utf8();
@@ -141,13 +168,43 @@ pub(super) fn strip_comments_quote_aware(code: &str, interp_kind: Interp) -> Str
 
 #[cfg(test)]
 mod tests {
-    use super::{Interp, strip_comment_lines, strip_comments_quote_aware};
+    use super::{Interp, strip_comment_lines, strip_comments_quote_aware, strip_trailing_comments};
 
     #[test]
     fn splits_cr_and_unicode_line_separators() {
-        assert_eq!(strip_comment_lines("# x'\rimport os"), "import os");
-        assert_eq!(strip_comment_lines("// x'\u{2028}run()"), "run()");
-        assert_eq!(strip_comment_lines("  // x'\u{2029}run()"), "run()");
+        assert_eq!(
+            strip_comment_lines("# x'\rimport os", Interp::Python),
+            "import os"
+        );
+        assert_eq!(
+            strip_comment_lines("// x'\u{2028}run()", Interp::Node),
+            "run()"
+        );
+        assert_eq!(
+            strip_comment_lines("  // x'\u{2029}run()", Interp::Node),
+            "run()"
+        );
+        assert_eq!(strip_comment_lines("# a\r'\nrun()", Interp::Ruby), "run()");
+        assert_eq!(
+            strip_comment_lines("# a\u{2028}'\nrun()", Interp::Python),
+            "run()"
+        );
+    }
+
+    #[test]
+    fn strips_trailing_comments_per_language() {
+        assert_eq!(
+            strip_trailing_comments("const r = /a\\/*/; // don't\nrun()", Interp::Node),
+            "const r = /a\\/*/; \nrun()"
+        );
+        assert_eq!(
+            strip_trailing_comments("x = 1 # a\r'\nrun()", Interp::Ruby),
+            "x = 1 \nrun()"
+        );
+        assert_eq!(
+            strip_trailing_comments("#!/usr/bin/env python3\nx = 1 # note", Interp::Python),
+            "#!/usr/bin/env python3\nx = 1 "
+        );
     }
 
     #[test]
@@ -188,6 +245,18 @@ mod tests {
             ),
             (Interp::Node, "a = 1\n#!x", "a = 1\n#!x"),
             (Interp::Python, "a = 1\n#! don't\nrun()", "a = 1\n\nrun()"),
+            (Interp::Python, "x = 1 # a\u{2028}'\nrun()", "x = 1 \nrun()"),
+            (Interp::Ruby, "x = 1 # a\r'\nrun()", "x = 1 \nrun()"),
+            (
+                Interp::Perl,
+                "my $a = 1; # a\r'\nrun()",
+                "my $a = 1; \nrun()",
+            ),
+            (
+                Interp::Php,
+                "<?php $a = 1; // a\u{2028}'\nrun();",
+                "<?php $a = 1; \nrun();",
+            ),
         ] {
             assert_eq!(strip_comments_quote_aware(input, interp), want, "{input:?}");
         }
