@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::shell::{Cmd, basename};
+use crate::shell::{Cmd, fold_name};
 use crate::{Ctx, Denial};
 
 pub const RULE: &str = "store_submit_guard";
@@ -69,13 +69,13 @@ const LAUNCHERS: &[&str] = &[
 pub fn matches<S: AsRef<str>>(words: &[S], anywhere: bool) -> Option<&'static str> {
     let launched = words
         .first()
-        .is_some_and(|first| LAUNCHERS.contains(&basename(first.as_ref())));
+        .is_some_and(|first| LAUNCHERS.contains(&fold_name(first.as_ref()).as_str()));
     for (at, word) in words.iter().enumerate() {
         if at > 0 && !launched && !anywhere {
             break;
         }
         let after = || words[at + 1..].iter().map(AsRef::as_ref);
-        let hit = match basename(word.as_ref()) {
+        let hit = match fold_name(word.as_ref()).as_str() {
             "fastlane" => after()
                 .any(|w| matches!(w, "deliver" | "supply" | "pilot") || w.starts_with("upload_to_"))
                 .then_some("fastlane upload"),

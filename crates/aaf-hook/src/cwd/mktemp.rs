@@ -14,7 +14,13 @@ fn is_safe_mktemp_dir_arg(val: &str) -> bool {
 }
 
 fn is_safe_mktemp_dir_cmd(cmd: &shell::Cmd) -> bool {
-    if cmd.dynamic_name || cmd.name() != "mktemp" || !cmd.assigns.is_empty() {
+    if cmd.dynamic_name
+        || !cmd
+            .words
+            .first()
+            .is_some_and(|w| shell::basename(w) == "mktemp")
+        || !cmd.assigns.is_empty()
+    {
         return false;
     }
     let mut has_dir_flag = false;
@@ -106,8 +112,8 @@ fn assigned_mktemp_var(script: &shell::Script, idx: usize) -> Option<&str> {
     let var = if cmd.words.is_empty() && cmd.assigns.len() == 1 && cmd.assigns[0].1 == "$" {
         cmd.assigns[0].0.as_str()
     } else if matches!(
-        cmd.name(),
-        "local" | "export" | "readonly" | "declare" | "typeset"
+        cmd.words.first().map(String::as_str),
+        Some("local" | "export" | "readonly" | "declare" | "typeset")
     ) && cmd.assigns.is_empty()
     {
         let non_flags: Vec<&str> = cmd

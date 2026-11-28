@@ -15,7 +15,7 @@ pub use crate::confine_core::path::canonical;
 pub(crate) use crate::confine_core::path::{canonical_entry, entries_to, links_to, regex_escape};
 
 mod git_dir;
-pub(crate) use git_dir::own_reflog_files;
+pub(crate) use git_dir::{linked_worktree_admin_dir, own_reflog_files};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 

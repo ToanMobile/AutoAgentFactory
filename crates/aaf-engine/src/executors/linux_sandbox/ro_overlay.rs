@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::super::sandbox::linked_worktree_admin_dir;
 use super::bwrap::{
     abs_path_str, canonical_or_self, is_leaf_symlink, push_flag_pair, push_flag_path,
 };
@@ -37,6 +38,30 @@ fn ensure_logs_dir(logs: &Path) -> Result<(), String> {
             .map_err(|err| format!("RFC-126: failed to create {}: {err}", logs.display())),
         Err(err) => Err(format!("RFC-126: failed to stat {}: {err}", logs.display())),
     }
+}
+
+/// SEC-129: matches primary-checkout pseudo-refs and merge/rebase/bisect/index
+/// state at the root of a common git dir (mirrors macOS Seatbelt rules in
+/// `executors/sandbox/git_dir.rs`).
+fn is_common_pseudo_ref_name(name: &str) -> bool {
+    if matches!(name, "rebase-merge" | "rebase-apply" | "sequencer") {
+        return true;
+    }
+    let base = name.strip_suffix(".lock").unwrap_or(name);
+    base.ends_with("HEAD")
+        || matches!(
+            base,
+            "index"
+                | "AUTO_MERGE"
+                | "MERGE_MSG"
+                | "MERGE_MODE"
+                | "MERGE_RR"
+                | "MERGE_AUTOSTASH"
+                | "SQUASH_MSG"
+                | "COMMIT_EDITMSG"
+        )
+        || base.starts_with("BISECT_")
+        || base.starts_with("sharedindex.")
 }
 
 impl<'a> RoOverlay<'a> {
@@ -140,9 +165,32 @@ impl<'a> RoOverlay<'a> {
         Ok(())
     }
 
+    /// SEC-129: lock existing pseudo-refs and merge/rebase/bisect/index state
+    /// at the root of the common git dir for linked worktrees.
+    fn protect_common_pseudo_refs(&mut self, git_dir: &Path) -> Result<(), String> {
+        let Ok(entries) = std::fs::read_dir(git_dir) else {
+            return Ok(());
+        };
+        let mut matches: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(is_common_pseudo_ref_name)
+            })
+            .map(|e| e.path())
+            .collect();
+        matches.sort();
+        for path in matches {
+            self.protect_existing(&path)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn protect_git_dir(
         &mut self,
         git_dir: &Path,
+        worktree: Option<&Path>,
         is_primary_checkout: bool,
     ) -> Result<(), String> {
         for rel in ["hooks", "refs/aaf", "config", "config.worktree"] {
@@ -158,6 +206,9 @@ impl<'a> RoOverlay<'a> {
             for rel in ["refs/heads/develop", "refs/heads/release", "refs/remotes"] {
                 self.protect_existing(&git_dir.join(rel))?;
             }
+            // SEC-129: lock existing pseudo-refs and primary checkout state at
+            // the root of the common git dir.
+            self.protect_common_pseudo_refs(git_dir)?;
             // RFC-126: lock common reflog tree for linked worktrees; create
             // missing `logs` so `--ro-bind` always mounts.
             let logs = git_dir.join("logs");
@@ -167,6 +218,14 @@ impl<'a> RoOverlay<'a> {
         let worktrees = git_dir.join("worktrees");
         if worktrees.is_dir() {
             self.bind_with_target(&worktrees)?;
+            // SEC-129: resolve this linked worktree's admin dir; in factory
+            // runs, linked worktrees always carry a `.git` gitfile so this
+            // always resolves. When `None` (no gitfile, worktree outside
+            // `git_dir`, or primary checkout), keep base behavior.
+            let own_admin = (!is_primary_checkout)
+                .then(|| worktree.and_then(|wt| linked_worktree_admin_dir(wt, git_dir)))
+                .flatten()
+                .map(|own| canonical_or_self(&own));
             if let Ok(entries) = std::fs::read_dir(&worktrees) {
                 let mut children: Vec<PathBuf> = entries
                     .flatten()
@@ -184,6 +243,13 @@ impl<'a> RoOverlay<'a> {
                         let logs = child.join("logs");
                         ensure_logs_dir(&logs)?;
                         self.protect_existing(&logs)?;
+                    }
+                    if let Some(own) = &own_admin
+                        && canonical_or_self(&child) != *own
+                    {
+                        // SEC-129: mount sibling admin dir read-only last so
+                        // the later mount wins over `--bind` above.
+                        self.bind_with_target(&child)?;
                     }
                 }
             }

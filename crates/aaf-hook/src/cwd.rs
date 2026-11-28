@@ -22,14 +22,15 @@ pub(crate) fn wrapped_cwd(wrapped: &[String], ctx: &Ctx) -> Option<PathBuf> {
     }
     let mut cwd: Option<PathBuf> = None;
     let mut i = 0;
-    let mut tool = "";
+    let mut tool = String::new();
     while i < wrapped.len() {
         let word = wrapped[i].as_str();
         if !word.starts_with('-') || word == "-" {
-            let base = shell::basename(word);
-            let launcher = DIR_LAUNCHERS.contains(&tool);
+            let base = shell::fold_name(word);
+            let base = base.as_str();
+            let launcher = DIR_LAUNCHERS.contains(&tool.as_str());
             if base == "env" || base == "sudo" || DIR_LAUNCHERS.contains(&base) {
-                tool = base;
+                tool = base.to_string();
             } else if launcher && matches!(word, "exec" | "x" | "dlx" | "run") {
                 // The launcher's subcommand: its options still follow.
             } else if matches!(
@@ -80,12 +81,12 @@ pub(crate) fn wrapped_cwd(wrapped: &[String], ctx: &Ctx) -> Option<PathBuf> {
                     | "flock"
                     | "taskset"
             ) {
-                tool = "";
+                tool.clear();
             }
             i += 1;
             continue;
         }
-        match tool {
+        match tool.as_str() {
             "env" => {
                 if let Some(rest) = word.strip_prefix("--chdir=") {
                     if !rest.is_empty() {
@@ -202,7 +203,7 @@ pub(crate) fn wrapped_cwd(wrapped: &[String], ctx: &Ctx) -> Option<PathBuf> {
             // `pnpm -C`/`--dir`, `yarn --cwd`, `uv --directory`, `poetry -C`,
             // `conda run --cwd`.
             launcher if DIR_LAUNCHERS.contains(&launcher) => {
-                let options: &[&str] = match tool {
+                let options: &[&str] = match tool.as_str() {
                     "mise" => &["-C", "--cd"],
                     "pnpm" => &["-C", "--dir"],
                     "uv" => &["--directory"],
@@ -269,7 +270,10 @@ struct Place {
 const MAX_PLACES: usize = 32;
 
 fn is_dir_builtin(cmd: &shell::Cmd) -> bool {
-    matches!(cmd.name(), "cd" | "pushd" | "popd")
+    matches!(
+        cmd.words.first().map(String::as_str),
+        Some("cd" | "pushd" | "popd")
+    )
 }
 
 /// Wrappers that run a builtin in the current shell; any other (`env`,

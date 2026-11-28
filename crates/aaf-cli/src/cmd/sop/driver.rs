@@ -15,6 +15,7 @@ use aaf_engine::factory::AccountPool;
 use aaf_engine::factory::adapters::provider_for;
 use aaf_engine::factory::audit_cmd_is_claude;
 use aaf_engine::factory::prompt::sandbox_policy_for;
+use aaf_engine::factory::stage_router::writer_requires_hook;
 use aaf_engine::gate::{GIT_TIMEOUT, head_lock};
 use aaf_engine::hook_settings;
 use aaf_engine::process::{CommandRunner, SystemRunner};
@@ -293,24 +294,39 @@ impl CliStageDriver<'_> {
             .unwrap_or_else(|| self.cfg.repo.run.model.trim());
 
         let run_cfg = &self.cfg.repo.run;
-        let uses_custom_claude = stage_uses_custom_cmd(effective_exec, run_cfg)
-            && (audit_cmd_is_claude(&run_cfg.executor_cmd.join(" "))
+        let uses_custom = stage_uses_custom_cmd(effective_exec, run_cfg);
+        let custom_cmd = if uses_custom {
+            run_cfg.executor_cmd.join(" ")
+        } else {
+            String::new()
+        };
+        let uses_custom_claude = uses_custom
+            && (audit_cmd_is_claude(&custom_cmd)
                 || run_executor_is_claude(&RunConfig {
                     executor: "custom".to_string(),
                     executor_cmd: run_cfg.executor_cmd.clone(),
                     ..RunConfig::default()
                 }));
+        let hook_base = (work_dir != self.repo_root)
+            .then_some(self.base_sha.as_deref())
+            .flatten();
         if aaf_domain::pipeline::normalize_executor_id(effective_exec) == "claude"
             || uses_custom_claude
         {
-            let hook_base = (work_dir != self.repo_root)
-                .then_some(self.base_sha.as_deref())
-                .flatten();
             if let Err(problem) =
                 hook_settings::check_worktree(&work_dir, &self.ctx.path_var, hook_base)
             {
                 return StageOutcome::Failed { reason: problem };
             }
+        } else if writer_requires_hook(effective_exec, &custom_cmd)
+            && let Err(problem) = hook_settings::check_worktree_for_executor(
+                &work_dir,
+                &self.ctx.path_var,
+                hook_base,
+                effective_exec,
+            )
+        {
+            return StageOutcome::Failed { reason: problem };
         }
 
         let stage_run_cfg = match build_stage_run_config(
