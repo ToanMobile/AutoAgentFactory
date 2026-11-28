@@ -276,7 +276,9 @@ pub(super) fn feeds_protected(feeder: Option<&Cmd>, decomp: &Decompress, ctx: &C
 
 fn exec_end(args: &[String], at: usize) -> usize {
     (at + 1..args.len())
-        .find(|&end| matches!(args[end].as_str(), ";" | "+"))
+        .find(|&end| {
+            args[end] == ";" || (args[end] == "+" && end - 1 > at && args[end - 1] == "{}")
+        })
         .unwrap_or(args.len())
 }
 
@@ -290,7 +292,7 @@ fn primary_args(tok: &str) -> Option<usize> {
         | "-atime" | "-cmin" | "-cnewer" | "-ctime" | "-mmin" | "-mnewer" | "-mtime" | "-Bmin"
         | "-Bnewer" | "-Btime" | "-newer" | "-used" | "-type" | "-xtype" | "-size" | "-perm"
         | "-flags" | "-user" | "-uid" | "-group" | "-gid" | "-inum" | "-links" | "-samefile"
-        | "-fstype" | "-context" => Some(1),
+        | "-fstype" | "-context" | "-xattrname" => Some(1),
         "-a"
         | "-and"
         | "-d"
@@ -305,6 +307,7 @@ fn primary_args(tok: &str) -> Option<usize> {
         | "-warn"
         | "-xdev"
         | "-acl"
+        | "-xattr"
         | "-empty"
         | "-executable"
         | "-false"
