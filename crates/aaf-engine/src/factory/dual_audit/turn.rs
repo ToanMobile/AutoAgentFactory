@@ -14,7 +14,7 @@ use serde_json::json;
 use super::matrix::{collect_score_issues, summarize_issues, to_verdict_rec};
 use super::{
     PartialTurnResult, build_dual_audit_record, canon_root, dual_audit_satisfies_policy,
-    dual_mech_score, emit_fail_and_rework, fp_io, sign_and_emit_pass,
+    dual_mech_score, dual_mech_score_with, emit_fail_and_rework, fp_io, sign_and_emit_pass,
 };
 use crate::cross_audit::AUDIT_EXECUTOR;
 use crate::cross_audit::dual_verdict::{
@@ -248,8 +248,54 @@ fn make_partial_record(
     (rec, score_fails, persist)
 }
 
+/// The scoring knobs of one reviewer turn, taken from `[cross_audit]`.
+#[derive(Debug, Clone)]
+pub(crate) struct ReviewPolicy {
+    pub score_gate: bool,
+    pub min_average_score: u8,
+    pub min_criterion_score: u8,
+    pub max_diff_bytes: usize,
+}
+
+impl ReviewPolicy {
+    pub(crate) fn from_cross_audit(cfg: &aaf_domain::config::CrossAuditConfig) -> Self {
+        Self {
+            score_gate: cfg.score_gate,
+            min_average_score: cfg.min_average_score,
+            min_criterion_score: cfg.min_criterion_score,
+            max_diff_bytes: cfg.max_diff_bytes,
+        }
+    }
+}
+
+/// What a reviewer turn is told rather than reads from the factory's state.
+#[derive(Debug, Clone)]
+pub(crate) struct ReviewInputs {
+    pub policy: ReviewPolicy,
+    /// `None`: review the task branch's own diff (`GitOps::diff`). `Some(sha)`:
+    /// review `sha...HEAD` of the worktree (`GitOps::diff_from`), the PR's own
+    /// change however far the base has moved.
+    pub diff_base: Option<String>,
+    /// `None`: ask [`post_audit::proof_verified`] as the factory does. `Some`:
+    /// the caller already verified the proof and says so (see
+    /// [`dual_mech_score_with`]).
+    pub proof_ok: Option<bool>,
+}
+
+impl ReviewInputs {
+    /// What the factory's own dual review has always used.
+    pub(crate) fn current(deps: &Deps) -> Self {
+        Self {
+            policy: ReviewPolicy::from_cross_audit(&deps.settings.repo.cross_audit),
+            diff_base: None,
+            proof_ok: None,
+        }
+    }
+}
+
 /// Runs one blind reviewer turn in a clean base tree with 1 format-repair retry,
 /// signs `audit_partial\0` on PASS/FAIL, and emits `EventKind::DualReviewTurn`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_reviewer_turn(
     deps: &Deps,
     target: &StageTarget,
@@ -258,11 +304,15 @@ pub(crate) fn run_reviewer_turn(
     receipt: &Receipt,
     plan_hash: &str,
     grant: &Grant,
+    inputs: &ReviewInputs,
 ) -> PortResult<PartialTurnResult> {
     let task = deps.store.get_task(&job.task_id)?;
-    let cfg = &deps.settings.repo.cross_audit;
-    let mech = dual_mech_score(deps, job, receipt);
-    let raw_diff = deps.git.diff(&job.worktree)?;
+    let cfg = &inputs.policy;
+    let mech = dual_mech_score_with(deps, job, receipt, inputs.proof_ok);
+    let raw_diff = match inputs.diff_base.as_deref() {
+        None => deps.git.diff(&job.worktree)?,
+        Some(base) => deps.git.diff_from(&job.worktree, base)?,
+    };
     if let Some(reason) = short_circuit_audit_reason_with_limit(&raw_diff, cfg.max_diff_bytes) {
         let out = DualReviewerOutcome::Inconclusive { reason };
         let (rec, _, _) =

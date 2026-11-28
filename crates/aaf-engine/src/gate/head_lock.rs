@@ -12,10 +12,16 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use super::changes::{self, AddedLines, Change};
 use super::{GIT_TIMEOUT, GateError, base, static_checks};
 
+mod always_human;
 mod dir;
+mod effective;
 mod nested;
 
+pub use always_human::{always_human_link_reason, always_human_reason};
 pub(super) use dir::content_hash;
+// `evaluate_changes_effective` is for the adopt lane (step 3).
+#[allow(unused_imports)]
+pub(crate) use effective::{evaluate_changes_effective, evaluate_changes_with_common};
 
 fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateError> {
     let mut builder = GlobSetBuilder::new();
@@ -274,52 +280,6 @@ fn valid_approval(
         return check(&approval).then_some(approval);
     }
     None
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_changes_with_common(
-    data_dir: &Path,
-    repo_root: &Path,
-    common_root: Option<&Path>,
-    cfg: &RepoConfig,
-    extra_hard_globs: &[String],
-    (base, changes): (&str, &[Change]),
-    added: &[AddedLines],
-    require_independent: bool,
-) -> Result<HeadLockReport, GateError> {
-    let effective =
-        changes::with_ignored_matching(repo_root, extra_hard_globs, changes, GIT_TIMEOUT)?;
-    let mut hash = |path: &str| content_hash(repo_root, path);
-    let (locked_changes, lock_fp, _) = locked_with(
-        (repo_root, base),
-        cfg,
-        extra_hard_globs,
-        &effective,
-        added,
-        &mut hash,
-    )?;
-    if locked_changes.is_empty() {
-        return Ok(HeadLockReport {
-            status: LockStatus::Clear,
-            lock_fp,
-            locked_changes,
-            approval: None,
-        });
-    }
-    let has_hard_lock = locked_changes.iter().any(|c| c.tier == LockTier::Hard);
-    let need_independent =
-        require_independent || cfg.cross_audit.require_different_provider || has_hard_lock;
-    let approval = valid_approval(data_dir, repo_root, common_root, &lock_fp, need_independent);
-    Ok(HeadLockReport {
-        status: if approval.is_some() {
-            LockStatus::Approved
-        } else {
-            LockStatus::Blocked
-        },
-        lock_fp,
-        locked_changes,
-        approval,
-    })
 }
 
 /// Head-lock state of the work tree against `base_sha`. Fails closed: when

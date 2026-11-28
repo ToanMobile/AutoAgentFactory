@@ -301,6 +301,10 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
         dry_run: args.dry_run,
         machine: cfg.global.machine.clone(),
         global_config: Some(cfg.global.clone()),
+        no_receipt_reuse: false,
+        run_commands_despite_head_lock: false,
+        strict_merged_head: false,
+        keep_non_aaf_local: false,
     };
     let progress = |event: &Progress<'_>| notice("merge", &progress_line(event));
     aaf_engine::git::ensure_plain_reflogs(&req.repo_root)
@@ -403,6 +407,18 @@ pub fn run(args: &MergeArgs, ctx: &Ctx) -> CmdResult {
                 report_task_id.as_deref(),
                 &cfg.repo,
             ))
+        }
+        // `aaf merge` never sets `run_commands_despite_head_lock`, so this cannot
+        // happen; if it ever does, it is a refusal, never a pass.
+        PrMergeOutcome::DryRunPendingHeadLock {
+            pr_number, receipt, ..
+        } => {
+            let reason = format!("PR #{pr_number} touches head-locked files without an approval");
+            let text = format!("BLOCKED (cross_approval_required): {reason}");
+            Ok(CmdOutput::policy("BLOCKED", text)
+                .field("code", json!("cross_approval_required"))
+                .field("reason", json!(reason))
+                .field("receipt", json!(receipt)))
         }
         PrMergeOutcome::Blocked {
             code,

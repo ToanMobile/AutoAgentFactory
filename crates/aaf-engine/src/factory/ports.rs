@@ -143,6 +143,13 @@ pub trait GitOps: Send + Sync {
     }
     /// The branch's diff against the base, for the cross-audit.
     fn diff(&self, worktree: &TaskWorktree) -> PortResult<String>;
+    /// The branch's diff against `base_sha` (three-dot, so a base that moved on
+    /// does not show up as deletions). Clients written before this existed
+    /// report it unsupported rather than answer with a different diff.
+    fn diff_from(&self, worktree: &TaskWorktree, base_sha: &str) -> PortResult<String> {
+        let _ = (worktree, base_sha);
+        Err(PortError::Unsupported("diff_from".to_string()))
+    }
     /// Merges the tasks' branches into a fresh integration worktree.
     fn integrate(&self, task_ids: &[String]) -> PortResult<Integration>;
     fn discard(&self, integration: &Integration) -> PortResult<()>;

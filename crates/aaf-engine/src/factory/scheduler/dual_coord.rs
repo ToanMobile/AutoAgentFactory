@@ -44,8 +44,9 @@ pub(crate) fn run_dual_job(
             let target = router
                 .and_then(|r| r.reviewer(&reviewer.id))
                 .ok_or_else(|| missing_target_err("dual review", &reviewer.id))?;
+            let inputs = dual_audit::ReviewInputs::current(deps);
             match dual_audit::run_reviewer_turn(
-                deps, target, &reviewer, &job, &receipt, &plan_hash, grant,
+                deps, target, &reviewer, &job, &receipt, &plan_hash, grant, &inputs,
             )? {
                 PartialTurnResult::Completed(rec) => {
                     let reviewer_id = rec.reviewer_id.clone();

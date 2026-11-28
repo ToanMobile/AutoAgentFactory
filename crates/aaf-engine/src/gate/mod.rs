@@ -7,6 +7,7 @@ pub mod base;
 pub mod changes;
 pub mod confine;
 pub mod docs_fast;
+mod entry;
 pub mod head_lock;
 mod helpers;
 pub mod hidden;
@@ -24,14 +25,18 @@ pub mod static_checks;
 mod tests;
 
 pub use crate::confine_core::GIT_TIMEOUT;
-use crate::throttle::{Progress, SystemProbe, Throttle};
-use aaf_domain::config::{MachineConfig, RepoConfig};
+use crate::throttle::Throttle;
+use aaf_domain::config::RepoConfig;
 use aaf_domain::gate::{CommandResult, GateMode, GateStatus, RECEIPT_SCHEMA_VERSION, Receipt};
 use aaf_domain::ports::Clock;
 use aaf_fp::fs_private as private;
 pub use base::GateRunOptions;
+pub use entry::{
+    head_lock_path_matcher, run_gate, run_gate_in, run_gate_observed, run_gate_observed_reporting,
+    run_gate_strict, run_gate_with,
+};
 pub use helpers::CommandTimeouts;
-pub(crate) use helpers::{Evidence, decide};
+pub(crate) use helpers::{Evidence, HEAD_LOCK_ONLY_NOTE, decide, head_lock_block_reason};
 pub use hidden::HiddenPolicy;
 use hidden::When;
 pub use reuse::{config_hash, repo_root_and_stats_id, stats_repo_id};
@@ -200,8 +205,11 @@ pub fn run_gate_with_options(
     };
     // A file behind an index flag does not move the fingerprint, so an
     // earlier `Clear` receipt for this tree proves nothing about it.
+    // Adopt runs (either flag) never answer from, or publish, a stored receipt.
+    let no_reuse = opts.no_receipt_reuse || opts.run_commands_despite_head_lock;
     if hidden.is_empty()
         && pre_proof_err.is_none()
+        && !no_reuse
         && let Some(receipt) = reuse::reusable_receipt(data_dir, &key, &asked)
     {
         return Ok(GateRun {
@@ -269,6 +277,7 @@ pub fn run_gate_with_options(
         && pre_proof_err.is_some()
         && hidden.is_empty()
         && head_lock.status != aaf_domain::gate::LockStatus::Blocked
+        && !no_reuse
         && let Some(receipt) = reuse::reusable_receipt(data_dir, &key, &asked)
     {
         return Ok(GateRun {
@@ -283,6 +292,21 @@ pub fn run_gate_with_options(
         .then_some(pre_proof_err.as_deref())
         .flatten();
 
+    // With the flag on and the head lock blocking, the verdict that decides
+    // whether commands, proof and oracle run leaves the lock out; the lock is
+    // put back into the receipt below.
+    let despite_head_lock = opts.run_commands_despite_head_lock
+        && head_lock.status == aaf_domain::gate::LockStatus::Blocked;
+    let masked_head_lock;
+    let verdict_head_lock: &aaf_domain::gate::HeadLockReport = if despite_head_lock {
+        masked_head_lock = aaf_domain::gate::HeadLockReport {
+            status: aaf_domain::gate::LockStatus::Clear,
+            ..head_lock.clone()
+        };
+        &masked_head_lock
+    } else {
+        &head_lock
+    };
     let verdict = |hidden: &[String],
                    proof_block: Option<&str>,
                    commands: Option<&[CommandResult]>,
@@ -290,7 +314,7 @@ pub fn run_gate_with_options(
         decide(&Evidence {
             hidden,
             critical_findings: statics.critical(),
-            head_lock: &head_lock,
+            head_lock: verdict_head_lock,
             store: &store,
             proof_block,
             commands,
@@ -451,6 +475,19 @@ pub fn run_gate_with_options(
     } else {
         (status, reasons)
     };
+    // The lock is real: whatever the commands said, the receipt stays
+    // `Blocked` and names the lock, so it can never pass as a clear gate.
+    let (status, reasons) = if despite_head_lock {
+        let mut reasons = reasons;
+        // Said by the verdict that left the lock out: nothing else blocks.
+        if status == GateStatus::Clear {
+            reasons.insert(0, HEAD_LOCK_ONLY_NOTE.to_string());
+        }
+        reasons.insert(0, head_lock_block_reason(&head_lock));
+        (GateStatus::Blocked, reasons)
+    } else {
+        (status, reasons)
+    };
 
     let receipt = Receipt {
         schema_version: RECEIPT_SCHEMA_VERSION,
@@ -469,8 +506,9 @@ pub fn run_gate_with_options(
         store_compliance: store,
         created_at: clock.now(),
     };
-    let write_common = opts.allow_common_receipt_write
-        || (clean_ignored_before && reuse::worktree_has_no_ignored_files(repo_root));
+    let write_common = !no_reuse
+        && (opts.allow_common_receipt_write
+            || (clean_ignored_before && reuse::worktree_has_no_ignored_files(repo_root)));
     reuse::persist_receipt(
         data_dir,
         &key,
@@ -484,115 +522,4 @@ pub fn run_gate_with_options(
         reused: false,
         unconfined,
     })
-}
-
-/// [`run_gate_with`] that also reports throttle progress to the caller.
-pub fn run_gate_observed(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    mode: GateMode,
-    clock: &dyn Clock,
-    machine: &MachineConfig,
-    progress: &dyn Fn(&Progress<'_>),
-) -> Result<Receipt, GateError> {
-    run_gate_observed_reporting(data_dir, repo_root, cfg, mode, clock, machine, progress)
-        .map(|run| run.receipt)
-}
-
-/// [`run_gate_observed`] that also says whether the receipt was reused.
-pub fn run_gate_observed_reporting(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    mode: GateMode,
-    clock: &dyn Clock,
-    machine: &MachineConfig,
-    progress: &dyn Fn(&Progress<'_>),
-) -> Result<GateRun, GateError> {
-    let probe = SystemProbe::detect();
-    let throttle = Throttle::system(machine, &probe, progress);
-    run_gate_reporting(data_dir, repo_root, cfg, mode, clock, &throttle)
-}
-
-/// [`run_gate_observed`] with [`HiddenPolicy::Remove`] for agent worktrees (never developer checkouts).
-pub fn run_gate_strict(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    mode: GateMode,
-    clock: &dyn Clock,
-    machine: &MachineConfig,
-    progress: &dyn Fn(&Progress<'_>),
-) -> Result<Receipt, GateError> {
-    let probe = SystemProbe::detect();
-    let throttle = Throttle::system(machine, &probe, progress);
-    run_gate_policy(
-        data_dir,
-        repo_root,
-        cfg,
-        mode,
-        clock,
-        &throttle,
-        HiddenPolicy::Remove,
-    )
-    .map(|run| run.receipt)
-}
-
-/// Runs the gate under this machine's load limits (docs/PLAN.md C.11).
-pub fn run_gate_with(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    mode: GateMode,
-    clock: &dyn Clock,
-    machine: &MachineConfig,
-) -> Result<Receipt, GateError> {
-    run_gate_observed(data_dir, repo_root, cfg, mode, clock, machine, &|_| {})
-}
-
-/// Runs the gate with default machine limits and stores the signed receipt under `data_dir`.
-pub fn run_gate_in(
-    data_dir: &Path,
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    mode: GateMode,
-    clock: &dyn Clock,
-) -> Result<Receipt, GateError> {
-    run_gate_with(
-        data_dir,
-        repo_root,
-        cfg,
-        mode,
-        clock,
-        &MachineConfig::default(),
-    )
-}
-
-/// Fixed entry point (docs/PLAN.md C.5); the data directory comes from the environment.
-pub fn run_gate(
-    repo_root: &Path,
-    cfg: &RepoConfig,
-    mode: GateMode,
-    clock: &dyn Clock,
-) -> Result<Receipt, GateError> {
-    run_gate_in(&aaf_fp::data_dir()?, repo_root, cfg, mode, clock)
-}
-
-/// Compiles a lightweight predicate checking whether a repo-relative path matches
-/// any configured `gate.head_lock_globs` (case-insensitive for non-test globs).
-pub fn head_lock_path_matcher(globs: &[String]) -> impl Fn(&str) -> bool {
-    let mut b = globset::GlobSetBuilder::new();
-    for g in globs {
-        let ci = !aaf_domain::config::TEST_FILE_GLOBS.contains(&g.as_str());
-        if let Ok(pat) = globset::GlobBuilder::new(g)
-            .literal_separator(true)
-            .case_insensitive(ci)
-            .build()
-        {
-            b.add(pat);
-        }
-    }
-    let set = b.build().ok();
-    move |path: &str| set.as_ref().is_some_and(|s| s.is_match(path))
 }

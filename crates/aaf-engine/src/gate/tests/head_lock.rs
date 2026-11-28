@@ -405,3 +405,40 @@ fn nested_git_repo_at_locked_dir_has_approvable_lock_fp_that_tracks_edits() {
     assert_ne!(after.lock_fp, before.lock_fp);
     assert_eq!(after.locked_changes, locked);
 }
+
+#[test]
+fn the_effective_changes_come_back_with_the_report() {
+    use super::super::changes;
+    use super::super::head_lock::evaluate_changes_effective;
+
+    let repo = Repo::new();
+    repo.append("tests/a_test.rs", "// weakened\n");
+    repo.write("src/new.rs", "pub fn n() {}\n");
+    let set = changes::collect(repo.root(), "main", super::super::GIT_TIMEOUT).unwrap();
+    let (report, effective) = evaluate_changes_effective(
+        repo.data_dir(),
+        repo.root(),
+        None,
+        &RepoConfig::default(),
+        &[],
+        ("main", &set.changes),
+        &[],
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.status, LockStatus::Blocked);
+    assert_eq!(effective.changes, set.changes);
+    // Same report as the function every other caller uses.
+    let plain = super::super::head_lock::evaluate_changes_with_common(
+        repo.data_dir(),
+        repo.root(),
+        None,
+        &RepoConfig::default(),
+        &[],
+        ("main", &set.changes),
+        &[],
+        false,
+    )
+    .unwrap();
+    assert_eq!(plain, report);
+}

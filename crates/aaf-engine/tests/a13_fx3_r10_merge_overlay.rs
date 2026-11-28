@@ -133,6 +133,10 @@ fn run_merge(work: &Path, data: &Path, head: &str) -> (PrMergeOutcome, usize) {
             ..MachineConfig::default()
         },
         global_config: None,
+        no_receipt_reuse: false,
+        run_commands_despite_head_lock: false,
+        strict_merged_head: false,
+        keep_non_aaf_local: false,
     };
     let gh = FakeGh {
         pr: PrInfo {

@@ -298,7 +298,8 @@ pub(super) fn land_pr_merge(
             unblock::root_succeeded(deps, task)?;
             Ok(Resolution::Settled(TaskState::Review))
         }
-        Ok(PrMergeOutcome::DryRunClear { .. }) => {
+        // A dry run never comes from the factory: leave the task in Review.
+        Ok(PrMergeOutcome::DryRunClear { .. } | PrMergeOutcome::DryRunPendingHeadLock { .. }) => {
             let why = format!("pull request {url} (dry-run clear)");
             deps.move_to(&task.id, TaskState::Review, None, &why)?;
             unblock::root_succeeded(deps, task)?;

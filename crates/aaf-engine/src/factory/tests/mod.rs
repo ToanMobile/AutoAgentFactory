@@ -36,6 +36,7 @@ mod pr_feedback;
 mod proof_needs_human;
 mod real_run;
 mod rebase_hooks;
+mod review_inputs;
 mod round;
 mod selection;
 mod startup_sweep;

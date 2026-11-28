@@ -171,6 +171,10 @@ require_different_provider = false
                 ..MachineConfig::default()
             },
             global_config: None,
+            no_receipt_reuse: false,
+            run_commands_despite_head_lock: false,
+            strict_merged_head: false,
+            keep_non_aaf_local: false,
         }
     }
 }
@@ -192,8 +196,7 @@ fn pr_info(number: u64, branch: &str, head: &str) -> PrInfo {
 #[test]
 fn merge_blocks_head_mismatch_and_unapproved_or_same_account_tier1_edit() {
     let fx = Fixture::new("true");
-    // Cargo.toml is Tier-1 (LockTier::Hard): same_account=true MUST be rejected
-    // even when require_different_provider = false.
+    // Cargo.toml is Tier-1 (Hard): same_account=true MUST be rejected even when require_different_provider = false.
     let head = fx.make_pr_branch("feat/edit-manifest", |root| {
         fs::write(
             root.join("Cargo.toml"),
@@ -224,8 +227,7 @@ fn merge_blocks_head_mismatch_and_unapproved_or_same_account_tier1_edit() {
     }
     assert_eq!(gh.merged_calls.load(Ordering::SeqCst), 0);
 
-    // 3. Signing a same_account=true approval MUST STILL BE REJECTED for Tier-1
-    // (even though repo config had require_different_provider = false).
+    // 3. Signing a same_account=true approval MUST STILL BE REJECTED for Tier-1 (despite require_different_provider = false).
     git(fx.work.path(), &["checkout", "feat/edit-manifest"]);
     let mut cfg = RepoConfig::default();
     cfg.gate.base_ref = "origin/main".to_string();
@@ -396,8 +398,7 @@ fn approval_unlocks_merge_when_pr_tightens_head_lock_globs_and_edits_newly_locke
     let fx = Fixture::new("true");
     // PR adds `docs/plan.md` to head_lock_globs in `.autofactory/config.toml`
     // AND modifies `docs/plan.md`. Approving on the PR branch uses the PR's
-    // config (2 locked files), while `aaf merge` evaluates against origin/main's
-    // trusted base config (1 locked file: `.autofactory/config.toml`).
+    // config (2 locked files), while `aaf merge` evaluates against origin/main's trusted base config (1 locked file).
     let head = fx.make_pr_branch("chore/tighten-lock", |root| {
         let cfg = fs::read_to_string(root.join(".autofactory/config.toml")).unwrap();
         let updated = cfg.replace(
@@ -577,8 +578,7 @@ fn a13_scratch_merge_never_runs_pr_controlled_hooks_from_relative_hooks_path() {
             );
         }
     });
-    // A repo-relative hooksPath (husky-style) resolves inside the scratch
-    // worktree, i.e. to files the PR itself controls.
+    // A repo-relative hooksPath (husky-style) resolves inside the scratch worktree, i.e. to PR-controlled files.
     git(fx.work.path(), &["config", "core.hooksPath", ".githooks"]);
     let gh = FakeGh {
         pr: pr_info(569, "feat/hooked", &head),

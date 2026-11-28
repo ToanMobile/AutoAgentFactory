@@ -49,6 +49,21 @@ pub(crate) struct Evidence<'a> {
     pub mode: GateMode,
 }
 
+/// Written into a receipt that `run_commands_despite_head_lock` forced to
+/// `Blocked` when everything else (commands, proof, oracle) passed: the head
+/// lock is then the only block. Nothing else writes this text.
+pub(crate) const HEAD_LOCK_ONLY_NOTE: &str =
+    "note: head lock is the only block; commands, proof and oracle passed";
+
+/// The reason text of a head lock that blocks, shared by the verdict and by
+/// callers that re-add it after masking the lock.
+pub(crate) fn head_lock_block_reason(report: &HeadLockReport) -> String {
+    format!(
+        "head lock: {} locked file(s) changed without a signed approval",
+        report.locked_changes.len()
+    )
+}
+
 /// Blocking reasons found before any command runs.
 fn early_blocks(evidence: &Evidence<'_>) -> Vec<String> {
     // First: with files nobody signed in the tree, nothing below describes
@@ -61,10 +76,7 @@ fn early_blocks(evidence: &Evidence<'_>) -> Vec<String> {
         ));
     }
     if evidence.head_lock.status == LockStatus::Blocked {
-        reasons.push(format!(
-            "head lock: {} locked file(s) changed without a signed approval",
-            evidence.head_lock.locked_changes.len()
-        ));
+        reasons.push(head_lock_block_reason(evidence.head_lock));
     }
     if evidence.store.status == StoreStatus::Blocked {
         reasons.push(format!(

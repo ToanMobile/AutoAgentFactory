@@ -17,8 +17,8 @@ mod policy;
 
 pub use super::rework_filter::{findings_from_review_issues, is_valid_rework_finding};
 pub use policy::{
-    audit_cmd_is_claude, fall_back_to_one_provider, fill_default_reviewers, resolve_audit_policy,
-    same_audit_provider,
+    adopt_reviewers, audit_cmd_is_claude, fall_back_to_one_provider, fill_default_reviewers,
+    resolve_audit_policy, same_audit_provider,
 };
 
 /// Effective audit provider name from config (`[cross_audit].executor` when

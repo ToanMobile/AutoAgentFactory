@@ -9,6 +9,10 @@ pub mod pr_merge;
 #[cfg(test)]
 mod pr_merge_ci_tests;
 mod pr_merge_support;
+pub(crate) mod pr_verify;
 
 pub use pr_cleanup::{PrCleanupReport, cleanup_merged_pr_local, main_work_tree};
-pub use pr_merge::{PrMergeOutcome, PrMergeRequest, merge_pr, merge_pr_with_cwd, sync_local_base};
+pub use pr_merge::{
+    PrMergeOutcome, PrMergeRequest, merge_pr, merge_pr_with_check, merge_pr_with_cwd,
+    sync_local_base,
+};

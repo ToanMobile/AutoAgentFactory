@@ -54,6 +54,8 @@ pub struct GitState {
     pub pr_notes: Vec<(String, Option<String>)>,
     /// Optional per-worktree diff override.
     pub diffs: HashMap<PathBuf, String>,
+    /// `base_sha` of every `diff_from` call.
+    pub diff_from_calls: Vec<String>,
     /// Optional PR feedback snapshot returned by `pr_feedback` (keyed by PR number).
     pub pr_feedback: HashMap<u64, PortResult<Option<PrFeedbackSnapshot>>>,
     /// Number of times `GitOps::pr_feedback` was called.
@@ -114,6 +116,14 @@ impl GitOps for FakeGit {
               fn base() {{}}\n\
              +change of {id}\n"
         ))
+    }
+    fn diff_from(&self, worktree: &TaskWorktree, base_sha: &str) -> PortResult<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .diff_from_calls
+            .push(base_sha.to_string());
+        self.diff(worktree)
     }
     fn integrate(&self, task_ids: &[String]) -> PortResult<Integration> {
         let mut state = self.0.lock().unwrap();

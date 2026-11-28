@@ -439,6 +439,10 @@ fn pr_merge_blocks_when_proof_needs_human_and_handover_marks_missing() {
             proof: GlobalProofConfig::default(),
             ..GlobalConfig::default()
         }),
+        no_receipt_reuse: false,
+        run_commands_despite_head_lock: false,
+        strict_merged_head: false,
+        keep_non_aaf_local: false,
     };
     let PrMergeOutcome::Blocked { code, reason, .. } =
         merge_pr(&req, &gh, &FixedClock(1000), &|_| {}).unwrap()

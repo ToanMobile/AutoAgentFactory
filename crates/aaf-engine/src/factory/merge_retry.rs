@@ -232,7 +232,9 @@ pub(crate) fn retry_task(deps: &Deps, task: &Task) -> PortResult<bool> {
             Ok(false)
         }
         // A dry run never comes from the factory; leave the task alone.
-        PrMergeOutcome::DryRunClear { .. } => Ok(false),
+        PrMergeOutcome::DryRunClear { .. } | PrMergeOutcome::DryRunPendingHeadLock { .. } => {
+            Ok(false)
+        }
     }
 }
 

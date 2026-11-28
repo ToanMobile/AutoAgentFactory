@@ -365,6 +365,10 @@ fn pr_merge_catches_force_added_gitignored_secret_and_validates_remote() {
             dry_run: true,
             machine: load_free_machine(),
             global_config: None,
+            no_receipt_reuse: false,
+            run_commands_despite_head_lock: false,
+            strict_merged_head: false,
+            keep_non_aaf_local: false,
         };
         let err = merge_pr(&req, &gh, &FixedClock(1), &noop).unwrap_err();
         assert!(matches!(err, GitError::Invalid(_)), "{bad_remote}: {err:?}");
@@ -387,6 +391,10 @@ fn pr_merge_catches_force_added_gitignored_secret_and_validates_remote() {
         dry_run: false,
         machine: load_free_machine(),
         global_config: None,
+        no_receipt_reuse: false,
+        run_commands_despite_head_lock: false,
+        strict_merged_head: false,
+        keep_non_aaf_local: false,
     };
     let out = merge_pr(&req, &gh, &FixedClock(2), &noop).unwrap();
     match out {

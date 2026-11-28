@@ -25,6 +25,15 @@ pub struct GateRunOptions<'a> {
     /// Optional Tier-1 `[proof].secret_env_allowlist` override; when `None`,
     /// proof flows read it from the global config file.
     pub proof_secret_allowlist: Option<&'a [String]>,
+    /// Never answer from a stored receipt (this worktree's or the common one)
+    /// and never publish a common receipt: the commands run for real. Used by
+    /// `aaf board adopt`, whose verdict must not come from a chat run.
+    pub no_receipt_reuse: bool,
+    /// When the head lock is the only thing blocking, still run the commands,
+    /// proof and oracle so a reviewer can be shown a real verdict. The receipt
+    /// is then forced back to `Blocked` (the lock is real), never reused and
+    /// never published as a common receipt. Callers set it only for a dry run.
+    pub run_commands_despite_head_lock: bool,
 }
 
 pub(crate) use crate::confine_core::git_refs::{

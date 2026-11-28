@@ -18,7 +18,8 @@ pub use matrix::{
     DeferredSiblingOutcome, DualMatrixDecision, build_dual_audit_record, decide_dual_matrix,
     dual_audit_satisfies_policy, governing_reviewer, merge_deferred_outcome, validate_dual_quorum,
 };
-pub(crate) use turn::{run_adjudicate_turn, run_reviewer_turn};
+#[allow(unused_imports)]
+pub(crate) use turn::{ReviewInputs, ReviewPolicy, run_adjudicate_turn, run_reviewer_turn};
 
 use super::audit_backend::audit_rejection_signal;
 use super::post_audit;
@@ -66,8 +67,31 @@ fn canon_root(job: &GateJob) -> String {
 }
 
 fn dual_mech_score(deps: &Deps, job: &GateJob, receipt: &Receipt) -> u8 {
-    let proof_ok = post_audit::proof_verified(deps, &job.worktree.path, receipt);
-    compute_mechanical_score(receipt, proof_ok, false, false).score
+    dual_mech_score_with(deps, job, receipt, None)
+}
+
+/// [`dual_mech_score`] with the proof verdict optionally given by the caller.
+///
+/// `Some(ok)` is `aaf board adopt`: the receipt comes from a dry run on the
+/// merged tree whose scratch worktree is gone, so the proof cannot be asked
+/// again, and a receipt that is `Blocked` only by the head lock (which adopt
+/// settles itself, after both reviewers) is scored as if it were `Clear`. Any
+/// other `Blocked` receipt keeps its score of 0.
+pub(crate) fn dual_mech_score_with(
+    deps: &Deps,
+    job: &GateJob,
+    receipt: &Receipt,
+    proof_ok: Option<bool>,
+) -> u8 {
+    let Some(proof_ok) = proof_ok else {
+        let proof_ok = post_audit::proof_verified(deps, &job.worktree.path, receipt);
+        return compute_mechanical_score(receipt, proof_ok, false, false).score;
+    };
+    let mut scored = receipt.clone();
+    if crate::pr_ops::pr_verify::pending_head_lock_only(&scored) {
+        scored.status = aaf_domain::gate::GateStatus::Clear;
+    }
+    compute_mechanical_score(&scored, proof_ok, false, false).score
 }
 
 /// Loads valid signed `audit_partial\0` records bound to `(repo_root, tree_fp,

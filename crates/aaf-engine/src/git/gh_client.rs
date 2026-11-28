@@ -56,6 +56,26 @@ pub struct PrInfo {
     pub is_cross_repository: bool,
     #[serde(default)]
     pub merge_commit: Option<MergeCommitRef>,
+    /// Who opened the PR (`None` when `gh` reports no author, e.g. a deleted account).
+    #[serde(default)]
+    pub author: Option<PrAuthor>,
+    /// The PR description; `gh` may send `null` for an empty one.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub body: String,
+}
+
+/// The `author` object of `gh pr view --json author`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PrAuthor {
+    #[serde(default)]
+    pub login: String,
+}
+
+fn null_as_default<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(de)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,7 +88,7 @@ pub struct PrCheck {
 }
 
 /// External GitHub CLI operations; faked in integration tests.
-pub trait GhClient: Sync {
+pub trait GhClient: Send + Sync {
     fn view_pr(&self, repo_root: &Path, pr_number: u64) -> Result<PrInfo, GitError>;
     fn pr_checks(&self, repo_root: &Path, pr_number: u64) -> Result<Vec<PrCheck>, GitError>;
     fn merge_pr(
@@ -80,6 +100,12 @@ pub trait GhClient: Sync {
         subject: Option<&str>,
         body_file: Option<&Path>,
     ) -> Result<(), GitError>;
+    /// Posts `body` as a comment on the PR. The default does nothing, so
+    /// every client written before comments existed keeps compiling.
+    fn comment_pr(&self, repo_root: &Path, pr_number: u64, body: &str) -> Result<(), GitError> {
+        let _ = (repo_root, pr_number, body);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -119,7 +145,7 @@ impl GhClient for SystemGh {
                 "view",
                 &pr,
                 "--json",
-                "number,state,headRefOid,headRefName,baseRefName,mergeable,isDraft,title,url,isCrossRepository,mergeCommit",
+                "number,state,headRefOid,headRefName,baseRefName,mergeable,isDraft,title,url,isCrossRepository,mergeCommit,author,body",
             ],
         )?;
         serde_json::from_str(&out)
@@ -184,5 +210,87 @@ impl GhClient for SystemGh {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         run_gh(repo_root, &refs)?;
         Ok(())
+    }
+
+    fn comment_pr(&self, repo_root: &Path, pr_number: u64, body: &str) -> Result<(), GitError> {
+        let pr = pr_number.to_string();
+        // `--body=` keeps a body that starts with `-` from reading as a flag.
+        let body_arg = format!("--body={body}");
+        run_gh(repo_root, &["pr", "comment", &pr, &body_arg])?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str =
+        r#""number":1,"state":"OPEN","headRefOid":"a","headRefName":"b","baseRefName":"main""#;
+
+    fn parse(extra: &str) -> PrInfo {
+        serde_json::from_str(&format!("{{{BASE}{extra}}}")).unwrap()
+    }
+
+    #[test]
+    fn author_and_body_are_read() {
+        let pr = parse(r#","author":{"login":"alex"},"body":"hello""#);
+        assert_eq!(
+            pr.author,
+            Some(PrAuthor {
+                login: "alex".to_string()
+            })
+        );
+        assert_eq!(pr.body, "hello");
+    }
+
+    #[test]
+    fn old_json_without_them_still_parses() {
+        let pr = parse("");
+        assert_eq!(pr.author, None);
+        assert_eq!(pr.body, "");
+    }
+
+    #[test]
+    fn a_null_author_or_body_is_accepted() {
+        let pr = parse(r#","author":null,"body":null"#);
+        assert_eq!(pr.author, None);
+        assert_eq!(pr.body, "");
+    }
+
+    struct Old;
+    impl GhClient for Old {
+        fn view_pr(&self, _: &Path, _: u64) -> Result<PrInfo, GitError> {
+            Ok(PrInfo::default())
+        }
+        fn pr_checks(&self, _: &Path, _: u64) -> Result<Vec<PrCheck>, GitError> {
+            Ok(Vec::new())
+        }
+        fn merge_pr(
+            &self,
+            _: &Path,
+            _: u64,
+            _: &str,
+            _: MergeStrategy,
+            _: Option<&str>,
+            _: Option<&Path>,
+        ) -> Result<(), GitError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_client_without_comment_pr_still_works_and_comments_nowhere() {
+        // Compiles with no `comment_pr`, and the default does nothing.
+        Old.comment_pr(Path::new("."), 1, "\u{1F916} aaf-bot: hi")
+            .unwrap();
+    }
+
+    #[test]
+    fn a_client_is_send() {
+        fn needs_send<T: Send>(_: &T) {}
+        needs_send(&Old);
+        let boxed: Box<dyn GhClient> = Box::new(Old);
+        needs_send(&boxed);
     }
 }

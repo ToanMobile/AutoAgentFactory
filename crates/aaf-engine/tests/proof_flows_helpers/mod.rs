@@ -166,6 +166,8 @@ impl GhClient for FakeGh {
             mergeable: "MERGEABLE".into(),
             is_cross_repository: false,
             merge_commit: None,
+            author: None,
+            body: String::new(),
         })
     }
 

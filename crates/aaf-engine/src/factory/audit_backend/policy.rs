@@ -250,6 +250,63 @@ pub fn fill_default_reviewers(cfg: &mut CrossAuditConfig, run_executor: &str) ->
     None
 }
 
+/// The two reviewers `aaf board adopt` runs on a PR: real built-in providers
+/// of two different canonical providers (`gemini` and `antigravity` are one),
+/// each in `installed`, whatever `cross_audit.dual_review` says. Listed
+/// `[[cross_audit.reviewers]]` come first, then `[run].executor` and the
+/// resolved auditor, as [`fill_default_reviewers`] would pick them.
+///
+/// Empty when fewer than two providers qualify: there is no second opinion to
+/// ask for, and the caller must refuse rather than fall back to one reviewer.
+pub fn adopt_reviewers(
+    cfg: &aaf_domain::config::RepoConfig,
+    installed: &[&str],
+) -> Vec<aaf_domain::pipeline::ReviewerConfig> {
+    use aaf_domain::pipeline::{ReviewerConfig, is_known_real_provider, is_known_real_reviewer};
+    let cross = &cfg.cross_audit;
+    let run = normalize_executor_id(&cfg.run.executor);
+    let auditor = normalize_executor_id(super::configured_audit_provider(&run, cross));
+    let default_reviewer = |executor: &str, model: &str, effort: &str| ReviewerConfig {
+        id: executor.to_string(),
+        executor: executor.to_string(),
+        executor_cmd: String::new(),
+        model: model.trim().to_string(),
+        effort: effort.trim().to_string(),
+    };
+    let mut candidates: Vec<ReviewerConfig> = cross
+        .reviewers
+        .iter()
+        .filter(|r| is_known_real_reviewer(r))
+        .cloned()
+        .collect();
+    // The runner and the auditor only stand in when they are plain providers.
+    if cross.executor_cmd.trim().is_empty() {
+        if is_known_real_provider(&run) {
+            candidates.push(default_reviewer(&run, "", ""));
+        }
+        if is_known_real_provider(&auditor) {
+            candidates.push(default_reviewer(&auditor, &cross.model, &cross.effort));
+        }
+    }
+    let mut picked: Vec<ReviewerConfig> = Vec::new();
+    for cand in candidates {
+        let provider = canonical_provider(&cand.executor);
+        let present = installed.iter().any(|i| canonical_provider(i) == provider);
+        if present
+            && !picked
+                .iter()
+                .any(|p| canonical_provider(&p.executor) == provider)
+        {
+            picked.push(cand);
+        }
+    }
+    picked.truncate(2);
+    if picked.len() < 2 {
+        picked.clear();
+    }
+    picked
+}
+
 /// [`fill_default_reviewers`], then the same for `plan_debate`: with no
 /// `plan_challenger`, no separate auditor and no reviewer of another
 /// provider there is nobody to challenge the plan, and every task would be
@@ -390,5 +447,87 @@ mod default_reviewers_tests {
         }];
         assert_eq!(fill_default_reviewers(&mut cfg, "claude"), None);
         assert_eq!(cfg.reviewers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod adopt_reviewers_tests {
+    use super::*;
+    use aaf_domain::config::RepoConfig;
+    use aaf_domain::pipeline::ReviewerConfig;
+
+    fn cfg(run: &str, auditor: &str) -> RepoConfig {
+        let mut cfg = RepoConfig::default();
+        cfg.run.executor = run.to_string();
+        cfg.cross_audit.executor = auditor.to_string();
+        cfg
+    }
+
+    fn providers(revs: &[ReviewerConfig]) -> Vec<String> {
+        revs.iter()
+            .map(|r| canonical_provider(&r.executor))
+            .collect()
+    }
+
+    #[test]
+    fn two_installed_providers_are_picked_even_with_dual_review_off() {
+        let mut c = cfg("claude", "codex");
+        c.cross_audit.dual_review = false;
+        let revs = adopt_reviewers(&c, &["claude", "codex"]);
+        assert_eq!(providers(&revs), ["claude", "codex"]);
+    }
+
+    #[test]
+    fn the_result_does_not_depend_on_dual_review() {
+        let mut on = cfg("claude", "codex");
+        on.cross_audit.dual_review = true;
+        let mut off = on.clone();
+        off.cross_audit.dual_review = false;
+        let installed = ["claude", "codex"];
+        assert_eq!(
+            adopt_reviewers(&on, &installed),
+            adopt_reviewers(&off, &installed)
+        );
+    }
+
+    #[test]
+    fn gemini_and_antigravity_count_as_one_provider() {
+        let c = cfg("gemini", "antigravity");
+        assert!(adopt_reviewers(&c, &["gemini", "antigravity"]).is_empty());
+    }
+
+    #[test]
+    fn one_installed_provider_is_not_enough() {
+        let c = cfg("claude", "codex");
+        assert!(adopt_reviewers(&c, &["claude"]).is_empty());
+        assert!(adopt_reviewers(&c, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_custom_command_is_not_a_provider() {
+        let mut c = cfg("claude", "custom");
+        c.cross_audit.executor_cmd = "my-wrapper {prompt}".to_string();
+        assert!(adopt_reviewers(&c, &["claude", "custom"]).is_empty());
+    }
+
+    #[test]
+    fn listed_reviewers_come_first_and_the_installed_filter_applies() {
+        let mut c = cfg("claude", "codex");
+        c.cross_audit.reviewers = vec![
+            ReviewerConfig {
+                id: "g".into(),
+                executor: "antigravity".into(),
+                ..ReviewerConfig::default()
+            },
+            ReviewerConfig {
+                id: "o".into(),
+                executor: "opencode".into(),
+                ..ReviewerConfig::default()
+            },
+        ];
+        let revs = adopt_reviewers(&c, &["claude", "antigravity"]);
+        // opencode is not installed, so antigravity pairs with claude.
+        assert_eq!(providers(&revs), ["gemini", "claude"]);
+        assert_eq!(revs[0].id, "g");
     }
 }

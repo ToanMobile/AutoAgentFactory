@@ -331,6 +331,10 @@ fn merge_oracle_and_hydration_seed_from_shared_base_snapshot() {
         dry_run: true,
         machine: calm_machine(),
         global_config: None,
+        no_receipt_reuse: false,
+        run_commands_despite_head_lock: false,
+        strict_merged_head: false,
+        keep_non_aaf_local: false,
     };
     let merge_out = merge_pr(&req, &gh, &FixedClock(100), &noop).unwrap();
     assert!(

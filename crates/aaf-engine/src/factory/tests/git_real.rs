@@ -206,6 +206,29 @@ fn a_task_worktree_is_created_once_and_then_reused_with_its_work() {
 }
 
 #[test]
+fn diff_from_shows_only_the_branchs_own_change_whatever_the_base_did_since() {
+    let fx = Fixture::new();
+    let fork = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tree = fx.task("t1", "hello.txt", "hello\n");
+    // The base moves on after the branch was cut.
+    fs::write(fx.repo.join("later.txt"), "later\n").unwrap();
+    git(&fx.repo, &["add", "-A"]);
+    git(&fx.repo, &["commit", "--quiet", "-m", "later"]);
+    let tip = git(&fx.repo, &["rev-parse", "HEAD"]);
+
+    let from_fork = fx.ops.diff_from(&tree, &fork).unwrap();
+    assert!(from_fork.contains("+hello"), "{from_fork}");
+    // Three dots: the base tip gives the same, not `later.txt` as a deletion.
+    assert_eq!(fx.ops.diff_from(&tree, &tip).unwrap(), from_fork);
+    assert!(!from_fork.contains("later.txt"));
+    assert_eq!(fx.ops.diff(&tree).unwrap(), from_fork);
+    // Anything that is not a full SHA never reaches git.
+    for bad in ["--output=/tmp/x", "main", "", &fork[..39]] {
+        assert!(fx.ops.diff_from(&tree, bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
 fn integration_merges_clean_branches_and_leaves_the_conflicting_one_out() {
     let fx = Fixture::new();
     fx.task("t1", "app.txt", "one\nfrom t1\n");

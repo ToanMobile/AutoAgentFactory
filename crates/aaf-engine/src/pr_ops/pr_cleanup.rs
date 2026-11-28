@@ -277,6 +277,11 @@ fn cleanup_merged_pr_local_into(
     if pr.is_cross_repository || is_protected_branch(&pr.head_ref_name, &pr.base_ref_name) {
         return;
     }
+    // Someone else's branch (a chat's PR that `aaf board adopt` merged) stays:
+    // only branches and worktrees AAF itself made are ours to remove.
+    if req.keep_non_aaf_local && !pr.head_ref_name.starts_with(worktree::BRANCH_PREFIX) {
+        return;
+    }
     if pr.head_ref_name.contains("..") || check_branch_name(main_repo, &pr.head_ref_name).is_err() {
         report.warnings.push(format!(
             "skipped local cleanup: invalid branch name {:?}",

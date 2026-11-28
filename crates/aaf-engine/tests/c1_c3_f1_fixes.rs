@@ -201,6 +201,10 @@ impl GitOps for RealGitWithStubGh {
                 ..Default::default()
             },
             global_config: None,
+            no_receipt_reuse: false,
+            run_commands_despite_head_lock: false,
+            strict_merged_head: false,
+            keep_non_aaf_local: false,
         };
         merge_pr(&req, &self.gh, &FixedClock(1_500), &|_| {})
             .map_err(|e| PortError::Io(e.to_string()))

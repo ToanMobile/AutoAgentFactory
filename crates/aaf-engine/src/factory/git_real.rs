@@ -138,6 +138,19 @@ impl RealGit {
     }
 }
 
+/// The plain diff of `range`, submodules included.
+fn diff_range(worktree: &TaskWorktree, range: &str) -> PortResult<String> {
+    let args = [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        range,
+    ];
+    git(&worktree.path, &args).map_err(err)
+}
+
 impl GitOps for RealGit {
     fn task_worktree(&self, task_id: &str) -> PortResult<TaskWorktree> {
         let _admin = self.admin();
@@ -239,16 +252,15 @@ impl GitOps for RealGit {
     }
 
     fn diff(&self, worktree: &TaskWorktree) -> PortResult<String> {
-        let range = format!("{}...HEAD", self.start());
-        let args = [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            &range,
-        ];
-        git(&worktree.path, &args).map_err(err)
+        diff_range(worktree, &format!("{}...HEAD", self.start()))
+    }
+
+    fn diff_from(&self, worktree: &TaskWorktree, base_sha: &str) -> PortResult<String> {
+        // A revision for git: only a full SHA, never something that reads as an option.
+        if base_sha.len() != 40 || !base_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(PortError::Invalid(format!("not a SHA: {base_sha:?}")));
+        }
+        diff_range(worktree, &format!("{base_sha}...HEAD"))
     }
 
     fn integrate(&self, task_ids: &[String]) -> PortResult<Integration> {

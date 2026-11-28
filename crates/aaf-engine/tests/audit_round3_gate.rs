@@ -396,6 +396,10 @@ fn pr_merge_hits_common_receipt_cache_with_auto_base_and_rejects_same_account() 
         dry_run,
         machine: machine.clone(),
         global_config: None,
+        no_receipt_reuse: false,
+        run_commands_despite_head_lock: false,
+        strict_merged_head: false,
+        keep_non_aaf_local: false,
     };
 
     let push_branch = |branch: &str, file: &str, body: &str| {
