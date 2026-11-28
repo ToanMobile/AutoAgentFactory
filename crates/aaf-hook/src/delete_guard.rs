@@ -106,7 +106,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let args = cmd.args();
     if cmd.xargs
         && (cmd.dynamic_name || is_deleter(name))
-        && feeds_protected(cmd.feeder.as_deref(), ctx)
+        && feeds_protected(cmd.feeder.as_deref(), &rewriters::decompress_mode(cmd), ctx)
     {
         let tool = if cmd.dynamic_name {
             "a tool chosen at run time"
