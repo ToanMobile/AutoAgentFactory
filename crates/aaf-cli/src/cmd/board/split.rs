@@ -13,6 +13,7 @@ use aaf_engine::accounts::{self, DiscoveryEnv, Router};
 use aaf_engine::executors::{self, ExecEnv};
 use aaf_engine::factory::adapters::{RouterPool, SystemClock, provider_for};
 use aaf_engine::factory::prompt::sandbox_policy_for;
+use aaf_engine::factory::stage_router::writer_requires_hook;
 use aaf_engine::factory::{
     AccountPool, Deps, GitOps, IntegrationGuard, Purpose, RealGit, SelectingPool, is_frozen,
     resolve_base,
@@ -236,9 +237,9 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
         base,
     );
     let clean = IntegrationGuard::acquire(&git, &[]).map_err(port)?;
-    let hook_required = run_executor_is_claude(&cfg.repo.run);
-    if hook_required {
-        let problem = match git.base_sha() {
+    let custom_cmd = cfg.repo.run.executor_cmd.join(" ");
+    let hook_problem = if run_executor_is_claude(&cfg.repo.run) {
+        match git.base_sha() {
             Ok(base_sha) => hook_settings::check_worktree(
                 &clean.integration().tree.path,
                 &ctx.path_var,
@@ -246,12 +247,30 @@ pub fn run_split(args: &SplitArgs, ctx: &Ctx) -> CmdResult {
             )
             .err(),
             Err(e) => Some(format!("the base branch could not be read ({e})")),
-        };
-        if let Some(problem) = problem {
-            return Ok(CmdOutput::policy("refused", problem.clone())
-                .field("task_id", json!(task.id))
-                .field("reason", json!(problem)));
         }
+    } else if writer_requires_hook(&cfg.repo.run.executor, &custom_cmd) {
+        let check_exec = if custom_cmd.trim().is_empty() {
+            cfg.repo.run.executor.as_str()
+        } else {
+            "claude"
+        };
+        match git.base_sha() {
+            Ok(base_sha) => hook_settings::check_worktree_for_executor(
+                &clean.integration().tree.path,
+                &ctx.path_var,
+                Some(&base_sha),
+                check_exec,
+            )
+            .err(),
+            Err(e) => Some(format!("the base branch could not be read ({e})")),
+        }
+    } else {
+        None
+    };
+    if let Some(problem) = hook_problem {
+        return Ok(CmdOutput::policy("refused", problem.clone())
+            .field("task_id", json!(task.id))
+            .field("reason", json!(problem)));
     }
 
     let now = clock.now();
