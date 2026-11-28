@@ -49,9 +49,12 @@ pub(super) fn check(
                 return Some(deny("find -ok/-okdir with {} + does not end on GNU find"));
             }
             let open = end == args.len() || is_dyn(end);
-            if (at + 1..end)
-                .any(|i| is_dyn(i) && (open || args.get(i + 1).is_some_and(|w| w == "+")))
-            {
+            let expr = |w: &str| w.starts_with('-') || matches!(w, "(" | ")" | "!" | ",");
+            let opaque = |i: usize| {
+                open || args.get(i + 1).is_some_and(|w| w == "+")
+                    || (i + 1..end).any(|j| is_dyn(j) || expr(&args[j]))
+            };
+            if (at + 1..end).any(|i| is_dyn(i) && opaque(i)) {
                 return Some(deny("find -exec/-ok has a word built at run time"));
             }
             destructive |= exec_deleter(&args[at + 1..end]).is_some();
