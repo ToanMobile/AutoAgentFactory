@@ -512,6 +512,10 @@ pub fn render_watch_text(snap: &WatchSnapshot) -> String {
         "\n[Tasks] total={} ready={} running={} gating={} review={} blocked={} backlog={} done={} cancelled={}",
         c.total, c.ready, c.running, c.gating, c.review, c.blocked, c.backlog, c.done, c.cancelled
     );
+    if c.adopting > 0 {
+        // Shown only when present so the totals still add up (adopting is its own state).
+        let _ = writeln!(out, "         adopting={}", c.adopting);
+    }
     if snap.tasks.active.is_empty() {
         let _ = writeln!(out, "  (no active tasks)");
     }

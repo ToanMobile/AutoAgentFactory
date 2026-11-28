@@ -31,10 +31,17 @@ pub enum EventKind {
     PrFeedback,
     CostPaused,
     CostResumed,
+    /// `aaf board adopt` took over a pull request opened outside the factory
+    /// and pinned its head.
+    PrAdopted,
+    /// The adopt lane moved an adopted pull request to its next phase.
+    AdoptStep,
+    /// The adopt lane gave up on an adopted pull request (task `Cancelled`).
+    AdoptAborted,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 26] = [
+    pub const ALL: [EventKind; 29] = [
         EventKind::TaskCreated,
         EventKind::TaskStateChanged,
         EventKind::RunStarted,
@@ -61,6 +68,9 @@ impl EventKind {
         EventKind::PrFeedback,
         EventKind::CostPaused,
         EventKind::CostResumed,
+        EventKind::PrAdopted,
+        EventKind::AdoptStep,
+        EventKind::AdoptAborted,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -91,6 +101,9 @@ impl EventKind {
             EventKind::PrFeedback => "pr_feedback",
             EventKind::CostPaused => "cost_paused",
             EventKind::CostResumed => "cost_resumed",
+            EventKind::PrAdopted => "pr_adopted",
+            EventKind::AdoptStep => "adopt_step",
+            EventKind::AdoptAborted => "adopt_aborted",
         }
     }
 

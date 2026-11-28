@@ -221,6 +221,8 @@ impl Scheduler<'_> {
                 match state {
                     TaskState::Done => self.summary.done.push(job.task_id),
                     TaskState::Review => self.summary.review.push(job.task_id),
+                    // A gate never settles an Adopting task (the adopt lane owns it): count nothing.
+                    TaskState::Adopting => {}
                     _ => self.summary.blocked.push(job.task_id),
                 }
             }

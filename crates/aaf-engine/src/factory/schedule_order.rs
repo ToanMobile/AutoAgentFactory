@@ -270,6 +270,8 @@ pub fn open_review_and_scopes(tasks: &[Task]) -> (usize, Vec<Vec<String>>) {
                     scopes.push(task.scope_paths.clone());
                 }
             }
+            // Adopting: the adopt lane owns its PR and head; it does not hold a review slot
+            // or a scope the generic scheduler must keep other tasks away from.
             _ => {}
         }
     }

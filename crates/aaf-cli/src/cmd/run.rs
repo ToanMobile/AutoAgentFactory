@@ -240,10 +240,20 @@ pub(crate) fn drain_stop_reason(summary: &RunSummary) -> &'static str {
     }
 }
 
+/// States that count as outstanding work. `Adopting` counts: the adopt lane (Auto
+/// mode) still has an adopted PR to finish, so the repo is not drained. (The UI
+/// supervisor deliberately does not count it: its Drain runners skip `Adopting`.)
+const WORK_STATES: [TaskState; 4] = [
+    TaskState::Ready,
+    TaskState::Running,
+    TaskState::Gating,
+    TaskState::Adopting,
+];
+
 /// True when this repository has a task an agent could be started for.
 fn has_work_in_db(db: &Db, repo: &Path) -> Result<bool, CmdError> {
     let repo_str = repo.to_string_lossy();
-    for state in [TaskState::Ready, TaskState::Running, TaskState::Gating] {
+    for state in WORK_STATES {
         let tasks = db
             .list_tasks(Some(&repo_str), Some(state))
             .map_err(|e| err("store", e))?;
@@ -257,7 +267,7 @@ fn has_work_in_db(db: &Db, repo: &Path) -> Result<bool, CmdError> {
 /// True when this repository has a task an agent could be started for.
 fn has_work(deps: &Deps) -> Result<bool, CmdError> {
     let repo = Some(deps.settings.repo_root.as_str());
-    for state in [TaskState::Ready, TaskState::Running, TaskState::Gating] {
+    for state in WORK_STATES {
         let tasks = deps
             .store
             .list_tasks(repo, Some(state))

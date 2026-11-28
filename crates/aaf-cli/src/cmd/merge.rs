@@ -165,6 +165,13 @@ fn resolve_task_merge_target(
     let task = db
         .get_task(task_id)
         .map_err(|e| CmdError::new(format!("merge: task {task_id}: {e}")))?;
+    // Adopting tasks are merged only by the adopt lane (pinned head, own gate and
+    // dual review); refuse before any gh lookup or `merge_pr_with_cwd` call.
+    if task.state == TaskState::Adopting {
+        return Err(CmdError::new(format!(
+            "merge: task {task_id} is adopting; the adopt lane merges it (use `aaf board cancel` to stop it)"
+        )));
+    }
     let repo_root = if !task.repo_root.is_empty() && Path::new(&task.repo_root).is_dir() {
         main_work_tree(Path::new(&task.repo_root))
     } else {

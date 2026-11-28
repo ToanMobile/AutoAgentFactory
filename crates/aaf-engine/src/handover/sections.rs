@@ -363,6 +363,7 @@ pub(super) fn build_next_step(task: &Task, status: &str, missing: &[String]) -> 
         return match task.state {
             TaskState::Done => "Đã bàn giao (Done)".to_string(),
             TaskState::Review => "Sẵn sàng merge (aaf merge)".to_string(),
+            // Adopting (and any other state) is only handed over once the lane finishes it.
             _ => "Sẵn sàng kiểm tra bàn giao".to_string(),
         };
     }

@@ -49,7 +49,11 @@ struct TaskDoneRow {
 }
 
 fn is_active_refusal(state: TaskState, allow_idle_gating: bool) -> bool {
-    state == TaskState::Running || (!allow_idle_gating && state == TaskState::Gating)
+    // Adopting is owned by the adopt lane (it reaches Done only after its own
+    // pinned-head gate, dual review and verified merge): refused even with `--force`.
+    state == TaskState::Running
+        || state == TaskState::Adopting
+        || (!allow_idle_gating && state == TaskState::Gating)
 }
 
 fn first_running_run(conn: &Connection, task_id: &str) -> PortResult<Option<String>> {
@@ -108,7 +112,8 @@ impl Db {
     /// Atomically marks a non-active task as `Done` (human action, e.g. after
     /// merging a PR outside `aaf merge`) inside one `BEGIN IMMEDIATE` transaction.
     ///
-    /// Refuses active tasks (`Running`, or `Gating` unless `opts.force`), any
+    /// Refuses active tasks (`Running`, `Adopting` even with `opts.force`, or
+    /// `Gating` unless `opts.force`), any
     /// task or descendant with a `running` run, already-`Done` tasks, `Cancelled`
     /// tasks unless `opts.force`, and tasks with unfinished subtasks unless
     /// `opts.force`.

@@ -86,7 +86,9 @@ pub(super) fn collect_repo_rollup(
             TaskState::Review => entry.review += 1,
             TaskState::Blocked => entry.blocked += 1,
             TaskState::Done => entry.done += 1,
-            TaskState::Backlog | TaskState::Cancelled => {}
+            // Adopting has no rollup column; it is left out rather than mislabeled as
+            // blocked, running or done.
+            TaskState::Backlog | TaskState::Cancelled | TaskState::Adopting => {}
         }
         if blocked_upstream.contains_key(&t.id) {
             entry.blocked_upstream += 1;

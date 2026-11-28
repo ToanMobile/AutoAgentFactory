@@ -484,6 +484,7 @@ fn clean_repo(
             let eligible = match task.state {
                 TaskState::Done => true,
                 TaskState::Cancelled => opts.include_cancelled,
+                // Adopting is live (not terminal): never reclaim its aaf/<id> worktree or branch.
                 _ => false,
             };
             if !eligible {

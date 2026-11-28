@@ -7,7 +7,7 @@ use aaf_engine::factory::BindingView;
 use aaf_engine::throttle::{Busy, Progress};
 
 use super::progress::line;
-use super::{report, sandbox_choice, waiting_line};
+use super::{WORK_STATES, has_work_in_db, report, sandbox_choice, waiting_line};
 use crate::output::Exit;
 
 #[test]
@@ -221,4 +221,39 @@ fn assigned_non_claude_account_routes_run_executor_to_gemini_or_grok() {
     ctx_gemini.path_var = bin_gemini.as_os_str().to_os_string();
     let cfg5 = ctx_gemini.load_config(&repo).unwrap();
     assert_eq!(cfg5.repo.run.executor, "gemini");
+}
+
+fn insert_task(db: &aaf_engine::db::Db, id: &str, repo: &Path, state: aaf_domain::task::TaskState) {
+    use aaf_domain::ports::TaskStore;
+    use aaf_domain::task::{ImmutableSpec, Priority, Task};
+    let spec = ImmutableSpec {
+        description: "spec".into(),
+        acceptance: vec!["ok".into()],
+    };
+    let mut task = Task::new_root(id, repo.to_string_lossy(), id, spec, Priority::P2, 10);
+    task.state = state;
+    db.insert_task(&task).unwrap();
+}
+
+#[test]
+fn an_adopting_task_counts_as_outstanding_work_for_its_repository() {
+    use aaf_domain::task::TaskState;
+    let tmp = tempfile::tempdir().unwrap();
+    let db = aaf_engine::db::Db::open(&tmp.path().join("aaf.db")).unwrap();
+    let repo = tmp.path().join("repo");
+    let other = tmp.path().join("other");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+
+    insert_task(&db, "t-done", &repo, TaskState::Done);
+    insert_task(&db, "t-blocked", &repo, TaskState::Blocked);
+    assert!(!has_work_in_db(&db, &repo).unwrap(), "nothing to do yet");
+
+    insert_task(&db, "t-ad", &repo, TaskState::Adopting);
+    assert!(has_work_in_db(&db, &repo).unwrap(), "Adopting is work");
+    assert!(
+        !has_work_in_db(&db, &other).unwrap(),
+        "another repository's adopted PR is not this repository's work"
+    );
+    assert!(WORK_STATES.contains(&TaskState::Adopting));
 }

@@ -104,6 +104,8 @@ fn format_refusal(target_id: &str, refusal: DoneRefusal) -> CmdOutput {
         DoneRefusal::ActiveState { task_id, state } => {
             let hint = if state == TaskState::Gating {
                 "stop `aaf run` first, or pass --force if no run is active"
+            } else if state == TaskState::Adopting {
+                "the adopt lane finishes it; `aaf board cancel` stops it; --force does not apply"
             } else {
                 "stop `aaf run` first"
             };

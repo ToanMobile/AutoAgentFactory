@@ -182,6 +182,8 @@ pub fn compute_report(
     let mut done_ids = HashSet::new();
 
     for task in &tasks {
+        // Adopting is a live stage here (`stays`/`stage_stats` follow `TaskState::ALL`): not
+        // terminal, never counted as blocked.
         bump_task(&mut counts, task.state, 1);
         if task.state == TaskState::Blocked {
             let kind = task.blocked_reason.as_ref().map_or("unknown", |r| r.kind());

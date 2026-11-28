@@ -8,7 +8,6 @@ use std::sync::Arc;
 use aaf_domain::account::ProviderKind;
 use aaf_domain::config::{AccountSelection, RunConfig};
 use aaf_domain::ports::{AccountStore, AgentRunner, Clock, TaskStore};
-use aaf_domain::task::TaskState;
 use aaf_engine::accounts::{self, DiscoveryEnv, Router};
 use aaf_engine::config::{self, EffectiveConfig};
 use aaf_engine::db::Db;
@@ -288,7 +287,8 @@ fn count_active_repos_for_fair_share(db: &Db, data_dir: &Path, current_repo: &Pa
     let allowed = supervisor_allowed_repos(data_dir);
     let mut repos = BTreeSet::new();
     repos.insert(normalize_repo_path(&current_repo.to_string_lossy()));
-    for state in [TaskState::Ready, TaskState::Running, TaskState::Gating] {
+    // Adopting counts: the adopt lane gates and merges its PR on this repo's share.
+    for state in super::WORK_STATES {
         for task in db.list_tasks(None, Some(state)).unwrap_or_default() {
             if Path::new(&task.repo_root).is_dir()
                 && repo_is_allowed(allowed.as_ref(), &task.repo_root)
@@ -298,4 +298,47 @@ fn count_active_repos_for_fair_share(db: &Db, data_dir: &Path, current_repo: &Pa
         }
     }
     repos.len().max(1)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use aaf_domain::ports::TaskStore;
+    use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
+
+    use super::*;
+
+    fn insert(db: &Db, id: &str, repo: &Path, state: TaskState) {
+        let spec = ImmutableSpec {
+            description: "spec".into(),
+            acceptance: vec!["ok".into()],
+        };
+        let mut task = Task::new_root(id, repo.to_string_lossy(), id, spec, Priority::P2, 10);
+        task.state = state;
+        db.insert_task(&task).unwrap();
+    }
+
+    #[test]
+    fn fair_share_counts_a_repository_whose_only_work_is_an_adopting_pr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("aaf.db")).unwrap();
+        let (a, b, c) = (
+            tmp.path().join("a"),
+            tmp.path().join("b"),
+            tmp.path().join("c"),
+        );
+        for dir in [&a, &b, &c] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        insert(&db, "t-a", &a, TaskState::Ready);
+        insert(&db, "t-done", &c, TaskState::Done);
+        assert_eq!(count_active_repos_for_fair_share(&db, tmp.path(), &a), 1);
+
+        insert(&db, "t-ad", &b, TaskState::Adopting);
+        assert_eq!(
+            count_active_repos_for_fair_share(&db, tmp.path(), &a),
+            2,
+            "the adopt lane is work on repository b"
+        );
+    }
 }

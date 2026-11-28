@@ -186,7 +186,7 @@ impl Db {
                     .prepare_cached(
                         "SELECT e.task_id, e.kind, e.created_at FROM events e \
                          INNER JOIN tasks t ON t.id = e.task_id \
-                         WHERE t.repo_root = ?1 AND t.state IN ('running', 'gating') \
+                         WHERE t.repo_root = ?1 AND t.state IN ('running', 'gating', 'adopting') \
                          AND e.id = (SELECT MAX(e2.id) FROM events e2 WHERE e2.task_id = e.task_id)",
                     )
                     .map_err(sql_err)?;
@@ -223,7 +223,7 @@ impl Db {
                     .prepare_cached(
                         "SELECT e.task_id, e.kind, e.created_at FROM events e \
                          INNER JOIN tasks t ON t.id = e.task_id \
-                         WHERE t.state IN ('running', 'gating') \
+                         WHERE t.state IN ('running', 'gating', 'adopting') \
                          AND e.id = (SELECT MAX(e2.id) FROM events e2 WHERE e2.task_id = e.task_id)",
                     )
                     .map_err(sql_err)?;

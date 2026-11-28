@@ -44,6 +44,7 @@ fn task_state() {
         (TaskState::Blocked, "blocked"),
         (TaskState::Done, "done"),
         (TaskState::Cancelled, "cancelled"),
+        (TaskState::Adopting, "adopting"),
     ];
     assert_eq!(cases.len(), TaskState::ALL.len());
     for (state, name) in cases {
@@ -148,6 +149,9 @@ fn event_kind() {
         (EventKind::PrFeedback, "pr_feedback"),
         (EventKind::CostPaused, "cost_paused"),
         (EventKind::CostResumed, "cost_resumed"),
+        (EventKind::PrAdopted, "pr_adopted"),
+        (EventKind::AdoptStep, "adopt_step"),
+        (EventKind::AdoptAborted, "adopt_aborted"),
     ];
     assert_eq!(cases.len(), EventKind::ALL.len());
     for (kind, name) in cases {

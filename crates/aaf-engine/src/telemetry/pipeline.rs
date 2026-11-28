@@ -314,6 +314,9 @@ fn finalize(
         n[2].detail = Some(r.status.as_str().into());
     }
     n[2].status = match last {
+        // Adopting: no factory coding stage (a chat session wrote the PR), and the lane's
+        // reviewer runs must not read as a coding run that is running or failed.
+        _ if st == TaskState::Adopting => "skipped",
         Some(r) if r.status == RunStatus::Running => "running",
         Some(r) if r.status == RunStatus::Succeeded || st == TaskState::Done => "passed",
         Some(_) => "failed",
@@ -347,6 +350,9 @@ fn finalize(
         }
         TaskState::Done => (n[7].status, n[7].attempts) = ("passed".into(), n[7].attempts.max(1)),
         TaskState::Cancelled => n[7].status = "skipped".into(),
+        // Adopting: keep the review/merge nodes as the lane's events recorded them; the
+        // reset below is for factory tasks that fell back out of review.
+        TaskState::Adopting => {}
         _ if n[6].status == "passed" => n[6].status = "pending".into(),
         _ => {}
     }
@@ -354,7 +360,13 @@ fn finalize(
         for x in &mut n[..hi] {
             if x.status == "pending" {
                 x.status = "skipped".into();
-            } else if x.status == "running" && st != TaskState::Running && st != TaskState::Gating {
+            } else if x.status == "running"
+                && !matches!(
+                    st,
+                    // Adopting: the lane's live phase is still running, not finished.
+                    TaskState::Running | TaskState::Gating | TaskState::Adopting
+                )
+            {
                 x.status = "passed".into();
             }
         }

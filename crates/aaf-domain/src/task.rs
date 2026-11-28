@@ -17,10 +17,15 @@ pub enum TaskState {
     Blocked,
     Done,
     Cancelled,
+    /// A pull request opened outside the factory, handed over with
+    /// `aaf board adopt`. Only the adopt lane moves it, and only to `Done`
+    /// or `Cancelled`: no generic path (unblock, wake, rework, ladder, retry,
+    /// sweep, gate polling) selects this state.
+    Adopting,
 }
 
 impl TaskState {
-    pub const ALL: [TaskState; 8] = [
+    pub const ALL: [TaskState; 9] = [
         TaskState::Backlog,
         TaskState::Ready,
         TaskState::Running,
@@ -29,6 +34,7 @@ impl TaskState {
         TaskState::Blocked,
         TaskState::Done,
         TaskState::Cancelled,
+        TaskState::Adopting,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -41,6 +47,7 @@ impl TaskState {
             TaskState::Blocked => "blocked",
             TaskState::Done => "done",
             TaskState::Cancelled => "cancelled",
+            TaskState::Adopting => "adopting",
         }
     }
 
@@ -54,9 +61,12 @@ impl TaskState {
 
     /// The only legal lifecycle moves. `Blocked` is re-entered through `Ready`
     /// or directly into `Gating` after a verified head-lock approval on an
-    /// existing registered worktree.
+    /// existing registered worktree. `Adopting` is entered only by inserting
+    /// the task in that state, and leaves only to `Done` or `Cancelled`.
     pub fn can_transition_to(self, next: TaskState) -> bool {
-        use TaskState::{Backlog, Blocked, Cancelled, Done, Gating, Ready, Review, Running};
+        use TaskState::{
+            Adopting, Backlog, Blocked, Cancelled, Done, Gating, Ready, Review, Running,
+        };
         matches!(
             (self, next),
             (Backlog, Ready | Cancelled)
@@ -65,6 +75,7 @@ impl TaskState {
                 | (Gating, Review | Done | Blocked | Ready | Cancelled)
                 | (Review, Gating | Done | Blocked | Ready | Cancelled)
                 | (Blocked, Ready | Gating | Cancelled)
+                | (Adopting, Done | Cancelled)
         )
     }
 

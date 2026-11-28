@@ -244,6 +244,11 @@ fn add(args: &AddArgs, ctx: &Ctx) -> CmdResult {
                 other.repo_root
             )));
         }
+        if other.state == TaskState::Adopting {
+            return Err(CmdError::new(format!(
+                "--blocked-by {blocker}: that task is adopting; an adopted PR cannot be a blocker"
+            )));
+        }
     }
 
     // The repro command is the slow, side-effecting step: it runs only once

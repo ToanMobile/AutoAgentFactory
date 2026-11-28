@@ -509,6 +509,13 @@ pub(crate) fn approve_and_regate(
     now: i64,
 ) -> Result<ApproveOutcome, ApproveOpError> {
     let task = db.get_task(task_id).map_err(ApproveOpError::Port)?;
+    // Refused before anything is signed: the adopt lane signs its own head-lock
+    // approval only after its dual review passed on the pinned head.
+    if task.state == TaskState::Adopting {
+        return Err(ApproveOpError::Port(PortError::Conflict(format!(
+            "task {task_id} is adopting; a human head-lock approval does not apply to an adopted PR"
+        ))));
+    }
     let main_root = Path::new(&task.repo_root);
     let registered_wt = worktree::existing_registered(main_root, &ctx.worktrees_dir, &task.id)
         .ok()

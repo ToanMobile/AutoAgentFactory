@@ -5,11 +5,11 @@ use aaf_domain::DomainError;
 use aaf_domain::budget::MAX_SUBTASK_DEPTH;
 use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
 
-use TaskState::{Backlog, Blocked, Cancelled, Done, Gating, Ready, Review, Running};
+use TaskState::{Adopting, Backlog, Blocked, Cancelled, Done, Gating, Ready, Review, Running};
 
 /// The table documented on `TaskState::can_transition_to`, written out again
 /// on purpose: a change to the lifecycle must be made in two places.
-const ALLOWED: [(TaskState, &[TaskState]); 8] = [
+const ALLOWED: [(TaskState, &[TaskState]); 9] = [
     (Backlog, &[Ready, Cancelled]),
     (Ready, &[Running, Blocked, Cancelled]),
     (Running, &[Gating, Blocked, Ready, Cancelled]),
@@ -18,6 +18,7 @@ const ALLOWED: [(TaskState, &[TaskState]); 8] = [
     (Blocked, &[Ready, Gating, Cancelled]),
     (Done, &[]),
     (Cancelled, &[]),
+    (Adopting, &[Done, Cancelled]),
 ];
 
 fn spec() -> ImmutableSpec {
@@ -38,7 +39,7 @@ fn every_pair_matches_the_documented_table() {
             allowed_count += usize::from(want);
         }
     }
-    assert_eq!(allowed_count, 22);
+    assert_eq!(allowed_count, 24);
 }
 
 #[test]
@@ -83,11 +84,29 @@ fn blocked_is_only_left_through_ready_gating_or_cancelled() {
 
 #[test]
 fn done_is_only_reached_after_the_gate() {
+    // `Adopting` reaches `Done` only after the adopt lane's own gate
+    // (`merge_pr` re-gates the merged tree) and its dual review.
     let sources: Vec<TaskState> = TaskState::ALL
         .into_iter()
         .filter(|from| from.can_transition_to(Done))
         .collect();
-    assert_eq!(sources, vec![Gating, Review]);
+    assert_eq!(sources, vec![Gating, Review, Adopting]);
+}
+
+#[test]
+fn adopting_is_never_entered_by_a_transition_and_only_leaves_to_done_or_cancelled() {
+    let sources: Vec<TaskState> = TaskState::ALL
+        .into_iter()
+        .filter(|from| from.can_transition_to(Adopting))
+        .collect();
+    assert!(sources.is_empty(), "{sources:?}");
+    let exits: Vec<TaskState> = TaskState::ALL
+        .into_iter()
+        .filter(|to| Adopting.can_transition_to(*to))
+        .collect();
+    assert_eq!(exits, vec![Done, Cancelled]);
+    assert!(!Adopting.is_terminal());
+    assert_eq!(TaskState::parse("adopting"), Some(Adopting));
 }
 
 #[test]

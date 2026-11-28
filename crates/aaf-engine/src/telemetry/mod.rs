@@ -49,6 +49,9 @@ pub struct TaskCounts {
     pub blocked: u32,
     pub done: u32,
     pub cancelled: u32,
+    /// Pull requests taken over by `aaf board adopt`, still in the adopt lane.
+    #[serde(default)]
+    pub adopting: u32,
     pub total: u32,
 }
 
@@ -298,6 +301,8 @@ pub(crate) fn bump_task(counts: &mut TaskCounts, state: TaskState, n: u32) {
         TaskState::Blocked => &mut counts.blocked,
         TaskState::Done => &mut counts.done,
         TaskState::Cancelled => &mut counts.cancelled,
+        // Own slot: an adopted PR is neither blocked nor actively coding.
+        TaskState::Adopting => &mut counts.adopting,
     };
     *slot = slot.saturating_add(n);
 }

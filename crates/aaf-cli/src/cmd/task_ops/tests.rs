@@ -174,3 +174,108 @@ fn approve_if_unchanged_refuses_a_locked_diff_edited_after_preview() {
     assert_eq!(signed.lock_fp, now.lock_fp);
     assert!(ctx.data_dir.join("approvals").exists());
 }
+
+fn adopting_task(db: &Db, repo: &Path) {
+    let mut task = Task::new_root(
+        "t-ad",
+        repo.to_string_lossy(),
+        "adopted",
+        ImmutableSpec {
+            description: "desc".into(),
+            acceptance: vec!["ok".into()],
+        },
+        Priority::P1,
+        10,
+    );
+    task.state = TaskState::Adopting;
+    db.insert_task(&task).unwrap();
+}
+
+#[test]
+fn approve_and_regate_refuses_adopting_before_signing_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let repo = root.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let db = Db::open(&root.join("aaf.db")).unwrap();
+    adopting_task(&db, &repo);
+    let ctx = Ctx {
+        cwd: repo.clone(),
+        home: root.join("home"),
+        data_dir: root.join("data"),
+        config_dir: root.join("config"),
+        worktrees_dir: root.join("worktrees"),
+        path_var: std::env::var_os("PATH").unwrap_or_default(),
+        run_id: None,
+        stdin_is_tty: false,
+        aaf_env: Vec::new(),
+    };
+    let before = db.get_task("t-ad").unwrap();
+
+    for expected in [None, Some("deadbeef")] {
+        let err = approve_and_regate(&db, &ctx, "t-ad", "alice", expected, "test", "alice", 99)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&err, ApproveOpError::Port(PortError::Conflict(m)) if m.contains("adopting")),
+            "{err:?}"
+        );
+    }
+    assert_eq!(db.get_task("t-ad").unwrap(), before);
+    assert!(
+        !ctx.data_dir.join("approvals").exists(),
+        "an approval was signed for an adopted PR"
+    );
+    assert!(db.events_for_task("t-ad", 10).unwrap().is_empty());
+}
+
+#[test]
+fn unblock_and_rework_do_not_touch_an_adopting_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let db = Db::open(&root.join("aaf.db")).unwrap();
+    adopting_task(&db, &root);
+    let ctx = Ctx {
+        cwd: root.clone(),
+        home: root.join("home"),
+        data_dir: root.join("data"),
+        config_dir: root.join("config"),
+        worktrees_dir: root.join("worktrees"),
+        path_var: std::ffi::OsString::new(),
+        run_id: None,
+        stdin_is_tty: false,
+        aaf_env: Vec::new(),
+    };
+    let before = db.get_task("t-ad").unwrap();
+
+    let err = unblock_task(&db, "t-ad", "aaf board unblock", "human", 99)
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            err,
+            TaskOpError::WrongState {
+                actual: TaskState::Adopting,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    for rerun in [false, true] {
+        let err = rework_task(&db, &ctx, "t-ad", "again", rerun, "why", "human", 99)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                err,
+                TaskOpError::WrongState {
+                    actual: TaskState::Adopting,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+    assert_eq!(db.get_task("t-ad").unwrap(), before);
+    assert!(db.events_for_task("t-ad", 10).unwrap().is_empty());
+}

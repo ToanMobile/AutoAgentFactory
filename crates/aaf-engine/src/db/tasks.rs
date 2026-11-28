@@ -195,6 +195,22 @@ pub(super) fn require_task(conn: &Connection, id: &str) -> PortResult<()> {
     }
 }
 
+/// Refuses to edit dependency edges that touch an `Adopting` task: the adopt
+/// lane owns that task, and an edge on either end would block or be blocked by it
+/// outside the lane's control. A missing task is left to the caller.
+fn refuse_adopting_dep(conn: &Connection, id: &str) -> PortResult<()> {
+    let state: Option<String> = conn
+        .prepare_cached("SELECT state FROM tasks WHERE id = ?1")
+        .and_then(|mut stmt| stmt.query_row(params![id], |row| row.get(0)).optional())
+        .map_err(sql_err)?;
+    if state.as_deref() == Some(TaskState::Adopting.as_str()) {
+        return Err(PortError::Conflict(format!(
+            "task {id} is adopting; dependencies cannot be added or removed on an adopted PR"
+        )));
+    }
+    Ok(())
+}
+
 /// Turns "no row was updated" into `NotFound`.
 fn one_task_changed(changed: usize, id: &str) -> PortResult<()> {
     if changed == 0 {
@@ -333,6 +349,8 @@ impl TaskStore for Db {
         self.write(move |tx| {
             require_task(tx, &task_id)?;
             require_task(tx, &blocked_by)?;
+            refuse_adopting_dep(tx, &task_id)?;
+            refuse_adopting_dep(tx, &blocked_by)?;
             // Edges are read inside the write transaction, so no other writer
             // can slip in the edge that closes the cycle after the check.
             let edges: Vec<(String, String)> = tx
@@ -361,6 +379,8 @@ impl TaskStore for Db {
         let task_id = task_id.to_string();
         let blocked_by = blocked_by.to_string();
         self.write(move |tx| {
+            refuse_adopting_dep(tx, &task_id)?;
+            refuse_adopting_dep(tx, &blocked_by)?;
             let changed = tx
                 .prepare_cached("DELETE FROM task_deps WHERE task_id = ?1 AND blocked_by = ?2")
                 .and_then(|mut stmt| stmt.execute(params![task_id, blocked_by]))

@@ -97,7 +97,8 @@ fn reap_running_runs(
 /// Puts back what an interrupted `aaf run` left behind: a task still
 /// `Running` has no live run any more (its processes are reaped and it
 /// returns to Ready); a task still `Gating` has any interrupted audit/unblock
-/// runs reaped and only needs the gate again.
+/// runs reaped and only needs the gate again; a task still `Adopting` only has
+/// its interrupted runs reaped and keeps its state.
 pub fn recover(deps: &Deps, reap: &dyn Fn(&str) -> PortResult<()>) -> PortResult<Vec<String>> {
     let repo = Some(deps.settings.repo_root.as_str());
     for task in deps.store.list_tasks(repo, Some(TaskState::Running))? {
@@ -111,6 +112,12 @@ pub fn recover(deps: &Deps, reap: &dyn Fn(&str) -> PortResult<()>) -> PortResult
     }
     let gating = deps.store.list_tasks(repo, Some(TaskState::Gating))?;
     for task in &gating {
+        reap_running_runs(deps, &task.id, reap)?;
+    }
+    // An adopted PR keeps `Adopting`: its zombie reviewer/gate runs are reaped, but it is
+    // neither sent back to Ready (the adopt lane re-checks the pinned head itself) nor
+    // returned for a generic re-gate.
+    for task in deps.store.list_tasks(repo, Some(TaskState::Adopting))? {
         reap_running_runs(deps, &task.id, reap)?;
     }
     Ok(gating.into_iter().map(|task| task.id).collect())

@@ -79,6 +79,8 @@ pub(super) fn run_digest(args: &HandoverArgs, ctx: &Ctx) -> CmdResult {
                 TaskState::Blocked => counts.blocked += 1,
                 TaskState::Done => counts.done += 1,
                 TaskState::Cancelled => counts.cancelled += 1,
+                // Own counter: an adopted PR is neither blocked nor coding.
+                TaskState::Adopting => counts.adopting += 1,
             }
             for r in db.runs_for_task(&t.id).unwrap_or_default() {
                 tokens_in = tokens_in.saturating_add(r.tokens_in);
@@ -201,6 +203,10 @@ fn render_digest_md(
         "Counts: {} total (done={}, review={}, blocked={}, running={}, gating={}, ready={}, backlog={}, cancelled={})",
         c.total, c.done, c.review, c.blocked, c.running, c.gating, c.ready, c.backlog, c.cancelled
     );
+    if c.adopting > 0 {
+        // Shown only when present so the totals still add up (adopting is its own state).
+        let _ = writeln!(out, "Adopting: {}", c.adopting);
+    }
     let dur = a
         .gate_avg_duration_ms
         .map_or_else(String::new, |ms| format!(", avg {ms}ms"));

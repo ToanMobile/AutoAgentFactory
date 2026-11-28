@@ -33,7 +33,8 @@ config base siết tier 1, `HiddenPolicy::Remove`). Cờ mới `PrMergeRequest.n
 **I4 Head-lock (v6, chủ repo chốt: ký sau 2 reviewer PASS).** Cả 3 PR thật của GeelyEx2 đều sửa
 `.agents/**` (Hard) và test cũ (Soft), nên cắt phạm vi kiểu v5 làm tính năng vô dụng.
 - Lane tự `head_lock::evaluate` trên worktree adopt, **bỏ qua mọi approval sẵn có**; `evaluate` lỗi → huỷ.
-- Thay đổi chạm `.autofactory/**` hoặc `.github/workflows/**` (cấu hình gate/CI kiểm chính PR) → huỷ
+- Thay đổi chạm cấu hình gate/CI/hook kiểm chính PR (`.autofactory/**`, `.github/workflows|actions/**`,
+  `action.y*ml`, file đăng ký hook của agent, file trong `[commands]`; danh sách đủ ở checklist C4) → huỷ
   `needs_human_head_lock`, luôn chờ người.
 - Mọi file khoá khác (Hard hay Soft): chỉ sau I5 đạt (2 provider canonical khác nhau cùng PASS trên diff có các
   file đó), lane ký approval cho `lock_fp` vừa tính trên worktree adopt (reviewer ghi
@@ -46,7 +47,7 @@ config base siết tier 1, `HiddenPolicy::Remove`). Cờ mới `PrMergeRequest.n
 `missing_reviewers`/partial cũ/`start_dual_review`/`finalize_dual_review`/phân xử. Reviewer chọn bằng helper
 mới `adopt_reviewers(&RepoConfig, installed)` độc lập với `cfg.dual_review` (≥ 2 provider canonical thật khác
 nhau, `gemini` = `antigravity`; thiếu → huỷ). `run_reviewer_turn` thêm tham số `ReviewInputs { policy,
-diff_base }`: policy cố định (`score_gate` theo repo, không adjudicate), diff = diff riêng của PR
+diff_base, proof_ok }`: policy cố định (`score_gate` theo repo, không adjudicate), diff = diff riêng của PR
 `merge-base(base, pinned)..pinned` (không `self.start()`). Đường cũ truyền giá trị hiện tại → không đổi hành vi.
 Đạt = cả 2 PASS, `p0 = p1 = 0`, trên đúng head ghim. `--author-executor` chỉ ghi log.
 
@@ -135,7 +136,7 @@ Base = main hiện tại (có 864a1d5, 15e9799). Triển khai bằng task mới 
 shell trước. Chưa kiểm: `GateJob` dựng từ worktree adopt có đủ cho `run_reviewer_turn` (with_clean_tree,
 integration tree) không.
 
-## Câu hỏi phản biện (vòng 5)
-Chỉ một câu: plan v5 **cộng** checklist còn lỗi **thiết kế** nào (sai hướng, phải đổi kiến trúc, hoặc một
+## Câu hỏi phản biện (vòng 7)
+Chỉ một câu: plan v6 **cộng** checklist còn lỗi **thiết kế** nào (sai hướng, phải đổi kiến trúc, hoặc một
 bất biến không thể thực thi) không? Chi tiết nối primitive đã có trong checklist thì không cần liệt kê lại;
 chỉ nêu mục checklist **sai** hoặc **thiếu** (file:dòng).

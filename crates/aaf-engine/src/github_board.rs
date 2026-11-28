@@ -68,6 +68,9 @@ pub fn map_state_to_column(state: TaskState, map: &GithubColumnMap) -> &str {
         TaskState::Blocked => &map.blocked,
         TaskState::Done => &map.done,
         TaskState::Cancelled => &map.cancelled,
+        // An adopted PR is gated, dual-reviewed and merged by the adopt lane: the
+        // review column is the honest place (not blocked, not building).
+        TaskState::Adopting => &map.review,
     }
 }
 

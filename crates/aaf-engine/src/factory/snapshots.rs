@@ -277,6 +277,13 @@ fn sanitize_steer_note(raw: &str) -> Result<String, String> {
 pub fn steer_task(db: &Db, task_id: &str, note: &str, now: i64) -> Result<String, String> {
     worktree::validate_task_id(task_id).map_err(|e| e.to_string())?;
     let clean = sanitize_steer_note(note)?;
+    // An adopted PR has no agent to steer; the note would only be dead text on a task
+    // the adopt lane owns.
+    if db.get_task(task_id).map_err(|e| e.to_string())?.state == TaskState::Adopting {
+        return Err(format!(
+            "task {task_id} is adopting; steer does not apply to an adopted PR"
+        ));
+    }
     let formatted = format!("steer: {clean}");
     db.append_context_note(task_id, &formatted, now)
         .map_err(|e| e.to_string())?;
