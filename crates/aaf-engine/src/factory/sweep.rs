@@ -58,7 +58,7 @@ fn recover_stream_usage(data_dir: &std::path::Path, run_id: &str) -> (u64, u64) 
     (0, 0)
 }
 
-fn reap_running_runs(
+pub(crate) fn reap_running_runs(
     deps: &Deps,
     task_id: &str,
     reap: &dyn Fn(&str) -> PortResult<()>,

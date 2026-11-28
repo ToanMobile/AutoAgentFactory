@@ -23,6 +23,7 @@ impl<'a> Scheduler<'a> {
     pub(super) fn start_adopt_job<'scope>(
         &mut self,
         scope: &'scope Scope<'scope, '_>,
+        reap: &'scope (dyn Fn(&str) -> PortResult<()> + Sync),
     ) -> PortResult<()>
     where
         'a: 'scope,
@@ -64,11 +65,13 @@ impl<'a> Scheduler<'a> {
             let id = task.id;
             let done = catch_unwind(AssertUnwindSafe(|| adopt_lane::run_job(deps, router, &id)))
                 .unwrap_or_else(|_| {
-                    catch_unwind(AssertUnwindSafe(|| adopt_lane::on_panic(deps, router, &id)))
-                        .unwrap_or_else(|_| AdoptDone {
-                            task_id: id.clone(),
-                            error: Some(format!("{id}: the adopt lane panicked twice")),
-                        })
+                    catch_unwind(AssertUnwindSafe(|| {
+                        adopt_lane::on_panic(deps, router, &id, reap)
+                    }))
+                    .unwrap_or_else(|_| AdoptDone {
+                        task_id: id.clone(),
+                        error: Some(format!("{id}: the adopt lane panicked twice")),
+                    })
                 });
             let _ = tx.send(Msg::Adopt(done));
         });

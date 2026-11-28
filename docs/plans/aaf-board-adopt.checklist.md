@@ -149,8 +149,9 @@ main 15e9799). Plan nói "làm gì"; checklist nói "nối vào đâu".
 
 ## C9. Mã huỷ (`AdoptAborted.code`)
 `needs_human_head_lock`, `lock_changed`, `needs_human_reviewers` (dưới 2 provider), `review_failed`, `gate_blocked`,
-`head_changed` (I2), `merged_unpinned`, `pr_not_open`, `pr_is_draft`, `ci_failed`, `merge_conflict`,
+`head_changed` (I2), `merged_unpinned`, `merged_outside`, `pr_not_open`, `pr_is_draft`, `ci_failed`, `merge_conflict`,
 `retry_exhausted`, `cancelled_by_user`. Comment PR ghi mã + lý do + việc cần làm.
+`merged_outside`: PR đã MERGED tại head đã ghim nhưng task chưa từng vào pha `merge` (không có `AdoptStep{phase:"merge"}` không-retry) → không có gate/review/chữ ký nào được ghi; huỷ, **không** emit `MergeResult`. Có `AdoptStep` merge từ lượt trước (crash sau `gh pr merge`) → vẫn `Done`.
 
 ## C10. Kết quả spike 3a (test `adopt_step3a_roundtrip.rs`, `factory/tests/adopt_step3a_review.rs`)
 - Vòng dry-run → ký → merge chạy thật: khi base chưa sửa file khoá kể từ merge-base, `lock_fp` trên worktree

@@ -34,6 +34,10 @@ fn advice(code: &str) -> &'static str {
              Adopt the PR again to pick up the new head."
         }
         "merged_unpinned" => "The PR was merged at a different commit than the adopted one.",
+        "merged_outside" => {
+            "The PR was merged outside the factory, so nothing was verified here. Check what \
+             landed."
+        }
         "pr_not_open" => "The PR is no longer open.",
         "pr_is_draft" => "Mark the PR ready for review, then adopt again.",
         "ci_failed" => "Fix the failing checks, push, then adopt again.",

@@ -21,6 +21,8 @@ impl Lane<'_> {
         )
         .map_err(|e| Exit::retry("merge_error", e.to_string()))?;
         match outcome {
+            // The merge phase's `AdoptStep` is already on record, so a merge that
+            // landed during the call (or just before it) is this lane's own.
             PrMergeOutcome::Merged { .. } | PrMergeOutcome::AlreadyMerged { .. } => Ok(Done),
             PrMergeOutcome::Blocked {
                 code,

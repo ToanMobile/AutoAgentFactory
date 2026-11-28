@@ -1130,6 +1130,7 @@ aaf board show <task id>                      # PR, pinned head, phase, retries,
 | `gate_blocked` | The gate on the merged tree blocks the PR. | Fix what the reasons say, push, adopt again. |
 | `head_changed` | The PR head, `aaf/<id>` or its worktree is no longer the adopted commit. | Adopt the PR again to pin the new head. |
 | `merged_unpinned` | The PR was merged at a commit other than the adopted one. | Check what landed. |
+| `merged_outside` | The PR was merged at the pinned head by someone else (web UI, script) before the lane reached its merge phase, so no gate, review or signature is on record. Nothing is marked done. | Check what landed. |
 | `pr_not_open`, `pr_is_draft` | The PR was closed, or became a draft. | Reopen or mark it ready, adopt again. |
 | `ci_failed` | The PR's checks failed. | Fix them, push, adopt again. |
 | `merge_conflict` | The PR conflicts with the base. | Resolve it, push, adopt again. |
@@ -1137,6 +1138,12 @@ aaf board show <task id>                      # PR, pinned head, phase, retries,
 | `cancelled_by_user` | Someone ran `aaf board cancel`. | Nothing; adopt again if you want it back. |
 
 - **Limits.** Adopting needs CI that reports at least one check (a PR with no check is not a pass), a base branch with a remote, and `aaf run --auto` running. When the PR and the base both change a head-locked file, the PR has to be rebased first (`lock_changed`). The files listed under `needs_human_head_lock` always wait for a person; the lane never approves them.
+
+**Known limits of adopting.**
+
+- The gate runs the PR's own code. A PR that changes a file the configured commands use indirectly (for example `package.json` scripts behind `npm test`, a Makefile, `build.rs`) is not forced to a human; the two reviewers must catch it. This is the same trust model as factory tasks. Paths named literally in `[commands]` are always human-only.
+- `aaf board cancel` during the last API call to GitHub cannot stop a merge that was already sent.
+- A repo with no registered CI check cannot adopt (the retries end in `retry_exhausted`), the same policy as factory merges.
 
 **Rework (`v3`).** `aaf board rework <id> --reason "…"` sends a task in Review back to Gating, so the gate runs again on its existing branch. With `--rerun`, the task goes back to Ready and the next `aaf run` starts an agent. The reason is added as a `rework:` note, and the unblock ladder starts again from that point.
 

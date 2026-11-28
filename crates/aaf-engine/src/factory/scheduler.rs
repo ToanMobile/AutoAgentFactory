@@ -223,7 +223,7 @@ impl<'a> Scheduler<'a> {
     fn drive<'scope>(
         &mut self,
         scope: &'scope Scope<'scope, '_>,
-        hooks: &Hooks<'_>,
+        hooks: &Hooks<'scope>,
         resumed: Vec<String>,
     ) -> PortResult<()>
     where
@@ -260,7 +260,7 @@ impl<'a> Scheduler<'a> {
                     self.poll_gating()?;
                 }
                 self.start_jobs(scope)?;
-                self.start_adopt_job(scope)?;
+                self.start_adopt_job(scope, hooks.reap)?;
             }
             let coding_limit = self.coding_parallel_limit();
             let aux_limit = self.aux_parallel_limit();

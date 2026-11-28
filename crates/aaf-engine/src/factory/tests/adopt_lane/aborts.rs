@@ -3,8 +3,8 @@
 //! code, the PR got a comment that starts `🤖 aaf-bot:` and names the code,
 //! nothing merged, nothing counted as a root failure.
 
-use aaf_domain::event::EventKind;
-use aaf_domain::ports::{KvStore, META_CONSECUTIVE_ROOT_FAILS, TaskStore};
+use aaf_domain::event::{EventKind, FactoryEvent};
+use aaf_domain::ports::{EventSink, KvStore, META_CONSECUTIVE_ROOT_FAILS, TaskStore};
 use aaf_domain::task::TaskState;
 
 use super::support::{Cfg, ID, Lab, Pr, padded_cargo};
@@ -263,14 +263,52 @@ fn merged_unpinned_when_the_pr_was_merged_at_another_head() {
 }
 
 #[test]
-fn a_pr_already_merged_at_the_pinned_head_is_done_without_merging_again() {
-    // A turn that merged and then died: the next one finishes the bookkeeping.
+fn merged_outside_when_the_pr_was_merged_at_the_pin_before_any_merge_phase() {
+    // Someone merged it on the web: no gate, review or signature is on record.
     let lab = Lab::new(Pr::Lib);
+    lab.gh.set_state("MERGED");
+    lab.turn();
+    assert_cancelled(&lab, "merged_outside");
+    assert!(
+        lab.events(EventKind::MergeResult).is_empty(),
+        "no merge result"
+    );
+    assert_eq!(lab.reviewer_runs(), 0);
+    assert!(lab.gh.comments()[0].contains("merged outside the factory"));
+}
+
+#[test]
+fn merged_outside_when_the_merge_lands_during_the_dry_run() {
+    let lab = Lab::new(Pr::Lib);
+    let gh = lab.gh.clone();
+    // The second `gh pr view` is the dry run's.
+    lab.gh
+        .on_view
+        .lock()
+        .unwrap()
+        .push((2, Box::new(move || gh.set_state("MERGED"))));
+    lab.turn();
+    assert_cancelled(&lab, "merged_outside");
+    assert!(
+        lab.events(EventKind::MergeResult).is_empty(),
+        "no merge result"
+    );
+}
+
+#[test]
+fn a_pr_merged_at_the_pin_after_the_merge_phase_began_is_done_without_merging_again() {
+    // A turn that reached the merge phase, merged and then died: the next one
+    // finishes the bookkeeping.
+    let lab = Lab::new(Pr::Lib);
+    let step = serde_json::json!({ "phase": "merge", "attempt": 0, "retry": false });
+    let event = FactoryEvent::new(EventKind::AdoptStep, step.to_string(), 2).for_task(ID);
+    lab.world.db.emit(&event).unwrap();
     lab.gh.set_state("MERGED");
     lab.turn();
     assert_eq!(lab.state(), TaskState::Done);
     assert_eq!(lab.gh.merges(), 0);
     assert!(lab.gh.comments().is_empty());
+    assert_eq!(lab.events(EventKind::MergeResult).len(), 1);
 }
 
 #[test]

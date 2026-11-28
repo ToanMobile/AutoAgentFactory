@@ -2,6 +2,7 @@
 //! on the merged tree, and how its outcomes (and the codes of the real merge)
 //! map to the lane's exits.
 
+use aaf_domain::event::EventKind;
 use aaf_domain::gate::Receipt;
 
 use super::flow::{Exit, Flow};
@@ -51,9 +52,36 @@ pub(super) fn blocked_exit(
 }
 
 impl Lane<'_> {
+    /// The PR is merged at the pinned head. That is `Done` only when this task
+    /// already reached the merge phase, which is entered after both reviewers
+    /// passed and any signature succeeded (a turn that merged and then died, or
+    /// a merge that landed during the call). Otherwise somebody merged it
+    /// outside the factory: no gate, review or signature is on record, so the
+    /// task is cancelled and no merge result is written.
+    fn merged_at_pin(&self) -> Flow<()> {
+        let steps = self.deps.store.events_for_task_by_kinds(
+            &self.task_id,
+            &[EventKind::AdoptStep],
+            1_000,
+        )?;
+        let reached_merge = steps.iter().any(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.payload_json).is_ok_and(|v| {
+                v["phase"].as_str() == Some("merge") && v["retry"].as_bool() != Some(true)
+            })
+        });
+        if reached_merge {
+            return Ok(());
+        }
+        Err(Exit::abort(
+            "merged_outside",
+            "the PR was merged outside the factory at the pinned head; no factory verification is \
+             recorded",
+        ))
+    }
+
     /// What GitHub says of the PR right now (open, not a draft, at the pinned
     /// head, still on the adopted base). `None`: a turn that merged and then
-    /// died left the PR merged at the pin already.
+    /// died left the PR merged at the pin already (see [`Self::merged_at_pin`]).
     pub(super) fn verify_pr(&self) -> Flow<Option<PrInfo>> {
         let pr = self
             .env
@@ -62,7 +90,7 @@ impl Lane<'_> {
             .map_err(|e| Exit::retry("gh_error", e.to_string()))?;
         if pr.state.eq_ignore_ascii_case("MERGED") {
             return if pr.head_ref_oid.eq_ignore_ascii_case(&self.pinned) {
-                Ok(None)
+                self.merged_at_pin().map(|()| None)
             } else {
                 Err(Exit::abort(
                     "merged_unpinned",
@@ -135,7 +163,7 @@ impl Lane<'_> {
                 receipt: *receipt,
                 lock_fp,
             })),
-            PrMergeOutcome::AlreadyMerged { .. } => Ok(None),
+            PrMergeOutcome::AlreadyMerged { .. } => self.merged_at_pin().map(|()| None),
             PrMergeOutcome::Blocked {
                 code,
                 reason,

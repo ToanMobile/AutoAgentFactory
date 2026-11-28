@@ -23,6 +23,8 @@ mod verify;
 
 pub use env::AdoptEnv;
 
+use aaf_domain::ports::PortResult;
+
 use super::Deps;
 use super::stage_router::StageRouter;
 use flow::Exit;
@@ -64,8 +66,19 @@ fn unpinned(deps: &Deps, task_id: &str, pin: PinError) -> Option<String> {
     }
 }
 
-/// What a panic inside a turn becomes: a retry, never a blocked task.
-pub(crate) fn on_panic(deps: &Deps, router: &StageRouter, task_id: &str) -> AdoptDone {
+/// What a panic inside a turn becomes: the task's runs the panic left
+/// `running` are reaped the way a restart would (`sweep::recover`), so `board
+/// cancel` is not refused and nothing is left to a daemon restart; then a retry,
+/// never a blocked task.
+pub(crate) fn on_panic(
+    deps: &Deps,
+    router: &StageRouter,
+    task_id: &str,
+    reap: &dyn Fn(&str) -> PortResult<()>,
+) -> AdoptDone {
+    let reaped = super::sweep::reap_running_runs(deps, task_id, reap)
+        .err()
+        .map(|err| format!("{task_id}: runs left by the panic not reaped: {err}"));
     let error = match router.adopt.as_deref() {
         None => None,
         Some(env) => match Lane::new(deps, router, env, task_id) {
@@ -76,10 +89,17 @@ pub(crate) fn on_panic(deps: &Deps, router: &StageRouter, task_id: &str) -> Adop
             ))),
         },
     };
+    let note = [reaped, error]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ");
     AdoptDone {
         task_id: task_id.to_string(),
-        error: Some(
-            error.unwrap_or_else(|| format!("{task_id}: the adopt lane panicked; it will retry")),
-        ),
+        error: Some(if note.is_empty() {
+            format!("{task_id}: the adopt lane panicked; it will retry")
+        } else {
+            note
+        }),
     }
 }

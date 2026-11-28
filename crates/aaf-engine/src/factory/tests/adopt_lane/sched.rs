@@ -117,6 +117,37 @@ fn a_panic_of_the_job_schedules_a_retry_and_blocks_nothing() {
 }
 
 #[test]
+fn a_panic_after_a_reviewer_began_a_run_reaps_it_so_board_cancel_works() {
+    use aaf_domain::ports::RunStore;
+    use aaf_domain::run::RunStatus;
+
+    let lab = Lab::new(Pr::Lib);
+    // The first reviewer's run is in the store as `running` when the lane panics.
+    *lab.runners[0].before.lock().unwrap() = Some(Box::new(|| panic!("reviewer exploded")));
+    let summary = run(&lab, &lab.router, Mode::Auto, 0);
+
+    let runs = lab.world.db.runs_for_task(ID).unwrap();
+    assert!(!runs.is_empty(), "the reviewer turn did begin a run");
+    assert!(
+        runs.iter().all(|r| r.status != RunStatus::Running),
+        "{runs:?}"
+    );
+    assert!(runs.iter().all(|r| r.ended_at.is_some()), "{runs:?}");
+    // Still adopting, retried later, nothing blocked.
+    assert_eq!(lab.state(), TaskState::Adopting);
+    assert_eq!(lab.task().retry_after, Some(1_000 + 60));
+    assert!(summary.blocked.is_empty(), "{summary:?}");
+    // `board cancel`'s store path is no longer refused by a running run.
+    let outcome = lab
+        .world
+        .db
+        .cancel_task_atomic(ID, false, None, 2_000)
+        .unwrap();
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(lab.state(), TaskState::Cancelled);
+}
+
+#[test]
 fn a_deferred_reviewer_in_the_scheduler_is_a_retry_not_a_halt_or_a_block() {
     let lab = Lab::new(Pr::Lib);
     lab.runners[0].fake.0.lock().unwrap().audit_outcome = Some(limit_outcome(Some(9_999)));
