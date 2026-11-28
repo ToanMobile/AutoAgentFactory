@@ -143,7 +143,23 @@ pub(super) fn is_compressor(name: &str) -> bool {
     find_spec(name).is_some()
 }
 
-fn strip_suffix_ci<'a>(arg: &'a str, sfx: &str) -> Option<&'a str> {
+pub(super) const TAR_SUFFIXES: &[&str] = &[
+    ".tgz", ".taz", ".tbz", ".tbz2", ".tb2", ".tz2", ".txz", ".tlz", ".tzst", ".tzo",
+];
+
+pub(super) enum Decompress {
+    No,
+    Yes(Vec<String>),
+    Opaque,
+}
+
+pub(super) fn all_suffixes() -> impl Iterator<Item = &'static str> {
+    COMPRESSORS
+        .iter()
+        .flat_map(|r| r.rsplit_once('|').map_or("", |(_, s)| s).split(' '))
+}
+
+pub(super) fn strip_suffix_ci<'a>(arg: &'a str, sfx: &str) -> Option<&'a str> {
     let split = arg.len().checked_sub(sfx.len())?;
     (!sfx.is_empty()
         && split > 0
@@ -171,8 +187,15 @@ fn safe_env_opts(val: &str) -> bool {
     })
 }
 
-/// Fail-closed check for compressors/decompressors on env vars, options, and paths.
-pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
+struct ParsedFlags<'a> {
+    suffixes: &'static str,
+    decompressing: bool,
+    recursive: bool,
+    custom_suffixes: Vec<&'a str>,
+    dynamic_suffix: bool,
+}
+
+fn parse_compressor_flags(cmd: &Cmd) -> Option<Result<ParsedFlags<'_>, Denial>> {
     let (name, args) = (cmd.name(), cmd.args());
     let (names, decomp, suffixes) = find_spec(name)?;
     if let Some((var, _)) = cmd
@@ -180,13 +203,15 @@ pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         .iter()
         .find(|(k, v)| has_word(ENV_OPTS, k) && !safe_env_opts(v))
     {
-        return Some(cant(name, &format!("option env var {var}")));
+        return Some(Err(cant(name, &format!("option env var {var}"))));
     }
     let (is_lzop, is_zstd) = (names == "lzop", names.starts_with("zstd"));
     let has_name = is_lzop || names.starts_with("gzip");
     let is_rz = names.starts_with("rzip");
     let mut decompressing = has_word(decomp, name);
-    let (mut recursive, mut restore_name, mut custom_suffixes) = (false, false, Vec::new());
+    let (mut recursive, mut restore_name, mut dynamic_suffix) = (false, false, false);
+    let mut custom_suffixes = Vec::new();
+    let is_dyn = |idx: usize| cmd.arg_dynamic.get(idx + 1).copied().unwrap_or(false);
 
     let flags = args.iter().map(String::as_str).enumerate();
     for (i, arg) in flags.filter(|(_, a)| a.len() > 1 && a.starts_with('-')) {
@@ -196,12 +221,13 @@ pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                 .split_once('=')
                 .map_or((arg, None), |(o, v)| (o, Some(v)));
             if unparseable_long(opt, is_zstd, is_lzop) {
-                return Some(cant(name, opt));
+                return Some(Err(cant(name, opt)));
             }
             decompressing |= long_is(opt, "--decompress", 3) || long_is(opt, "--uncompress", 3);
             recursive |= long_is(opt, "--recursive", 5);
             restore_name |= has_name && long_is(opt, "--name", 4);
             if long_is(opt, "--suffix", 4) {
+                dynamic_suffix |= is_dyn(if eq.is_some() { i } else { i + 1 });
                 custom_suffixes.extend(eq.or_else(next_arg).filter(|s| !s.is_empty()));
             }
         } else {
@@ -211,11 +237,12 @@ pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
                     'd' => decompressing = true,
                     'r' => recursive = true,
                     'N' if has_name => restore_name = true,
-                    'x' | 'P' | 'p' if is_lzop => return Some(cant(name, "-x/-p/-P output")),
-                    'O' if is_rz => return Some(cant(name, "-O output directory")),
+                    'x' | 'P' | 'p' if is_lzop => return Some(Err(cant(name, "-x/-p/-P output"))),
+                    'O' if is_rz => return Some(Err(cant(name, "-O output directory"))),
                     'S' => {
                         let r = chars.as_str();
                         let val = (!r.is_empty()).then_some(r).or_else(next_arg);
+                        dynamic_suffix |= is_dyn(if !r.is_empty() { i } else { i + 1 });
                         custom_suffixes.extend(val.filter(|s| !s.is_empty()));
                         break;
                     }
@@ -225,12 +252,50 @@ pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
             }
         }
         if custom_suffixes.len() > MAX_MODIFIERS {
-            return Some(cant(name, "too many suffixes"));
+            return Some(Err(cant(name, "too many suffixes")));
         }
     }
     if decompressing && restore_name {
-        return Some(cant(name, "-N/--name filename"));
+        return Some(Err(cant(name, "-N/--name filename")));
     }
+    Some(Ok(ParsedFlags {
+        suffixes,
+        decompressing,
+        recursive,
+        custom_suffixes,
+        dynamic_suffix,
+    }))
+}
+
+pub(super) fn decompress_mode(cmd: &Cmd) -> Decompress {
+    if cmd.dynamic_name {
+        return Decompress::Opaque;
+    }
+    if crate::shell::SHELLS.contains(&cmd.name()) {
+        return Decompress::Yes(Vec::new());
+    }
+    match parse_compressor_flags(cmd) {
+        None => Decompress::No,
+        Some(Err(_)) => Decompress::Opaque,
+        Some(Ok(f)) if f.dynamic_suffix || cmd.arg_dynamic.iter().skip(1).any(|&d| d) => {
+            Decompress::Opaque
+        }
+        Some(Ok(f)) if f.decompressing => {
+            Decompress::Yes(f.custom_suffixes.into_iter().map(str::to_string).collect())
+        }
+        Some(Ok(_)) => Decompress::No,
+    }
+}
+
+/// Fail-closed check for compressors/decompressors on env vars, options, and paths.
+pub(super) fn check_compressor(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
+    let name = cmd.name();
+    let flags = match parse_compressor_flags(cmd)? {
+        Ok(flags) => flags,
+        Err(denial) => return Some(denial),
+    };
+    let (suffixes, recursive, custom_suffixes) =
+        (flags.suffixes, flags.recursive, flags.custom_suffixes);
     let toks = match named_candidates(cmd) {
         Ok(toks) => toks,
         Err(denial) => return Some(denial),

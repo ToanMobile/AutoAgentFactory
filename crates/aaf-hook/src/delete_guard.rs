@@ -8,6 +8,7 @@ use crate::shell::Cmd;
 use crate::{Ctx, Denial, git_guard, paths};
 
 mod find;
+mod find_dynamic;
 mod rewriters;
 mod writers;
 
@@ -106,7 +107,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
     let args = cmd.args();
     if cmd.xargs
         && (cmd.dynamic_name || is_deleter(name))
-        && feeds_protected(cmd.feeder.as_deref(), ctx)
+        && feeds_protected(cmd.feeder.as_deref(), &rewriters::decompress_mode(cmd), ctx)
     {
         let tool = if cmd.dynamic_name {
             "a tool chosen at run time"
@@ -151,7 +152,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         }),
         "sed" => writers::check_sed(args, ctx),
         "git" => git(args, ctx),
-        "find" => find(args, ctx),
+        "find" => find(args, cmd.arg_dynamic.get(1..).unwrap_or(&[]), ctx),
         _ => None,
     }
 }

@@ -207,10 +207,12 @@ pub(super) fn find_execs(words: &[Tok]) -> Vec<Vec<Tok>> {
             words[at].text.as_str(),
             "-exec" | "-execdir" | "-ok" | "-okdir"
         ) {
-            let end = words[at + 1..]
-                .iter()
-                .position(|tok| tok.text == ";" || tok.text == "+")
-                .map_or(words.len(), |offset| at + 1 + offset);
+            let end = (at + 1..words.len())
+                .find(|&end| {
+                    words[end].text == ";"
+                        || (words[end].text == "+" && end - 1 > at && words[end - 1].text == "{}")
+                })
+                .unwrap_or(words.len());
             if end > at + 1 {
                 subs.push(words[at + 1..end].to_vec());
             }

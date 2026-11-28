@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::shell::{self, Cmd};
 use crate::{Ctx, Denial, paths};
 
+use super::rewriters::{self, Decompress};
 use super::{RULE, check_delete_root};
 
 /// Tools that remove or empty the files `find -exec` hands them. A shell is
@@ -30,7 +31,7 @@ pub(super) const DELETERS: &[&str] = &[
     "del-cli",
 ];
 
-const EXEC_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+pub(super) const EXEC_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 pub(super) fn is_deleter(name: &str) -> bool {
     DELETERS.contains(&name) || name == "ln" || super::rewriters::is_compressor(name)
@@ -40,19 +41,32 @@ pub(super) fn is_deleter(name: &str) -> bool {
 /// wrapper stripping as a typed command (`env rm`, `nice /bin/rm`,
 /// `sh -c …`). A tool chosen at run time, or an argv that cannot be
 /// analysed, could be one.
-fn runs_deleter(argv: &[String]) -> bool {
+pub(super) fn exec_deleter(argv: &[String]) -> Option<Decompress> {
     let script = shell::parse_argv(argv);
-    !script.opaque.is_empty()
-        || script
-            .cmds
-            .iter()
-            .any(|cmd| cmd.dynamic_name || is_deleter(cmd.name()))
+    if !script.opaque.is_empty() {
+        return Some(Decompress::Opaque);
+    }
+    let mut deleters = script
+        .cmds
+        .iter()
+        .filter(|c| c.dynamic_name || is_deleter(c.name()));
+    let first = rewriters::decompress_mode(deleters.next()?);
+    Some(
+        deleters.fold(first, |acc, c| match (acc, rewriters::decompress_mode(c)) {
+            (Decompress::Opaque, _) | (_, Decompress::Opaque) => Decompress::Opaque,
+            (Decompress::Yes(mut a), Decompress::Yes(b)) => {
+                a.extend(b);
+                Decompress::Yes(a)
+            }
+            (Decompress::No, other) | (other, Decompress::No) => other,
+        }),
+    )
 }
 
 /// A global option `find` reads before its search roots: `-H`, `-L`, `-P`
 /// and BSD `-E`, `-X`, `-d`, `-s`, `-x`, alone or clustered (`-sx`), or GNU
 /// `-O<level>`.
-fn global_option(arg: &str) -> bool {
+pub(super) fn global_option(arg: &str) -> bool {
     let Some(flags) = arg.strip_prefix('-') else {
         return false;
     };
@@ -66,7 +80,7 @@ fn global_option(arg: &str) -> bool {
 /// BSD `find` (getopt `EHLPXdf:sx`): a cluster of flag letters ending in
 /// `f` (`-f`, `-xf`, `-sf/`) whose value, glued or the next word, is a
 /// search root. `Some("")` when the value is the next word.
-fn dash_f(arg: &str) -> Option<&str> {
+pub(super) fn dash_f(arg: &str) -> Option<&str> {
     let letters = arg.strip_prefix('-')?;
     let at = letters.find('f')?;
     letters[..at]
@@ -181,20 +195,34 @@ fn temp_root(raw: &str, ctx: &Ctx) -> bool {
 /// `find … -delete` (or `-exec rm {}`) removes whatever its tests let
 /// through, protected files included. It is allowed only when a `-name`
 /// test every deleted file must pass cannot match a protected file.
-pub(super) fn find(args: &[String], ctx: &Ctx) -> Option<Denial> {
+pub(super) fn find(args: &[String], dynamic: &[bool], ctx: &Ctx) -> Option<Denial> {
     let word = |at: usize| args.get(at).map_or("", String::as_str);
     let expression = expression_start(args);
-    let action = (expression..args.len()).find(|at| match word(*at) {
-        "-delete" => true,
-        action if EXEC_ACTIONS.contains(&action) => {
-            let end = (*at + 1..args.len())
-                .find(|end| matches!(word(*end), ";" | "+"))
-                .unwrap_or(args.len());
-            let argv = args.get(*at + 1..end).unwrap_or(&[]);
-            argv.iter().any(|arg| arg.contains("{}")) && runs_deleter(argv)
+    if let Some(denial) = super::find_dynamic::check(args, dynamic, expression, false) {
+        return Some(denial);
+    }
+    let mut actions = Vec::new();
+    let mut at = expression;
+    while at < args.len() {
+        match word(at) {
+            "-delete" => actions.push((at, Decompress::No)),
+            action if EXEC_ACTIONS.contains(&action) => {
+                let end = exec_end(args, at);
+                let argv = args.get(at + 1..end).unwrap_or(&[]);
+                if argv.iter().any(|arg| arg.contains("{}"))
+                    && let Some(decomp) = exec_deleter(argv)
+                {
+                    actions.push((at, decomp));
+                }
+                at = end;
+            }
+            _ => {}
         }
-        _ => false,
-    })?;
+        at += 1;
+    }
+    if actions.is_empty() {
+        return None;
+    }
     // Whatever its tests, the search roots are deleted from: they get the
     // containment of `rm -r` (the repository, `/tmp`, `$TMPDIR`).
     if let Some(denial) = roots(args)
@@ -203,7 +231,10 @@ pub(super) fn find(args: &[String], ctx: &Ctx) -> Option<Denial> {
     {
         return Some(denial);
     }
-    reaches_protected(args, expression, action, ctx).then(|| {
+    let reaches = actions
+        .iter()
+        .any(|(action, decomp)| reaches_protected(args, (expression, *action), decomp, ctx));
+    reaches.then(|| {
         Denial::new(
             RULE,
             "find would delete every match and its tests do not rule out protected files",
@@ -216,7 +247,7 @@ pub(super) fn find(args: &[String], ctx: &Ctx) -> Option<Denial> {
 /// Only a `find` is understood; any other feeder (`ls`, `git ls-files`,
 /// `cat list`, a pipeline stage in between) prints names the hook cannot
 /// know, and that is refused.
-pub(super) fn feeds_protected(feeder: Option<&Cmd>, ctx: &Ctx) -> bool {
+pub(super) fn feeds_protected(feeder: Option<&Cmd>, decomp: &Decompress, ctx: &Ctx) -> bool {
     let Some(find) = feeder.filter(|cmd| cmd.name() == "find" && !cmd.dynamic_name && !cmd.xargs)
     else {
         return true;
@@ -239,28 +270,111 @@ pub(super) fn feeds_protected(feeder: Option<&Cmd>, ctx: &Ctx) -> bool {
             )
         })
         .map_or(args.len(), |at| expression + at);
+    let dyn_args = find.arg_dynamic.get(1..).unwrap_or(&[]);
     prints_other
+        || super::find_dynamic::check(args, dyn_args, expression, true).is_some()
         || roots(args)
             .into_iter()
             .any(|root| root_denied(root, ctx).is_some())
-        || reaches_protected(args, expression, action, ctx)
+        || reaches_protected(args, (expression, action), decomp, ctx)
+}
+
+pub(super) fn exec_end(args: &[String], at: usize) -> usize {
+    (at + 1..args.len())
+        .find(|&end| {
+            args[end] == ";" || (args[end] == "+" && end - 1 > at && args[end - 1] == "{}")
+        })
+        .unwrap_or(args.len())
+}
+
+const ZERO_ARG_PRIMARIES: &str = "\
+    -a -and -d -daystart -depth -follow -ignore_readdir_race -mount -noignore_readdir_race \
+    -noleaf -nowarn -warn -xdev -acl -xattr -empty -executable -false -nogroup -nouser \
+    -readable -sparse -true -writable -delete -ls -print -print0 -prune -quit";
+
+/// Number of operands a `find` primary consumes, or `None` when unknown.
+pub(super) fn primary_args(tok: &str) -> Option<usize> {
+    match tok {
+        "-fprintf" => Some(2),
+        "-name" | "-iname" | "-lname" | "-ilname" | "-path" | "-ipath" | "-wholename"
+        | "-iwholename" | "-regex" | "-iregex" | "-regextype" | "-fprint" | "-fprint0" | "-fls"
+        | "-printf" | "-files0-from" | "-maxdepth" | "-mindepth" | "-amin" | "-anewer"
+        | "-atime" | "-cmin" | "-cnewer" | "-ctime" | "-mmin" | "-mnewer" | "-mtime" | "-Bmin"
+        | "-Bnewer" | "-Btime" | "-newer" | "-used" | "-type" | "-xtype" | "-size" | "-perm"
+        | "-flags" | "-user" | "-uid" | "-group" | "-gid" | "-inum" | "-links" | "-samefile"
+        | "-fstype" | "-context" | "-xattrname" => Some(1),
+        _ if ZERO_ARG_PRIMARIES
+            .split_ascii_whitespace()
+            .any(|p| p == tok) =>
+        {
+            Some(0)
+        }
+        _ if tok.starts_with("-newer") && tok.len() == 8 => Some(1),
+        _ => None,
+    }
+}
+
+fn has_safe_name_filter(
+    args: &[String],
+    expression: usize,
+    action: usize,
+    decomp: &Decompress,
+) -> bool {
+    let mut at = expression;
+    while at < action {
+        let tok = args[at].as_str();
+        if EXEC_ACTIONS.contains(&tok) {
+            at = exec_end(args, at) + 1;
+        } else if matches!(tok, "-name" | "-iname") {
+            if at + 1 < action && !pattern_may_name_protected(&args[at + 1], decomp) {
+                return true;
+            }
+            at += 2;
+        } else if let Some(n) = primary_args(tok) {
+            at += 1 + n;
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
+fn pattern_may_name_protected(pattern: &str, decomp: &Decompress) -> bool {
+    if paths::may_name_protected(pattern) {
+        return true;
+    }
+    let custom = match decomp {
+        Decompress::No => return false,
+        Decompress::Opaque => return true,
+        Decompress::Yes(custom) => custom.as_slice(),
+    };
+    let has_glob = paths::has_glob(pattern);
+    let exposes = |sfx: &str| {
+        rewriters::strip_suffix_ci(pattern, sfx).is_some_and(paths::may_name_protected)
+            || (has_glob && paths::may_name_protected_with_suffix(pattern, sfx))
+    };
+    rewriters::TAR_SUFFIXES.iter().any(|sfx| {
+        rewriters::strip_suffix_ci(pattern, sfx)
+            .is_some_and(|stem| paths::may_name_protected(&format!("{stem}.tar")))
+    }) || rewriters::all_suffixes().any(exposes)
+        || custom.iter().map(String::as_str).any(exposes)
 }
 
 /// A file of the repository can reach the action at `action` without having
 /// passed a `-name` test that rules protected files out.
-fn reaches_protected(args: &[String], expression: usize, action: usize, ctx: &Ctx) -> bool {
+fn reaches_protected(
+    args: &[String],
+    (expression, action): (usize, usize),
+    decomp: &Decompress,
+    ctx: &Ctx,
+) -> bool {
     let word = |at: usize| args.get(at).map_or("", String::as_str);
     // With an operator a file can reach the action without passing the test;
     // a test after the action filters nothing. Settled from the words alone,
     // before the root lookup spawns git.
     let branches = (expression..args.len())
         .any(|at| matches!(word(at), "-o" | "-or" | "!" | "-not" | "(" | ")" | ","));
-    let filtered = !branches
-        && (expression..action).any(|at| {
-            matches!(word(at), "-name" | "-iname")
-                && at + 1 < action
-                && !paths::may_name_protected(word(at + 1))
-        });
+    let filtered = !branches && has_safe_name_filter(args, expression, action, decomp);
     if filtered {
         return false;
     }
