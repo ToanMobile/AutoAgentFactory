@@ -227,6 +227,8 @@ pub(crate) fn waiting_line(waiting: u32, binding: &BindingView) -> Option<String
 pub(crate) fn drain_stop_reason(summary: &RunSummary) -> &'static str {
     if summary.frozen {
         "frozen"
+    } else if summary.cost_paused {
+        "cost_paused"
     } else if summary.halted.is_some() {
         "halted"
     } else if !summary.blocked.is_empty() {

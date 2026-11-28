@@ -31,6 +31,8 @@ pub(super) fn report(
         summary.waiting_for_account,
         if summary.frozen {
             "; factory is FROZEN: aaf board unfreeze"
+        } else if summary.cost_paused {
+            "; factory is COST PAUSED (daily_token_cap reached)"
         } else {
             ""
         }

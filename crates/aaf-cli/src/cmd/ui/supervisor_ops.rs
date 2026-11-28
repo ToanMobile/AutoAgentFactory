@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aaf_domain::ports::{Clock, KvStore, META_COST_PAUSED_UNTIL};
+use aaf_engine::clock::SystemClock;
+use aaf_engine::db::Db;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -122,6 +125,35 @@ pub(super) fn runner_env(ctx: &Ctx) -> Vec<(&'static str, std::ffi::OsString)> {
         env.push(("AAF_SEED_CACHE", std::ffi::OsString::from(val)));
     }
     env
+}
+
+/// Returns `true` iff `META_COST_PAUSED_UNTIL` is still in the future AND the
+/// repository's effective 24h `daily_token_cap` is still reached. Checking live
+/// config + 24h usage avoids supervisor spin-loops during a cost pause while
+/// waking immediately if the user raises or disables `daily_token_cap`.
+pub(super) fn is_repo_cost_paused(ctx: &Ctx, db: &Db, repo_root: &str) -> bool {
+    is_repo_cost_paused_at(ctx, db, repo_root, SystemClock.now())
+}
+
+pub(super) fn is_repo_cost_paused_at(ctx: &Ctx, db: &Db, repo_root: &str, now: i64) -> bool {
+    let paused_until = db
+        .get_meta(META_COST_PAUSED_UNTIL)
+        .ok()
+        .flatten()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if paused_until <= now {
+        return false;
+    }
+    let Ok(cfg) = ctx.load_config(Path::new(repo_root)) else {
+        return false;
+    };
+    let cap = cfg.repo.unblocker.cost_guard.daily_token_cap;
+    if cap == 0 {
+        return false;
+    }
+    db.cost_window_usage(now.saturating_sub(86_400))
+        .is_ok_and(|(day_tokens, _)| day_tokens >= cap)
 }
 
 /// Returns `true` iff an external `aaf run` process currently holds the OS flock
@@ -414,5 +446,88 @@ mod tests {
         drop(holder);
         let after = collect_running_repo_paths(&data_dir, &[], &known);
         assert!(after.is_empty());
+    }
+
+    #[test]
+    fn is_repo_cost_paused_respects_expiry_and_cap_updates() {
+        use aaf_domain::ports::{RunStore, TaskStore};
+        use aaf_domain::run::{RunRecord, RunStatus};
+        use aaf_domain::task::{ImmutableSpec, Priority, Task, TaskState};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let cfg_dir = tmp.path().join("cfg");
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        let ctx = Ctx {
+            cwd: repo.clone(),
+            home: tmp.path().to_path_buf(),
+            data_dir: data_dir.clone(),
+            config_dir: cfg_dir.clone(),
+            worktrees_dir: tmp.path().join("wt"),
+            path_var: std::ffi::OsString::new(),
+            run_id: None,
+            stdin_is_tty: false,
+            aaf_env: Vec::new(),
+        };
+        let db = Db::open(&data_dir.join("aaf.db")).unwrap();
+        let now = 200_000_i64;
+        let repo_str = repo.to_string_lossy().into_owned();
+        let mut t = Task::new_root(
+            "t1",
+            &repo_str,
+            "hist",
+            ImmutableSpec {
+                description: "d".into(),
+                acceptance: vec!["a".into()],
+            },
+            Priority::P2,
+            1,
+        );
+        t.state = TaskState::Done;
+        db.insert_task(&t).unwrap();
+        db.insert_run(&RunRecord {
+            id: "r1".into(),
+            task_id: "t1".into(),
+            account_id: Some("a".into()),
+            executor: "claude".into(),
+            worktree_path: String::new(),
+            branch: "aaf/t1".into(),
+            status: RunStatus::Succeeded,
+            exit_code: Some(0),
+            tokens_in: 1_500,
+            tokens_out: 500,
+            started_at: now - 3_600,
+            ended_at: Some(now - 3_500),
+        })
+        .unwrap();
+        db.set_meta(META_COST_PAUSED_UNTIL, &(now + 3_600).to_string())
+            .unwrap();
+        fs::write(
+            cfg_dir.join("config.toml"),
+            "[unblocker.cost_guard]\ndaily_token_cap = 1000\n",
+        )
+        .unwrap();
+
+        assert!(is_repo_cost_paused_at(&ctx, &db, &repo_str, now));
+        assert!(!is_repo_cost_paused_at(&ctx, &db, &repo_str, now + 3_600));
+
+        // Raising daily_token_cap above 24h usage unpauses supervisor immediately.
+        fs::write(
+            cfg_dir.join("config.toml"),
+            "[unblocker.cost_guard]\ndaily_token_cap = 5000\n",
+        )
+        .unwrap();
+        assert!(!is_repo_cost_paused_at(&ctx, &db, &repo_str, now));
+
+        // Disabling cost_guard (cap = 0) unpauses supervisor immediately.
+        fs::write(
+            cfg_dir.join("config.toml"),
+            "[unblocker.cost_guard]\ndaily_token_cap = 0\n",
+        )
+        .unwrap();
+        assert!(!is_repo_cost_paused_at(&ctx, &db, &repo_str, now));
     }
 }

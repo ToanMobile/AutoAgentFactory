@@ -147,10 +147,7 @@ fn daily_cap_pauses_new_work_then_resumes_when_window_rolls() {
         data_dir,
         Arc::new(db.clone()),
         Arc::clone(&clock),
-        CostGuardConfig {
-            daily_token_cap: 1_000,
-            spike_factor: 4,
-        },
+        cost_guard(1_000, 4),
     );
 
     let idle_step = AtomicU32::new(0);
@@ -223,10 +220,7 @@ fn spike_freezes_factory_and_requires_unfreeze() {
         data_dir,
         Arc::new(db.clone()),
         Arc::clone(&clock),
-        CostGuardConfig {
-            daily_token_cap: 24_000,
-            spike_factor: 4,
-        },
+        cost_guard(24_000, 4),
     );
     let hooks = Hooks {
         idle: &|| true,
@@ -278,10 +272,7 @@ fn cap_resume_never_clears_consecutive_fail_freeze() {
         data_dir,
         Arc::new(db.clone()),
         Arc::clone(&clock),
-        CostGuardConfig {
-            daily_token_cap: 1_000,
-            spike_factor: 4,
-        },
+        cost_guard(1_000, 4),
     );
 
     let hooks = Hooks {
@@ -353,10 +344,7 @@ fn paused_events_are_emitted_once_per_transition() {
         data_dir,
         Arc::new(db.clone()),
         Arc::clone(&clock),
-        CostGuardConfig {
-            daily_token_cap: 1_000,
-            spike_factor: 4,
-        },
+        cost_guard(1_000, 4),
     );
 
     let step = AtomicU32::new(0);
@@ -421,10 +409,7 @@ fn unfreeze_anchors_spike_window_and_re_freezes_on_new_spike() {
         data_dir,
         Arc::new(db.clone()),
         Arc::clone(&clock),
-        CostGuardConfig {
-            daily_token_cap: 24_000,
-            spike_factor: 4,
-        },
+        cost_guard(24_000, 4),
     );
     let hooks = Hooks {
         idle: &|| false,
@@ -484,10 +469,7 @@ fn pause_persists_in_meta_across_separate_once_runs_without_spam() {
         data_dir,
         Arc::new(db.clone()),
         Arc::clone(&clock),
-        CostGuardConfig {
-            daily_token_cap: 1_000,
-            spike_factor: 4,
-        },
+        cost_guard(1_000, 4),
     );
     let hooks = Hooks {
         idle: &|| false,
@@ -548,10 +530,7 @@ fn long_running_task_ending_within_hour_triggers_spike_freeze() {
         data_dir,
         Arc::new(db.clone()),
         clock,
-        CostGuardConfig {
-            daily_token_cap: 24_000,
-            spike_factor: 4,
-        },
+        cost_guard(24_000, 4),
     );
     let hooks = Hooks {
         idle: &|| false,
@@ -567,4 +546,40 @@ fn long_running_task_ending_within_hour_triggers_spike_freeze() {
     let payload: Value = serde_json::from_str(&frozen[0].payload_json).unwrap();
     assert_eq!(payload["reason"], "token_spike");
     assert_eq!(payload["tokens_last_hour"], 5_000);
+}
+
+fn cost_guard(daily_token_cap: u64, spike_factor: u32) -> CostGuardConfig {
+    CostGuardConfig {
+        daily_token_cap,
+        spike_factor,
+    }
+}
+
+#[test]
+fn cost_paused_queued_audit_reports_zero_waiting_for_account() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let data_dir = root.join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let db = Db::open(&data_dir.join("aaf.db")).unwrap();
+    let now = 200_000_i64;
+    insert_done_history_task(&db, "hist");
+    insert_run_tokens(&db, "r1", "hist", now - 7_200, (700, 500));
+    let mut gating = Task::new_root("g1", "/fake/repo", "gating", test_spec(), Priority::P2, 1);
+    gating.state = TaskState::Gating;
+    db.insert_task(&gating).unwrap();
+    let (mut deps, _) = build_cost_deps(
+        root,
+        data_dir,
+        Arc::new(db),
+        Arc::new(TestClock(AtomicI64::new(now))),
+        cost_guard(1_000, 4),
+    );
+    deps.settings.repo.cross_audit.audit_scope = aaf_domain::config::AuditScope::Always;
+    let hooks = Hooks {
+        idle: &|| false,
+        reap: &|_| Ok(()),
+    };
+    let summary = run(&deps, Mode::Once, &hooks).unwrap();
+    assert!(summary.cost_paused && summary.waiting_for_account == 0);
 }

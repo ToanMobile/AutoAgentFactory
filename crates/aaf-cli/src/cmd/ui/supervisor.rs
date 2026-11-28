@@ -23,9 +23,9 @@ use serde_json::{Value, json};
 #[cfg(test)]
 pub(super) use super::supervisor_ops::runner_env;
 use super::supervisor_ops::{
-    PersistedState, WorkerSlot, collect_running_repo_paths, is_repo_allowed, is_repo_lock_held,
-    normalize_repo_key, read_persisted, spawn_repo_runner, stop_children_unlocked,
-    sync_caffeinate_child, write_persisted,
+    PersistedState, WorkerSlot, collect_running_repo_paths, is_repo_allowed, is_repo_cost_paused,
+    is_repo_lock_held, normalize_repo_key, read_persisted, spawn_repo_runner,
+    stop_children_unlocked, sync_caffeinate_child, write_persisted,
 };
 use crate::cmd::board::store::SharedRoDb;
 use crate::ctx::Ctx;
@@ -419,7 +419,8 @@ fn tick(sup: &UiSupervisor) {
         if guard.backoff_until.get(&repo).is_some_and(|u| *u > now) {
             continue;
         }
-        if is_repo_lock_held(&sup.ctx.data_dir, &repo) {
+        if is_repo_lock_held(&sup.ctx.data_dir, &repo) || is_repo_cost_paused(&sup.ctx, &db, &repo)
+        {
             continue;
         }
         match spawn_repo_runner(&exe, &sup.ctx, &repo) {

@@ -382,6 +382,9 @@ pub(super) fn detect_worker_issues(
 
 fn parse_waiting_for_account_line(line: &str) -> Option<u64> {
     let idx = line.find(" waiting for an account")?;
+    if line.contains("factory is COST PAUSED") || line.contains("factory is FROZEN") {
+        return Some(0);
+    }
     let prefix = line[..idx].trim_end();
     let num_str = prefix.rsplit(|c: char| !c.is_ascii_digit()).next()?;
     if num_str.is_empty() {
@@ -497,5 +500,32 @@ pub(super) fn summarize_account_pool(
         total_accounts: accounts.len(),
         waiting_for_account,
         waiting_repos,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_waiting_for_account_line;
+
+    #[test]
+    fn parse_waiting_for_account_ignores_cost_paused_and_frozen_lines() {
+        assert_eq!(
+            parse_waiting_for_account_line(
+                "0 agent run(s), 0 gate run(s): 0 done, 0 in review, 0 blocked, 0 back to ready, 1 waiting for an account; factory is COST PAUSED (daily_token_cap reached)"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            parse_waiting_for_account_line(
+                "0 agent run(s), 0 gate run(s): 0 done, 0 in review, 0 blocked, 0 back to ready, 1 waiting for an account; factory is FROZEN: aaf board unfreeze"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            parse_waiting_for_account_line(
+                "0 agent run(s), 0 gate run(s): 0 done, 0 in review, 0 blocked, 0 back to ready, 2 waiting for an account"
+            ),
+            Some(2)
+        );
     }
 }

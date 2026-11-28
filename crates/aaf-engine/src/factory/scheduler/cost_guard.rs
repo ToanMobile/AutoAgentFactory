@@ -39,6 +39,10 @@ impl Scheduler<'_> {
     pub(in crate::factory) fn cost_gate(&mut self) -> PortResult<CostGate> {
         let cfg = self.deps.settings.repo.unblocker.cost_guard;
         if cfg.daily_token_cap == 0 {
+            if is_cost_paused_meta(&*self.deps.store)? {
+                self.deps.store.set_meta(META_COST_PAUSED_UNTIL, "0")?;
+            }
+            self.state.cost_cached_paused = false;
             return Ok(CostGate::Allow);
         }
 

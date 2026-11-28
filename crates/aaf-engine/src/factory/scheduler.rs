@@ -316,13 +316,11 @@ impl<'a> Scheduler<'a> {
                 .keys()
                 .filter(|id| !board.candidates.iter().any(|t| t.id == **id))
                 .count();
-            let waiting = self.state.jobs.len()
-                + parked
-                + if capped || paused || frozen {
-                    0
-                } else {
-                    board.candidates.len()
-                };
+            let waiting = if paused || frozen {
+                0
+            } else {
+                self.state.jobs.len() + parked + if capped { 0 } else { board.candidates.len() }
+            };
             if !halted && !stopping {
                 self.summary.waiting_for_account = u32::try_from(waiting).unwrap_or(u32::MAX);
             }
