@@ -370,7 +370,7 @@ fn verified_reflog_file(git_dir_canon: &Path, rel: &Path) -> Option<PathBuf> {
 /// whose `gitdir:` leads into `<git_dir>/worktrees/<name>`: that dir. A normal checkout (or
 /// a subdirectory of one), a submodule and a `--separate-git-dir` checkout
 /// own the `HEAD` and `index` in `git_dir`, so they are not linked.
-fn linked_worktree_admin_dir(worktree: &Path, git_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn linked_worktree_admin_dir(worktree: &Path, git_dir: &Path) -> Option<PathBuf> {
     let mut dot_gits = worktree.ancestors().map(|dir| dir.join(".git"));
     let dot_git = dot_gits.find(|dot_git| dot_git.symlink_metadata().is_ok())?;
     // A `.git` link to a gitfile is followed, as git follows it.

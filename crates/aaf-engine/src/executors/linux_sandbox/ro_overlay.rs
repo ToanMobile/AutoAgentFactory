@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::super::sandbox::linked_worktree_admin_dir;
 use super::bwrap::{
     abs_path_str, canonical_or_self, is_leaf_symlink, push_flag_pair, push_flag_path,
 };
@@ -37,25 +38,6 @@ fn ensure_logs_dir(logs: &Path) -> Result<(), String> {
             .map_err(|err| format!("RFC-126: failed to create {}: {err}", logs.display())),
         Err(err) => Err(format!("RFC-126: failed to stat {}: {err}", logs.display())),
     }
-}
-
-/// SEC-129: resolves the active linked worktree's admin dir
-/// (`<git_dir>/worktrees/<name>`, canonicalized) by walking up from `worktree`
-/// to its `.git` gitfile, matching `executors/sandbox/git_dir.rs::linked_worktree_admin_dir`.
-fn linked_worktree_admin_dir(worktree: &Path, git_dir: &Path) -> Option<PathBuf> {
-    let dot_git = worktree
-        .ancestors()
-        .map(|dir| dir.join(".git"))
-        .find(|candidate| candidate.symlink_metadata().is_ok())?;
-    let text = match std::fs::metadata(&dot_git) {
-        Ok(meta) if meta.is_file() => std::fs::read_to_string(&dot_git).unwrap_or_default(),
-        _ => return None,
-    };
-    let target = text.lines().next()?.strip_prefix("gitdir:")?;
-    let base = dot_git.parent().unwrap_or(worktree);
-    let admins = std::fs::canonicalize(git_dir.join("worktrees")).ok()?;
-    let target = std::fs::canonicalize(base.join(target.trim())).ok()?;
-    Some(admins.join(target.strip_prefix(&admins).ok()?.iter().next()?))
 }
 
 /// SEC-129: matches primary-checkout pseudo-refs and merge/rebase/bisect/index
@@ -236,9 +218,14 @@ impl<'a> RoOverlay<'a> {
         let worktrees = git_dir.join("worktrees");
         if worktrees.is_dir() {
             self.bind_with_target(&worktrees)?;
+            // SEC-129: resolve this linked worktree's admin dir; in factory
+            // runs, linked worktrees always carry a `.git` gitfile so this
+            // always resolves. When `None` (no gitfile, worktree outside
+            // `git_dir`, or primary checkout), keep base behavior.
             let own_admin = (!is_primary_checkout)
                 .then(|| worktree.and_then(|wt| linked_worktree_admin_dir(wt, git_dir)))
-                .flatten();
+                .flatten()
+                .map(|own| canonical_or_self(&own));
             if let Ok(entries) = std::fs::read_dir(&worktrees) {
                 let mut children: Vec<PathBuf> = entries
                     .flatten()
@@ -247,24 +234,22 @@ impl<'a> RoOverlay<'a> {
                     .collect();
                 children.sort();
                 for child in children {
-                    let is_own = !is_leaf_symlink(&child)
-                        && own_admin
-                            .as_ref()
-                            .is_some_and(|own| canonical_or_self(&child) == *own);
-                    if !is_primary_checkout && !is_own {
-                        // SEC-129: sibling (or unresolvable) worktree admin dirs stay RO.
-                        self.bind_with_target(&child)?;
-                        continue;
-                    }
                     push_flag_path(self.argv, self.bound_rw, "--bind", &child)?;
                     for rel in ["hooks", "config", "config.worktree", "commondir", "gitdir"] {
                         self.protect_existing(&child.join(rel))?;
                     }
                     if !is_primary_checkout {
-                        // RFC-126: lock own worktree's reflog dir too.
+                        // RFC-126: lock every worktree's reflog dir too.
                         let logs = child.join("logs");
                         ensure_logs_dir(&logs)?;
                         self.protect_existing(&logs)?;
+                    }
+                    if let Some(own) = &own_admin
+                        && canonical_or_self(&child) != *own
+                    {
+                        // SEC-129: mount sibling admin dir read-only last so
+                        // the later mount wins over `--bind` above.
+                        self.bind_with_target(&child)?;
                     }
                 }
             }
