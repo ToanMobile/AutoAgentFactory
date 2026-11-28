@@ -8,6 +8,7 @@ use crate::shell::Cmd;
 use crate::{Ctx, Denial, git_guard, paths};
 
 mod find;
+mod find_dynamic;
 mod rewriters;
 mod writers;
 
@@ -151,7 +152,7 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         }),
         "sed" => writers::check_sed(args, ctx),
         "git" => git(args, ctx),
-        "find" => find(args, ctx),
+        "find" => find(args, cmd.arg_dynamic.get(1..).unwrap_or(&[]), ctx),
         _ => None,
     }
 }

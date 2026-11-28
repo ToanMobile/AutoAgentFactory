@@ -31,7 +31,7 @@ pub(super) const DELETERS: &[&str] = &[
     "del-cli",
 ];
 
-const EXEC_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+pub(super) const EXEC_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 pub(super) fn is_deleter(name: &str) -> bool {
     DELETERS.contains(&name) || name == "ln" || super::rewriters::is_compressor(name)
@@ -41,7 +41,7 @@ pub(super) fn is_deleter(name: &str) -> bool {
 /// wrapper stripping as a typed command (`env rm`, `nice /bin/rm`,
 /// `sh -c …`). A tool chosen at run time, or an argv that cannot be
 /// analysed, could be one.
-fn exec_deleter(argv: &[String]) -> Option<Decompress> {
+pub(super) fn exec_deleter(argv: &[String]) -> Option<Decompress> {
     let script = shell::parse_argv(argv);
     if !script.opaque.is_empty() {
         return Some(Decompress::Opaque);
@@ -66,7 +66,7 @@ fn exec_deleter(argv: &[String]) -> Option<Decompress> {
 /// A global option `find` reads before its search roots: `-H`, `-L`, `-P`
 /// and BSD `-E`, `-X`, `-d`, `-s`, `-x`, alone or clustered (`-sx`), or GNU
 /// `-O<level>`.
-fn global_option(arg: &str) -> bool {
+pub(super) fn global_option(arg: &str) -> bool {
     let Some(flags) = arg.strip_prefix('-') else {
         return false;
     };
@@ -80,7 +80,7 @@ fn global_option(arg: &str) -> bool {
 /// BSD `find` (getopt `EHLPXdf:sx`): a cluster of flag letters ending in
 /// `f` (`-f`, `-xf`, `-sf/`) whose value, glued or the next word, is a
 /// search root. `Some("")` when the value is the next word.
-fn dash_f(arg: &str) -> Option<&str> {
+pub(super) fn dash_f(arg: &str) -> Option<&str> {
     let letters = arg.strip_prefix('-')?;
     let at = letters.find('f')?;
     letters[..at]
@@ -195,9 +195,12 @@ fn temp_root(raw: &str, ctx: &Ctx) -> bool {
 /// `find … -delete` (or `-exec rm {}`) removes whatever its tests let
 /// through, protected files included. It is allowed only when a `-name`
 /// test every deleted file must pass cannot match a protected file.
-pub(super) fn find(args: &[String], ctx: &Ctx) -> Option<Denial> {
+pub(super) fn find(args: &[String], dynamic: &[bool], ctx: &Ctx) -> Option<Denial> {
     let word = |at: usize| args.get(at).map_or("", String::as_str);
     let expression = expression_start(args);
+    if let Some(denial) = super::find_dynamic::check(args, dynamic, expression, false) {
+        return Some(denial);
+    }
     let mut actions = Vec::new();
     let mut at = expression;
     while at < args.len() {
@@ -267,14 +270,16 @@ pub(super) fn feeds_protected(feeder: Option<&Cmd>, decomp: &Decompress, ctx: &C
             )
         })
         .map_or(args.len(), |at| expression + at);
+    let dyn_args = find.arg_dynamic.get(1..).unwrap_or(&[]);
     prints_other
+        || super::find_dynamic::check(args, dyn_args, expression, true).is_some()
         || roots(args)
             .into_iter()
             .any(|root| root_denied(root, ctx).is_some())
         || reaches_protected(args, (expression, action), decomp, ctx)
 }
 
-fn exec_end(args: &[String], at: usize) -> usize {
+pub(super) fn exec_end(args: &[String], at: usize) -> usize {
     (at + 1..args.len())
         .find(|&end| {
             args[end] == ";" || (args[end] == "+" && end - 1 > at && args[end - 1] == "{}")
@@ -282,8 +287,13 @@ fn exec_end(args: &[String], at: usize) -> usize {
         .unwrap_or(args.len())
 }
 
+const ZERO_ARG_PRIMARIES: &str = "\
+    -a -and -d -daystart -depth -follow -ignore_readdir_race -mount -noignore_readdir_race \
+    -noleaf -nowarn -warn -xdev -acl -xattr -empty -executable -false -nogroup -nouser \
+    -readable -sparse -true -writable -delete -ls -print -print0 -prune -quit";
+
 /// Number of operands a `find` primary consumes, or `None` when unknown.
-fn primary_args(tok: &str) -> Option<usize> {
+pub(super) fn primary_args(tok: &str) -> Option<usize> {
     match tok {
         "-fprintf" => Some(2),
         "-name" | "-iname" | "-lname" | "-ilname" | "-path" | "-ipath" | "-wholename"
@@ -293,36 +303,12 @@ fn primary_args(tok: &str) -> Option<usize> {
         | "-Bnewer" | "-Btime" | "-newer" | "-used" | "-type" | "-xtype" | "-size" | "-perm"
         | "-flags" | "-user" | "-uid" | "-group" | "-gid" | "-inum" | "-links" | "-samefile"
         | "-fstype" | "-context" | "-xattrname" => Some(1),
-        "-a"
-        | "-and"
-        | "-d"
-        | "-daystart"
-        | "-depth"
-        | "-follow"
-        | "-ignore_readdir_race"
-        | "-mount"
-        | "-noignore_readdir_race"
-        | "-noleaf"
-        | "-nowarn"
-        | "-warn"
-        | "-xdev"
-        | "-acl"
-        | "-xattr"
-        | "-empty"
-        | "-executable"
-        | "-false"
-        | "-nogroup"
-        | "-nouser"
-        | "-readable"
-        | "-sparse"
-        | "-true"
-        | "-writable"
-        | "-delete"
-        | "-ls"
-        | "-print"
-        | "-print0"
-        | "-prune"
-        | "-quit" => Some(0),
+        _ if ZERO_ARG_PRIMARIES
+            .split_ascii_whitespace()
+            .any(|p| p == tok) =>
+        {
+            Some(0)
+        }
         _ if tok.starts_with("-newer") && tok.len() == 8 => Some(1),
         _ => None,
     }
