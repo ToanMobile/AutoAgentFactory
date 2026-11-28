@@ -421,7 +421,7 @@ pub fn bounded_glob(last: &str) -> bool {
     has_glob(last) && !last.ends_with('*')
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Part {
     Star,
     Any,
@@ -436,11 +436,7 @@ fn glob_parts(pattern: &str) -> Vec<Part> {
             '*' => parts.push(Part::Star),
             '?' => parts.push(Part::Any),
             '[' => {
-                for inner in chars.by_ref() {
-                    if inner == ']' {
-                        break;
-                    }
-                }
+                let _ = chars.by_ref().find(|&inner| inner == ']');
                 parts.push(Part::Any);
             }
             other => parts.push(Part::Lit(other.to_ascii_lowercase())),
@@ -495,38 +491,44 @@ const ENV_VARIANTS: &[&str] = &[
     ".env.test",
 ];
 
-fn may_name_protected_with(pattern: &str, include_nested: bool) -> bool {
-    if pattern.len() > MAX_PATTERN {
+fn may_name_protected_with(pattern: &str, suffix: &str, include_nested: bool) -> bool {
+    if pattern.len() > MAX_PATTERN || suffix.len() > MAX_PATTERN {
         return true;
     }
-    if SECRET_ENV_ALLOWLIST.contains(&fold(pattern).as_str()) {
+    let folded = fold(pattern);
+    if SECRET_ENV_ALLOWLIST.contains(&folded.strip_suffix(&fold(suffix)).unwrap_or("")) {
         return false;
     }
     let parts = glob_parts(pattern);
-    if PROTECTED_GLOBS
+    let sfx: Vec<_> = suffix
+        .chars()
+        .map(|c| Part::Lit(c.to_ascii_lowercase()))
+        .collect();
+    let hits = |g: &str| globs_intersect(&parts, &[glob_parts(g), sfx.clone()].concat());
+    PROTECTED_GLOBS
         .iter()
         .filter(|g| include_nested || !NESTED.iter().any(|(_, f)| f == *g))
-        .any(|glob| globs_intersect(&parts, &glob_parts(glob)))
-    {
-        return true;
-    }
-    // ponytail: every `*.<ext>` also matches `.env.<ext>`, so strictly no
-    // suffix filter is safe. A pattern opening with `*` is refused only for
-    // the usual `.env.*` variants; upgrade to listing the tree if a project
-    // keeps secrets in `.env.<unusual>`.
-    globs_intersect(&parts, &glob_parts(".env.*"))
-        && (parts.first() != Some(&Part::Star)
-            || ENV_VARIANTS.iter().any(|name| glob_match(pattern, name)))
+        .any(|g| hits(g))
+        || (hits(".env.*")
+            && (parts.first() != Some(&Part::Star)
+                || ENV_VARIANTS
+                    .iter()
+                    .any(|n| glob_match(pattern, &format!("{n}{suffix}")))))
 }
 
 /// A file-name glob (as given to `find -name`) can match a protected file.
 pub fn may_name_protected(pattern: &str) -> bool {
-    may_name_protected_with(pattern, true)
+    may_name_protected_with(pattern, "", true)
+}
+
+/// Like [`may_name_protected`], when a decompressor strips `suffix` from matched names.
+pub fn may_name_protected_with_suffix(pattern: &str, suffix: &str) -> bool {
+    may_name_protected_with(pattern, suffix, true)
 }
 
 /// Like [`may_name_protected`], excluding names only protected inside `.claude`/`.autofactory`.
 pub fn may_name_protected_anywhere(pattern: &str) -> bool {
-    may_name_protected_with(pattern, false)
+    may_name_protected_with(pattern, "", false)
 }
 
 /// A file-name glob can match a secret file (returns the matched pattern).

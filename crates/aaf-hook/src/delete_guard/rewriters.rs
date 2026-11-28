@@ -268,14 +268,19 @@ fn parse_compressor_flags(cmd: &Cmd) -> Option<Result<ParsedFlags<'_>, Denial>> 
 }
 
 pub(super) fn decompress_mode(cmd: &Cmd) -> Decompress {
-    if cmd.dynamic_name || crate::shell::SHELLS.contains(&cmd.name()) {
+    if cmd.dynamic_name {
+        return Decompress::Opaque;
+    }
+    if crate::shell::SHELLS.contains(&cmd.name()) {
         return Decompress::Yes(Vec::new());
     }
     match parse_compressor_flags(cmd) {
         None => Decompress::No,
         Some(Err(_)) => Decompress::Opaque,
-        Some(Ok(f)) if f.dynamic_suffix => Decompress::Opaque,
-        Some(Ok(f)) if f.decompressing || cmd.arg_dynamic.iter().skip(1).any(|&d| d) => {
+        Some(Ok(f)) if f.dynamic_suffix || cmd.arg_dynamic.iter().skip(1).any(|&d| d) => {
+            Decompress::Opaque
+        }
+        Some(Ok(f)) if f.decompressing => {
             Decompress::Yes(f.custom_suffixes.into_iter().map(str::to_string).collect())
         }
         Some(Ok(_)) => Decompress::No,

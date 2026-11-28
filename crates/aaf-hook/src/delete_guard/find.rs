@@ -8,7 +8,7 @@ use crate::shell::{self, Cmd};
 use crate::{Ctx, Denial, paths};
 
 use super::rewriters::{self, Decompress};
-use super::{ENV_SAMPLES, NESTED_PROTECTED, RULE, check_delete_root};
+use super::{RULE, check_delete_root};
 
 /// Tools that remove or empty the files `find -exec` hands them. A shell is
 /// one of them: what its script does with `$1` is not analysed.
@@ -204,9 +204,7 @@ pub(super) fn find(args: &[String], ctx: &Ctx) -> Option<Denial> {
         match word(at) {
             "-delete" => actions.push((at, Decompress::No)),
             action if EXEC_ACTIONS.contains(&action) => {
-                let end = (at + 1..args.len())
-                    .find(|end| matches!(word(*end), ";" | "+"))
-                    .unwrap_or(args.len());
+                let end = exec_end(args, at);
                 let argv = args.get(at + 1..end).unwrap_or(&[]);
                 if argv.iter().any(|arg| arg.contains("{}"))
                     && let Some(decomp) = exec_deleter(argv)
@@ -276,6 +274,82 @@ pub(super) fn feeds_protected(feeder: Option<&Cmd>, decomp: &Decompress, ctx: &C
         || reaches_protected(args, (expression, action), decomp, ctx)
 }
 
+fn exec_end(args: &[String], at: usize) -> usize {
+    (at + 1..args.len())
+        .find(|&end| matches!(args[end].as_str(), ";" | "+"))
+        .unwrap_or(args.len())
+}
+
+/// Number of operands a `find` primary consumes, or `None` when unknown.
+fn primary_args(tok: &str) -> Option<usize> {
+    match tok {
+        "-fprintf" => Some(2),
+        "-name" | "-iname" | "-lname" | "-ilname" | "-path" | "-ipath" | "-wholename"
+        | "-iwholename" | "-regex" | "-iregex" | "-regextype" | "-fprint" | "-fprint0" | "-fls"
+        | "-printf" | "-files0-from" | "-maxdepth" | "-mindepth" | "-amin" | "-anewer"
+        | "-atime" | "-cmin" | "-cnewer" | "-ctime" | "-mmin" | "-mnewer" | "-mtime" | "-Bmin"
+        | "-Bnewer" | "-Btime" | "-newer" | "-used" | "-type" | "-xtype" | "-size" | "-perm"
+        | "-flags" | "-user" | "-uid" | "-group" | "-gid" | "-inum" | "-links" | "-samefile"
+        | "-fstype" | "-context" => Some(1),
+        "-a"
+        | "-and"
+        | "-d"
+        | "-daystart"
+        | "-depth"
+        | "-follow"
+        | "-ignore_readdir_race"
+        | "-mount"
+        | "-noignore_readdir_race"
+        | "-noleaf"
+        | "-nowarn"
+        | "-warn"
+        | "-xdev"
+        | "-acl"
+        | "-empty"
+        | "-executable"
+        | "-false"
+        | "-nogroup"
+        | "-nouser"
+        | "-readable"
+        | "-sparse"
+        | "-true"
+        | "-writable"
+        | "-delete"
+        | "-ls"
+        | "-print"
+        | "-print0"
+        | "-prune"
+        | "-quit" => Some(0),
+        _ if tok.starts_with("-newer") && tok.len() == 8 => Some(1),
+        _ => None,
+    }
+}
+
+fn has_safe_name_filter(
+    args: &[String],
+    expression: usize,
+    action: usize,
+    decomp: &Decompress,
+) -> bool {
+    let mut at = expression;
+    while at < action {
+        let tok = args[at].as_str();
+        if EXEC_ACTIONS.contains(&tok) {
+            at = exec_end(args, at) + 1;
+        } else if matches!(tok, "-name" | "-iname") {
+            if at + 1 < action && !pattern_may_name_protected(&args[at + 1], decomp) {
+                return true;
+            }
+            at += 2;
+        } else if let Some(n) = primary_args(tok) {
+            at += 1 + n;
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
 fn pattern_may_name_protected(pattern: &str, decomp: &Decompress) -> bool {
     if paths::may_name_protected(pattern) {
         return true;
@@ -286,23 +360,9 @@ fn pattern_may_name_protected(pattern: &str, decomp: &Decompress) -> bool {
         Decompress::Yes(custom) => custom.as_slice(),
     };
     let has_glob = paths::has_glob(pattern);
-    let glob_split = has_glob
-        .then(|| pattern.rfind(['.', '-', '_']).filter(|&i| i > 0))
-        .flatten()
-        .map(|i| pattern.split_at(i))
-        .filter(|(_, tail)| paths::has_glob(tail));
     let exposes = |sfx: &str| {
         rewriters::strip_suffix_ci(pattern, sfx).is_some_and(paths::may_name_protected)
-            || glob_split.is_some_and(|(stem, tail)| {
-                paths::glob_match(tail, sfx) && paths::may_name_protected(stem)
-            })
-            || (has_glob
-                && paths::SAMPLE_NAMES
-                    .iter()
-                    .chain(ENV_SAMPLES)
-                    .copied()
-                    .chain(NESTED_PROTECTED.iter().map(|(_, f)| *f))
-                    .any(|sample| paths::glob_match(pattern, &format!("{sample}{sfx}"))))
+            || (has_glob && paths::may_name_protected_with_suffix(pattern, sfx))
     };
     rewriters::TAR_SUFFIXES.iter().any(|sfx| {
         rewriters::strip_suffix_ci(pattern, sfx)
@@ -325,12 +385,7 @@ fn reaches_protected(
     // before the root lookup spawns git.
     let branches = (expression..args.len())
         .any(|at| matches!(word(at), "-o" | "-or" | "!" | "-not" | "(" | ")" | ","));
-    let filtered = !branches
-        && (expression..action).any(|at| {
-            matches!(word(at), "-name" | "-iname")
-                && at + 1 < action
-                && !pattern_may_name_protected(word(at + 1), decomp)
-        });
+    let filtered = !branches && has_safe_name_filter(args, expression, action, decomp);
     if filtered {
         return false;
     }
