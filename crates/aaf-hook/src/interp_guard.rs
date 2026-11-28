@@ -296,11 +296,34 @@ fn inspect_rmtree(
     })
 }
 
+/// Line terminators recognized across supported interpreters (POSIX `\n`,
+/// Python/JS/Ruby `\r`, ECMAScript U+2028/U+2029) — SEC-113.
+const LINE_BREAKS: [char; 4] = ['\n', '\r', '\u{2028}', '\u{2029}'];
+
 fn strip_comment_lines(code: &str) -> String {
-    code.lines()
+    code.split(LINE_BREAKS)
         .filter(|l| {
             let t = l.trim_start();
             !t.starts_with('#') && !t.starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Naively strips inline trailing `#` (except `#!` shebang lines) and `//`
+/// comments from each line without tracking quotes (SEC-113). Used only as an
+/// additive OR-ed pass in [`inspect_payload`], so cutting `#` or `//` inside a
+/// string literal (e.g. `"http://x"`) can only add detections, never drop one.
+fn strip_trailing_comments(code: &str) -> String {
+    code.split(LINE_BREAKS)
+        .map(|line| {
+            let hash = (!line.starts_with("#!")).then(|| line.find('#')).flatten();
+            let slash = line.find("//");
+            match (hash, slash) {
+                (Some(h), Some(s)) => &line[..h.min(s)],
+                (Some(i), None) | (None, Some(i)) => &line[..i],
+                (None, None) => line,
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -383,12 +406,22 @@ fn inspect_text(interp_kind: Interp, interp: &str, text: &str, ctx: &Ctx) -> Opt
 }
 
 fn inspect_payload(interp_kind: Interp, interp: &str, code: &str, ctx: &Ctx) -> Option<Denial> {
-    inspect_text(interp_kind, interp, code, ctx).or_else(|| {
-        let stripped = strip_comment_lines(code);
-        (stripped != code)
-            .then(|| inspect_text(interp_kind, interp, &stripped, ctx))
-            .flatten()
-    })
+    if let Some(d) = inspect_text(interp_kind, interp, code, ctx) {
+        return Some(d);
+    }
+    let stripped = strip_comment_lines(code);
+    if stripped != code
+        && let Some(d) = inspect_text(interp_kind, interp, &stripped, ctx)
+    {
+        return Some(d);
+    }
+    // SEC-113: additive pass stripping trailing `#` / `//` comments so an
+    // unmatched quote inside an inline comment cannot hide following lines.
+    let no_trailing = strip_trailing_comments(code);
+    if no_trailing != code && no_trailing != stripped {
+        return inspect_text(interp_kind, interp, &no_trailing, ctx);
+    }
+    None
 }
 
 /// True when `code` mentions any shell-exec, recursive-delete, file-delete, or
@@ -416,4 +449,29 @@ pub fn check_cmd(cmd: &Cmd, ctx: &Ctx) -> Option<Denial> {
         .chain(shell::stdin_scripts(&cmd.redirects, cmd.feeder.as_deref()))
         .chain(cmd.heredocs.iter().cloned())
         .find_map(|payload| inspect_payload(interp, name, &payload, ctx))
+}
+
+#[cfg(test)]
+mod comment_strip_tests {
+    use super::{strip_comment_lines, strip_trailing_comments};
+
+    #[test]
+    fn splits_cr_and_unicode_line_separators() {
+        assert_eq!(strip_comment_lines("# x'\rimport os"), "import os");
+        assert_eq!(strip_comment_lines("// x'\u{2028}run()"), "run()");
+        assert_eq!(strip_comment_lines("  // x'\u{2029}run()"), "run()");
+    }
+
+    #[test]
+    fn strips_trailing_comments_preserving_shebang() {
+        assert_eq!(
+            strip_trailing_comments("import os # don't\nos.system('x')"),
+            "import os \nos.system('x')"
+        );
+        assert_eq!(strip_trailing_comments("a // x # y\rb # z // w"), "a \nb ");
+        assert_eq!(
+            strip_trailing_comments("#!/usr/bin/env python3\nx = 1 # note"),
+            "#!/usr/bin/env python3\nx = 1 "
+        );
+    }
 }
