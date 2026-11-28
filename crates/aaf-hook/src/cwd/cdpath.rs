@@ -62,7 +62,10 @@ pub(super) fn cdpath(script: &shell::Script) -> Search {
         }
         // Only a clear that surely runs in this shell (not after `&&`, in a
         // pipeline or an `if` body) clears it for the commands after it.
-        let here = depth == 0 && script.functions.is_empty() && script.plain_steps.contains(&idx);
+        let here = depth == 0
+            && script.functions.is_empty()
+            && script.plain_steps.contains(&idx)
+            && !super::runs_elsewhere(cmd);
         let names_function = cmd
             .args()
             .iter()
@@ -74,7 +77,10 @@ pub(super) fn cdpath(script: &shell::Script) -> Search {
         if !(unset || cmd.sets_var("CDPATH") || cmd.sets_var("cdpath")) {
             continue;
         }
-        let declared = shell::DECLARERS.contains(&cmd.name());
+        let declared = cmd
+            .words
+            .first()
+            .is_some_and(|w| shell::DECLARERS.contains(&w.as_str()));
         let literal = cmd
             .assigns
             .iter()
@@ -110,7 +116,7 @@ pub(super) fn cdpath(script: &shell::Script) -> Search {
 /// The directory a `cd`/`pushd` looks up in `CDPATH`: a bare relative name
 /// (`cd etc`), not `/…`, `~…`, `.`, `..`, `./…` or `../…`.
 pub(super) fn searched_dir(cmd: &shell::Cmd) -> Option<&str> {
-    if !matches!(cmd.name(), "cd" | "pushd") {
+    if !matches!(cmd.words.first().map(String::as_str), Some("cd" | "pushd")) {
         return None;
     }
     let mut after_dd = false;

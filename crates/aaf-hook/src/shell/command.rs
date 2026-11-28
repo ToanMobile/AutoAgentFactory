@@ -52,7 +52,10 @@ impl Cmd {
             word.strip_prefix(var)
                 .is_some_and(|rest| rest.starts_with('=') || rest.starts_with("+="))
         };
-        let names = DECLARERS.contains(&self.name()) || NAME_SETTERS.contains(&self.name());
+        let names = self
+            .words
+            .first()
+            .is_some_and(|w| DECLARERS.contains(&w.as_str()) || NAME_SETTERS.contains(&w.as_str()));
         self.assigns.iter().any(|(key, _)| key == var)
             || self.words.iter().any(assigned)
             || (names && self.args().iter().any(|arg| arg == var))
@@ -71,8 +74,8 @@ impl Cmd {
         if zsh_table {
             return true;
         }
-        match self.name() {
-            "alias" | "hash" | "autoload" => self
+        match self.words.first().map(String::as_str) {
+            Some("alias" | "hash" | "autoload") => self
                 .args()
                 .iter()
                 .any(|arg| arg.contains("aaf") || arg.contains('$')),
