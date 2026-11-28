@@ -45,7 +45,7 @@ bash ~/.gemini/config/skills/aaf_clean/scripts/aaf_clean.sh --include-caches
 |---|---|
 | `--dry-run` | Chỉ liệt kê worktree, branch, `target-*` sẽ xoá, **không** sửa hay xoá gì trên đĩa. |
 | `--repo <PATH>` | Chỉ dọn 1 repo cụ thể (tự động giới hạn `aaf gc --repo`, bỏ qua Step 2 `aaf-wt/*` và Step 5 system caches). |
-| `--include-caches` | Dọn thêm Gradle `build-cache-1`/`daemon`, Xcode `DerivedData`, `npm`/`uv` cache (chỉ xoá khi tool tương ứng đang rảnh). |
+| `--include-caches` | Dọn thêm Gradle `build-cache-1`/`daemon`, Xcode `DerivedData`, `npm`/`uv` cache, và rác `/private/tmp` cũ > 180 phút thuộc user hiện tại (chỉ xoá khi tiến trình đang rảnh). |
 | `--min-age-mins <N>` | Chỉ xoá `worktrees` và `aaf-wt/target-*`/`aaf-*` không có process nào giữ và không đụng tới trong N phút (mặc định: `120` phút). |
 
 ---
@@ -62,7 +62,7 @@ bash ~/.gemini/config/skills/aaf_clean/scripts/aaf_clean.sh --include-caches
 4. **Dọn local git branch thừa đã merge**:
    - Xác định `base_branch` (`main` / `master` / `develop` / `origin/HEAD`).
    - Dùng `git for-each-ref --merged` và `git worktree list --porcelain` để xoá các local branch đã merge hoàn toàn, **bảo toàn** `main`, `master`, `develop`, `release/*` và mọi nhánh đang được check out ở bất kỳ worktree nào.
-5. **Dọn cache hệ thống tuỳ chọn (`--include-caches`)**: Chỉ chạy khi không truyền `--repo` và kiểm tra tiến trình `gradle`, `xcodebuild`/`Xcode`, `npm`/`uv` đang rảnh.
+5. **Dọn cache hệ thống & `/private/tmp` tuỳ chọn (`--include-caches`)**: Chỉ chạy khi không truyền `--repo`; kiểm tra tiến trình `gradle`, `xcodebuild`/`Xcode`, `npm`/`uv` đang rảnh, và dọn các thư mục tạm thuộc `$USER` trong `/private/tmp` (kể cả thư mục con trong `/private/tmp/claude-501`) đã ngưng hoạt động > 180 phút, không có tiến trình giữ (`com.apple.*`, `powerlog*`, `android-*`, `ccd-*`, `claude`... luôn được giữ nguyên).
 6. **Báo cáo dung lượng**: In `aaf_wt_matched`, `worktrees_matched`, `merged_branches_matched` và dung lượng trống trước/sau (`df -h`).
 
 ---

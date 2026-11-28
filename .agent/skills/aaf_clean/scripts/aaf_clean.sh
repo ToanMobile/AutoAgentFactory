@@ -420,7 +420,7 @@ done < <(collect_repos)
 
 # 5. Optional system/build caches (skipped when --repo is specified; only when tools are idle)
 if [[ -z "$TARGET_REPO" && "$INCLUDE_CACHES" -eq 1 ]]; then
-  log "Step 5: Cleaning safe system & build caches..."
+  log "Step 5: Cleaning safe system, build & /private/tmp caches..."
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "  [DRY-RUN] Would clean Gradle build-cache-1/daemon, Xcode DerivedData, npm/uv caches (when respective tools are idle)"
   else
@@ -440,6 +440,51 @@ if [[ -z "$TARGET_REPO" && "$INCLUDE_CACHES" -eq 1 ]]; then
       log "  SKIP npm/uv cache cleanup (npm/uv process active)"
     fi
   fi
+
+  # 5b. Clean idle user-owned temp directories in /private/tmp (older than 180m, no active process)
+  tmp_min_age=180
+  removed_tmp=0
+  for d in /private/tmp/*; do
+    [[ -d "$d" && ! -L "$d" && -O "$d" ]] || continue
+    tbase=$(basename "$d")
+    case "$tbase" in
+      com.apple.*|powerlog*|android-*|ccd-*|claude|claude-501|tmux-*|ssh-*|launch-*)
+        continue
+        ;;
+    esac
+    if dir_in_use "$d"; then
+      continue
+    fi
+    thit=""
+    thit=$(find "$d" -mmin -"$tmp_min_age" -print -quit 2>/dev/null || echo "FIND_ERR")
+    [[ -z "$thit" ]] || continue
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log "  [DRY-RUN] Would remove idle /private/tmp/$tbase (> ${tmp_min_age}m)"
+    else
+      rm -rf "$d" 2>/dev/null || true
+    fi
+    removed_tmp=$((removed_tmp + 1))
+  done
+
+  if [[ -d /private/tmp/claude-501 && ! -L /private/tmp/claude-501 && -O /private/tmp/claude-501 ]]; then
+    for sub in /private/tmp/claude-501/*/*; do
+      [[ -d "$sub" && ! -L "$sub" && -O "$sub" ]] || continue
+      if dir_in_use "$sub"; then
+        continue
+      fi
+      shit=""
+      shit=$(find "$sub" -mmin -"$tmp_min_age" -print -quit 2>/dev/null || echo "FIND_ERR")
+      [[ -z "$shit" ]] || continue
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "  [DRY-RUN] Would remove idle $sub (> ${tmp_min_age}m)"
+      else
+        rm -rf "$sub" 2>/dev/null || true
+      fi
+      removed_tmp=$((removed_tmp + 1))
+    done
+  fi
+  log "  /private/tmp idle entries matched: $removed_tmp"
 fi
 
 free_after=$(get_disk_free)
