@@ -7,6 +7,7 @@ mod a13_fx1_r10b_loop;
 mod a13_fx2_r10b_gate_retry;
 mod adapters;
 mod adopt_isolation;
+mod adopt_step3a_review;
 mod audit_gate098_autofix_err;
 mod audit_retry;
 mod auto_double_gate;

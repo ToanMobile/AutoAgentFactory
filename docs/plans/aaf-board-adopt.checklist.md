@@ -151,3 +151,21 @@ main 15e9799). Plan nói "làm gì"; checklist nói "nối vào đâu".
 `needs_human_head_lock`, `lock_changed`, `needs_human_reviewers` (dưới 2 provider), `review_failed`, `gate_blocked`,
 `head_changed` (I2), `merged_unpinned`, `pr_not_open`, `pr_is_draft`, `ci_failed`, `merge_conflict`,
 `retry_exhausted`, `cancelled_by_user`. Comment PR ghi mã + lý do + việc cần làm.
+
+## C10. Kết quả spike 3a (test `adopt_step3a_roundtrip.rs`, `factory/tests/adopt_step3a_review.rs`)
+- Vòng dry-run → ký → merge chạy thật: khi base chưa sửa file khoá kể từ merge-base, `lock_fp` trên worktree
+  adopt **bằng** `DryRunPendingHeadLock.lock_fp`; ký `approve_expecting(Base{tip, merge_base, pinned})` rồi
+  `merge_pr_with_check` ra `Merged` (gate chạy lại có approval). Base tiến trên file khác: vẫn `Merged`.
+- **PR và base cùng sửa một file khoá** (trước dry-run): hai `lock_fp` lệch, không cách ký nào ra `Merged` (an
+  toàn: không merge). Lane: so `lock_fp` tự tính (worktree adopt, cfg `load_trusted_base_config(tip)`) với
+  `lock_fp` của dry-run; lệch → huỷ `lock_changed`, lý do "PR và base cùng sửa file khoá; rebase lên base mới rồi
+  push, adopt lại". Không retry. Ký bằng `expected = lock_fp` của dry-run.
+- `load_trusted_base_config` (`pr_ops/pr_merge_support.rs:215`) đang `pub(super)`: nâng `pub(crate)` cho lane
+  dùng **đúng** loader của gate (siết tier 1). Không tự parse config.
+- Mã `cross_approval_required` không phân biệt được: ở **dry-run** (không phải `DryRunPendingHeadLock`, ví dụ
+  không có test command, lệnh fail) → huỷ `gate_blocked` kèm `receipt.reasons`; ở **merge thật** → huỷ
+  `lock_changed`.
+- `GateJob` dựng được từ worktree adopt (4 trường); `plan_hash = ""`, `Grant::new(None, None)`. Reviewer đọc cây
+  base (integration tree), PR chỉ thấy qua diff `merge_base...pinned` — giống factory hiện nay. `proof_ok:
+  Some(true)` cần để `mech` không về 0 với receipt chỉ-head-lock.
+- Lane phải tự `evaluate` lock: approval cũ làm dry-run thường ra `DryRunClear` dù `locked_changes` không rỗng.
