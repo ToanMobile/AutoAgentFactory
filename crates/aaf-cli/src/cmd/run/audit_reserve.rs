@@ -90,6 +90,20 @@ pub(super) fn repo_audits_on_provider(
     false
 }
 
+/// [`repo_audits_on_provider`] for an `Adopting` task: the adopt lane reviews with
+/// `[run].executor`, the auditor and the listed reviewers whatever
+/// `cross_audit.dual_review` says.
+pub(super) fn repo_adopts_on_provider(
+    repo_cfg: &RepoConfig,
+    path_var: &OsStr,
+    home: &Path,
+    provider: ProviderKind,
+) -> bool {
+    let mut cfg = repo_cfg.clone();
+    cfg.cross_audit.dual_review = true;
+    repo_audits_on_provider(&cfg, path_var, home, provider)
+}
+
 /// Derives `strict_audit_reserve` per [`ProviderKey`] solely from repo config,
 /// independent of lazy stage-insertion order (`ro`).
 pub(super) fn is_auxiliary_auditor(ctx: &Ctx, cfg: &EffectiveConfig, key: &ProviderKey) -> bool {
@@ -131,13 +145,15 @@ impl ReserveCtx {
             return false;
         }
         let task_path = Path::new(&task.repo_root);
+        let audits = |cfg: &RepoConfig| {
+            if task.state == TaskState::Adopting {
+                repo_adopts_on_provider(cfg, &self.path_var, &self.home, provider)
+            } else {
+                repo_audits_on_provider(cfg, &self.path_var, &self.home, provider)
+            }
+        };
         if same_repo(task_path, &self.current_repo) {
-            return repo_audits_on_provider(
-                &self.current_repo_cfg,
-                &self.path_var,
-                &self.home,
-                provider,
-            );
+            return audits(&self.current_repo_cfg);
         }
         if !task_path.join(REPO_CONFIG_REL).is_file() && !task_path.join(LOCAL_CONFIG_REL).is_file()
         {
@@ -153,8 +169,16 @@ impl ReserveCtx {
         }) else {
             return true;
         };
-        repo_audits_on_provider(&eff.repo, &self.path_var, &self.home, provider)
+        audits(&eff.repo)
     }
+}
+
+/// The tasks that will ask for an audit: those about to be audited (`Gating`)
+/// and those the adopt lane reviews (`Adopting`), whatever `dual_review` says.
+fn gating_or_adopting(db: &Db) -> aaf_domain::ports::PortResult<Vec<Task>> {
+    let mut tasks = db.list_tasks(None, Some(TaskState::Gating))?;
+    tasks.extend(db.list_tasks(None, Some(TaskState::Adopting))?);
+    Ok(tasks)
 }
 
 /// Returns a closure reporting the author account id (if any) of every live
@@ -167,7 +191,7 @@ pub(super) fn gating_authors_provider(
 ) -> Arc<dyn Fn(ProviderKind) -> Vec<Option<String>> + Send + Sync> {
     let rctx = ReserveCtx::from_ctx(ctx, repo, cfg);
     Arc::new(move |provider| {
-        let Ok(tasks) = db.list_tasks(None, Some(TaskState::Gating)) else {
+        let Ok(tasks) = gating_or_adopting(&db) else {
             return Vec::new();
         };
         tasks
@@ -193,12 +217,11 @@ pub(super) fn has_live_gating_for_provider(
 ) -> Arc<dyn Fn() -> bool + Send + Sync> {
     let rctx = ReserveCtx::from_ctx(ctx, repo, cfg);
     Arc::new(move || {
-        db.list_tasks(None, Some(TaskState::Gating))
-            .is_ok_and(|tasks| {
-                tasks
-                    .iter()
-                    .any(|t| rctx.task_needs_provider_audit(t, provider))
-            })
+        gating_or_adopting(&db).is_ok_and(|tasks| {
+            tasks
+                .iter()
+                .any(|t| rctx.task_needs_provider_audit(t, provider))
+        })
     })
 }
 
@@ -288,6 +311,54 @@ mod tests {
             has_agy(),
             "Antigravity-only live Repo A in Gating must reserve Antigravity in Repo B"
         );
+    }
+
+    #[test]
+    fn an_adopting_task_reserves_its_reviewers_whatever_dual_review_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let db = Db::open(&dir.path().join("aaf.db")).unwrap();
+        // `dual_review` is off and the single auditor is Claude: a Gating task
+        // never audits on Antigravity here, an adopted PR still reviews on it.
+        let mut repo_cfg = RepoConfig::default();
+        repo_cfg.run.executor = "claude".into();
+        repo_cfg.cross_audit.executor = "claude".into();
+        repo_cfg.cross_audit.dual_review = false;
+        repo_cfg.cross_audit.reviewers = vec![ReviewerConfig {
+            id: "agy".into(),
+            executor: "antigravity".into(),
+            ..ReviewerConfig::default()
+        }];
+        let cfg = EffectiveConfig {
+            global: GlobalConfig::default(),
+            repo: repo_cfg,
+            sources: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let ctx = test_ctx(dir.path());
+        let has_agy = |db: &Db| {
+            has_live_gating_for_provider(&ctx, &repo, &cfg, db.clone(), ProviderKind::Antigravity)()
+        };
+        let add = |id: &str, state: TaskState| {
+            let mut t = Task::new_root(
+                id,
+                repo.to_string_lossy().into_owned(),
+                "t",
+                ImmutableSpec {
+                    description: String::new(),
+                    acceptance: Vec::new(),
+                },
+                Priority::P1,
+                100,
+            );
+            t.state = state;
+            db.insert_task(&t).unwrap();
+        };
+        add("t-gate", TaskState::Gating);
+        assert!(!has_agy(&db), "a Gating task has no reason to reserve it");
+        add("t-adopt", TaskState::Adopting);
+        assert!(has_agy(&db), "an Adopting task counts, dual_review or not");
     }
 
     #[test]

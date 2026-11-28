@@ -1,6 +1,7 @@
 //! The loop itself: the scheduler on the caller's thread, one thread per job
 //! that needs an account, and one gate thread for the repository.
 
+mod adopt;
 mod cost_guard;
 mod dispatch;
 pub(super) mod dual_coord;
@@ -20,6 +21,7 @@ use std::time::Instant;
 use aaf_domain::ports::{PortError, PortResult};
 use aaf_domain::task::{Task, TaskState};
 
+use super::adopt_lane::AdoptDone;
 use super::audit_backend::AuditBackend;
 use super::dual_audit::DualReviewCoord;
 use super::finish::Resolution;
@@ -50,6 +52,8 @@ pub struct Hooks<'a> {
 
 enum Msg {
     Worker(WorkerLane, Outcome),
+    /// A turn of the adopt lane: its own message, never an `Outcome`.
+    Adopt(AdoptDone),
     Gate(GateJob, Result<Resolution, String>),
 }
 
@@ -144,6 +148,8 @@ pub(super) struct LoopState {
     pub(super) jobs: VecDeque<Job>,
     pub(super) coding_active: usize,
     pub(super) aux_active: usize,
+    /// A lane turn is running (`aux_active` counts it too).
+    pub(super) adopt_active: bool,
     pub(super) in_flight_tasks: HashMap<String, usize>,
     in_gate: usize,
     pub(super) started: HashSet<String>,
@@ -254,6 +260,7 @@ impl<'a> Scheduler<'a> {
                     self.poll_gating()?;
                 }
                 self.start_jobs(scope)?;
+                self.start_adopt_job(scope)?;
             }
             let coding_limit = self.coding_parallel_limit();
             let aux_limit = self.aux_parallel_limit();
@@ -292,6 +299,9 @@ impl<'a> Scheduler<'a> {
                                 .remove(&(outcome.task_id.clone(), outcome.provider.clone()));
                         }
                         self.handle_worker(lane, outcome)?;
+                    }
+                    Some(Msg::Adopt(done)) => {
+                        self.finish_adopt_job(done);
                     }
                     Some(Msg::Gate(job, resolution)) => {
                         if matches!(resolution, Ok(Resolution::Settled(_))) {

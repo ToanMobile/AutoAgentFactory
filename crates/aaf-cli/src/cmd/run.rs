@@ -2,6 +2,7 @@
 //! (docs/PLAN.md C.10): wires the real store, executor, git and gate into
 //! the factory loop of `aaf_engine::factory`.
 
+mod adopt_wiring;
 mod audit_reserve;
 mod deps;
 pub(crate) mod detach;

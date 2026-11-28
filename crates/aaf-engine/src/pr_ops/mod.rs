@@ -9,6 +9,8 @@ pub mod pr_merge;
 #[cfg(test)]
 mod pr_merge_ci_tests;
 mod pr_merge_support;
+// The adopt lane reads the base the way the merge gate does.
+pub(crate) use pr_merge_support::{fetch_base, load_trusted_base_config};
 pub(crate) mod pr_verify;
 
 pub use pr_cleanup::{PrCleanupReport, cleanup_merged_pr_local, main_work_tree};

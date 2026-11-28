@@ -13,6 +13,7 @@
 //! ponytail: thread per run, upgrade to a pool when > 64 runs are parallel.
 
 pub mod adapters;
+pub mod adopt_lane;
 pub mod audit_backend;
 mod audit_turn;
 pub mod batch;
@@ -61,6 +62,7 @@ use aaf_domain::task::TaskState;
 use serde::Serialize;
 
 pub use crate::git::base_ref::{BaseRef, resolve_base};
+pub use adopt_lane::AdoptEnv;
 pub use audit_backend::{
     AuditBackend, audit_cmd_is_claude, build_audit_command, configured_audit_provider,
     effective_audit_provider, fall_back_to_one_provider, fill_default_reviewers,

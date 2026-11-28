@@ -212,7 +212,7 @@ pub(super) fn ls_remote_head(
 /// and `AAF_*` environment overlays layered on top exactly as for `aaf gate`
 /// (never loosening). Tier 1 is `global` when the caller already loaded it,
 /// else the global config file itself: a missing `global` never skips it.
-pub(super) fn load_trusted_base_config(
+pub(crate) fn load_trusted_base_config(
     repo_root: &Path,
     base_sha: &str,
     global: Option<&GlobalConfig>,
@@ -461,7 +461,7 @@ impl Drop for MergeLockGuard {
     }
 }
 
-pub(super) fn fetch_base(
+pub(crate) fn fetch_base(
     repo_root: &Path,
     remote: &str,
     base_ref_name: &str,

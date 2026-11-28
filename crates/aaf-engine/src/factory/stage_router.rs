@@ -3,27 +3,28 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use aaf_domain::account::{AccountProfile, ProviderKind};
+use aaf_domain::account::ProviderKind;
 use aaf_domain::config::{AGENT_CONFIG_GLOBS, CrossAuditConfig, RepoConfig};
 use aaf_domain::gate::ChangeKind;
 use aaf_domain::pipeline::{PlanContract, TaskTier, canonical_provider, is_known_real_provider};
-use aaf_domain::ports::{AgentRunner, LimitHit, PortError, PortResult};
+use aaf_domain::ports::{AgentRunner, PortError, PortResult};
 use aaf_domain::task::{Priority, Task};
 use globset::{GlobBuilder, GlobSetBuilder};
 
+mod locked_pool;
+pub use locked_pool::AntigravityLockedPool;
+
 use super::adapters::provider_for;
+use super::adopt_lane::AdoptEnv;
 use super::audit_backend::{audit_cmd_is_claude, build_audit_command};
-use super::ports::{AccountPool, Grant, Purpose};
-use crate::accounts::Lease;
+use super::ports::AccountPool;
 use crate::gate::changes::Change;
 use crate::gate::docs_fast;
 use crate::plan_debate::schema::normalize_repo_path;
-use crate::unblocker::QuotaRoute;
 
-const ANTIGRAVITY_LEASE_STEM: &str = "provider-antigravity";
 const HIGH_RISK_KEYWORDS: &[&str] = &[
     "sandbox",
     "hook",
@@ -61,59 +62,6 @@ impl ProviderKey {
 impl fmt::Display for ProviderKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-/// Wraps an [`AccountPool`] with an exclusive non-blocking file lock on
-/// `<data_dir>/leases/provider-antigravity.lock` (R3-CONC-5) so at most one
-/// Antigravity run executes at a time across processes (0 or 1+ accounts).
-pub struct AntigravityLockedPool {
-    inner: Arc<dyn AccountPool>,
-    data_dir: PathBuf,
-}
-
-impl AntigravityLockedPool {
-    pub fn new(inner: Arc<dyn AccountPool>, data_dir: PathBuf) -> Self {
-        Self { inner, data_dir }
-    }
-
-    fn lock_then(
-        &self,
-        acquire: impl FnOnce(&dyn AccountPool) -> PortResult<Option<Grant>>,
-    ) -> PortResult<Option<Grant>> {
-        let leases_dir = self.data_dir.join("leases");
-        let Some(lock) = Lease::try_acquire(&leases_dir, ANTIGRAVITY_LEASE_STEM)
-            .map_err(|err| PortError::Io(err.to_string()))?
-        else {
-            return Ok(None);
-        };
-        Ok(acquire(&*self.inner)?.map(|g| g.with_extra_guard(Box::new(lock))))
-    }
-}
-
-impl AccountPool for AntigravityLockedPool {
-    fn acquire(&self) -> PortResult<Option<Grant>> {
-        self.lock_then(|pool| pool.acquire())
-    }
-
-    fn acquire_for(&self, task_id: &str, purpose: Purpose) -> PortResult<Option<Grant>> {
-        self.lock_then(|pool| pool.acquire_for(task_id, purpose))
-    }
-
-    fn after_limit(&self) -> PortResult<Option<QuotaRoute>> {
-        self.inner.after_limit()
-    }
-
-    fn report_limit(&self, account_id: &str, hit: &LimitHit) -> PortResult<()> {
-        self.inner.report_limit(account_id, hit)
-    }
-
-    fn profiles(&self) -> PortResult<Vec<AccountProfile>> {
-        self.inner.profiles()
-    }
-
-    fn provider_account_count(&self) -> PortResult<usize> {
-        self.inner.provider_account_count()
     }
 }
 
@@ -182,6 +130,12 @@ pub struct StageRouter {
     pub plan_author: Option<StageTarget>,
     pub plan_challenger: Option<StageTarget>,
     pub reviewers: Vec<(String, StageTarget)>,
+    /// The reviewers `aaf board adopt` asks, whatever `cross_audit.dual_review`
+    /// says (see `adopt_reviewers`); their pools are registered like any stage's.
+    pub adopt_reviewers: Vec<(String, StageTarget)>,
+    /// What the adopt lane needs besides reviewers (`gh`, merge settings).
+    /// `None` leaves `Adopting` tasks alone.
+    pub adopt: Option<Arc<AdoptEnv>>,
     pub pools: HashMap<ProviderKey, Arc<dyn AccountPool>>,
 }
 
@@ -231,8 +185,32 @@ impl StageRouter {
             plan_author,
             plan_challenger,
             reviewers,
+            adopt_reviewers: Vec::new(),
+            adopt: None,
             pools,
         }
+    }
+
+    /// Registers the adopt reviewers and their pools.
+    pub fn with_adopt_reviewers(mut self, reviewers: Vec<(String, StageTarget)>) -> Self {
+        for (_, target) in &reviewers {
+            self.register_pool(target);
+        }
+        self.adopt_reviewers = reviewers;
+        self
+    }
+
+    /// Turns the adopt lane on: `gh` and the merge settings it works with.
+    pub fn with_adopt_env(mut self, env: AdoptEnv) -> Self {
+        self.adopt = Some(Arc::new(env));
+        self
+    }
+
+    pub fn adopt_reviewer(&self, id: &str) -> Option<&StageTarget> {
+        self.adopt_reviewers
+            .iter()
+            .find(|(rid, _)| rid == id)
+            .map(|(_, t)| t)
     }
 
     pub fn with_implementer(mut self, target: StageTarget) -> Self {

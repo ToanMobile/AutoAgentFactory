@@ -19,8 +19,6 @@ mod nested;
 
 pub use always_human::{always_human_link_reason, always_human_reason};
 pub(super) use dir::content_hash;
-// `evaluate_changes_effective` is for the adopt lane (step 3).
-#[allow(unused_imports)]
 pub(crate) use effective::{evaluate_changes_effective, evaluate_changes_with_common};
 
 fn glob_set(globs: &[String], case_insensitive: bool) -> Result<GlobSet, GateError> {

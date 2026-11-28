@@ -146,3 +146,32 @@ impl FactoryEvent {
         self
     }
 }
+
+/// What `aaf board adopt` records in the [`EventKind::PrAdopted`] event of an
+/// adopted pull request. The adopt lane trusts `head_sha` and nothing else for
+/// the head it reviews and merges.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrAdoptedPayload {
+    pub pr_number: u64,
+    pub url: String,
+    /// The 40-hex head commit the adoption pinned (`refs/heads/aaf/<id>`).
+    pub head_sha: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub author_login: String,
+    /// What the chat said wrote the PR (`--author-executor`); logged only.
+    #[serde(default)]
+    pub declared_executor: Option<String>,
+}
+
+impl PrAdoptedPayload {
+    /// True when `head_sha` is a 40-hex commit id.
+    pub fn head_is_valid(&self) -> bool {
+        self.head_sha.len() == 40 && self.head_sha.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// The pinned head in the form git prints it.
+    pub fn pinned(&self) -> String {
+        self.head_sha.to_ascii_lowercase()
+    }
+}

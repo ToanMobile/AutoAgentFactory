@@ -25,7 +25,7 @@ use crate::output::CmdError;
 
 type Spec<'a> = (&'a str, &'a str, &'a str, &'a str);
 
-fn exec_env_for(ctx: &Ctx, cfg: &EffectiveConfig) -> ExecEnv {
+pub(super) fn exec_env_for(ctx: &Ctx, cfg: &EffectiveConfig) -> ExecEnv {
     let s = |p: &Path| p.to_string_lossy().into_owned();
     let mut env = ExecEnv {
         home: Some(s(&ctx.home)),
@@ -249,9 +249,8 @@ pub(super) fn build_stage_router(
             revs.push((r.id.clone(), mk(rv(r), true)?));
         }
     }
-    Ok(StageRouter::from_targets(
-        def, impl_t, esc_t, pa, pc, revs, pools,
-    ))
+    let router = StageRouter::from_targets(def, impl_t, esc_t, pa, pc, revs, pools);
+    super::adopt_wiring::attach(router, ctx, repo, cfg, db)
 }
 
 /// Builds the single-auditor [`AuditBackend`] using native `AgyRunner` +
