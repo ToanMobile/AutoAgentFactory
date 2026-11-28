@@ -3,8 +3,9 @@
 //! GNU and BSD `find` end `-exec`/`-execdir` at `+` only when the word right
 //! before it is exactly `{}`; any other `+` is an argument and the command
 //! runs on to `;`. Ending the argv at a bare `+` lets a `-name` that is an
-//! argument of the command (`-exec true + -name x \;`) pass as a filter, and
-//! hides the `{}` of `-exec rm + {} \;`, so every file is deleted.
+//! argument of the command (`-exec true + -name x \;`) pass as a filter,
+//! hides the `{}` of `-exec rm + {} \;` so every file is deleted, and hides
+//! the operands the command is checked with (`-exec rm + .env \;`).
 
 mod common;
 
@@ -36,7 +37,7 @@ fn plus_ends_exec_only_after_braces() {
                 DELETE,
             ),
             (r"find . -exec rm + {} \;", DELETE),
-            (r"find . -name '*.log' -exec rm + {} \;", DELETE),
+            (r"find . -name '*.log' -exec rm + .env \;", DELETE),
         ],
     );
 }
@@ -52,6 +53,8 @@ fn exec_terminated_by_braces_plus_or_semicolon_stays_allowed() {
             ("find dist -name '*.log.gz' -exec gunzip -f {} +", ALLOW),
             (r"find . -name '*.log' -exec rm {} \;", ALLOW),
             ("find . -name '*.log' -exec echo {} + -delete", ALLOW),
+            // `rm + ./x.log` per match: a file named `+` and the logs only.
+            (r"find . -name '*.log' -exec rm + {} \;", ALLOW),
         ],
     );
 }
