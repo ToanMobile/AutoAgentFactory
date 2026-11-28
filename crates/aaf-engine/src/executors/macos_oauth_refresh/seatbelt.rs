@@ -165,7 +165,7 @@ pub(super) fn build_seatbelt_profile_with_home(
     denied_dirs: &[&Path],
 ) -> Option<String> {
     let (_, cwd_s) = sbpl_clean_canon(empty_cwd)?;
-    let (_, kc_s) = sbpl_clean_canon(keychain_dir)?;
+    let (kc_canon, kc_s) = sbpl_clean_canon(keychain_dir)?;
     let mut p = String::from(
         "(version 1)\n(allow default)\n(deny file-write*)\n\
          (allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") \
@@ -179,6 +179,15 @@ pub(super) fn build_seatbelt_profile_with_home(
             "(deny file-read* file-write* (subpath \"{s}\"))\n"
         ));
         denied_canon.push(canon);
+    }
+    if kc_canon.parent().is_none() || overlaps_any(&kc_canon, &denied_canon) {
+        return None;
+    }
+    if let Some(home) = home_dir {
+        let (home_canon, _) = sbpl_clean_canon(home)?;
+        if kc_canon == home_canon || home_canon.starts_with(&kc_canon) {
+            return None;
+        }
     }
     p.push_str(&format!(
         "(allow file-read* file-write* (subpath \"{cwd_s}\"))\n\

@@ -375,14 +375,14 @@ impl<'a> Scheduler<'a> {
         if oauth_refreshed {
             // Separate counter from network outage retries so a healed OAuth token
             // neither steals network budget nor gets blocked by an earlier blip.
-            let tries = self.state.oauth_retries.entry(task_id.clone()).or_default();
-            if *tries == 0 {
-                *tries = 1;
+            let already_tried = self.state.oauth_retries.get(&task_id).copied().unwrap_or(0);
+            if already_tried == 0 {
                 let can_dispatch = !self.is_stopping()
                     && self.summary.halted.is_none()
                     && !super::is_frozen(&*self.deps.store)?
                     && self.cost_gate()? == CostGate::Allow;
                 if can_dispatch {
+                    self.state.oauth_retries.insert(task_id.clone(), 1);
                     if state == TaskState::Gating {
                         self.queue_gating_task(task_id)?;
                     } else if self.mode == Mode::Once {
@@ -395,6 +395,7 @@ impl<'a> Scheduler<'a> {
                 self.record_halt(&task_id, detail);
                 return Ok(());
             }
+            let tries = self.state.oauth_retries.entry(task_id.clone()).or_default();
             *tries = tries.saturating_add(1);
             let tries = *tries;
             let wait = if tries <= MAX_TRANSIENT_RETRIES + 1 {

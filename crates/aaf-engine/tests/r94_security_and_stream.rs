@@ -261,11 +261,15 @@ fn host_refresh_seatbelt_rejects_lock_symlinks_and_sibling_lock_overlap() {
     fs::write(claude_cfg.join("settings.json"), "{}").unwrap();
     symlink(&claude_cfg, &symlink_cfg).unwrap();
 
-    // 1. Sibling `{cfg}.lock` overlapping denied_dirs must fail closed.
+    // 1. Sibling `{cfg}.lock` or `keychain_dir` overlapping denied_dirs must fail closed.
     assert!(
         host_refresh_seatbelt_profile(&empty_cwd, &kc_dir, Some(&claude_cfg), &[&sibling_lock])
             .is_none(),
         "sibling .lock overlapping denied dir must fail closed"
+    );
+    assert!(
+        host_refresh_seatbelt_profile(&empty_cwd, tmp.path(), None, &[&claude_cfg]).is_none(),
+        "keychain_dir acting as ancestor of a denied dir must fail closed"
     );
     // 2. Symlinked claude_config_dir pointing at a denied dir must fail closed,
     //    while a dotfiles symlink pointing at a non-denied dir succeeds.

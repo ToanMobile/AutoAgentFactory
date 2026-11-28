@@ -265,12 +265,9 @@ fn read_agy_keychain_mdat() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&fin.stdout);
-    let mdat = text
-        .lines()
+    text.lines()
         .find(|line| line.contains("\"mdat\""))
         .map(|line| line.trim().to_string())
-        .unwrap_or_else(|| "present".to_string());
-    Some(mdat)
 }
 
 fn run_claude_host_ping(
@@ -495,7 +492,7 @@ pub(super) fn refresh_agy_now_impl(
     let ok = run_agy_models_host(agy_bin, env, &home, task_cwd);
     let after_mdat = read_agy_keychain_mdat();
     let changed = ok && after_mdat.as_deref().is_some_and(|a| a != before_mdat);
-    lock.write_stamp(if ok {
+    lock.write_stamp(if changed {
         Stamp::Ok(now_secs())
     } else {
         Stamp::Err(now_secs())
